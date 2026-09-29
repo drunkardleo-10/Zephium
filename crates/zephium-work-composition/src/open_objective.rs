@@ -486,8 +486,8 @@ fn assemble_with_actions(
 mod tests;
 
 #[cfg(feature = "durable-runtime")]
+mod consent;
+#[cfg(feature = "durable-runtime")]
 mod read_interactions;
 #[cfg(feature = "durable-runtime")]
 pub(crate) mod site_work;
-#[cfg(feature = "durable-runtime")]
-mod consent;

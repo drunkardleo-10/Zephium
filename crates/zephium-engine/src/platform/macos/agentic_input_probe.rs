@@ -1043,9 +1043,8 @@ fn initialize_application(
         return Ok(());
     }
     // Launch without activation before any native window exists.
-    let valid = |policy| {
-        app.activationPolicy() == policy && !app.isActive() && app.windows().is_empty()
-    };
+    let valid =
+        |policy| app.activationPolicy() == policy && !app.isActive() && app.windows().is_empty();
     if app.isActive()
         || !app.windows().is_empty()
         || (app.activationPolicy() != NSApplicationActivationPolicy::Prohibited

@@ -95,7 +95,7 @@ impl AgentBrowserSession {
             EMULATION_OUTPUT_TOKENS,
             zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
         )
-            .map_err(|_| AgentBrowserProviderError::Catalog)?;
+        .map_err(|_| AgentBrowserProviderError::Catalog)?;
         let emulation =
             WorkPlanningConfig::try_new(config, EMULATION_INPUT_TOKENS, EMULATION_COST_MICRO_USD)
                 .map_err(|_| AgentBrowserProviderError::Catalog)?;

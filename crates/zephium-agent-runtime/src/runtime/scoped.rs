@@ -37,7 +37,9 @@ pub enum AgentRuntimeScopedBindingRefusal {
 }
 
 impl AgentRuntimeScopedBinding {
-    pub(super) fn work(&self) -> zephium_agentic::WorkId { self.lease.resource().identity().work() }
+    pub(super) fn work(&self) -> zephium_agentic::WorkId {
+        self.lease.resource().identity().work()
+    }
     /// Freezes the exact process-local lease and immutable approved manifest.
     pub fn try_new(
         lease: WorkBrowserExecutionLease,
@@ -199,7 +201,9 @@ pub struct PendingScopedAgentRuntime {
 
 impl PendingScopedAgentRuntime {
     #[cfg(test)]
-    pub(super) fn joined_for_test(&self) -> Arc<super::WorkerJoinCompletion> { self.pending.inner.joined.clone() }
+    pub(super) fn joined_for_test(&self) -> Arc<super::WorkerJoinCompletion> {
+        self.pending.inner.joined.clone()
+    }
     /// Starts the existing bounded worker with a frozen scope, without native
     /// acquisition. Construction/polling of the controller waits for `bind`.
     pub fn spawn_suspended(
@@ -223,8 +227,13 @@ impl PendingScopedAgentRuntime {
         controller: Box<dyn AgentRuntimeScopedController>,
         group: &super::AgentRuntimeWorkerGroup,
     ) -> Result<Self, RuntimeSpawnError> {
-        PendingAgentRuntime::spawn_suspended_inner(config, Some(RuntimeController::Scoped(controller)), Some(binding), Some(group))
-            .map(|pending| Self { pending })
+        PendingAgentRuntime::spawn_suspended_inner(
+            config,
+            Some(RuntimeController::Scoped(controller)),
+            Some(binding),
+            Some(group),
+        )
+        .map(|pending| Self { pending })
     }
 
     /// Releases the same worker startup gate, without moving a native port.

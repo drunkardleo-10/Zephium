@@ -12,10 +12,10 @@ const MAX_BODY_BYTES: usize = 131072;
 mod authoring_store;
 #[path = "work_environment.rs"]
 mod environment_store;
-#[path = "work_runtime.rs"]
-pub(super) mod runtime_store;
 #[path = "work_personal.rs"]
 mod personal_store;
+#[path = "work_runtime.rs"]
+pub(super) mod runtime_store;
 const _: [(); 512] = [(); MAX_WORKS_PER_PROFILE];
 const _: [(); 256] = [(); MAX_ACTIVE_WORKS_PER_PROFILE];
 const _: [(); 32] = [(); MAX_WORK_PLAN_REVISIONS];
@@ -88,7 +88,9 @@ impl Hub {
             return Err(WorkError::Unavailable);
         }
         if let WorkRequest::Personal(request) = request {
-            use zephium_core::work::personal::{WorkHistoryHit, WorkPersonalReply, WorkPersonalRequest};
+            use zephium_core::work::personal::{
+                WorkHistoryHit, WorkPersonalReply, WorkPersonalRequest,
+            };
             if let WorkPersonalRequest::SearchHistory { query, limit } = &request {
                 let hits = self
                     .search_history(profile, query, u32::from(*limit))

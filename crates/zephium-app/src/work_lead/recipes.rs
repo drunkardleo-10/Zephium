@@ -127,7 +127,9 @@ fn text(args: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
             if value.is_empty() {
                 Ok(None)
             } else if value.chars().count() > max || value.contains(['\n', '<', '>', '"']) {
-                Err(format!("search.{key} is one line of at most {max} characters"))
+                Err(format!(
+                    "search.{key} is one line of at most {max} characters"
+                ))
             } else {
                 Ok(Some(value.to_owned()))
             }
@@ -153,7 +155,9 @@ fn airport(args: &Value, key: &str) -> Result<Option<String>, String> {
     if code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_uppercase()) {
         Ok(Some(code))
     } else {
-        Err(format!("search.{key} is a three-letter IATA airport code such as WAW"))
+        Err(format!(
+            "search.{key} is a three-letter IATA airport code such as WAW"
+        ))
     }
 }
 
@@ -221,7 +225,20 @@ fn days(date: &str) -> Option<i64> {
     let number = |range: std::ops::Range<usize>| date.get(range)?.parse::<i64>().ok();
     let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let lengths = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let lengths = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     if !(2000..=2100).contains(&year)
         || !(1..=12).contains(&month)
         || day < 1
@@ -276,7 +293,10 @@ impl SiteSearch {
             "checkin" => self.checkin.clone()?,
             "checkout" => self.checkout.clone()?,
             "adults" => self.adults.unwrap_or(1).to_string(),
-            "months" => (self.nights()? as f64 / 30.0).round().clamp(1.0, 12.0).to_string(),
+            "months" => (self.nights()? as f64 / 30.0)
+                .round()
+                .clamp(1.0, 12.0)
+                .to_string(),
             "from" => self.from.clone()?,
             "to" => self.to.clone()?,
             "depart" => self.depart.clone()?,
@@ -386,8 +406,10 @@ mod tests {
 
     #[test]
     fn stays_open_on_each_sites_own_results_for_the_dates() {
-        let week = search(json!({"place": "San Francisco, CA", "checkin": "2027-01-05",
-            "checkout": "2027-01-12", "adults": 1}));
+        let week = search(
+            json!({"place": "San Francisco, CA", "checkin": "2027-01-05",
+            "checkout": "2027-01-12", "adults": 1}),
+        );
         assert_eq!(
             pages(&week, Some("booking.com"))[1],
             (
@@ -396,8 +418,10 @@ mod tests {
             )
         );
         assert_eq!(pages(&week, Some("booking.com"))[0].0, "Booking.com");
-        let month = search(json!({"place": "San Francisco, CA", "checkin": "2027-01-01",
-            "checkout": "2027-02-01", "adults": 1, "currency": "usd"}));
+        let month = search(
+            json!({"place": "San Francisco, CA", "checkin": "2027-01-01",
+            "checkout": "2027-02-01", "adults": 1, "currency": "usd"}),
+        );
         assert_eq!(
             pages(&month, Some("www.airbnb.com"))[0].1,
             "https://www.airbnb.com/s/San-Francisco--CA/homes?date_picker_type=monthly_stay&monthly_start_date=2027-01-01&monthly_length=1&monthly_end_date=2027-02-01&adults=1&currency=USD"
@@ -429,7 +453,10 @@ mod tests {
         );
         let business = search(json!({"from": "WAW", "to": "SFO", "depart": "2027-01-05",
             "adults": 2, "cabin": "business"}));
-        let urls: Vec<String> = super::pages(&business, None).into_iter().map(|(_, url)| url).collect();
+        let urls: Vec<String> = super::pages(&business, None)
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect();
         assert_eq!(
             urls,
             [
@@ -446,14 +473,20 @@ mod tests {
         let lego = search(json!({"query": "star wars"}));
         assert_eq!(
             pages(&lego, Some("lego.com"))[0],
-            ("LEGO", "https://www.lego.com/en-us/search?q=star%20wars".to_owned())
+            (
+                "LEGO",
+                "https://www.lego.com/en-us/search?q=star%20wars".to_owned()
+            )
         );
         assert!(pages(&lego, Some("unknown.shop")).len() == 2);
         for (bad, rule) in [
             (json!({"checkin": "2027-02-30"}), "search.checkin"),
             (json!({"from": "Warsaw"}), "search.from"),
             (json!({"adults": 0}), "search.adults"),
-            (json!({"checkin": "2027-01-05", "checkout": "2027-01-05"}), "search.checkout"),
+            (
+                json!({"checkin": "2027-01-05", "checkout": "2027-01-05"}),
+                "search.checkout",
+            ),
             (json!({"cabin": "sleeper"}), "search.cabin"),
             (json!("WAW"), "search is"),
         ] {

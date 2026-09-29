@@ -1439,7 +1439,12 @@ impl PendingAgentRuntime {
         config: AgentRuntimeConfig,
         controller: Box<dyn AgentRuntimeController>,
     ) -> Result<Self, RuntimeSpawnError> {
-        Self::spawn_suspended_inner(config, Some(RuntimeController::Legacy(controller)), None, None)
+        Self::spawn_suspended_inner(
+            config,
+            Some(RuntimeController::Legacy(controller)),
+            None,
+            None,
+        )
     }
 
     fn spawn_suspended_inner(
@@ -1667,7 +1672,9 @@ fn schedule_reap(worker: RuntimeWorkerOwnership) {
         // group slots. A failed reaper never releases a slot before join.
         let worker = take_worker_ownership(&handoff);
         let mut emergency = recover_lock(&EMERGENCY_WORKER_REAP);
-        if let Some(worker) = worker { emergency.push(worker); }
+        if let Some(worker) = worker {
+            emergency.push(worker);
+        }
     }
 }
 
@@ -2103,14 +2110,33 @@ struct WorkerGroup {
 impl AgentRuntimeWorkerGroup {
     /// Reserves the existing exclusive runtime slot for one trusted Work group.
     pub fn try_new(work: zephium_agentic::WorkId, capacity: u8) -> Result<Self, RuntimeSpawnError> {
-        if !(1..=3).contains(&capacity) { return Err(RuntimeSpawnError::Group); }
-        Ok(Self(Arc::new(WorkerGroup { _permit: acquire_worker_permit()?, work, capacity, active: AtomicU8::new(0) })))
+        if !(1..=3).contains(&capacity) {
+            return Err(RuntimeSpawnError::Group);
+        }
+        Ok(Self(Arc::new(WorkerGroup {
+            _permit: acquire_worker_permit()?,
+            work,
+            capacity,
+            active: AtomicU8::new(0),
+        })))
     }
 
-    fn acquire(&self, scope: &AgentRuntimeScopedBinding) -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
-        if scope.work() != self.0.work { return Err(RuntimeSpawnError::Group); }
-        if retry_emergency_reapers() { return Err(RuntimeSpawnError::AlreadyRunning); }
-        self.0.active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| (active < self.0.capacity).then_some(active + 1)).map_err(|_| RuntimeSpawnError::Group)?;
+    fn acquire(
+        &self,
+        scope: &AgentRuntimeScopedBinding,
+    ) -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
+        if scope.work() != self.0.work {
+            return Err(RuntimeSpawnError::Group);
+        }
+        if retry_emergency_reapers() {
+            return Err(RuntimeSpawnError::AlreadyRunning);
+        }
+        self.0
+            .active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.0.capacity).then_some(active + 1)
+            })
+            .map_err(|_| RuntimeSpawnError::Group)?;
         Ok(Arc::new(WorkerPermit(Some(self.0.clone()))))
     }
 }
@@ -2118,14 +2144,18 @@ impl AgentRuntimeWorkerGroup {
 impl Drop for WorkerPermit {
     fn drop(&mut self) {
         match &self.0 {
-            Some(group) => { group.active.fetch_sub(1, Ordering::AcqRel); }
+            Some(group) => {
+                group.active.fetch_sub(1, Ordering::AcqRel);
+            }
             None => RUNTIME_WORKER_HELD.store(false, Ordering::Release),
         }
     }
 }
 
 fn acquire_worker_permit() -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
-    if retry_emergency_reapers() { return Err(RuntimeSpawnError::AlreadyRunning); }
+    if retry_emergency_reapers() {
+        return Err(RuntimeSpawnError::AlreadyRunning);
+    }
     if RUNTIME_WORKER_HELD
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -2139,7 +2169,9 @@ fn retry_emergency_reapers() -> bool {
     let retained_workers = std::mem::take(&mut *recover_lock(&EMERGENCY_WORKER_REAP));
     let retained = !retained_workers.is_empty();
     if retained {
-        for worker in retained_workers { schedule_reap(worker); }
+        for worker in retained_workers {
+            schedule_reap(worker);
+        }
     }
     retained
 }

@@ -844,7 +844,10 @@ mod tests {
         else {
             panic!()
         };
-        let names: Vec<_> = subjects.iter().map(|subject| subject.name.as_str()).collect();
+        let names: Vec<_> = subjects
+            .iter()
+            .map(|subject| subject.name.as_str())
+            .collect();
         assert_eq!(names, ["Monthly stay", "Studio"]);
         assert!(matches!(&cells[0][0].value, WorkCellValue::Text { text } if text == "$2,100"));
         assert_eq!(cited, [1, 2, 5, 6]);

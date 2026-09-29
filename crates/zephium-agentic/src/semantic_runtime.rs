@@ -1699,16 +1699,18 @@ mod tests {
 
     #[test]
     fn compact_program_is_bound_to_the_reviewed_source_and_exact_output() {
-        let manifest: serde_json::Value = serde_json::from_str(include_str!(
-            "../assets/semantic-runtime-cdp-v1.json"
-        ))
-        .expect("manifest");
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/semantic-runtime-cdp-v1.json"))
+                .expect("manifest");
         for (key, source) in [
             ("source", SEMANTIC_RUNTIME_PROGRAM.source()),
             ("compact", SEMANTIC_RUNTIME_PROGRAM.cdp_source()),
         ] {
             assert!(source.is_ascii());
-            assert_eq!(manifest[key], format!("{:x}", Sha256::digest(source.as_bytes())));
+            assert_eq!(
+                manifest[key],
+                format!("{:x}", Sha256::digest(source.as_bytes()))
+            );
         }
     }
 

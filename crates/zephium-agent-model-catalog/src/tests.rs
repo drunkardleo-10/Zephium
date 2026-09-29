@@ -198,8 +198,14 @@ fn gpt6_luna_is_a_separate_exact_entry_with_its_published_prices() {
         config
     );
     for (effort, expected) in [
-        (Gpt6LunaDecisionEffort::None, AgentProviderReasoningEffort::None),
-        (Gpt6LunaDecisionEffort::Low, AgentProviderReasoningEffort::Low),
+        (
+            Gpt6LunaDecisionEffort::None,
+            AgentProviderReasoningEffort::None,
+        ),
+        (
+            Gpt6LunaDecisionEffort::Low,
+            AgentProviderReasoningEffort::Low,
+        ),
     ] {
         let decision = try_gpt6_luna_decision_call_config(4_096, effort).unwrap();
         assert_eq!(decision.reasoning_effort(), expected);

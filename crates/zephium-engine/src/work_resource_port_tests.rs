@@ -1921,8 +1921,8 @@ fn closed_anonymous_session_refuses_execution_but_preserves_native_drain() {
 
 #[test]
 fn work_construction_retry_is_closed_and_preserves_the_original_deadline() {
-    use zephium_agentic::{WorkBrowserConstructionAttempt as Attempt, WorkBrowserDocumentPolicy};
     use std::time::Duration;
+    use zephium_agentic::{WorkBrowserConstructionAttempt as Attempt, WorkBrowserDocumentPolicy};
     let now = Instant::now();
     let admission = admission();
     let (_, ordinary) = source();

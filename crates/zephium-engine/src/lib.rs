@@ -302,12 +302,20 @@ pub use platform::macos::MacosAgenticSemanticTwoActionScenario;
 #[doc(hidden)]
 pub type MacosAgentWorkProbePoll = Box<dyn FnMut(bool) -> Option<Result<(), &'static str>>>;
 
-#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe", feature = "agentic-browser-qa"))]
+#[cfg(all(
+    target_os = "macos",
+    feature = "native-agentic-semantic-probe",
+    feature = "agentic-browser-qa"
+))]
 #[doc(hidden)]
 pub use platform::macos::agentic_decision_probe::DecisionObservationSite;
 
 /// Records a fixed public anonymous page through the Work observation lifecycle.
-#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe", feature = "agentic-browser-qa"))]
+#[cfg(all(
+    target_os = "macos",
+    feature = "native-agentic-semantic-probe",
+    feature = "agentic-browser-qa"
+))]
 #[doc(hidden)]
 pub fn run_macos_decision_observation_probe(
     site: DecisionObservationSite,
@@ -317,7 +325,11 @@ pub fn run_macos_decision_observation_probe(
 }
 
 /// Records the next decision observation under these content rules instead of none.
-#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe", feature = "agentic-browser-qa"))]
+#[cfg(all(
+    target_os = "macos",
+    feature = "native-agentic-semantic-probe",
+    feature = "agentic-browser-qa"
+))]
 #[doc(hidden)]
 pub fn use_macos_decision_observation_content_rules(
     rules: std::sync::Arc<zephium_core::blocker::ContentRules>,

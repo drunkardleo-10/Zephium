@@ -13,20 +13,18 @@ fn memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<WorkMemoryV1>> {
     let created: i64 = row.get(5)?;
     let used: Option<i64> = row.get(6)?;
     let source: Option<String> = row.get(7)?;
-    Ok(
-        WorkMemoryKindV1::from_name(&kind).map(|kind| WorkMemoryV1 {
-            id: row.get(0).unwrap_or_default(),
-            text: row.get(1).unwrap_or_default(),
-            kind,
-            work: work.as_deref().and_then(WorkId::parse),
-            execution: execution.as_deref().and_then(WorkExecutionId::parse),
-            source: source
-                .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-                .filter(|text| !text.is_empty()),
-            created_ms: created.to_string(),
-            used_ms: used.map(|used| used.to_string()),
-        }),
-    )
+    Ok(WorkMemoryKindV1::from_name(&kind).map(|kind| WorkMemoryV1 {
+        id: row.get(0).unwrap_or_default(),
+        text: row.get(1).unwrap_or_default(),
+        kind,
+        work: work.as_deref().and_then(WorkId::parse),
+        execution: execution.as_deref().and_then(WorkExecutionId::parse),
+        source: source
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|text| !text.is_empty()),
+        created_ms: created.to_string(),
+        used_ms: used.map(|used| used.to_string()),
+    }))
 }
 
 /// Words for FTS5 as prefix terms, each quoted: a query is never syntax.
@@ -128,7 +126,9 @@ pub(super) fn call(
                     .prepare_cached("SELECT id, text FROM work_memories")
                     .map_err(|_| WorkError::Unavailable)?;
                 let rows = stmt
-                    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
                     .map_err(|_| WorkError::Unavailable)?;
                 let mut found = None;
                 for (known, words) in rows.flatten() {

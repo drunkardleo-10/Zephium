@@ -7,6 +7,14 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod acceptance;
+#[cfg(all(target_os = "macos", feature = "decision-eval"))]
+mod decision_eval;
+#[cfg(all(target_os = "macos", feature = "decision-eval"))]
+mod decision_observation;
+#[cfg(target_os = "macos")]
+mod lead_smoke;
 #[cfg(target_os = "macos")]
 mod work_actor;
 #[cfg(target_os = "macos")]
@@ -16,19 +24,11 @@ mod work_artifact_cleanup;
 mod work_commerce;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_durable;
-#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
-mod work_site;
-#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
-mod acceptance;
 mod work_navigation;
 mod work_route;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_site;
 mod work_sites;
-#[cfg(target_os = "macos")]
-mod lead_smoke;
-#[cfg(all(target_os = "macos", feature = "decision-eval"))]
-mod decision_eval;
-#[cfg(all(target_os = "macos", feature = "decision-eval"))]
-mod decision_observation;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -44,17 +44,27 @@ fn main() {
         #[cfg(feature = "decision-eval")]
         [argument] if argument == "--live-decision-eval" => decision_eval::run(),
         #[cfg(feature = "decision-eval")]
-        [argument, case] if argument == "--live-decision-eval-case" => decision_eval::run_case(case, ProbeModel::Luna),
+        [argument, case] if argument == "--live-decision-eval-case" => {
+            decision_eval::run_case(case, ProbeModel::Luna)
+        }
         #[cfg(feature = "decision-eval")]
         [argument] if argument == "--live-decision-eval-terra" => decision_eval::run_terra(),
         #[cfg(feature = "decision-eval")]
-        [argument, paths @ ..] if argument == "--search-reuse-replay" && !paths.is_empty() => decision_eval::search_reuse_replay(paths),
+        [argument, paths @ ..] if argument == "--search-reuse-replay" && !paths.is_empty() => {
+            decision_eval::search_reuse_replay(paths)
+        }
         #[cfg(feature = "decision-eval")]
-        [argument, effort] if argument == "--live-decision-eval-effort" => decision_eval::run_effort(effort),
+        [argument, effort] if argument == "--live-decision-eval-effort" => {
+            decision_eval::run_effort(effort)
+        }
         #[cfg(feature = "decision-eval")]
-        [argument, case] if argument == "--live-decision-eval-case-terra" => decision_eval::run_case(case, ProbeModel::Terra),
+        [argument, case] if argument == "--live-decision-eval-case-terra" => {
+            decision_eval::run_case(case, ProbeModel::Terra)
+        }
         #[cfg(feature = "decision-eval")]
-        [argument, site] if argument == "--record-decision-observation" => decision_observation::run(site),
+        [argument, site] if argument == "--record-decision-observation" => {
+            decision_observation::run(site)
+        }
         #[cfg(feature = "decision-eval")]
         [argument, site, lists]
             if argument == "--record-decision-observation" && lists == "release-lists" =>
@@ -192,9 +202,13 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),
         #[cfg(feature = "durable-runtime")]
-        [argument] if argument == "--live-agent-airbnb-listing-work" => work_durable::run_agent_listing(),
+        [argument] if argument == "--live-agent-airbnb-listing-work" => {
+            work_durable::run_agent_listing()
+        }
         #[cfg(feature = "durable-runtime")]
-        [argument, url] if argument == "--live-agent-page-work" => work_durable::run_agent_page(url),
+        [argument, url] if argument == "--live-agent-page-work" => {
+            work_durable::run_agent_page(url)
+        }
         #[cfg(feature = "durable-runtime")]
         [argument, url] if argument == "--live-agent-listing-page-work" => {
             work_durable::run_agent_listing_page(url)

@@ -9,7 +9,12 @@ fn call(hub: &mut Hub, request: WorkPersonalRequest) -> Result<WorkPersonalReply
     }
 }
 
-fn remember(hub: &mut Hub, text: &str, work: Option<zephium_core::work::WorkId>, now: u64) -> WorkMemoryV1 {
+fn remember(
+    hub: &mut Hub,
+    text: &str,
+    work: Option<zephium_core::work::WorkId>,
+    now: u64,
+) -> WorkMemoryV1 {
     let WorkPersonalReply::Memory(Some(memory)) = call(
         hub,
         WorkPersonalRequest::Remember {
@@ -27,7 +32,11 @@ fn remember(hub: &mut Hub, text: &str, work: Option<zephium_core::work::WorkId>,
     memory
 }
 
-fn list(hub: &mut Hub, query: Option<&str>, work: Option<zephium_core::work::WorkId>) -> Vec<String> {
+fn list(
+    hub: &mut Hub,
+    query: Option<&str>,
+    work: Option<zephium_core::work::WorkId>,
+) -> Vec<String> {
     let WorkPersonalReply::Memories(memories) = call(
         hub,
         WorkPersonalRequest::Memories {
@@ -47,17 +56,34 @@ fn memories_are_kept_once_found_by_their_words_and_edited_or_forgotten() {
     let mut hub = Hub::in_memory().unwrap();
     hub.save(&session()).unwrap();
     let work = create(&mut hub).id;
-    let aisle = remember(&mut hub, "Prefers aisle seats on long flights", Some(work), 10);
+    let aisle = remember(
+        &mut hub,
+        "Prefers aisle seats on long flights",
+        Some(work),
+        10,
+    );
     assert_eq!(aisle.work, Some(work));
-    assert_eq!(aisle.source.as_deref(), Some("Compare implementation choices"));
+    assert_eq!(
+        aisle.source.as_deref(),
+        Some("Compare implementation choices")
+    );
     remember(&mut hub, "Anna leads design", None, 20);
     let again = remember(&mut hub, "prefers aisle  seats on long flights.", None, 30);
     assert_eq!(again.id, aisle.id);
     assert_eq!(again.used_ms.as_deref(), Some("30"));
     assert_eq!(list(&mut hub, None, None).len(), 2);
-    assert_eq!(list(&mut hub, Some("fli"), None), ["Prefers aisle seats on long flights"]);
-    assert_eq!(list(&mut hub, Some("\"design OR"), None), ["Anna leads design"]);
-    assert_eq!(list(&mut hub, None, Some(work)), ["Prefers aisle seats on long flights"]);
+    assert_eq!(
+        list(&mut hub, Some("fli"), None),
+        ["Prefers aisle seats on long flights"]
+    );
+    assert_eq!(
+        list(&mut hub, Some("\"design OR"), None),
+        ["Anna leads design"]
+    );
+    assert_eq!(
+        list(&mut hub, None, Some(work)),
+        ["Prefers aisle seats on long flights"]
+    );
     let WorkPersonalReply::Memory(Some(edited)) = call(
         &mut hub,
         WorkPersonalRequest::Edit {
@@ -70,7 +96,10 @@ fn memories_are_kept_once_found_by_their_words_and_edited_or_forgotten() {
         panic!()
     };
     assert_eq!(edited.text, "Prefers window seats");
-    assert_eq!(list(&mut hub, Some("window"), None), ["Prefers window seats"]);
+    assert_eq!(
+        list(&mut hub, Some("window"), None),
+        ["Prefers window seats"]
+    );
     assert!(list(&mut hub, Some("aisle"), None).is_empty());
     call(&mut hub, WorkPersonalRequest::Forget { id: aisle.id }).unwrap();
     assert_eq!(list(&mut hub, None, None), ["Anna leads design"]);
@@ -95,18 +124,22 @@ fn consent_is_one_standing_answer_per_work_and_source() {
     let mut hub = Hub::in_memory().unwrap();
     hub.save(&session()).unwrap();
     let work = create(&mut hub).id;
-    let mut consent = |source, set| match call(
-        &mut hub,
-        WorkPersonalRequest::Consent { work, source, set },
-    )
-    .unwrap()
-    {
-        WorkPersonalReply::Consent(answer) => answer,
-        _ => panic!(),
-    };
+    let mut consent =
+        |source, set| match call(&mut hub, WorkPersonalRequest::Consent { work, source, set })
+            .unwrap()
+        {
+            WorkPersonalReply::Consent(answer) => answer,
+            _ => panic!(),
+        };
     assert_eq!(consent(WorkContextSourceV1::History, None), None);
-    assert_eq!(consent(WorkContextSourceV1::History, Some(true)), Some(true));
-    assert_eq!(consent(WorkContextSourceV1::Notes, Some(false)), Some(false));
+    assert_eq!(
+        consent(WorkContextSourceV1::History, Some(true)),
+        Some(true)
+    );
+    assert_eq!(
+        consent(WorkContextSourceV1::Notes, Some(false)),
+        Some(false)
+    );
     assert_eq!(consent(WorkContextSourceV1::History, None), Some(true));
     assert_eq!(consent(WorkContextSourceV1::Tabs, None), None);
     assert!(matches!(

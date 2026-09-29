@@ -15,7 +15,11 @@ fn profile_of(expected: &str) -> Result<ProfileId, WorkError> {
         .ok_or(WorkError::Invalid)
 }
 
-fn admitted(caller: &WebviewWindow, app: &tauri::AppHandle, command: &str) -> Result<(), WorkError> {
+fn admitted(
+    caller: &WebviewWindow,
+    app: &tauri::AppHandle,
+    command: &str,
+) -> Result<(), WorkError> {
     if !authorize(caller, CallerPolicy::Main, command) {
         return Err(WorkError::Unavailable);
     }
@@ -28,17 +32,22 @@ fn admitted(caller: &WebviewWindow, app: &tauri::AppHandle, command: &str) -> Re
 #[cfg(feature = "work-product")]
 mod live {
     use super::*;
+    use zephium_app::work_connections::client::keychain;
     use zephium_app::work_connections::{cli, store};
     use zephium_ipc::work::{
         WorkCliStatusV1, WorkServerAuthV1, WorkServerRowV1, WorkServerTransportV1, WorkServerV1,
     };
-    use zephium_app::work_connections::client::keychain;
 
-    pub(super) fn store(app: &tauri::AppHandle) -> Result<&'static store::ConnectionStore, WorkError> {
+    pub(super) fn store(
+        app: &tauri::AppHandle,
+    ) -> Result<&'static store::ConnectionStore, WorkError> {
         if let Some(store) = store::shared() {
             return Ok(store);
         }
-        let data = app.path().app_data_dir().map_err(|_| WorkError::Unavailable)?;
+        let data = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| WorkError::Unavailable)?;
         store::install(&data);
         store::shared().ok_or(WorkError::Unavailable)
     }
@@ -77,9 +86,11 @@ mod live {
             .map(|server| {
                 let mut accounts: Vec<String> = Vec::new();
                 match &server.transport {
-                    WorkServerTransportV1::Stdio { env, .. } => {
-                        accounts.extend(env.iter().filter(|e| e.secret).map(|e| format!("env.{}", e.name)))
-                    }
+                    WorkServerTransportV1::Stdio { env, .. } => accounts.extend(
+                        env.iter()
+                            .filter(|e| e.secret)
+                            .map(|e| format!("env.{}", e.name)),
+                    ),
                     WorkServerTransportV1::Http {
                         auth: WorkServerAuthV1::Bearer,
                         ..
@@ -126,7 +137,11 @@ async fn listing(
         let store = live::store(app)?;
         let id = profile.to_string();
         let servers = store.servers(&id).map_err(|_| WorkError::Unavailable)?;
-        let clis = if with_clis { live::clis().await } else { Vec::new() };
+        let clis = if with_clis {
+            live::clis().await
+        } else {
+            Vec::new()
+        };
         let rows = tokio::task::spawn_blocking(move || live::rows(&id, servers))
             .await
             .map_err(|_| WorkError::Unavailable)?;
@@ -354,22 +369,24 @@ pub(crate) async fn work_sign_in_connection(
             let WorkServerTransportV1::Http { url, .. } = &server.transport else {
                 return Err(WorkError::Invalid);
             };
-            let tokens = zephium_app::work_connections::client::keychain::oauth_store(&owner, &server.id);
+            let tokens =
+                zephium_app::work_connections::client::keychain::oauth_store(&owner, &server.id);
             let opener = app.clone();
-            let signed = zephium_app::work_connections::client::oauth::sign_in(url, tokens, move |page| {
-                if zephium_core::navigation::is_allowed_str(&page) {
-                    let shell = opener.state::<Handle>();
-                    let _ = dispatch_operation(
-                        &opener,
-                        &shell,
-                        Command::OpenUrl {
-                            input: page,
-                            new_tab: true,
-                        },
-                    );
-                }
-            })
-            .await;
+            let signed =
+                zephium_app::work_connections::client::oauth::sign_in(url, tokens, move |page| {
+                    if zephium_core::navigation::is_allowed_str(&page) {
+                        let shell = opener.state::<Handle>();
+                        let _ = dispatch_operation(
+                            &opener,
+                            &shell,
+                            Command::OpenUrl {
+                                input: page,
+                                new_tab: true,
+                            },
+                        );
+                    }
+                })
+                .await;
             let mut check = zephium_app::work_connections::mcp::check(&owner, &server).await;
             if signed.is_err() && check.outcome == WorkServerOutcomeV1::Ready {
                 check.outcome = WorkServerOutcomeV1::SignIn;

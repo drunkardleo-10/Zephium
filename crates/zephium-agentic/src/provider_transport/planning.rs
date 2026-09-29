@@ -717,7 +717,8 @@ fn decode_response_with(
                 && role == "assistant"
                 && status == "completed"
                 && phase.as_deref() == Some("commentary")
-                && matches!(content.as_slice(), [Content::OutputText { text }] if !text.trim_start().starts_with('{')) => {}
+                && matches!(content.as_slice(), [Content::OutputText { text }] if !text.trim_start().starts_with('{')) =>
+                {}
             Output::Message {
                 role,
                 status,

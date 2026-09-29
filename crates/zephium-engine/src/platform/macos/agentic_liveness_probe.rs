@@ -4,8 +4,8 @@
 use block2::RcBlock;
 use objc2::{rc::Retained, runtime::AnyObject, MainThreadOnly};
 use objc2_app_kit::{
-    NSAccessibility as _, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSAccessibility as _, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSDate, NSError, NSHTTPCookie, NSPoint, NSRect, NSRunLoop, NSSize,
@@ -354,9 +354,13 @@ fn run(
         eprintln!("liveness_probe site={site:?} stage={stage:?} ax_sample={sample} nodes={} web_areas={} challenge_areas={} checkboxes={} scoped_checkboxes={} named_checkboxes={} enabled_checkboxes={} candidates={} unresolved_remote={} root_getters={} bridge={:?} truncated={}",
             facts.nodes, facts.web_areas, facts.challenge_areas, facts.checkboxes,
             facts.scoped_checkboxes, facts.named_checkboxes, facts.enabled_checkboxes, facts.candidates, facts.unresolved_remote, facts.root_getters, facts.bridge, facts.truncated);
-        if facts.scoped_checkboxes > 0 && !facts.truncated { break; }
+        if facts.scoped_checkboxes > 0 && !facts.truncated {
+            break;
+        }
         let wait_started = Instant::now();
-        while wait_started.elapsed() < Duration::from_millis(100) { pump(); }
+        while wait_started.elapsed() < Duration::from_millis(100) {
+            pump();
+        }
     }
     let facts = challenge_ax::inspect_own_process(mtm);
     eprintln!("liveness_probe site={site:?} stage={stage:?} ax_source=OwnProcess windows={} nodes={} web_areas={} challenge_areas={} checkboxes={} scoped_checkboxes={} named_checkboxes={} enabled_checkboxes={} candidates={} unresolved_remote={} bridge={:?} truncated={}",

@@ -92,7 +92,9 @@ impl WorkObservationPresentation {
     pub(crate) fn liveness_facts(&self) -> (bool, bool, bool, bool, bool) {
         (
             !self.main.isMiniaturized(),
-            self.main.occlusionState().contains(NSWindowOcclusionState::Visible),
+            self.main
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible),
             !self.page.visibleRect().is_empty(),
             self.main.isOnActiveSpace(),
             self.main.isVisible(),

@@ -750,10 +750,16 @@ fn a_recorded_consent_dialog_is_dismissed_by_its_refusing_control_only_by_recipe
             .contains(SemanticOperationClass::Click));
     }
     let recipe = policy
-        .decision_action_recipe(&DecisionOperation::Click(nodes[3].reference()), &observation)
+        .decision_action_recipe(
+            &DecisionOperation::Click(nodes[3].reference()),
+            &observation,
+        )
         .unwrap()
         .unwrap();
-    assert_eq!(recipe.verification(), SemanticVerification::PageDialogClosed);
+    assert_eq!(
+        recipe.verification(),
+        SemanticVerification::PageDialogClosed
+    );
     let snapshot = &observation.frames()[0];
     let batch = SemanticActionBatch::bind(
         SemanticActionBatchId::new(1).unwrap(),
@@ -765,7 +771,10 @@ fn a_recorded_consent_dialog_is_dismissed_by_its_refusing_control_only_by_recipe
     let action = batch.actions()[0].prepare(snapshot).unwrap();
     assert!(policy.assess(&action, &observation).is_ok());
     assert!(policy
-        .decision_action_recipe(&DecisionOperation::Click(nodes[4].reference()), &observation)
+        .decision_action_recipe(
+            &DecisionOperation::Click(nodes[4].reference()),
+            &observation
+        )
         .unwrap()
         .is_none());
     // The same controls in a dialog that is not about cookies stay refused.

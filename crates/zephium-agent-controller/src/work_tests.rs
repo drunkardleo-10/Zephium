@@ -533,11 +533,11 @@ mod account_tests;
 #[cfg(feature = "probe-harness")]
 use account_tests::{AccountFault, AccountTask};
 #[cfg(feature = "probe-harness")]
-#[path = "work_navigation_tests.rs"]
-mod navigation_tests;
-#[cfg(feature = "probe-harness")]
 #[path = "work_decision_tests.rs"]
 mod decision_tests;
+#[cfg(feature = "probe-harness")]
+#[path = "work_navigation_tests.rs"]
+mod navigation_tests;
 #[cfg(feature = "probe-harness")]
 use navigation_tests::{NavigationFault, NavigationTask};
 const FIXTURE_POLICY_NOW_MILLIS: u64 = 2;
@@ -1150,10 +1150,19 @@ impl AgentBrowserPort for Port {
         };
         #[cfg(feature = "probe-harness")]
         let wire = if let Fault::DecisionClick(applied) = self.fault {
-            format!(r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document"}},{{"k":2,"p":0,"r":"button","n":"Details","o":1,"s":{},"ak":6,"fc":true,"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#,
-                correlation.invocation().get(), correlation.snapshot_generation().get(),
-                if applied && lock(&self.calls).contains(&7) {4} else {0})
-        } else { wire };
+            format!(
+                r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document"}},{{"k":2,"p":0,"r":"button","n":"Details","o":1,"s":{},"ak":6,"fc":true,"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#,
+                correlation.invocation().get(),
+                correlation.snapshot_generation().get(),
+                if applied && lock(&self.calls).contains(&7) {
+                    4
+                } else {
+                    0
+                }
+            )
+        } else {
+            wire
+        };
         let snapshot = decode_semantic_snapshot(
             SemanticDecodeContext::new(
                 correlation.invocation(),
@@ -1318,7 +1327,9 @@ impl AgentBrowserPort for Port {
                     SemanticActionExecutionBackend::FixedSemanticRecipe,
                     SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
                     SemanticActionNativeViewport::try_new(800, 600).unwrap(),
-                    geometry, now, now,
+                    geometry,
+                    now,
+                    now,
                 ));
                 return ContextDispatch::Scheduled;
             }

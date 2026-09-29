@@ -287,9 +287,7 @@ impl WorkPersonalRequest {
                 }
                 fact(text)
             }
-            Self::Forget { id } => valid_memory_id(id)
-                .then_some(())
-                .ok_or(WorkError::Invalid),
+            Self::Forget { id } => valid_memory_id(id).then_some(()).ok_or(WorkError::Invalid),
             Self::Used { ids, .. } => (ids.len() <= 64 && ids.iter().all(|id| valid_memory_id(id)))
                 .then_some(())
                 .ok_or(WorkError::Invalid),

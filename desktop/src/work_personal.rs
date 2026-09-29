@@ -43,9 +43,9 @@ async fn memories(
             use zephium_core::work::personal::{check_memory, WorkMemoryFault};
             let shell = app.state::<zephium_app::Handle>();
             let text = match &change {
-                Some(WorkMemoryChangeV1::Add { text, .. } | WorkMemoryChangeV1::Edit { text, .. }) => {
-                    Some(text.as_str())
-                }
+                Some(
+                    WorkMemoryChangeV1::Add { text, .. } | WorkMemoryChangeV1::Edit { text, .. },
+                ) => Some(text.as_str()),
                 _ => None,
             };
             if let Some(Err(fault)) = text.map(check_memory) {
@@ -141,7 +141,9 @@ fn row(row: zephium_app::work_personal::skills::SkillRow) -> zephium_ipc::work::
 }
 
 #[cfg(feature = "work-product")]
-fn fault(fault: zephium_app::work_personal::skills::SkillChangeFault) -> Result<WorkSkillFaultV1, WorkError> {
+fn fault(
+    fault: zephium_app::work_personal::skills::SkillChangeFault,
+) -> Result<WorkSkillFaultV1, WorkError> {
     use zephium_app::work_lead::skills::SkillFault;
     use zephium_app::work_personal::skills::SkillChangeFault as Change;
     Ok(match fault {

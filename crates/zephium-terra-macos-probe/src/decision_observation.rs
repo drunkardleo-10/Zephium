@@ -202,11 +202,29 @@ pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
     };
     let licenses = LicensePolicy::new(["CC-BY-SA-3.0"]).map_err(|_| ProbeFailure::Authority)?;
     let seed = ReleaseCatalogSeed::from_embedded_gzip(
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/blocker-seed/v1/catalog.json")),
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/blocker-seed/v1/release-seed.json")),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/blocker-seed/v1/catalog.json"
+        )),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/blocker-seed/v1/release-seed.json"
+        )),
         vec![
-            EmbeddedReleaseAsset::new("easylist.txt", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/blocker-seed/v1/easylist.txt.gz"))),
-            EmbeddedReleaseAsset::new("easyprivacy.txt", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/blocker-seed/v1/easyprivacy.txt.gz"))),
+            EmbeddedReleaseAsset::new(
+                "easylist.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/easylist.txt.gz"
+                )),
+            ),
+            EmbeddedReleaseAsset::new(
+                "easyprivacy.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/easyprivacy.txt.gz"
+                )),
+            ),
         ],
         limits,
         licenses,
@@ -231,12 +249,18 @@ pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
     let rules = match rx.recv_timeout(std::time::Duration::from_secs(120)) {
         Ok(BlockerCompileOutcome::Compiled(rules)) => rules,
         Ok(BlockerCompileOutcome::Failed(failure)) => {
-            let _ = writeln!(std::io::stderr(), "decision_observation release_lists=failed reason={failure:?}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "decision_observation release_lists=failed reason={failure:?}"
+            );
             return Err(ProbeFailure::Runtime);
         }
         Err(_) => return Err(ProbeFailure::Runtime),
     };
-    let _ = writeln!(std::io::stderr(), "decision_observation release_lists=compiled");
+    let _ = writeln!(
+        std::io::stderr(),
+        "decision_observation release_lists=compiled"
+    );
     zephium_engine::use_macos_decision_observation_content_rules(rules)
         .then_some(())
         .ok_or(ProbeFailure::Runtime)
@@ -283,8 +307,11 @@ const CHALLENGE_MARKERS: &[&str] = &[
 
 impl PageFacts {
     fn of(observation: &SemanticObservation) -> Self {
-        let nodes: Vec<&SemanticNode> =
-            observation.frames().iter().flat_map(|frame| frame.nodes()).collect();
+        let nodes: Vec<&SemanticNode> = observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .collect();
         let texts = || {
             nodes.iter().flat_map(|node| {
                 [node.name(), node.text()]
@@ -293,7 +320,8 @@ impl PageFacts {
                     .map(|text| text.as_str().to_lowercase())
             })
         };
-        let marked = |markers: &[&str]| texts().any(|text| markers.iter().any(|m| text.contains(m)));
+        let marked =
+            |markers: &[&str]| texts().any(|text| markers.iter().any(|m| text.contains(m)));
         let role = |role: SemanticRole| nodes.iter().filter(|node| node.role() == role).count();
         Self {
             nodes: nodes.len(),
@@ -302,14 +330,20 @@ impl PageFacts {
                 .flat_map(|node| [node.name(), node.text()].into_iter().flatten())
                 .map(SemanticText::len)
                 .sum(),
-            headings: nodes.iter().filter(|node| node.heading_level().is_some()).count(),
+            headings: nodes
+                .iter()
+                .filter(|node| node.heading_level().is_some())
+                .count(),
             links: role(SemanticRole::Link),
             room_links: nodes
                 .iter()
                 .filter_map(|node| node.link_destination())
                 .filter(|target| target.as_url().path().starts_with("/rooms/"))
                 .count(),
-            images: nodes.iter().filter(|node| node.image_source().is_some()).count(),
+            images: nodes
+                .iter()
+                .filter(|node| node.image_source().is_some())
+                .count(),
             buttons: role(SemanticRole::Button),
             dialogs: role(SemanticRole::Dialog),
             error_marker: marked(ERROR_MARKERS),

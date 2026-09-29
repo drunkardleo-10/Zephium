@@ -6,6 +6,11 @@ mod agent_history;
 pub(crate) mod agentic_liveness_probe;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_history::AgentHistoryBackTicket;
+#[cfg(all(
+    feature = "native-agentic-semantic-probe",
+    feature = "agentic-browser-qa"
+))]
+pub(crate) mod agentic_decision_probe;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) mod agentic_foreground_driver;
 #[cfg(feature = "native-agentic-foreground-probe")]
@@ -18,8 +23,6 @@ pub(crate) mod agentic_resource_composition_probe;
 pub(crate) mod agentic_resource_driver;
 #[cfg(feature = "native-agentic-semantic-probe")]
 mod agentic_semantic_probe;
-#[cfg(all(feature = "native-agentic-semantic-probe", feature = "agentic-browser-qa"))]
-pub(crate) mod agentic_decision_probe;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod content_filter;

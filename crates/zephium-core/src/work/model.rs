@@ -99,7 +99,10 @@ pub struct WorkModelToolResult {
 #[derive(Clone)]
 pub enum WorkModelPart {
     Text(String),
-    Image { media_type: String, bytes: Vec<u8> },
+    Image {
+        media_type: String,
+        bytes: Vec<u8>,
+    },
     ToolCall(WorkModelToolCall),
     /// A provider item the transport must replay verbatim on the next call
     /// (reasoning items, encrypted thinking, native search blocks).

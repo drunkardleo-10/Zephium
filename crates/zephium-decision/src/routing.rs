@@ -89,10 +89,9 @@ impl DecisionPurpose {
     fn confident(self, answer: &Answer, backend: AnswerBackend) -> bool {
         let threshold = self.threshold(backend);
         match (self, answer.value()) {
-            (
-                Self::Challenge | Self::Relevance | Self::Completion,
-                AnswerValue::Noul { noul },
-            ) => *noul <= 1.0 - threshold || *noul >= threshold,
+            (Self::Challenge | Self::Relevance | Self::Completion, AnswerValue::Noul { noul }) => {
+                *noul <= 1.0 - threshold || *noul >= threshold
+            }
             (
                 Self::Action
                 | Self::Locate
@@ -109,9 +108,7 @@ impl DecisionPurpose {
                 *confidence >= threshold
                     && probabilities.get(choice).is_some_and(|p| *p >= threshold)
             }
-            (Self::OrderedScore, AnswerValue::Score { confidence, .. }) => {
-                *confidence >= threshold
-            }
+            (Self::OrderedScore, AnswerValue::Score { confidence, .. }) => *confidence >= threshold,
             _ => false,
         }
     }
@@ -420,9 +417,10 @@ mod tests {
             "challenge":{"type":"noul","noul":0.01},
             "target":{"type":"choice","choice":"@a1","confidence":0.9,"probabilities":{"@a1":0.9,"none":0.1}}
         }));
-        let mut routed = DecisionFallback::assess(&request, purposes, Err(FallbackReason::Unavailable))
-            .unwrap()
-            .finish(Some(emulated));
+        let mut routed =
+            DecisionFallback::assess(&request, purposes, Err(FallbackReason::Unavailable))
+                .unwrap()
+                .finish(Some(emulated));
         assert!(matches!(
             routed.take("target"),
             Some(ResolvedDecision::Unresolved {

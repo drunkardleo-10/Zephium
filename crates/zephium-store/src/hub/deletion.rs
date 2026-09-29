@@ -1115,7 +1115,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(retained_memory_terms, 0, "profile scrub retained memory terms");
+        assert_eq!(
+            retained_memory_terms, 0,
+            "profile scrub retained memory terms"
+        );
         let history_sequence: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_sequence WHERE name = 'history'",

@@ -86,12 +86,19 @@ pub fn brand_family(source: &[u8], target: &[u8]) -> Option<&'static str> {
         if !parsed.suffix().is_known() || parsed.suffix().typ() != Some(psl::Type::Icann) {
             return None;
         }
-        let label_end = domain.len().checked_sub(parsed.suffix().as_bytes().len() + 1)?;
+        let label_end = domain
+            .len()
+            .checked_sub(parsed.suffix().as_bytes().len() + 1)?;
         std::str::from_utf8(domain.get(..label_end)?).ok()
     }
     let (source, target) = (brand(source)?, brand(target)?);
     (source == target)
-        .then(|| BRAND_FAMILIES.iter().copied().find(|brand| *brand == source))
+        .then(|| {
+            BRAND_FAMILIES
+                .iter()
+                .copied()
+                .find(|brand| *brand == source)
+        })
         .flatten()
 }
 

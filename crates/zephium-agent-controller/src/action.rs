@@ -97,7 +97,11 @@ impl AgentBrowserActionProposal {
         self,
         error: SemanticActionBindingError,
     ) -> Option<AgentProviderActionRefusal> {
-        Some(AgentProviderActionRefusal::unissued(self.continuation?, error, self.refusal_context))
+        Some(AgentProviderActionRefusal::unissued(
+            self.continuation?,
+            error,
+            self.refusal_context,
+        ))
     }
 }
 
@@ -526,7 +530,9 @@ impl AgentBrowserAction {
     pub(crate) fn into_rejected_refusal(
         self,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
-        if self.proposal.action.effect() != SemanticEffectClass::Read || self.proposal.continuation.is_none() {
+        if self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.proposal.continuation.is_none()
+        {
             return Err(Box::new(self));
         }
         let mut this = *self.into_rejected_batch_keeping()?;
@@ -535,7 +541,10 @@ impl AgentBrowserAction {
             Ok(terminal) => Ok((
                 terminal,
                 AgentProviderActionRefusal::unissued(
-                    this.proposal.continuation.take().expect("checked provider continuation"),
+                    this.proposal
+                        .continuation
+                        .take()
+                        .expect("checked provider continuation"),
                     SemanticActionBindingError::DispatchRejected,
                     this.proposal.refusal_context,
                 ),
@@ -575,7 +584,10 @@ impl AgentBrowserAction {
             Ok(terminal) => Ok((
                 terminal,
                 AgentProviderActionRefusal::unissued(
-                    this.proposal.continuation.take().expect("checked provider continuation"),
+                    this.proposal
+                        .continuation
+                        .take()
+                        .expect("checked provider continuation"),
                     SemanticActionBindingError::Unverified,
                     this.proposal.refusal_context,
                 ),
@@ -949,18 +961,17 @@ impl AgentBrowserAction {
             self.applied_on_page_change = applied.is_ok();
             applied
         });
-        let verified =
-            match verified {
-                Ok(verified) => verified,
-                Err(refusal) => {
-                    let reason = refusal.error();
-                    let failed = policy
-                        .settle_refused_semantic_terminal(refusal)
-                        .map_err(AgentBrowserActionError::Policy)?;
-                    self.retain_failure(failed);
-                    return Err(AgentBrowserActionError::Verification(reason));
-                }
-            };
+        let verified = match verified {
+            Ok(verified) => verified,
+            Err(refusal) => {
+                let reason = refusal.error();
+                let failed = policy
+                    .settle_refused_semantic_terminal(refusal)
+                    .map_err(AgentBrowserActionError::Policy)?;
+                self.retain_failure(failed);
+                return Err(AgentBrowserActionError::Verification(reason));
+            }
+        };
         self.finished = true;
         policy
             .settle_verified_semantic_terminal(verified, &self.proposal.action)

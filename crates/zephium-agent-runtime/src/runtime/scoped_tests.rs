@@ -21,7 +21,13 @@ fn acquired_scope() -> (
     acquired_scope_for_work(WorkId::generate())
 }
 
-fn acquired_scope_for_work(work: WorkId) -> (WorkBrowserResources, WorkBrowserExecutionLease, AgentRuntimeScopedBinding) {
+fn acquired_scope_for_work(
+    work: WorkId,
+) -> (
+    WorkBrowserResources,
+    WorkBrowserExecutionLease,
+    AgentRuntimeScopedBinding,
+) {
     let mut rows = WorkBrowserResources::new(work, 31.into());
     let request = rows
         .construct(
@@ -101,7 +107,12 @@ struct IngressController {
 fn scoped_group_keeps_global_exclusion_and_all_failed_reaper_ownership() {
     let _serial = runtime_test_guard();
     struct Reset;
-    impl Drop for Reset { fn drop(&mut self) { FORCE_REAPER_SPAWN_FAILURE.store(false, Ordering::Release); retry_emergency_reapers(); } }
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCE_REAPER_SPAWN_FAILURE.store(false, Ordering::Release);
+            retry_emergency_reapers();
+        }
+    }
     let reset = Reset;
     struct PendingController;
     impl AgentRuntimeScopedController for PendingController {
@@ -110,16 +121,31 @@ fn scoped_group_keeps_global_exclusion_and_all_failed_reaper_ownership() {
         }
     }
     let work = WorkId::generate();
-    assert!(matches!(AgentRuntimeWorkerGroup::try_new(work, 4), Err(RuntimeSpawnError::Group)));
+    assert!(matches!(
+        AgentRuntimeWorkerGroup::try_new(work, 4),
+        Err(RuntimeSpawnError::Group)
+    ));
     let group = AgentRuntimeWorkerGroup::try_new(work, 3).unwrap();
-    assert!(matches!(PendingAgentRuntime::spawn_suspended(AgentRuntimeConfig::STANDARD), Err(RuntimeSpawnError::AlreadyRunning)));
+    assert!(matches!(
+        PendingAgentRuntime::spawn_suspended(AgentRuntimeConfig::STANDARD),
+        Err(RuntimeSpawnError::AlreadyRunning)
+    ));
     let spawn = |work| {
         let (rows, lease, binding) = acquired_scope_for_work(work);
-        let result = PendingScopedAgentRuntime::spawn_suspended_in_group(AgentRuntimeConfig::STANDARD, binding, Box::new(PendingController), &group);
+        let result = PendingScopedAgentRuntime::spawn_suspended_in_group(
+            AgentRuntimeConfig::STANDARD,
+            binding,
+            Box::new(PendingController),
+            &group,
+        );
         (rows, lease, result)
     };
-    assert!(matches!(spawn(WorkId::generate()).2, Err(RuntimeSpawnError::Group)));
-    let mut workers = Vec::new(); let mut joins = Vec::new();
+    assert!(matches!(
+        spawn(WorkId::generate()).2,
+        Err(RuntimeSpawnError::Group)
+    ));
+    let mut workers = Vec::new();
+    let mut joins = Vec::new();
     for _ in 0..3 {
         let (rows, lease, result) = spawn(work);
         let pending = result.unwrap();
@@ -132,15 +158,24 @@ fn scoped_group_keeps_global_exclusion_and_all_failed_reaper_ownership() {
     drop(workers);
     assert_eq!(recover_lock(&EMERGENCY_WORKER_REAP).len(), 3);
     assert_eq!(group.0.active.load(Ordering::Acquire), 3);
-    assert!(matches!(spawn(work).2, Err(RuntimeSpawnError::AlreadyRunning)));
+    assert!(matches!(
+        spawn(work).2,
+        Err(RuntimeSpawnError::AlreadyRunning)
+    ));
     assert_eq!(recover_lock(&EMERGENCY_WORKER_REAP).len(), 3);
     drop(reset);
-    for joined in joins { assert!(joined.wait_until(Instant::now() + Duration::from_secs(2))); }
+    for joined in joins {
+        assert!(joined.wait_until(Instant::now() + Duration::from_secs(2)));
+    }
     assert_eq!(group.0.active.load(Ordering::Acquire), 0);
-    assert!(matches!(PendingAgentRuntime::spawn_suspended(AgentRuntimeConfig::STANDARD), Err(RuntimeSpawnError::AlreadyRunning)));
+    assert!(matches!(
+        PendingAgentRuntime::spawn_suspended(AgentRuntimeConfig::STANDARD),
+        Err(RuntimeSpawnError::AlreadyRunning)
+    ));
     drop(group);
     let next = PendingAgentRuntime::spawn_suspended(AgentRuntimeConfig::STANDARD).unwrap();
-    let joined = next.inner.joined.clone(); drop(next);
+    let joined = next.inner.joined.clone();
+    drop(next);
     assert!(joined.wait_until(Instant::now() + Duration::from_secs(2)));
 }
 

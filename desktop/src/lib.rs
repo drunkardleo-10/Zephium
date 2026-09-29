@@ -67,10 +67,10 @@ compile_error!("staging-extension-catalog and local-extension-lab are mutually e
 
 mod blocker_service;
 mod browser_credentials;
-#[cfg(feature = "work-product")]
-mod favicon_probe;
 #[cfg(feature = "curated-extension-distribution")]
 mod extension_distribution;
+#[cfg(feature = "work-product")]
+mod favicon_probe;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
@@ -94,18 +94,18 @@ mod search_providers;
 mod startup_styles;
 #[cfg(feature = "work-product")]
 mod work_activity;
+mod work_connections;
 mod work_decision;
-mod work_models;
 #[cfg(feature = "work-development-traces")]
 mod work_diagnostics;
+mod work_models;
 #[cfg(any(feature = "work-product", test))]
 mod work_operations;
+mod work_personal;
 mod work_product;
 #[cfg(feature = "work-product")]
 mod work_provider;
-mod work_personal;
 mod work_sites;
-mod work_connections;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};

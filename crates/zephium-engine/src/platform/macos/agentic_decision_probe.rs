@@ -42,8 +42,12 @@ impl DecisionObservationSite {
             Self::Airbnb => "https://www.airbnb.com/s/San-Francisco--CA/homes",
             Self::Yc => "https://www.ycombinator.com/about",
             Self::Government => "https://travel.state.gov/",
-            Self::DemoStore => "https://www.scrapingcourse.com/ecommerce/product/adrienne-trek-jacket/",
-            Self::BookStore => "https://books.toscrape.com/catalogue/the-black-maria_991/index.html",
+            Self::DemoStore => {
+                "https://www.scrapingcourse.com/ecommerce/product/adrienne-trek-jacket/"
+            }
+            Self::BookStore => {
+                "https://books.toscrape.com/catalogue/the-black-maria_991/index.html"
+            }
             Self::BookCatalog => "https://books.toscrape.com/catalogue/page-1.html",
             Self::TestStore => "https://www.demoblaze.com/prod.html?idp_=1",
             Self::AirbnbListing => "https://www.airbnb.com/rooms/23813739",
@@ -72,9 +76,7 @@ impl DecisionObservationSite {
     /// A heavy client-rendered listing needs longer before its first capture.
     fn settle(self) -> Duration {
         match self {
-            Self::AirbnbListing | Self::AirbnbStays | Self::AirbnbMonthly => {
-                Duration::from_secs(8)
-            }
+            Self::AirbnbListing | Self::AirbnbStays | Self::AirbnbMonthly => Duration::from_secs(8),
             Self::LegoTheme | Self::Consent | Self::Interstitial => Duration::from_secs(5),
             _ => Duration::from_secs(2),
         }
@@ -238,6 +240,8 @@ pub fn run(
 }
 
 /// The next recording's profile gets these content rules instead of none.
-pub(crate) fn use_content_rules(rules: std::sync::Arc<zephium_core::blocker::ContentRules>) -> bool {
+pub(crate) fn use_content_rules(
+    rules: std::sync::Arc<zephium_core::blocker::ContentRules>,
+) -> bool {
     super::agentic_semantic_probe::use_probe_content_rules(rules)
 }
