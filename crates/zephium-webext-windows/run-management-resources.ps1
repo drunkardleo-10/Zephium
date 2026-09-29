@@ -1,7 +1,8 @@
 param(
     [ValidateRange(60, 600)][int]$IdleSeconds = 120,
     [ValidateSet(1, 3, 5)][int[]]$Counts = @(1, 3, 5),
-    [ValidateSet('persistent', 'shared')][string[]]$Modes = @('persistent', 'shared')
+    [ValidateSet('persistent', 'shared')][string[]]$Modes = @('persistent', 'shared'),
+    [switch]$LowMemory
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -18,14 +19,20 @@ $packages = @($names | ForEach-Object {
 })
 foreach ($count in $Counts) {
     foreach ($mode in $Modes) {
-        $label = "$count-$mode"
+        $label = "$count-$mode-$(if ($LowMemory) { 'low' } else { 'normal' })"
         $steps = [Collections.Generic.List[object]]::new()
         $steps.Add(@{navigate='$ORIGIN/first'})
-        if ($mode -eq 'shared') { $steps.Add(@{view='manager'}) }
+        if ($mode -eq 'shared') {
+            $steps.Add(@{view='manager'})
+            if ($LowMemory) { $steps.Add(@{in='manager'; low_memory=$true}) }
+        }
         for ($index = 0; $index -lt $count; $index++) {
             $steps.Add(@{load=$packages[$index]; prepare_windows=$true})
             $manager = if ($mode -eq 'shared') { 'manager' } else { "manager$index" }
-            if ($mode -eq 'persistent') { $steps.Add(@{view=$manager}) }
+            if ($mode -eq 'persistent') {
+                $steps.Add(@{view=$manager})
+                if ($LowMemory) { $steps.Add(@{in=$manager; low_memory=$true}) }
+            }
             $steps.Add(@{in=$manager; navigate='chrome-extension://$ID/zephium-windows-host/host.html'})
             $steps.Add(@{sleep=2000})
             if ($mode -eq 'shared') { $steps.Add(@{in=$manager; navigate='about:blank'}) }

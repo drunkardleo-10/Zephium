@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Zephium local performance fixture</title>
+<script>
+  // Local, account-free workload. Bound observations; no background polling.
+  window.longTasks = [];
+  new PerformanceObserver(list => {
+    for (const entry of list.getEntries()) {
+      if (longTasks.length < 200) longTasks.push({start: entry.startTime, duration: entry.duration});
+    }
+  }).observe({type: 'longtask', buffered: true});
+</script>
+<style>
+  body { font: 16px system-ui; background: #fafafa; color: #242424; margin: 24px; }
+  main { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  article { padding: 12px; border: 1px solid #aaa; border-radius: 8px; }
+  a { color: #2367c1; } button, input, textarea { font: inherit; }
+</style>
+<h1>Local page with 600 cards and 120 color rules</h1>
+<form><label>Name <input autocomplete="name"></label><label>Editor <textarea>This are a sentence.</textarea></label></form>
+<main></main>
+<script>
+  const style = document.createElement('style');
+  style.textContent = Array.from({length: 120}, (_, i) =>
+    `.card-${i} { background: hsl(${i * 3} 30% 95%); border-color: hsl(${i * 3} 30% 50%); }`).join('\n');
+  document.head.append(style);
+  document.querySelector('main').innerHTML = Array.from({length: 600}, (_, i) =>
+    `<article class="card-${i % 120}"><h2>Card ${i}</h2><p>A paragraph with <strong>formatted text</strong> and a <a href="/performance?next=${i}">local link</a>.</p><button type="button">Select ${i}</button></article>`).join('');
+</script>

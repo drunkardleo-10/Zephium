@@ -54,8 +54,12 @@ impl Fixture {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                     let mut request = [0; 4096];
-                    let _ = stream.read(&mut request);
-                    let body = "<!doctype html><title>Zephium lab fixture</title><body><h1>Extension probe</h1><textarea aria-label='Editor'>This are a sentence.</textarea><a href='/second'>Second page</a></body>";
+                    let size = stream.read(&mut request).unwrap_or(0);
+                    let body = if request[..size].starts_with(b"GET /performance") {
+                        include_str!("../fixtures/performance.html")
+                    } else {
+                        "<!doctype html><title>Zephium lab fixture</title><body><h1>Extension probe</h1><textarea aria-label='Editor'>This are a sentence.</textarea><a href='/second'>Second page</a></body>"
+                    };
                     let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                     let _ = stream.write_all(response.as_bytes());
                 } else {
@@ -668,6 +672,14 @@ pub fn run() -> Result<()> {
                 return Ok(json!({"view":new_name,"profile":p}));
             }
             let view = views.get(name).ok_or("unknown view")?;
+            if let Some(low) = step["low_memory"].as_bool() {
+                view.set_memory_usage_level(if low {
+                    wry::MemoryUsageLevel::Low
+                } else {
+                    wry::MemoryUsageLevel::Normal
+                })?;
+                return Ok(json!({"low_memory":low}));
+            }
             if let Some(enabled) = step["enabled"].as_bool() {
                 let item = last_extension.as_ref().ok_or("no native extension")?;
                 let (tx, rx) = mpsc::channel();
