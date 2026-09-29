@@ -12,6 +12,7 @@ import type {
   ObjectView,
   PageObjectView,
   PicksView,
+  PickView,
   PlanView,
   PlotView,
   ProjectView,
@@ -1252,6 +1253,215 @@ export const centred: { object: ObjectView; width: number }[] = [
 ].map((object) => ({ object, width: centreSize(object).width - 80 }));
 
 /** What the look test draws: one sheet per group, each object at its width. */
+/** The trip run's five Airbnb picks as the lead published them: prices with a "was" fact. */
+const airbnb = (
+  name: string,
+  subtitle: string,
+  photo: string,
+  price: number,
+  was: string,
+  facts: PickView["facts"],
+  why: string,
+  rating?: PickView["rating"],
+): PickView => ({
+  name,
+  subtitle,
+  picture: picture(photo, 720, 540),
+  logo: "airbnb.com",
+  url: "https://www.airbnb.com/rooms/929707397495574143",
+  price: {
+    display: `$${price.toLocaleString("en-US")} monthly`,
+    amount: price,
+    currency: "USD",
+  },
+  facts: [{ label: "Original monthly", value: was, kind: "text" }, ...facts],
+  ...(rating ? { rating } : {}),
+  why,
+  tags: [],
+  recommended: false,
+});
+const tripStays: PicksView = {
+  kind: "picks",
+  id: "trip-stays",
+  title: "Airbnb options for provisional YC stay",
+  facet: "stay",
+  items: [
+    airbnb(
+      "Cozy Large Central Queen Bedroom in SoMa",
+      "Private room in South of Market",
+      "42dec9cc26.webp",
+      2175,
+      "$2,632",
+      [
+        { label: "Privacy", value: "Private room", kind: "text" },
+        { label: "Amenities", value: "Workspace, laundry, kitchen", kind: "text" },
+      ],
+      "Lowest price among listed options; SoMa location and work setup. Total checkout price not shown.",
+      { value: 4.89, max: 5, count: 9 },
+    ),
+    airbnb(
+      "Beautiful apartment walk to UCSF & Golden Gate Park",
+      "Apartment in Inner Sunset",
+      "831b720e54.webp",
+      3558,
+      "$3,672",
+      [
+        { label: "Privacy", value: "Apartment", kind: "text" },
+        { label: "Location", value: "Inner Sunset; walk to UCSF", kind: "text" },
+      ],
+      "Entire apartment with strong rating; location specifically mentions walking to UCSF.",
+      { value: 4.93, max: 5, count: 15 },
+    ),
+    airbnb(
+      "Orchid Studio 429",
+      "Hotel in San Francisco",
+      "8340bec274.webp",
+      2360,
+      "$3,035",
+      [],
+      "Relatively affordable studio-style hotel listing with many reviews; total checkout price not shown.",
+      { value: 4.86, max: 5, count: 57 },
+    ),
+    airbnb(
+      "Casa Castro Poppy | W/D, Wkly Clean, Private Bath",
+      "Private room in San Francisco",
+      "9fb9978c4c.webp",
+      2329,
+      "$2,670",
+      [
+        { label: "Privacy", value: "Private room, private bath", kind: "text" },
+        { label: "Amenities", value: "Weekly cleaning, washer/dryer", kind: "text" },
+      ],
+      "Private bath plus weekly cleaning at a lower monthly rate; verify location and availability.",
+    ),
+    airbnb(
+      "Sunny Telegraph Hill bay view condo w parking, gym",
+      "Condo in San Francisco",
+      "de811bb61d.webp",
+      5140,
+      "$6,240",
+      [{ label: "Privacy", value: "Entire condo", kind: "text" }],
+      "Whole condo with a bay view and parking; the most expensive of the five.",
+    ),
+  ],
+};
+
+/** The provider compare run's picks and capability sheet, as published. */
+const providerPicks: PicksView = {
+  kind: "picks",
+  id: "provider-picks",
+  title: "Provider choices for Lunios AI SaaS",
+  facet: "service",
+  items: [
+    {
+      name: "AWS",
+      subtitle: "Core production platform for API, workers, data",
+      logo: "aws.amazon.com",
+      facts: [
+        { label: "PG + vectors", value: "yes", kind: "yes" },
+        { label: "Durable workflows", value: "yes", kind: "yes" },
+        { label: "Managed Redis", value: "yes", kind: "yes" },
+        { label: "Entry pricing", value: "Usage-based", kind: "text" },
+      ],
+      why: "Best full-backend fit: managed primitives, regional control, and a path from ECS to RDS, SQS, S3, and observability.",
+      tags: ["recommended", "backend"],
+      recommended: true,
+    },
+    {
+      name: "Cloudflare",
+      subtitle: "Edge, WAF, static delivery, lightweight APIs",
+      logo: "cloudflare.com",
+      price: { display: "$5/mo base", amount: 5, currency: "USD" },
+      facts: [
+        { label: "Edge/WAF", value: "yes", kind: "yes" },
+        { label: "Durable workflows", value: "yes", kind: "yes" },
+        { label: "PG + vectors", value: "partial", kind: "partial" },
+        { label: "Included requests", value: "10M/mo", kind: "text" },
+      ],
+      why: "Excellent front door and cheap edge runtime; keep PostgreSQL and heavy workers outside Cloudflare.",
+      tags: ["edge", "low-cost"],
+      recommended: false,
+    },
+    {
+      name: "Vercel",
+      subtitle: "Next.js web app and frontend delivery",
+      logo: "vercel.com",
+      price: { display: "$20/mo", amount: 20, currency: "USD" },
+      facts: [
+        { label: "Next.js hosting", value: "yes", kind: "yes" },
+        { label: "Durable workflows", value: "no", kind: "no" },
+        { label: "PG + vectors", value: "no", kind: "no" },
+        { label: "Function duration", value: "bounded", kind: "text" },
+      ],
+      why: "Best web-surface experience, but not the system of record or long-running AI-job platform.",
+      tags: ["frontend"],
+      recommended: false,
+    },
+    {
+      name: "Hetzner",
+      subtitle: "Low-cost compute with a self-managed stack",
+      logo: "docs.hetzner.com",
+      price: { display: "€5.49/mo", amount: 5.49, currency: "EUR" },
+      facts: [
+        { label: "PG + vectors", value: "partial", kind: "partial" },
+        { label: "Durable workflows", value: "no", kind: "no" },
+        { label: "Managed Redis", value: "no", kind: "no" },
+        { label: "Object storage", value: "1TB + 1TB egress", kind: "text" },
+      ],
+      why: "Lowest compute cost, but you own HA, backups, upgrades, queues, observability, and most operations.",
+      tags: ["budget", "self-managed"],
+      recommended: false,
+    },
+  ],
+};
+const providerSheet: SheetView = {
+  kind: "sheet",
+  id: "provider-sheet",
+  title: "Provider capability comparison",
+  columns: [
+    { label: "Provider", kind: "entity" },
+    { label: "Monthly entry", kind: "money", currency: "USD", best: "min" },
+    { label: "Edge/WAF", kind: "yes_no" },
+    { label: "Managed Postgres", kind: "yes_no" },
+    { label: "pgvector path", kind: "yes_no" },
+    { label: "Durable workflows", kind: "yes_no" },
+    { label: "Managed queue", kind: "yes_no" },
+    { label: "Managed Redis", kind: "yes_no" },
+    { label: "Object storage", kind: "yes_no" },
+    { label: "Ops burden", kind: "text" },
+  ],
+  rows: [
+    {
+      cells: ["AWS", "", "yes", "yes", "yes", "yes", "yes", "yes", "yes", "medium"],
+      entity: { logo: "aws.amazon.com" },
+    },
+    {
+      cells: [
+        "Cloudflare",
+        "5",
+        "yes",
+        "no",
+        "partial",
+        "yes",
+        "yes",
+        "no",
+        "yes",
+        "low at edge; external data/workers",
+      ],
+      entity: { logo: "cloudflare.com" },
+    },
+    {
+      cells: ["Vercel", "20", "yes", "no", "no", "no", "no", "no", "no", "low for frontend"],
+      entity: { logo: "vercel.com" },
+    },
+    {
+      cells: ["Hetzner", "", "partial", "no", "partial", "no", "no", "no", "yes", "high"],
+      entity: { logo: "hetzner.com" },
+    },
+  ],
+  note: "Published entry or representative rates; not an identical workload estimate. Blank means no comparable figure.",
+};
+
 export const looks: Record<string, { object: ObjectView; width: number }[]> = {
   replies: [
     {
@@ -1301,6 +1511,16 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
     { object: fix, width: 720 },
   ],
   lists: [{ object: today, width: 620 }],
+  compare: [
+    { object: providerPicks, width: 1120 },
+    { object: providerSheet, width: 1120 },
+    { object: { ...providerSheet, id: "provider-sheet-880" }, width: 880 },
+  ],
+  trip: [
+    { object: tripStays, width: 976 },
+    { object: { ...tripStays, id: "trip-stays-1120" }, width: 1120 },
+    { object: { ...tripStays, id: "trip-stays-720" }, width: 720 },
+  ],
   sheets: [
     { object: providers, width: 880 },
     { object: sets, width: 880 },

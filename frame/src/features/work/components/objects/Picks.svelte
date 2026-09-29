@@ -6,6 +6,8 @@
   import Title from "./Title.svelte";
   import Sheet from "./Sheet.svelte";
   import { picksSheet } from "./centre";
+  /** A card's least width, pictured or plain, and the gap between cards. */
+  const CARD = { pictured: 200, plain: 220, gap: 16 } as const;
   /** Things to choose between, side by side; the set opens as a sheet to compare. */
   let {
     object,
@@ -17,6 +19,21 @@
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
   } = $props();
+  let width = $state(0);
+  /**
+   * Cards to a row: as many as the width holds at a card's least, then spread
+   * over balanced rows, so five stand 3 + 2 (or 5 across), never 4 + 1.
+   */
+  const across = $derived.by(() => {
+    const count = object.items.length;
+    if (!count) return 1;
+    const least = pictured ? CARD.pictured : CARD.plain;
+    const fits = width
+      ? Math.max(1, Math.floor((width + CARD.gap) / (least + CARD.gap)))
+      : Math.min(count, 4);
+    const rows = Math.ceil(count / Math.min(fits, count));
+    return Math.ceil(count / rows);
+  });
   const routed = (pick: PickView): pick is PickView & { route: NonNullable<PickView["route"]> } =>
     !!pick.route;
   const flights = $derived(object.facet === "flight" && object.items.every(routed));
@@ -38,7 +55,8 @@
   class:pictured
   class:mixed
   aria-label={object.title}
-  style:--across={Math.min(object.items.length, flights ? 3 : 4)}
+  bind:clientWidth={width}
+  style:--across={across}
 >
   {#if object.title || (actions.compare && object.items.length > 1)}
     <header>

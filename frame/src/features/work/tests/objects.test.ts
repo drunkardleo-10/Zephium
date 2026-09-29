@@ -102,4 +102,37 @@ test("a sheet keeps its subject and the columns that say most in the width it ha
     rows: costs.rows.map((row) => ({ cells: [...row.cells, " "] })),
   };
   expect(fitColumns(blank, 900)).toEqual([1, 2]);
+  // A heading wraps between its words: seven yes/no columns with two-word names fit a result.
+  const capabilities = {
+    columns: [
+      { label: "Provider", kind: "entity" as const },
+      { label: "Monthly entry", kind: "money" as const },
+      ...[
+        "Edge/WAF",
+        "Managed Postgres",
+        "pgvector path",
+        "Durable workflows",
+        "Managed queue",
+        "Managed Redis",
+        "Object storage",
+      ].map((label) => ({ label, kind: "yes_no" as const })),
+      { label: "Ops burden", kind: "text" as const },
+    ],
+    rows: [
+      ["AWS", "", "yes", "yes", "yes", "yes", "yes", "yes", "yes", "medium"],
+      [
+        "Cloudflare",
+        "5",
+        "yes",
+        "no",
+        "partial",
+        "yes",
+        "yes",
+        "no",
+        "yes",
+        "low at edge; external",
+      ],
+    ].map((cells) => ({ cells })),
+  };
+  expect(fitColumns(capabilities, 1120 - 44)).toHaveLength(9);
 });

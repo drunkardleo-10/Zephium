@@ -256,10 +256,21 @@
     font-size: var(--text-label);
   }
 
+  /* A heading wraps between its words, so a narrow column's name never widens it. */
   .plain thead th {
     padding-block: 0 9px;
     border-block-start: 0;
-    white-space: nowrap;
+    vertical-align: bottom;
+    overflow-wrap: normal;
+    text-wrap: balance;
+  }
+
+  .plain thead .sort {
+    text-align: inherit;
+  }
+
+  .plain thead .centered .sort {
+    justify-content: center;
   }
 
   .plain tbody th {

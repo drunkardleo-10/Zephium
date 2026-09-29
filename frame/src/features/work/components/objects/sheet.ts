@@ -128,14 +128,14 @@ const MEASURE = 240;
  * text, shortest first. What does not fit waits behind "more columns".
  */
 export function fitColumns(sheet: Pick<SheetView, "columns" | "rows">, width: number): number[] {
+  // A heading wraps between its words: a column needs its longest word, not its whole name.
+  const word = (index: number) =>
+    Math.max(0, ...(sheet.columns[index]?.label ?? "").split(/\s+/u).map((part) => part.length));
   const longest = (index: number) =>
-    Math.max(
-      sheet.columns[index]?.label.length ?? 0,
-      ...sheet.rows.map((row) => (row.cells[index] ?? "").trim().length),
-    );
+    Math.max(word(index), ...sheet.rows.map((row) => (row.cells[index] ?? "").trim().length));
   const room = (index: number) => {
     const fixed = ROOM[sheet.columns[index]!.kind];
-    if (fixed) return Math.max(fixed, (sheet.columns[index]!.label.length + 2) * CHAR);
+    if (fixed) return Math.max(fixed, word(index) * CHAR + PAD);
     // Text wraps: it needs its longest word and a fair measure, not its whole length.
     return Math.min(MEASURE, Math.max(96, Math.ceil(longest(index) * 0.55) * CHAR)) + PAD;
   };

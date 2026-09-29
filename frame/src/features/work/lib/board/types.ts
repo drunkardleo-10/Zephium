@@ -211,7 +211,8 @@ type PicksFacet =
   | "other";
 type FactKind = "text" | "yes" | "no" | "partial" | "rating";
 type PickFact = { label: string; value: string; kind: FactKind; sources?: string[] };
-type PriceView = { display: string; amount?: number; currency?: string };
+/** A price as shown, and what it was before a discount, when the source says. */
+type PriceView = { display: string; amount?: number; currency?: string; was?: string };
 type RouteView = {
   from: string;
   to: string;

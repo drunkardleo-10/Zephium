@@ -129,7 +129,10 @@
   {@const column = object.columns[at]!}
   {@const text = object.rows[index]?.cells[at] ?? ""}
   {@const marked = best[at]?.has(String(index))}
-  {#if column.kind === "yes_no"}<YesNo value={yesNo(text)} size={16} />
+  {#if !text.trim() && column.kind !== "yes_no"}<span class="none" title={m.work_object_unknown()}
+      >–</span
+    >
+  {:else if column.kind === "yes_no"}<YesNo value={yesNo(text)} size={16} />
   {:else if column.kind === "rating"}
     {@const score = rating(text)}
     {#if score}<Dots
@@ -276,13 +279,14 @@
     white-space: nowrap;
   }
 
+  /* The best figure is set heavier, in place: every figure keeps one shape. */
   .figure.best {
-    padding: 2px 8px;
-    margin-inline-end: -8px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-active);
-    color: var(--color-text);
     font-weight: 650;
+  }
+
+  /* Nothing comparable to say: a quiet dash, never a blank a reader takes for a gap. */
+  .none {
+    color: var(--color-faint);
   }
 
   .tag {

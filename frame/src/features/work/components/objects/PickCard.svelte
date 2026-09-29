@@ -25,6 +25,30 @@
     onopen?: () => void;
   } = $props();
   const tube = $derived(video && !!pick.url && !!youtubeId(pick.url));
+  const figureOf = (text: string) => Number(text.replace(/[^\d.]/gu, "")) || 0;
+  /**
+   * The price before a discount: the price's own, else a fact that says what
+   * it was ("Original monthly $2,632") when it is higher than the price now.
+   */
+  const earlier = $derived.by(() => {
+    if (!pick.price) return null;
+    if (pick.price.was) return { value: pick.price.was, fact: null };
+    const now = pick.price.amount ?? figureOf(pick.price.display);
+    const fact = pick.facts.find(
+      (entry) =>
+        /^(original|was|regular|usual|list|before)\b/iu.test(entry.label.trim()) &&
+        figureOf(entry.value) > now &&
+        now > 0,
+    );
+    return fact ? { value: fact.value, fact } : null;
+  });
+  const facts = $derived(pick.facts.filter((entry) => entry !== earlier?.fact));
+  /** "Top pick" says it once: a tag that repeats it goes. */
+  const tags = $derived(
+    pick.recommended
+      ? pick.tags.filter((tag) => !/^(recommended|top pick)$/iu.test(tag.trim()))
+      : pick.tags,
+  );
   /** The address that would not load; a new picture gets its own chance. */
   let broken = $state<string | null>(null);
   const failed = $derived(!!pick.picture && broken === pick.picture.src);
@@ -116,9 +140,9 @@
         {#if video && pick.duration && !picture}<span>{pick.duration}</span>{/if}
       </p>
     {/if}
-    {#if pick.facts.length}
+    {#if facts.length}
       <dl class="facts">
-        {#each pick.facts as fact (fact.label)}
+        {#each facts as fact (fact.label)}
           <div>
             <dt>{fact.label}</dt>
             <dd>
@@ -134,15 +158,17 @@
       </dl>
     {/if}
     {#if pick.why}<p class="why">{pick.why}</p>{/if}
-    {#if pick.tags.length}
+    {#if tags.length}
       <ul class="tags">
-        {#each pick.tags as tag (tag)}<li>{tag}</li>{/each}
+        {#each tags as tag (tag)}<li>{tag}</li>{/each}
       </ul>
     {/if}
     {#if pick.price}
       <p class="price">
         <span class="figure">{price.figure}</span>{#if price.period}<span class="period"
             >{price.period}</span
+          >{/if}{#if earlier}<s class="was" aria-label={m.work_pick_was({ price: earlier.value })}
+            >{earlier.value}</s
           >{/if}
       </p>
     {/if}
@@ -417,6 +443,15 @@
   .period {
     color: var(--color-muted);
     font-size: var(--text-label);
+  }
+
+  /* What it cost before: beside the price, quiet and struck, never a second figure. */
+  .was {
+    margin-inline-start: 4px;
+    color: var(--color-faint);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+    text-decoration-thickness: 1px;
   }
 
   .actions {
