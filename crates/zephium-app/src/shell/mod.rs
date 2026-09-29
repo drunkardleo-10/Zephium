@@ -1230,6 +1230,7 @@ impl Shell {
     fn attach_retained(&mut self, mut work: crate::work_resources::product::ProductWork) {
         if self.work.is_some()
             || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
+            || work.given_up()
             || !work.admits(&self.engine, &self.store, self.work_profile_binding())
         {
             work.refuse();
@@ -1248,6 +1249,15 @@ impl Shell {
                 self.retained_work = Some(Box::new(work));
                 self.retained_work.as_mut().unwrap().initialize();
             }
+            return;
+        }
+        // A failed group takes no page: waiting would never end.
+        if self
+            .retained_page_runtime
+            .as_ref()
+            .is_some_and(|group| group.is_failed())
+        {
+            work.refuse();
             return;
         }
         let seated = self

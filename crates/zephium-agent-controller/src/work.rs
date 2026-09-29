@@ -3136,14 +3136,26 @@ impl AgentWorkController {
             {
                 Ok(verified) => verified,
                 Err(AgentWorkFailure::Browser(
-                    AgentBrowserProviderError::ActionRejected(_)
-                    | AgentBrowserProviderError::ActionUnverified,
+                    error @ (AgentBrowserProviderError::ActionRejected(_)
+                    | AgentBrowserProviderError::ActionUnverified),
                 )) => {
                     let refusal = state
                         .session
                         .as_mut()
                         .and_then(|session| session.take_rejected_refusal())
                         .ok_or(AgentWorkFailure::Contract)?;
+                    // The page ran its checks for a step it then refused
+                    // (covered, changed): the context needs a fresh look
+                    // before the next step, as after any step it ran.
+                    if matches!(
+                        error,
+                        AgentBrowserProviderError::ActionRejected(
+                            crate::AgentBrowserActionError::Failed(_)
+                        )
+                    ) {
+                        state.refresh_account(worker, browser)?;
+                        let _ = Box::pin(Self::observe(state, worker, browser)).await?;
+                    }
                     if let Some(target) = state.follow.take() {
                         let next = Self::navigate_current(
                             state,

@@ -742,6 +742,10 @@ impl ProductWork {
                 .as_ref()
                 .is_some_and(RetainedWork::awaits_group_audit)
     }
+    /// Its owner asked it to close or stop before it was admitted.
+    pub(crate) fn given_up(&self) -> bool {
+        self.signal.close.load(Ordering::Acquire) || self.signal.stop.load(Ordering::Acquire)
+    }
     pub(crate) fn take(attachment: &RetainedWorkAttachment) -> Option<Self> {
         attachment.0.lock().ok()?.take()
     }
