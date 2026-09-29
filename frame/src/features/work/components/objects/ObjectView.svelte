@@ -19,6 +19,7 @@
     note: () => import("./Note.svelte"),
     file: () => import("./File.svelte"),
     folder: () => import("./Folder.svelte"),
+    project: () => import("./Project.svelte"),
   };
   const loaded: Partial<Record<ObjectKind, Renderer>> = {};
 </script>

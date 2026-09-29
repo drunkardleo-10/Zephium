@@ -8,3 +8,4 @@ export { default as CheckmarkCircle02Icon } from "@hugeicons/core-free-icons/Che
 export { default as Note01Icon } from "@hugeicons/core-free-icons/Note01Icon";
 export { default as Folder01Icon } from "@hugeicons/core-free-icons/Folder01Icon";
 export { default as File01Icon } from "@hugeicons/core-free-icons/File01Icon";
+export { default as GitBranchIcon } from "@hugeicons/core-free-icons/GitBranchIcon";

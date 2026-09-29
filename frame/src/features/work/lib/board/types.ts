@@ -433,7 +433,36 @@ export type FolderView = ObjectBase & {
   entries: readonly FolderEntry[];
 };
 
+/** A member of a project's stack, from its manifests: a known product's host draws its mark. */
+type ProjectStackItem = { name: string; logo?: string; version?: string };
+/** An entry of a project's structure; a folder holds its first entries and counts the rest. */
+export type ProjectEntry = {
+  name: string;
+  folder: boolean;
+  children?: readonly ProjectEntry[];
+  /** Entries the folder holds beyond those listed. */
+  more?: number;
+};
+/** A command the project defines: `dev` run by `pnpm` as `vite`. */
+type ProjectScript = { name: string; command: string; runner?: string };
+export type ProjectView = ObjectBase & {
+  kind: "project";
+  name: string;
+  /** One line: what the project is. */
+  summary?: string;
+  path?: string;
+  stack: readonly ProjectStackItem[];
+  /** The root's entries, depth ≤ 3. */
+  tree: readonly ProjectEntry[];
+  /** Root entries beyond those listed. */
+  more?: number;
+  scripts: readonly ProjectScript[];
+  /** Absent outside a repository. */
+  git?: { branch?: string; changed: number; ahead?: number; behind?: number };
+};
+
 export type ObjectView =
+  | ProjectView
   | ReplyView
   | PicksView
   | PlanView

@@ -14,6 +14,7 @@ import type {
   PicksView,
   PlanView,
   PlotView,
+  ProjectView,
   ReplyView,
   SheetView,
 } from "../lib/board/types";
@@ -907,6 +908,56 @@ const folder: FolderView = {
   ],
 };
 
+const project: ProjectView = {
+  kind: "project",
+  id: "project",
+  name: "Lunios",
+  summary:
+    "An AI writing studio: a SvelteKit web app over a Rust API, packaged for the desktop with Tauri.",
+  path: "~/Dev/Lunios",
+  stack: [
+    { name: "SvelteKit", logo: "svelte.dev", version: "2.20" },
+    { name: "TypeScript", logo: "typescriptlang.org", version: "5.8" },
+    { name: "Rust", logo: "rust-lang.org", version: "1.89" },
+    { name: "Tauri", logo: "tauri.app", version: "2.4" },
+    { name: "PostgreSQL", logo: "postgresql.org" },
+    { name: "Vitest" },
+  ],
+  tree: [
+    {
+      name: "apps",
+      folder: true,
+      children: [
+        { name: "web", folder: true, more: 42 },
+        { name: "desktop", folder: true, more: 9 },
+      ],
+    },
+    {
+      name: "crates",
+      folder: true,
+      children: [
+        { name: "api", folder: true, more: 18 },
+        { name: "editor-core", folder: true, more: 11 },
+        { name: "sync", folder: true, more: 7 },
+      ],
+      more: 2,
+    },
+    { name: "docs", folder: true, more: 6 },
+    { name: "Cargo.toml", folder: false },
+    { name: "package.json", folder: false },
+    { name: "pnpm-workspace.yaml", folder: false },
+    { name: "README.md", folder: false },
+  ],
+  more: 4,
+  scripts: [
+    { name: "dev", runner: "pnpm", command: "vite dev --port 5173" },
+    { name: "build", runner: "pnpm", command: "vite build && tauri build" },
+    { name: "test", runner: "pnpm", command: "vitest run && cargo test --workspace" },
+    { name: "check", runner: "cargo", command: "cargo clippy --all-targets -- -D warnings" },
+  ],
+  git: { branch: "editor-sync", changed: 3, ahead: 2 },
+};
+
 /** Every object, in the order the look test lays them out. */
 export const allObjects: readonly ObjectView[] = [
   replySmall,
@@ -933,6 +984,7 @@ export const allObjects: readonly ObjectView[] = [
   note,
   ...files,
   folder,
+  project,
 ];
 
 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
@@ -1213,6 +1265,10 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
   ],
   notes: [{ object: note, width: 420 }],
   files: [...files.map((object) => ({ object, width: 280 })), { object: folder, width: 300 }],
+  projects: [
+    { object: project, width: 720 },
+    { object: { ...project, id: "project-narrow" }, width: 480 },
+  ],
   drafts: drafts.map((object) => ({ object, width: 520 })),
   code: [
     { object: excerpt, width: 640 },

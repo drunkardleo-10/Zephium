@@ -136,6 +136,7 @@ describe("object fixtures", () => {
       note: 0,
       file: 0,
       folder: 0,
+      project: 0,
     } satisfies Record<ObjectKind, number>;
     for (const object of allObjects) kinds[object.kind] += 1;
     expect(Object.entries(kinds).filter(([, count]) => !count)).toEqual([]);

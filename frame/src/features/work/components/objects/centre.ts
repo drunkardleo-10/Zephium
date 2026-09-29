@@ -28,6 +28,8 @@ export function centreSize(object: ObjectView): { width: number; height: number 
       return { width: 760, height: 860 };
     case "folder":
       return { width: 640, height: 640 };
+    case "project":
+      return { width: 880, height: 860 };
   }
 }
 
