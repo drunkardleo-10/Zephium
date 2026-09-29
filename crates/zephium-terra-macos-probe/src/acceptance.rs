@@ -399,7 +399,7 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
     }
 }
 
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 12] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 15] = [
     // A day planned from sources that need no real profile: the person's
     // Zephium tasks, seeded for today; the day's sources are asked once.
     LeadScenario {
@@ -473,6 +473,27 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 12] = [
     LeadScenario {
         name: "project",
         requests: &["What's in {repo}?"],
+        answer: "",
+        folder: false,
+        site: None,
+    },
+    LeadScenario {
+        name: "lego",
+        requests: &["Open https://www.lego.com/en-us/themes/architecture, pick three sets, compare price and pieces"],
+        answer: "Your pick.",
+        folder: false,
+        site: None,
+    },
+    LeadScenario {
+        name: "compare",
+        requests: &["Compare AWS, Vercel, Hetzner, Cloudflare for an AI SaaS"],
+        answer: "A B2B SaaS with chat over the customer's documents, about 5,000 users in the first year.",
+        folder: false,
+        site: None,
+    },
+    LeadScenario {
+        name: "explain",
+        requests: &["Explain this Rust function:\n\nfn runs<T: PartialEq + Clone>(items: &[T], min: usize) -> Vec<(T, usize)> {\n    let mut out: Vec<(T, usize)> = Vec::new();\n    for item in items {\n        match out.last_mut() {\n            Some((last, n)) if last == item => *n += 1,\n            _ => out.push((item.clone(), 1)),\n        }\n    }\n    out.retain(|(_, n)| *n >= min);\n    out\n}"],
         answer: "",
         folder: false,
         site: None,
@@ -845,6 +866,135 @@ fn page_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
     }
 }
 
+/// One closed summary row for a lead run's execution.
+pub(super) fn run_row(
+    name: &str,
+    index: usize,
+    execution: &zephium_core::work::runtime::WorkExecutionFact,
+    wall_ms: u128,
+) {
+    use zephium_core::work::runtime::*;
+    let usage = execution.attempts.first().and_then(|a| a.usage);
+    let mut kinds: Vec<&str> = execution
+        .steps
+        .iter()
+        .filter(|s| matches!(s.kind, WorkStepKindV1::Publish))
+        .flat_map(|s| s.artifacts.iter())
+        .filter_map(|id| execution.artifacts.iter().find(|a| a.id == *id))
+        .map(|a| a.data.kind_name())
+        .collect();
+    kinds.sort_unstable();
+    let revised = execution
+        .artifacts
+        .iter()
+        .filter(|a| a.revises.is_some())
+        .count();
+    say(format_args!(
+        "lead-run: scenario={} request={} status={:?} wall_ms={} steps={} turns={} searches={} pages={} parts={} parts_done={} objects={} revised={} inputs={} tokens={} cost_micro_usd={} accounting={:?} asks={}",
+        name,
+        index,
+        execution.status,
+        wall_ms,
+        execution.steps.len(),
+        execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Turn)).count(),
+        execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Search { .. })).count(),
+        execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Read { .. })).count(),
+        execution.parts.len(),
+        execution
+            .parts
+            .iter()
+            .filter(|p| p.state == zephium_core::work::parts::WorkPartStateV1::Done)
+            .count(),
+        kinds.join(","),
+        revised,
+        execution.inputs.len(),
+        usage.map_or(0, |u| u.model_tokens),
+        usage.map_or(0, |u| u.cost_micro_usd),
+        usage.map(|u| u.accounting),
+        execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Ask { .. })).count(),
+    ));
+}
+
+/// One closed row per part that ended without doing its job.
+pub(super) fn part_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
+    use zephium_core::work::parts::WorkPartStateV1 as State;
+    for part in &execution.parts {
+        if !matches!(part.state, State::Failed | State::Stopped) && part.need.is_none() {
+            continue;
+        }
+        let need = part
+            .need
+            .as_ref()
+            .and_then(|need| serde_json::to_value(need).ok())
+            .map(|value| {
+                let kind = value.as_object().and_then(|o| o.keys().next().cloned());
+                let reason = value
+                    .as_object()
+                    .and_then(|o| o.values().next())
+                    .and_then(|inner| inner.get("reason"))
+                    .and_then(|reason| reason.as_str().map(str::to_owned));
+                format!(
+                    "{}/{}",
+                    kind.unwrap_or_default(),
+                    reason.unwrap_or_default()
+                )
+            });
+        say(format_args!(
+            "lead-part: helper={:?} state={:?} need={}",
+            part.helper,
+            part.state,
+            need.as_deref().unwrap_or("none")
+        ));
+    }
+}
+
+/// The published pictures fetched the way media admission fetches them:
+/// admitted when the bounded public fetch returns an image, refused with
+/// its closed cause otherwise.
+pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecutionFact) {
+    use zephium_agentic::public_asset::{fetch_public_image, PublicAssetError};
+    use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+    let mut urls: Vec<String> = Vec::new();
+    for step in &execution.steps {
+        if !matches!(
+            step.kind,
+            zephium_core::work::runtime::WorkStepKindV1::Publish
+        ) {
+            continue;
+        }
+        for artifact in execution
+            .artifacts
+            .iter()
+            .filter(|artifact| step.artifacts.contains(&artifact.id))
+        {
+            match &artifact.data {
+                Data::Picks { items, .. } => {
+                    urls.extend(items.iter().flat_map(|i| i.image_candidates.clone()))
+                }
+                Data::ComparisonMatrix { subjects, .. } | Data::Findings { subjects, .. } => {
+                    urls.extend(subjects.iter().flat_map(|s| s.image_candidates.clone()))
+                }
+                _ => {}
+            }
+        }
+    }
+    urls.sort();
+    urls.dedup();
+    let candidates = urls.len();
+    let (mut admitted, mut too_large, mut other) = (0, 0, 0);
+    for url in urls.into_iter().take(16) {
+        match fetch_public_image(&url).await {
+            Ok(_) => admitted += 1,
+            Err(PublicAssetError::TooLarge) => too_large += 1,
+            Err(_) => other += 1,
+        }
+    }
+    say(format_args!(
+        "lead-media: candidates={candidates} admitted={admitted} refused={} too_large={too_large}",
+        too_large + other
+    ));
+}
+
 fn needs_person(kind: &zephium_core::work::runtime::WorkStepKindV1) -> bool {
     use zephium_core::work::runtime::WorkStepKindV1 as K;
     match kind {
@@ -1062,45 +1212,15 @@ pub(super) async fn lead_workflow(
         };
         expected = projection.work.revision;
         let execution = projection.executions.last().ok_or("lead_execution")?;
-        let usage = execution.attempts.first().and_then(|a| a.usage);
-        let mut kinds: Vec<&str> = execution
-            .steps
-            .iter()
-            .filter(|s| matches!(s.kind, WorkStepKindV1::Publish))
-            .flat_map(|s| s.artifacts.iter())
-            .filter_map(|id| execution.artifacts.iter().find(|a| a.id == *id))
-            .map(|a| a.data.kind_name())
-            .collect();
-        kinds.sort_unstable();
-        let revised = execution
-            .artifacts
-            .iter()
-            .filter(|a| a.revises.is_some())
-            .count();
-        say(format_args!(
-            "lead-run: scenario={} request={} status={:?} wall_ms={} steps={} turns={} searches={} pages={} parts={} parts_done={} objects={} revised={} inputs={} tokens={} cost_micro_usd={} accounting={:?}",
+        run_row(
             scenario.name,
             index + 1,
-            execution.status,
+            execution,
             started.elapsed().as_millis(),
-            execution.steps.len(),
-            execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Turn)).count(),
-            execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Search { .. })).count(),
-            execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Read { .. })).count(),
-            execution.parts.len(),
-            execution
-                .parts
-                .iter()
-                .filter(|p| p.state == zephium_core::work::parts::WorkPartStateV1::Done)
-                .count(),
-            kinds.join(","),
-            revised,
-            execution.inputs.len(),
-            usage.map_or(0, |u| u.model_tokens),
-            usage.map_or(0, |u| u.cost_micro_usd),
-            usage.map(|u| u.accounting),
-        ));
+        );
         page_rows(execution);
+        part_rows(execution);
+        media_row(execution).await;
         if !matches!(
             execution.status,
             WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview

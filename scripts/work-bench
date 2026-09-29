@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""Scenario bench for Work: live lead runs through the signed probe, one table.
+
+  scripts/work-bench build                  build and sign the probe
+  scripts/work-bench run [scenario ...]     run (default: every default scenario)
+  scripts/work-bench show [run.json]        print a run (default: the latest)
+  scripts/work-bench compare a.json b.json  deltas of b against a
+  scripts/work-bench baseline [run.json]    mark a run (default: the latest) as the baseline
+  scripts/work-bench list                   scenarios
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime
+
+REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+PROBE = os.path.join(REPO, "target/debug/macos-terra-agentic-probe")
+OUT = os.path.join(REPO, "target/work-bench")
+IDENTIFIER = "app.zephium.work-integration.probe"
+
+# name -> (probe arguments, run by default, what it does)
+SCENARIOS = {
+    "lego": (["--live-lead", "lego"], True, "three Architecture sets from lego.com, price and pieces"),
+    "trip": (["--live-lead", "trip"], True, "YC batch trip from Warsaw"),
+    "compare": (["--live-lead", "compare"], True, "AWS, Vercel, Hetzner, Cloudflare for an AI SaaS"),
+    "compilers": (["--live-lead", "compilers"], True, "free university compilers plan"),
+    "explain": (["--live-lead", "explain"], True, "explain a pasted Rust function, no web"),
+    "project": (["--live-lead", "project"], True, "what's in a small scratch repo"),
+    "day": (["--loopback-site", "apps"], True, "plan the day against loopback Slack, Gmail, Calendar apps (scripted lead)"),
+    "tasks": (["--live-lead", "day"], False, "plan the day from seeded Zephium tasks (real lead)"),
+}
+TIMEOUT = 1000
+STOP_ERRORS = ("Unauthorized", "MissingKey")
+
+
+def die(message):
+    print(f"work-bench: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def sh(*command, **kwargs):
+    return subprocess.run(command, cwd=REPO, **kwargs)
+
+
+def check_signed():
+    if not os.path.isfile(PROBE):
+        die("probe not built: run scripts/work-bench build")
+    shown = subprocess.run(["/usr/bin/codesign", "-dv", PROBE], capture_output=True, text=True)
+    verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", PROBE], capture_output=True)
+    if f"Identifier={IDENTIFIER}" not in shown.stderr or verified.returncode != 0:
+        die("probe is not signed with scripts/sign-work-probe.sh (a rebuild unsigns it): run scripts/work-bench build")
+
+
+def build():
+    if sh("cargo", "build", "-p", "zephium-terra-macos-probe", "--features", "durable-runtime").returncode:
+        die("probe build failed")
+    if sh(os.path.join(REPO, "scripts/sign-work-probe.sh")).returncode:
+        die("probe signing failed")
+
+
+RUN_LINE = re.compile(
+    r"lead-run: scenario=(\S+) request=(\d+) status=(\w+) wall_ms=(\d+) steps=(\d+) turns=(\d+) searches=(\d+) "
+    r"pages=(\d+) parts=(\d+) parts_done=(\d+) objects=(\S*) revised=(\d+) inputs=(\d+) tokens=(\d+) "
+    r"cost_micro_usd=(\d+) accounting=(\S+) asks=(\d+)"
+)
+PAGE_LINE = re.compile(r"phase=page site=\S* task=\S+ status=\w+ wall_ms=(\d+) calls=(\d+) actions=(\d+) tokens=(\d+) records=(\d+)")
+
+
+def parse(name, output, code, wall):
+    row = {"scenario": name, "exit": code, "process_ms": wall}
+    runs = RUN_LINE.findall(output)
+    if runs:
+        r = runs[-1]
+        row.update(
+            status=r[2], wall_ms=int(r[3]), steps=int(r[4]), turns=int(r[5]), searches=int(r[6]),
+            read_steps=int(r[7]), parts=int(r[8]), parts_done=int(r[9]), objects=[k for k in r[10].split(",") if k],
+            tokens=int(r[13]), cost_micro_usd=int(r[14]), asks=int(r[16]),
+        )
+    else:
+        row.update(status="none", wall_ms=wall, objects=[])
+    pages = PAGE_LINE.findall(output)
+    row["pages"] = len(pages) if pages else row.get("read_steps", 0)
+    row["page_calls"] = sum(int(p[1]) for p in pages)
+    row["page_actions"] = sum(int(p[2]) for p in pages)
+    row["page_tokens"] = sum(int(p[3]) for p in pages)
+    row["lead_turn_events"] = len(re.findall(r"(?:event|lead)=Turn \{", output))
+    media = re.findall(r"lead-media: candidates=(\d+) admitted=(\d+) refused=(\d+) too_large=(\d+)", output)
+    m = media[-1] if media else ("0", "0", "0", "0")
+    row["pictures"] = {"candidates": int(m[0]), "admitted": int(m[1]), "refused": int(m[2]), "too_large": int(m[3])}
+    row["failed_parts"] = [
+        {"helper": p[0], "state": p[1], "need": p[2]}
+        for p in re.findall(r"lead-part: helper=(\w+) state=(\w+) need=(\S+)", output)
+        if p[1] != "Done"
+    ]
+    row["model_refused"] = re.findall(r"(?:event|lead)=ModelRefused \{ error: (\w+)", output)
+    row["run_failure"] = "run_failure=" in output
+    if name == "day":
+        ok = code == 0 and "check=apps" in output and row["status"] != "none"
+    else:
+        ok = code == 0 and row["status"] in ("NeedsReview", "Completed") and bool(row["objects"])
+    row["ok"] = ok and not row["run_failure"]
+    return row
+
+
+def run_one(name, stamp):
+    args = SCENARIOS[name][0]
+    logs = os.path.join(OUT, stamp)
+    os.makedirs(logs, exist_ok=True)
+    cwd = tempfile.mkdtemp(prefix=f"work-bench-{name}-")
+    log_path = os.path.join(logs, f"{name}.log")
+    started = time.monotonic()
+    with open(log_path, "w") as log:
+        child = subprocess.Popen([PROBE, *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            code = child.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+            code = -9
+        except KeyboardInterrupt:
+            child.kill()
+            child.wait()
+            raise
+    wall = int((time.monotonic() - started) * 1000)
+    with open(log_path, errors="replace") as log:
+        output = log.read()
+    shutil.rmtree(cwd, ignore_errors=True)
+    row = parse(name, output, code, wall)
+    row["log"] = os.path.relpath(log_path, REPO)
+    return row
+
+
+def commit_id():
+    head = sh("git", "rev-parse", "--short", "HEAD", capture_output=True, text=True).stdout.strip()
+    dirty = bool(sh("git", "status", "--porcelain", "--untracked-files=no", capture_output=True, text=True).stdout.strip())
+    return head + ("+dirty" if dirty else "")
+
+
+HEAD = ["scenario", "result", "wall", "turns", "reads/calls", "tokens", "cost", "searches", "pics ok/refused", "failed parts (need/reason)"]
+
+
+def cell(row):
+    p = row["pictures"]
+    return [
+        row["scenario"],
+        "ok" if row["ok"] else f"FAIL({row['status']})",
+        f"{row['wall_ms'] / 1000:.0f}s",
+        str(row.get("turns", "-")),
+        f"{row['pages']}/{row['page_calls']}",
+        f"{row.get('tokens', 0) / 1000:.1f}k",
+        f"${row.get('cost_micro_usd', 0) / 1e6:.3f}",
+        str(row.get("searches", "-")),
+        f"{p['admitted']}/{p['refused']}" + (f" of {p['candidates']}" if p["candidates"] else ""),
+        ", ".join(f"{f['helper']}:{f['need']}" for f in row["failed_parts"]) or "-",
+    ]
+
+
+def table(head, rows):
+    widths = [max(len(head[i]), *(len(r[i]) for r in rows)) if rows else len(head[i]) for i in range(len(head))]
+
+    def line(r):
+        return "  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip()
+
+    return "\n".join([line(head), line(["-" * w for w in widths])] + [line(r) for r in rows])
+
+
+def show(run):
+    print(f"work-bench run {run['stamp']} at {run['commit']}")
+    print(table(HEAD, [cell(r) for r in run["rows"]]))
+    rows = run["rows"]
+    print(f"\ntotal: {sum(1 for r in rows if r['ok'])}/{len(rows)} ok, {sum(r['wall_ms'] for r in rows) / 1000:.0f}s, ${sum(r.get('cost_micro_usd', 0) for r in rows) / 1e6:.3f}")
+
+
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def latest():
+    runs = sorted(f for f in os.listdir(OUT) if re.fullmatch(r"\d{8}-\d{6}\.json", f)) if os.path.isdir(OUT) else []
+    if not runs:
+        die("no runs yet")
+    return os.path.join(OUT, runs[-1])
+
+
+METRICS = [
+    ("wall", lambda r: r["wall_ms"] / 1000, "{:.0f}s"),
+    ("turns", lambda r: r.get("turns", 0), "{:.0f}"),
+    ("reads", lambda r: r["pages"], "{:.0f}"),
+    ("calls", lambda r: r["page_calls"], "{:.0f}"),
+    ("tokens", lambda r: r.get("tokens", 0) / 1000, "{:.1f}k"),
+    ("cost", lambda r: r.get("cost_micro_usd", 0) / 1e6, "${:.3f}"),
+    ("searches", lambda r: r.get("searches", 0), "{:.0f}"),
+    ("pics", lambda r: r["pictures"]["admitted"], "{:.0f}"),
+    ("failed", lambda r: len(r["failed_parts"]), "{:.0f}"),
+]
+
+
+def compare(a_path, b_path):
+    a, b = load(a_path), load(b_path)
+    print(f"{os.path.basename(a_path)} ({a['commit']}) -> {os.path.basename(b_path)} ({b['commit']})")
+    by = {r["scenario"]: r for r in a["rows"]}
+    rows, regressions = [], []
+    for r in b["rows"]:
+        base = by.get(r["scenario"])
+        if base is None:
+            rows.append([r["scenario"], "new"] + [""] * len(METRICS))
+            continue
+        result = "ok" if r["ok"] else "FAIL"
+        if base["ok"] and not r["ok"]:
+            regressions.append(f"{r['scenario']}: was ok, now failing")
+            result = "REGRESSED"
+        elif r["ok"] and not base["ok"]:
+            result = "fixed"
+        line = [r["scenario"], result]
+        for _, get, fmt in METRICS:
+            x, y = get(base), get(r)
+            line.append("=" if abs(x - y) < 1e-9 else f"{fmt.format(x)} > {fmt.format(y)}")
+        rows.append(line)
+    print(table(["scenario", "result"] + [m[0] for m in METRICS], rows))
+    if regressions:
+        print("\nregressions:\n  " + "\n  ".join(regressions))
+    return 1 if regressions else 0
+
+
+def run(names):
+    names = names or [n for n, (_, default, _) in SCENARIOS.items() if default]
+    unknown = [n for n in names if n not in SCENARIOS]
+    if unknown:
+        die(f"unknown scenario {unknown[0]} (see: scripts/work-bench list)")
+    check_signed()
+    os.makedirs(OUT, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    rows = []
+    stopped = None
+    for name in names:
+        print(f"[{name}] running ...", flush=True)
+        row = run_one(name, stamp)
+        rows.append(row)
+        print("  " + "  ".join(cell(row)[1:]), flush=True)
+        if any(e in STOP_ERRORS for e in row["model_refused"]) and not row["ok"]:
+            stopped = f"provider refused the key ({', '.join(sorted(set(row['model_refused'])))}) in {name}; stopped"
+            break
+    result = {"stamp": stamp, "commit": commit_id(), "rows": rows}
+    if stopped:
+        result["stopped"] = stopped
+    path = os.path.join(OUT, f"{stamp}.json")
+    with open(path, "w") as f:
+        json.dump(result, f, indent=2)
+    print()
+    show(result)
+    if stopped:
+        print(f"\n{stopped}")
+    print(f"\n{os.path.relpath(path, REPO)}")
+    baseline = os.path.join(OUT, "baseline.json")
+    if os.path.isfile(baseline):
+        print()
+        compare(baseline, path)
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else "run"
+    rest = argv[2:]
+    if command == "build":
+        build()
+    elif command == "run":
+        run(rest)
+    elif command == "show":
+        show(load(rest[0] if rest else latest()))
+    elif command == "compare" and len(rest) == 2:
+        sys.exit(compare(*rest))
+    elif command == "baseline":
+        os.makedirs(OUT, exist_ok=True)
+        source = rest[0] if rest else latest()
+        shutil.copyfile(source, os.path.join(OUT, "baseline.json"))
+        print(f"baseline: {os.path.relpath(source, REPO)}")
+    elif command == "list":
+        for name, (_, default, about) in SCENARIOS.items():
+            print(f"{name:10} {'default' if default else 'on request':11} {about}")
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv)
+    except KeyboardInterrupt:
+        sys.exit(130)

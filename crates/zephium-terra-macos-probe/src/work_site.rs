@@ -993,6 +993,7 @@ impl Context<'_> {
             light: scripted,
         };
         let work = self.create(objective).await?;
+        let started = std::time::Instant::now();
         let opened = Mutex::new(Vec::<Opened>::new());
         let asked = Mutex::new(Vec::new());
         let decisions = Mutex::new(Vec::new());
@@ -1086,6 +1087,10 @@ impl Context<'_> {
             self.person(work.0, answer, &done, &asked, &decisions, &confirmed)
         );
         let state = state.map_err(|_| "lead_run")?;
+        if let Some(execution) = state.executions.last() {
+            super::acceptance::run_row("apps", 1, execution, started.elapsed().as_millis());
+            super::acceptance::part_rows(execution);
+        }
         Ok(Run {
             state,
             notices: Vec::new(),
