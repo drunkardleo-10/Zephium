@@ -240,13 +240,7 @@ pub(super) fn apply(
             for id in ids.into_iter().take(usize::from(limit)) {
                 let id = WorkEnvironmentId::parse(&id).ok_or(WorkError::Unavailable)?;
                 let snapshot = read(tx, profile, id)?;
-                works.push(WorkEnvironmentSummary {
-                    id,
-                    space: snapshot.space,
-                    title: snapshot.title,
-                    lifecycle: snapshot.lifecycle,
-                    revision: snapshot.revision,
-                });
+                works.push(summary(tx, snapshot)?);
             }
             let next = if more {
                 works.last().map(|w| w.id)
@@ -289,6 +283,95 @@ pub(super) fn apply(
             note_available,
         ),
     }
+}
+
+/// A work as its list shows it: what its runs asked and were called, and when it was last worked in.
+fn summary(
+    tx: &Transaction<'_>,
+    snapshot: WorkEnvironmentSnapshot,
+) -> Result<WorkEnvironmentSummary, WorkError> {
+    let mut requests: Vec<String> = vec![];
+    let mut name: Option<String> = None;
+    let mut touched = 0_i64;
+    let mut runs = tx
+        .prepare_cached(
+            "SELECT json_extract(body,'$.spec.request'), json_extract(body,'$.title'), \
+             (SELECT json_extract(a.value,'$.title') FROM json_each(body,'$.artifacts') a \
+              WHERE json_extract(a.value,'$.data.kind') IN ('reply','answer') LIMIT 1), \
+             approved_unix_ms FROM work_executions WHERE work_id=?1 ORDER BY approved_unix_ms",
+        )
+        .map_err(db)?;
+    let mut objective = tx
+        .prepare_cached("SELECT objective, updated_unix_ms FROM works WHERE id=?1")
+        .map_err(db)?;
+    let mut seen = std::collections::HashSet::new();
+    for element in &snapshot.elements {
+        let WorkEnvironmentReference::Objective { objective: work } = &element.reference else {
+            continue;
+        };
+        if !seen.insert(*work) {
+            continue;
+        }
+        let id = work.to_string();
+        let Some((text, updated)) = objective
+            .query_row([&id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .optional()
+            .map_err(db)?
+        else {
+            continue;
+        };
+        touched = touched.max(updated);
+        type Run = (Option<String>, Option<String>, Option<String>, i64);
+        let rows = runs
+            .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(db)?
+            .collect::<Result<Vec<Run>, _>>()
+            .map_err(db)?;
+        if rows.is_empty() {
+            push_request(&mut requests, &text);
+        }
+        for (index, (request, title, reply, approved)) in rows.into_iter().enumerate() {
+            touched = touched.max(approved);
+            let asked = request.filter(|request| !request.trim().is_empty());
+            push_request(
+                &mut requests,
+                asked.as_deref().unwrap_or(if index == 0 { &text } else { "" }),
+            );
+            // Only the work's first run names it.
+            if index == 0 && seen.len() == 1 {
+                name = [title, reply]
+                    .into_iter()
+                    .flatten()
+                    .map(|name| name.trim().to_owned())
+                    .find(|name| !name.is_empty());
+            }
+        }
+    }
+    Ok(WorkEnvironmentSummary {
+        id: snapshot.id,
+        space: snapshot.space,
+        empty: snapshot.elements.is_empty() && snapshot.areas.is_empty(),
+        title: snapshot.title,
+        lifecycle: snapshot.lifecycle,
+        revision: snapshot.revision,
+        name: name.map(|name| cut(&name, MAX_SUMMARY_REQUEST_CHARS)),
+        requests,
+        touched_ms: touched.max(0).to_string(),
+    })
+}
+
+fn push_request(requests: &mut Vec<String>, text: &str) {
+    let line = cut(
+        &text.split_whitespace().collect::<Vec<_>>().join(" "),
+        MAX_SUMMARY_REQUEST_CHARS,
+    );
+    if !line.is_empty() && requests.len() < MAX_SUMMARY_REQUESTS && !requests.contains(&line) {
+        requests.push(line);
+    }
+}
+
+fn cut(text: &str, chars: usize) -> String {
+    text.chars().take(chars).collect()
 }
 
 fn command_apply(

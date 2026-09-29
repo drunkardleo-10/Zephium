@@ -999,3 +999,49 @@ fn schema19_upgrade_retains_old_receipts_and_checkpoint_cas_survives_reopen() {
         Err(WorkError::Unavailable)
     ));
 }
+
+fn listed(conn: &mut Connection, space: u128) -> Vec<WorkEnvironmentSummary> {
+    match call(
+        conn,
+        1.into(),
+        WorkEnvironmentCall::List {
+            space: space.into(),
+            after: None,
+            limit: 32,
+        },
+    )
+    .unwrap()
+    .0
+    {
+        WorkEnvironmentReply::Page { works, .. } => works,
+        _ => panic!("expected a page"),
+    }
+}
+
+#[test]
+fn the_list_says_what_each_work_asked_and_whether_it_holds_anything() {
+    let mut conn = database();
+    let draft = create(&mut conn, 1, 1, 3);
+    let used = create(&mut conn, 2, 1, 3);
+    insert_objective(&mut conn, 1.into(), 60.into());
+    edit(
+        &mut conn,
+        3,
+        &used,
+        WorkEnvironmentEdit::Add {
+            reference: WorkEnvironmentReference::Objective {
+                objective: 60.into(),
+            },
+            area: None,
+        },
+    );
+    let works = listed(&mut conn, 3);
+    let draft = works.iter().find(|work| work.id == draft.id).unwrap();
+    assert!(draft.empty);
+    assert!(draft.requests.is_empty());
+    assert_eq!(draft.name, None);
+    let used = works.iter().find(|work| work.id == used.id).unwrap();
+    assert!(!used.empty);
+    assert_eq!(used.requests, vec!["Existing objective".to_owned()]);
+    assert_ne!(used.touched_ms, "0");
+}

@@ -655,7 +655,19 @@ pub struct WorkEnvironmentSummary {
     pub title: String,
     pub lifecycle: WorkLifecycle,
     pub revision: WorkRevision,
+    /// What the work's first run called it: its title, else its reply's.
+    pub name: Option<String>,
+    /// Every request in the work, first one first, each cut to a line's length.
+    pub requests: Vec<String>,
+    /// When the work was last worked in, Unix epoch milliseconds as decimal text.
+    pub touched_ms: String,
+    /// It holds nothing yet.
+    pub empty: bool,
 }
+
+/// Requests a summary carries, and the characters of each.
+pub const MAX_SUMMARY_REQUESTS: usize = 16;
+pub const MAX_SUMMARY_REQUEST_CHARS: usize = 160;
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
