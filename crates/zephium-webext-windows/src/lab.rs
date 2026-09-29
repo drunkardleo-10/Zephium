@@ -190,6 +190,7 @@ struct ViewOptions<'a> {
     visible: bool,
     initialization: Option<&'a str>,
     adopt_new_windows: bool,
+    allow_native_windows: bool,
 }
 
 fn make_view(
@@ -204,6 +205,7 @@ fn make_view(
         visible,
         initialization,
         adopt_new_windows,
+        allow_native_windows,
     } = options;
     let mut context = wry::WebContext::new(Some(root.to_path_buf()));
     let expected_root = root.canonicalize()?;
@@ -289,6 +291,10 @@ fn make_view(
                 "new_window",
                 json!({"url":url,"source":source,"user_initiated":features.user_initiated}),
             );
+            // Lab-only comparison: let the runtime own its child completely.
+            if allow_native_windows {
+                return wry::NewWindowResponse::Allow;
+            }
             if adopt_new_windows
                 && features.user_initiated
                 && children.borrow().len() < 4
@@ -499,6 +505,7 @@ pub fn run() -> Result<()> {
         udf.display()
     );
     let adopt_new_windows = steps.iter().any(|step| step["adopt_new_windows"] == true);
+    let allow_native_windows = steps.iter().any(|step| step["allow_native_windows"] == true);
     let first = make_view(
         &host,
         &udf,
@@ -508,6 +515,7 @@ pub fn run() -> Result<()> {
         ViewOptions {
             visible,
             adopt_new_windows,
+            allow_native_windows,
             ..Default::default()
         },
     )?;
@@ -641,6 +649,7 @@ pub fn run() -> Result<()> {
                             visible: window,
                             initialization: initialization.as_deref(),
                             adopt_new_windows,
+                            allow_native_windows,
                         },
                     )?,
                 );

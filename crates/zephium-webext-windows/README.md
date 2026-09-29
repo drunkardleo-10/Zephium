@@ -72,6 +72,11 @@ WebView2. Package records include version, manifest version and SHA-256.
 
 ## QA follow-up qualifiers
 
+- `allow_native_windows: true` is a lab-only comparison with WebView2-owned
+  child windows. On WebView2 154.0.4258.37 both promise and callback forms of
+  native `tabs.create` still returned `undefined`, despite the children existing.
+  Evidence: `target/windows-create-allow/20260929-173250/results.jsonl`.
+  The result omission is therefore not specific to deferred `SetNewWindow`.
 - `run-browser-surfaces.ps1` checks Grammarly's native OAuth-window adoption,
   native extension context-menu entries, and 1Password's empty runtime popup
   and separate welcome document. It reports failed native action commands as
