@@ -32,8 +32,11 @@
     if (!action || !Number.isInteger(windowId)) return;
     if (running) { queued = true; return; }
     running = true;
+    // Native queries can finish after the human switches tabs. Tag the whole
+    // snapshot with its original binding so the host can reject stale results.
+    const requestedWindowId = windowId;
     try {
-      const tabs = await chrome.tabs.query({windowId});
+      const tabs = await chrome.tabs.query({windowId: requestedWindowId});
       if (tabs.length !== 1) throw new Error('Human controller identity unavailable');
       const tabId = tabs[0].id;
       const [title, badge, popup, enabled, report] = await Promise.all([
@@ -42,11 +45,11 @@
       ]);
       let icon = null;
       try { icon = await pixels(report?.icon); } catch { /* Keep the native action without an icon. */ }
-      chrome.webview.postMessage(JSON.stringify({kind: 'action', windowId, tabId,
+      chrome.webview.postMessage(JSON.stringify({kind: 'action', windowId: requestedWindowId, tabId,
         title: (title || manifest.name || '').slice(0, 256), badge: (badge || '').slice(0, 32),
         popup: (popup || '').slice(0, 2048), enabled, icon}));
     } catch (error) {
-      chrome.webview.postMessage(JSON.stringify({kind: 'action-error', windowId, error: String(error).slice(0, 256)}));
+      chrome.webview.postMessage(JSON.stringify({kind: 'action-error', windowId: requestedWindowId, error: String(error).slice(0, 256)}));
     } finally {
       running = false;
       if (queued) { queued = false; void refresh(); }
