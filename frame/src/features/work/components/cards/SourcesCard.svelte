@@ -219,7 +219,7 @@
 
   .row {
     display: grid;
-    grid-template-columns: 16px 128px minmax(0, 1fr);
+    grid-template-columns: 16px 112px minmax(0, 1fr);
     align-items: center;
     gap: 10px;
     inline-size: 100%;
