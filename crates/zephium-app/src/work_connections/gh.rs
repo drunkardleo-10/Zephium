@@ -31,6 +31,7 @@ fn reason(name: &str, args: &Value) -> String {
         ("github_comment", Some(n)) => format!("To comment on {n}; you'll see the text first."),
         ("github_issues", _) => "To list the repository's issues with your account.".into(),
         ("github_prs", _) => "To list the repository's pull requests with your account.".into(),
+        ("github_mine", _) => "To see what waits on you across GitHub with your account.".into(),
         _ => "To work on GitHub with your account instead of opening github.com.".into(),
     }
 }
@@ -67,6 +68,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
         tool("github_prs", "List pull requests, newest first.", json!({"repo": repo, "state": state, "search": search, "limit": limit}), &[]),
         tool("github_checks", "The CI checks of a pull request, failing first, with links to their logs.", json!({"repo": repo, "number": number}), &["number"]),
         tool("github_pr_diff", "The diff of a pull request, cut at 12 KB; read files locally for more.", json!({"repo": repo, "number": number}), &["number"]),
+        tool("github_mine", "What waits on the person across all of GitHub, with no repository: pull requests where their review is requested, open issues assigned to them, their own open pull requests, or their unread notifications (mentions, replies, CI).", json!({"kind": {"type": "string", "enum": ["review_requests", "assigned", "authored", "notifications"]}, "limit": limit}), &["kind"]),
         tool("github_api", "Read any GitHub REST resource with GET, such as `repos/{owner}/{repo}/contents/README.md` or `search/issues?q=…`. Read-only.", json!({"path": {"type": "string"}}), &["path"]),
         tool("github_comment", "Comment on an issue or pull request as the person. The person sees the exact text and confirms before it is posted.", json!({"repo": repo, "number": number, "body": {"type": "string", "description": "Markdown."}}), &["number", "body"]),
         tool("github_create_pr", "Open a pull request from a pushed branch as the person, after they confirm.", json!({"repo": repo, "title": {"type": "string"}, "body": {"type": "string"}, "base": {"type": "string"}, "head": {"type": "string"}, "draft": {"type": "boolean"}}), &["title", "body"]),
@@ -325,6 +327,76 @@ pub fn render_list(value: &Value, prs: bool) -> (String, CallFact) {
     )
 }
 
+/// Search results across repositories, one line each with its link.
+pub fn render_found(value: &Value, prs: bool) -> (String, CallFact) {
+    let items = value.as_array().cloned().unwrap_or_default();
+    let mut out = String::new();
+    for item in &items {
+        out.push_str(&format!(
+            "{}#{} {} · {} · updated {} · {}\n",
+            item["repository"]["nameWithOwner"].as_str().unwrap_or(""),
+            item["number"].as_u64().unwrap_or(0),
+            clip(item["title"].as_str().unwrap_or(""), 160),
+            login(&item["author"]),
+            day(&item["updatedAt"]),
+            item["url"].as_str().unwrap_or("")
+        ));
+    }
+    if items.is_empty() {
+        out = if prs {
+            "No open pull requests.".into()
+        } else {
+            "No open issues.".into()
+        };
+    }
+    (
+        out.trim_end().to_owned(),
+        CallFact {
+            verb: if prs { "prs" } else { "issues" }.into(),
+            count: Some(items.len() as u32),
+            ..Default::default()
+        },
+    )
+}
+
+/// The person's unread notifications: repository, title, why, when, link.
+pub fn render_notifications(value: &Value) -> (String, CallFact) {
+    let items = value.as_array().cloned().unwrap_or_default();
+    let mut out = String::new();
+    for item in &items {
+        let repo = item["repository"]["full_name"].as_str().unwrap_or("");
+        // The API's subject link as the page a person opens.
+        let link = item["subject"]["url"]
+            .as_str()
+            .and_then(|api| api.strip_prefix("https://api.github.com/repos/"))
+            .map(|rest| {
+                format!(
+                    "https://github.com/{}",
+                    rest.replacen("/pulls/", "/pull/", 1)
+                )
+            })
+            .unwrap_or_else(|| format!("https://github.com/{repo}"));
+        out.push_str(&format!(
+            "{repo} · {} · {} · {} · {} · {link}\n",
+            clip(item["subject"]["title"].as_str().unwrap_or(""), 160),
+            item["subject"]["type"].as_str().unwrap_or(""),
+            item["reason"].as_str().unwrap_or("").replace('_', " "),
+            day(&item["updated_at"]),
+        ));
+    }
+    if items.is_empty() {
+        out = "No unread notifications.".into();
+    }
+    (
+        out.trim_end().to_owned(),
+        CallFact {
+            verb: "notifications".into(),
+            count: Some(items.len() as u32),
+            ..Default::default()
+        },
+    )
+}
+
 pub fn render_checks(value: &Value, number: u64) -> (String, CallFact) {
     let mut checks = value.as_array().cloned().unwrap_or_default();
     let rank = |c: &Value| match c["bucket"].as_str() {
@@ -460,7 +532,14 @@ impl GitHub {
         name: &str,
         args: &Value,
     ) -> Result<ToolReply, ToolReply> {
-        let repo = self.repo_args(args)?;
+        if name == "github_mine" {
+            return self.mine(host, args).await;
+        }
+        let repo = if name == "github_api" {
+            Vec::new()
+        } else {
+            self.repo_args(args)?
+        };
         let number = args["number"].as_u64();
         let need_number = || {
             number
@@ -674,6 +753,67 @@ impl GitHub {
                 Err(reply)
             }
         }
+    }
+
+    /// What waits on the person across GitHub: `gh search` for review
+    /// requests, assignments and their own pull requests, `gh api
+    /// notifications` for the rest. Read-only; no repository needed.
+    async fn mine(&self, host: &dyn ConnectionHost, args: &Value) -> Result<ToolReply, ToolReply> {
+        let limit = args["limit"]
+            .as_u64()
+            .unwrap_or(15)
+            .clamp(1, MAX_LIST)
+            .to_string();
+        let kind = args["kind"].as_str().unwrap_or("");
+        if kind == "notifications" {
+            let argv = vec![
+                "api".into(),
+                "-X".into(),
+                "GET".into(),
+                format!("notifications?per_page={limit}"),
+            ];
+            return self
+                .read(
+                    host,
+                    argv,
+                    CallFact {
+                        verb: "notifications".into(),
+                        ..Default::default()
+                    },
+                    render_notifications,
+                )
+                .await;
+        }
+        let (what, filter, prs) = match kind {
+            "review_requests" => ("prs", "--review-requested=@me", true),
+            "assigned" => ("issues", "--assignee=@me", false),
+            "authored" => ("prs", "--author=@me", true),
+            _ => {
+                return Err(fault(
+                    "`kind` is review_requests, assigned, authored or notifications.",
+                ))
+            }
+        };
+        let argv: Vec<String> = vec![
+            "search".into(),
+            what.into(),
+            filter.into(),
+            "--state=open".into(),
+            "--limit".into(),
+            limit,
+            "--json".into(),
+            "number,title,repository,author,updatedAt,url".into(),
+        ];
+        self.read(
+            host,
+            argv,
+            CallFact {
+                verb: what.into(),
+                ..Default::default()
+            },
+            |v| render_found(v, prs),
+        )
+        .await
     }
 
     /// The page of a listing, when the repository is named.
@@ -1067,6 +1207,26 @@ mod tests {
         assert_eq!(fact.count, Some(0));
         let (_, empty) = render_list(&json!([]), false);
         assert_eq!(empty.count, Some(0));
+        let (text, fact) = render_found(
+            &json!([{"number": 7, "title": "Fix login", "repository": {"nameWithOwner": "octo/app"},
+                "author": {"login": "ana"}, "updatedAt": "2026-09-29T10:00:00Z",
+                "url": "https://github.com/octo/app/pull/7"}]),
+            true,
+        );
+        assert_eq!(
+            text,
+            "octo/app#7 Fix login · ana · updated 2026-09-29 · https://github.com/octo/app/pull/7"
+        );
+        assert_eq!((fact.verb.as_str(), fact.count), ("prs", Some(1)));
+        let (text, fact) = render_notifications(&json!([{"reason": "review_requested",
+            "updated_at": "2026-09-29T09:00:00Z", "repository": {"full_name": "octo/app"},
+            "subject": {"title": "Fix login", "type": "PullRequest",
+                "url": "https://api.github.com/repos/octo/app/pulls/7"}}]));
+        assert_eq!(
+            text,
+            "octo/app · Fix login · PullRequest · review requested · 2026-09-29 · https://github.com/octo/app/pull/7"
+        );
+        assert_eq!(fact.count, Some(1));
     }
 
     #[test]
