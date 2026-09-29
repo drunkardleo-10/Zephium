@@ -642,7 +642,8 @@ fn settled_origin_admitted(
 ) -> bool {
     frame == requested
         || (policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
-            && SemanticOrigin::parse(document.as_url().as_str()).is_ok_and(|origin| &origin == frame))
+            && SemanticOrigin::parse(document.as_url().as_str())
+                .is_ok_and(|origin| &origin == frame))
 }
 
 impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedController {
