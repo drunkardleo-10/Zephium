@@ -855,7 +855,7 @@ impl WorkArtifactField {
             Self::PickImages => "a pick has at most 3 image_candidates, each a public https URL of a picture of that subject from its sources",
             Self::PickLogo => "a pick's logo_host is a bare lowercase host such as airbnb.com",
             Self::PickUrl => "a pick's url is a public https URL",
-            Self::PickPrice => "a pick's price has a display of at most 24 characters, an optional plain decimal amount and an optional three-letter currency code",
+            Self::PickPrice => "a pick's price has a display of at most 24 characters, an optional plain decimal amount, an optional three-letter currency code and an optional was of at most 24 characters: the price before a reduction the source shows",
             Self::PickFacts => "a pick has at most 4 facts, each a label of at most 20 characters and a value of at most 40",
             Self::PickRating => "a pick's rating is a plain decimal value between 0 and max, with max 5 or 10",
             Self::PickWhy => "a pick's why is one line of at most 160 characters",

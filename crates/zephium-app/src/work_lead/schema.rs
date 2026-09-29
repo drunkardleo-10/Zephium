@@ -96,7 +96,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
                     "image_candidates": list(string(), 0, L::PICK_IMAGES),
                     "logo_host": string(),
                     "url": string(),
-                    "price": object(json!({"display": text(L::PICK_PRICE), "amount": decimal(), "currency": string()}), &["display"]),
+                    "price": object(json!({"display": text(L::PICK_PRICE), "amount": decimal(), "currency": string(), "was": text(L::PICK_PRICE)}), &["display"]),
                     "facts": list(object(json!({
                         "label": text(L::FACT_LABEL), "value": text(L::FACT_VALUE),
                         "kind": one_of(&["text", "yes", "no", "partial", "rating"])

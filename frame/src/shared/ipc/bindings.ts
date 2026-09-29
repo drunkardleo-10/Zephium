@@ -4361,6 +4361,11 @@ export type WorkPriceV1_Deserialize = {
 	display: string,
 	amount?: string | null,
 	currency?: string | null,
+	/**
+	 *  The price before a reduction the source shows, as a person reads it:
+	 *  "$129.99".
+	 */
+	was?: string | null,
 };
 
 export type WorkPriceV1_Serialize = {
@@ -4368,6 +4373,11 @@ export type WorkPriceV1_Serialize = {
 	display: string,
 	amount?: string | null,
 	currency?: string | null,
+	/**
+	 *  The price before a reduction the source shows, as a person reads it:
+	 *  "$129.99".
+	 */
+	was?: string | null,
 };
 
 export type WorkProjectEntryKindV1 = "folder" | "file";

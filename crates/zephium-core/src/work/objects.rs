@@ -188,6 +188,10 @@ pub struct WorkPriceV1 {
     pub amount: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
+    /// The price before a reduction the source shows, as a person reads it:
+    /// "$129.99".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -984,6 +988,13 @@ pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPic
                 return Err(place("items[].price.currency", i)
                     .dropping(F::PickPrice, Remove("items[].price.currency")));
             }
+            optional(
+                budget,
+                &price.was,
+                L::PICK_PRICE,
+                F::PickPrice,
+                place("items[].price.was", i),
+            )?;
         }
         extra(
             item.facts.len(),

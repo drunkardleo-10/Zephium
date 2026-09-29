@@ -76,7 +76,7 @@ fn object(properties: Value, required: &[&str]) -> Value {
 const OBJECTS: &str = "\
 Each kind's data follows the schema whose title is the kind; limits are characters and items, and nothing is ever cut to fit.
 - reply: the answer on top of the result, made last. text is one to three plain sentences with only **bold** and `code`; figures are key numbers shown large; points are short lines. One per request.
-- picks: things to choose between. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host. route is for flights and trains. At most one item is recommended.
+- picks: things to choose between. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host. price.was is the price before a reduction, only when the source shows one. route is for flights and trains. At most one item is recommended.
 - plan: time-ordered steps (an itinerary, a roadmap, weeks of study). Advice sits on the step it belongs to; pick points a step at an item of a picks object (0-based index).
 - list: items without time order; from says where an item came from (app, who, when, a quote, a link back).
 - sheet: real data in typed columns, one string per cell (numbers as plain decimals, yes_no one of yes, no, partial, unknown, rating like 4/5, empty when unknown); money columns name a currency. No sentences.

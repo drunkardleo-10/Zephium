@@ -25,7 +25,7 @@ fn every_kind_round_trips_its_wire_shape() {
         json!({"kind":"reply","headline":"128 PLN","text":"At today's rate, **30 EUR** is about 128 PLN.",
             "figures":[{"label":"Rate","value":"4.27","note":"ECB, 28 Sep"}],"points":["Cards add about 2%"]}),
         json!({"kind":"picks","facet":"flight","items":[{"name":"LOT LO 3","subtitle":"Direct",
-            "price":{"display":"$1,240 return","amount":"1240","currency":"USD"},
+            "price":{"display":"$1,240 return","amount":"1240","currency":"USD","was":"$1,480"},
             "facts":[{"label":"Bags","value":"1 checked","kind":"yes"}],
             "rating":{"value":"4.5","max":5,"count":120},"why":"Only direct flight","tags":["direct"],
             "recommended":true,"route":{"from":"WAW","to":"SFO","depart":"10:05","arrive":"13:40",
@@ -108,6 +108,16 @@ fn limits_come_back_as_the_field_and_the_item() {
     )
     .unwrap();
     assert_eq!(fact.fill(fact.path.unwrap()), "items[0].facts[1].value");
+    let was = fault(
+        json!({"kind":"picks","facet":"product","items":[{"name":"Falcon",
+            "price":{"display":"$79.99","was":"x".repeat(25)}}]}),
+        0,
+    )
+    .unwrap();
+    assert!(was
+        .describe()
+        .starts_with("items[0].price.was is 25 characters; the limit is 24."));
+    assert_eq!(was.drop, Some(WorkFaultDrop::Remove("items[].price.was")));
     assert_eq!(fact.drop, Some(WorkFaultDrop::Remove("items[].facts[]")));
     let cells = |first: &str, second: &str| {
         fault(
@@ -127,7 +137,9 @@ fn limits_come_back_as_the_field_and_the_item() {
         0,
     )
     .unwrap();
-    assert!(points.describe().starts_with("points has 6 items; the limit is 5."));
+    assert!(points
+        .describe()
+        .starts_with("points has 6 items; the limit is 5."));
     assert_eq!(points.drop, Some(WorkFaultDrop::Keep("points")));
     assert_eq!(
         field(
