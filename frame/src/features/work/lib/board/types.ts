@@ -434,7 +434,7 @@ export type FolderView = ObjectBase & {
 };
 
 /** A member of a project's stack, from its manifests: a known product's host draws its mark. */
-type ProjectStackItem = { name: string; logo?: string; version?: string };
+type ProjectStackItem = { name: string; logo?: string; version?: string; role?: string };
 /** An entry of a project's structure; a folder holds its first entries and counts the rest. */
 export type ProjectEntry = {
   name: string;
@@ -443,8 +443,8 @@ export type ProjectEntry = {
   /** Entries the folder holds beyond those listed. */
   more?: number;
 };
-/** A command the project defines: `dev` run by `pnpm` as `vite`. */
-type ProjectScript = { name: string; command: string; runner?: string };
+/** A command the project defines: `dev` is `vite dev`, from `package.json`. */
+type ProjectScript = { name: string; command: string; source?: string };
 export type ProjectView = ObjectBase & {
   kind: "project";
   name: string;

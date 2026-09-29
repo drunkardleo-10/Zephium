@@ -916,7 +916,7 @@ const project: ProjectView = {
     "An AI writing studio: a SvelteKit web app over a Rust API, packaged for the desktop with Tauri.",
   path: "~/Dev/Lunios",
   stack: [
-    { name: "SvelteKit", logo: "svelte.dev", version: "2.20" },
+    { name: "SvelteKit", logo: "svelte.dev", version: "2.20", role: "Frontend" },
     { name: "TypeScript", logo: "typescriptlang.org", version: "5.8" },
     { name: "Rust", logo: "rust-lang.org", version: "1.89" },
     { name: "Tauri", logo: "tauri.app", version: "2.4" },
@@ -950,10 +950,10 @@ const project: ProjectView = {
   ],
   more: 4,
   scripts: [
-    { name: "dev", runner: "pnpm", command: "vite dev --port 5173" },
-    { name: "build", runner: "pnpm", command: "vite build && tauri build" },
-    { name: "test", runner: "pnpm", command: "vitest run && cargo test --workspace" },
-    { name: "check", runner: "cargo", command: "cargo clippy --all-targets -- -D warnings" },
+    { name: "dev", command: "vite dev --port 5173", source: "package.json" },
+    { name: "build", command: "vite build && tauri build", source: "package.json" },
+    { name: "test", command: "vitest run && cargo test --workspace", source: "package.json" },
+    { name: "lint", command: "cargo clippy --all-targets -- -D warnings", source: "Makefile" },
   ],
   git: { branch: "editor-sync", changed: 3, ahead: 2 },
 };

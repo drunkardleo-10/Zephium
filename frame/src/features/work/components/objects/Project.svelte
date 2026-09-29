@@ -49,7 +49,7 @@
   </header>
 
   {#if object.stack.length}<ul class="stack" aria-label={m.work_project_stack()}>
-      {#each object.stack as item (item.name)}<li>
+      {#each object.stack as item (item.name)}<li title={item.role}>
           {#if item.logo}<Mark address={item.logo} size={16} />{/if}
           <span class="name">{item.name}</span>
           {#if item.version}<span class="version">{item.version}</span>{/if}
@@ -80,8 +80,12 @@
     {#if object.scripts.length}<div class="column">
         <h4>{m.work_project_scripts()}</h4>
         <dl class="scripts">
-          {#each object.scripts as script (script.name)}<div>
-              <dt>{script.runner ? `${script.runner} ${script.name}` : script.name}</dt>
+          {#each object.scripts as script, index (index)}<div>
+              <dt>
+                <span>{script.name}</span>{#if script.source}<span class="source"
+                    >{script.source}</span
+                  >{/if}
+              </dt>
               {#if script.command && script.command !== script.name}<dd>{script.command}</dd>{/if}
             </div>{/each}
         </dl>
@@ -313,10 +317,22 @@
   }
 
   dt {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
     font-family: var(--font-mono);
     font-size: var(--text-body);
     font-weight: 550;
     overflow-wrap: anywhere;
+  }
+
+  .source {
+    flex: none;
+    color: var(--color-faint);
+    font-family: var(--font-sans);
+    font-size: var(--text-caption);
+    font-weight: 400;
   }
 
   dd {
