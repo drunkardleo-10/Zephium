@@ -268,6 +268,20 @@ pub trait WorkPublicSearchProvider: Send + Sync {
         Box::pin(async { Ok(WorkPublicSearchReuse::default()) })
     }
 
+    /// Optional: whether what a part's searches found already answers its
+    /// goal (`scope.query`), so it finishes instead of searching again.
+    /// `found` is those searches' own answers; `answers` true means enough.
+    /// Without it, the part decides for itself.
+    fn enough<'a>(
+        &'a self,
+        _scope: &'a WorkPublicSearchScope,
+        _found: &'a str,
+        _limits: WorkExecutionLimits,
+        _deadline: std::time::Instant,
+    ) -> WorkPublicSearchReuseFuture<'a> {
+        Box::pin(async { Ok(WorkPublicSearchReuse::default()) })
+    }
+
     /// `context` carries only Rust-admitted public bodies for this attempt.
     fn search<'a>(
         &'a self,

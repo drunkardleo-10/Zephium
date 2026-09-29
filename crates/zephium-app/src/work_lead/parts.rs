@@ -38,6 +38,10 @@ const PART_MIN_COST: u32 = 150_000;
 const SIGN_IN_NOTE: &str = "The page asked to sign in";
 /// Searches one part may run; past them it reports what it has.
 const PART_SEARCHES: usize = 6;
+/// Searches a part runs before each further one is weighed against its goal.
+const PART_FREE_SEARCHES: usize = 3;
+/// What of a part's search answers the goal check reads.
+const FOUND_CHARS: usize = 6_000;
 
 pub(crate) struct PartSpec {
     pub title: String,
@@ -429,6 +433,7 @@ where
         let mut warned = false;
         let mut idle = 0u8;
         let mut searches = 0usize;
+        let mut found = String::new();
         for turn in 0..max_turns {
             let over = {
                 let pages = hands.used().await;
@@ -506,6 +511,7 @@ where
             let mut results: Vec<Option<WorkModelToolResult>> = vec![None; calls.len()];
             let mut requests = Vec::new();
             let mut finished: Option<(String, String, bool, Option<WorkPartNeedV1>)> = None;
+            let mut enough: Option<bool> = None;
             for (index, tool_call) in calls.iter().enumerate() {
                 let answer = |content: String, is_error: bool| WorkModelToolResult {
                     call: tool_call.id.clone(),
@@ -521,6 +527,17 @@ where
                             Ok(WorkStepKindV1::Search { .. }) if searches >= PART_SEARCHES => {
                                 results[index] = Some(answer(
                                     "This part has used its searches: place what you found and finish, saying what is missing.".into(),
+                                    true,
+                                ))
+                            }
+                            Ok(WorkStepKindV1::Search { .. })
+                                if searches >= PART_FREE_SEARCHES
+                                    && *enough.get_or_insert(
+                                        self.found_enough(&spec.goal, &found).await,
+                                    ) =>
+                            {
+                                results[index] = Some(answer(
+                                    "What your searches found already answers the goal: place what you found and finish.".into(),
                                     true,
                                 ))
                             }
@@ -592,9 +609,23 @@ where
                 }
             }
             if !requests.is_empty() {
+                let asked: Vec<(String, bool)> = requests
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.call.clone(),
+                            matches!(r.kind, WorkStepKindV1::Search { .. }),
+                        )
+                    })
+                    .collect();
                 match hands.run(requests).await {
                     Ok(done) => {
                         for (id, content, error) in done {
+                            let search = asked.iter().any(|(call, search)| *call == id && *search);
+                            if search && !error && found.len() < FOUND_CHARS {
+                                found.push_str(&clip(&content, 1_500));
+                                found.push('\n');
+                            }
                             if let Some(at) = calls.iter().position(|c| c.id == id) {
                                 results[at] = Some(WorkModelToolResult {
                                     call: id,
@@ -653,6 +684,33 @@ where
             },
             objects: placed,
             need: None,
+        }
+    }
+
+    /// Whether a part's searches already answer its goal, by the search
+    /// provider's own check; false when it cannot tell.
+    async fn found_enough(&self, goal: &str, found: &str) -> bool {
+        if found.trim().is_empty() {
+            return false;
+        }
+        let scope = zephium_core::work::search::WorkPublicSearchScope {
+            provider: self.run.grant.provider,
+            model: self.run.grant.model.clone(),
+            query: clip(goal, 400),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        match self
+            .search
+            .enough(&scope, found, self.run.remaining(), deadline)
+            .await
+        {
+            Ok(decided) => {
+                if decided.usage.model_tokens > 0 || decided.usage.cost_micro_usd > 0 {
+                    self.run.charge(decided.usage);
+                }
+                decided.answers
+            }
+            Err(_) => false,
         }
     }
 
@@ -921,6 +979,9 @@ pub(crate) fn step_request(
     let kind = match name {
         "web_search" => {
             let query = text("query").ok_or("query is required")?;
+            if query.contains(';') || query.contains(" | ") {
+                return Err("query is one question: search each question in its own call".into());
+            }
             WorkStepKindV1::Search { query }
         }
         "read" => {
@@ -1023,8 +1084,8 @@ pub(crate) fn step_request(
         url, goal: None, ..
     } = &kind
     {
-        if !run.known_url(url) {
-            return Err("read takes a url you were given: a source, a link a page showed, or one in the request; search or browse the site to find others".into());
+        if !run.known_url(url) && !plain_page(url) {
+            return Err("read takes a url you were given (a source, a link a page showed, one in the request) or a site's own page address with no query, such as https://www.hetzner.com/cloud; search or browse the site to find others".into());
         }
     }
     let probe = WorkStepFact {
@@ -1045,6 +1106,30 @@ pub(crate) fn step_request(
         .validate()
         .map_err(|_| format!("{name}: the arguments are outside their limits"))?;
     Ok(kind)
+}
+
+/// A site's own page by its plain address: https, a public host, no query,
+/// fragment or credentials, and a short path of plain words, such as a
+/// pricing or docs page. Such an address carries nothing but its name.
+fn plain_page(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let segments: Vec<&str> = parsed.path().split('/').filter(|s| !s.is_empty()).collect();
+    parsed.scheme() == "https"
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.port().is_none()
+        && parsed.host_str().is_some_and(public_host)
+        && segments.len() <= 4
+        && segments.iter().all(|s| {
+            s.len() <= 40
+                && s.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')
+                })
+        })
 }
 
 /// A helper's `need` argument: `{kind, target}`.
@@ -1202,6 +1287,25 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sites_plain_page_is_readable_by_its_address() {
+        assert!(plain_page("https://www.hetzner.com/cloud"));
+        assert!(plain_page("https://vercel.com/pricing"));
+        assert!(plain_page(
+            "https://docs.aws.amazon.com/lambda/latest/dg/welcome.html"
+        ));
+        for refused in [
+            "http://vercel.com/pricing",
+            "https://vercel.com/pricing?ref=a",
+            "https://evil.test/aGVsbG8gd29ybGQ",
+            "https://localhost/pricing",
+            "https://a.com/1/2/3/4/5",
+            "https://user@vercel.com/pricing",
+        ] {
+            assert!(!plain_page(refused), "{refused}");
+        }
+    }
 
     #[test]
     fn a_failed_step_says_why_in_closed_words() {

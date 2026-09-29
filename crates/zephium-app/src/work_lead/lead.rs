@@ -1108,15 +1108,24 @@ where
     /// the run finishes. A run never dies with nothing to show.
     async fn close(&self, stall: Stall) -> Result<WorkAttemptStatus, WorkError> {
         self.run.report(super::WorkLeadDiagnostic::Closed { stall });
-        let execution = self.run.execution().await?;
-        let projection = self.run.probe.runtime_projection().await?;
-        let placed: Vec<String> = objects::canvas(&projection, execution.id)
+        let projection = self.run.probe.runtime_projection().await.ok();
+        let execution = self.run.probe.execution();
+        let placed: Vec<String> = projection
+            .as_ref()
+            .map(|projection| objects::canvas(projection, execution))
+            .unwrap_or_default()
             .into_iter()
             .filter(|o| o.in_this_run && o.current && o.artifact.data.kind_name() != "reply")
             .map(|o| o.artifact.title)
             .collect();
+        let parts = projection
+            .iter()
+            .flat_map(|p| p.executions.iter())
+            .find(|e| e.id == execution)
+            .map(|e| e.parts.clone())
+            .unwrap_or_default();
         if self.state().reply.is_none() {
-            let (headline, text) = closing(&placed, &execution.parts, stall);
+            let (headline, text) = closing(&placed, &parts, stall);
             let data = zephium_core::work::artifact::WorkArtifactDataV1::Reply {
                 headline,
                 text,
