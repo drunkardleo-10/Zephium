@@ -11,7 +11,7 @@ tools: [ask, start_part, create, finish]
 
 ## Parts (start them in one turn, they run in parallel)
 - **Stay** — browser part on airbnb.com (booking.com when the person prefers hotels), with `search` {place, checkin, checkout, adults}: the helper starts on the site's results for those dates, so no date picker is needed (a month or more opens Airbnb's monthly stays). Brief: the area near where they need to be and the budget per night or per month. It returns three homes as picks with each home's own photos, price and total, rating, and the reason it fits.
-- **Flights** — browser part on google.com (Google Flights; kayak.com as the second choice), with `search` {from, to, depart, return, adults, cabin}, airports as IATA codes (WAW, SFO) and dates as YYYY-MM-DD; omit return for one way. It returns three to four flights as picks with the route drawn (from, to, times, stops, carrier with its host such as lot.com), price and duration; mark the one you would book as recommended.
+- **Flights** — browser part on kayak.com (Google Flights as the second choice), with `search` {from, to, depart, return, adults, cabin}, airports as IATA codes (WAW, SFO) and dates as YYYY-MM-DD; omit return for one way. It returns three to four flights as picks with the route drawn (from, to, times, stops, carrier with its host such as lot.com), price and duration; mark the one you would book as recommended.
 - **Entry** — research part: visa or ESTA, passport validity, what to carry, for the traveller's nationality when known. It returns a short list (requirements), each item with its source.
 - Add a part only for a real need the request names (a conference ticket, a car, a restaurant).
 

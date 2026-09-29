@@ -76,20 +76,20 @@ const RECIPES: &[Recipe] = &[
         template: "https://www.booking.com/searchresults.html?ss={place:q}&checkin={checkin}&checkout={checkout}&group_adults={adults}&no_rooms=1&lang=en-us[&selected_currency={currency}]",
     },
     Recipe {
-        site: "google.com",
-        name: "Google Flights",
-        kind: Kind::Flights,
-        min_nights: 0,
-        max_nights: u16::MAX,
-        template: "https://www.google.com/travel/flights?q=Flights%20from%20{from:q}%20to%20{to:q}%20on%20{depart}{trip:q}{party:q}{cabin_class:q}&hl=en[&curr={currency}]",
-    },
-    Recipe {
         site: "kayak.com",
         name: "Kayak",
         kind: Kind::Flights,
         min_nights: 0,
         max_nights: u16::MAX,
         template: "https://www.kayak.com/flights/{from}-{to}/{depart}[/{back}]{cabin_path}{party_path}?sort=bestflight_a",
+    },
+    Recipe {
+        site: "google.com",
+        name: "Google Flights",
+        kind: Kind::Flights,
+        min_nights: 0,
+        max_nights: u16::MAX,
+        template: "https://www.google.com/travel/flights?q=Flights%20from%20{from:q}%20to%20{to:q}%20on%20{depart}{trip:q}{party:q}{cabin_class:q}&hl=en[&curr={currency}]",
     },
     Recipe {
         site: "amazon.com",
@@ -410,11 +410,11 @@ mod tests {
             "return": "2027-03-20", "currency": "USD"}));
         let pages = pages(&round, None);
         assert_eq!(
-            pages[0].1,
+            pages[1].1,
             "https://www.google.com/travel/flights?q=Flights%20from%20WAW%20to%20SFO%20on%202027-01-05%20through%202027-03-20&hl=en&curr=USD"
         );
         assert_eq!(
-            pages[1].1,
+            pages[0].1,
             "https://www.kayak.com/flights/WAW-SFO/2027-01-05/2027-03-20?sort=bestflight_a"
         );
         let business = search(json!({"from": "WAW", "to": "SFO", "depart": "2027-01-05",
@@ -423,8 +423,8 @@ mod tests {
         assert_eq!(
             urls,
             [
-                "https://www.google.com/travel/flights?q=Flights%20from%20WAW%20to%20SFO%20on%202027-01-05%20oneway%20for%202%20adults%20business%20class&hl=en",
                 "https://www.kayak.com/flights/WAW-SFO/2027-01-05/business/2adults?sort=bestflight_a",
+                "https://www.google.com/travel/flights?q=Flights%20from%20WAW%20to%20SFO%20on%202027-01-05%20oneway%20for%202%20adults%20business%20class&hl=en",
             ]
         );
         assert_eq!(super::pages(&business, Some("kayak.com"))[0].0, "Kayak");
