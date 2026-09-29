@@ -1259,7 +1259,7 @@ impl MacosWorkComposition {
                         let task = resume_plan
                             .as_ref()
                             .is_some_and(|plan| page_task(&plan.request));
-                        let cap = human_wait_cap(intervention.as_ref(), task);
+                        let cap = human_wait_cap(intervention.as_ref(), task, anonymous);
                         skipped = cap == 0;
                         let wait = if skipped {
                             None
@@ -1427,15 +1427,21 @@ impl MacosWorkComposition {
                     Some(AgentWorkDisposition::Succeeded | AgentWorkDisposition::Cancelled) => None,
                     Some(AgentWorkDisposition::WaitingForHuman) if gave_up_on_person => {
                         let url = page.as_ref().map(|(_, url)| url.as_str());
+                        let note =
+                            match intervention.as_ref().map(|i| i.kind) {
+                                Some(
+                                    zephium_core::work::runtime::WorkInterventionKindV1::Challenge,
+                                ) if skipped => skipped_check(url),
+                                Some(
+                                    zephium_core::work::runtime::WorkInterventionKindV1::SignIn,
+                                ) if skipped => "The page asked to sign in".into(),
+                                _ => needs_you(url),
+                            };
                         return Ok(BrowserRun::closed(
                             result,
                             usage,
                             intervention,
-                            Some(if skipped {
-                                skipped_check(url)
-                            } else {
-                                needs_you(url)
-                            }),
+                            Some(note),
                             measure.settle(started, model_in_flight),
                             helped,
                         ));
@@ -1485,10 +1491,12 @@ fn refusal_line(snapshot: &zephium_app::RetainedWorkSnapshot, yours: bool) -> St
 /// sign-in or a decision keeps the long wait.
 const HUMAN_CHECK_WAIT_MILLIS: u64 = 90_000;
 /// A research read (one page, no task) behind a bot check is skipped at
-/// once: its part reads its other sources instead of waiting on a person.
-fn human_wait_cap(intervention: Option<&WorkInterventionV1>, task: bool) -> u64 {
+/// once, and so is an anonymous read that wants anything of a person: its
+/// part reads its other sources instead of waiting.
+fn human_wait_cap(intervention: Option<&WorkInterventionV1>, task: bool, anonymous: bool) -> u64 {
     use zephium_core::work::runtime::WorkInterventionKindV1 as Kind;
     match intervention.map(|intervention| intervention.kind) {
+        _ if !task && anonymous => 0,
         Some(Kind::Challenge) if !task => 0,
         Some(Kind::Challenge | Kind::Permission | Kind::UnsupportedInteraction) => {
             HUMAN_CHECK_WAIT_MILLIS
@@ -1801,10 +1809,18 @@ mod closed_result_tests {
             kind: Kind::SignIn,
             origin: None,
         };
-        assert_eq!(human_wait_cap(Some(&check), true), HUMAN_CHECK_WAIT_MILLIS);
-        assert_eq!(human_wait_cap(Some(&check), false), 0);
         assert_eq!(
-            human_wait_cap(Some(&sign_in), false),
+            human_wait_cap(Some(&check), true, false),
+            HUMAN_CHECK_WAIT_MILLIS
+        );
+        assert_eq!(human_wait_cap(Some(&check), false, false), 0);
+        assert_eq!(
+            human_wait_cap(Some(&sign_in), false, false),
+            MAX_WORK_HUMAN_WAIT_MILLIS
+        );
+        assert_eq!(human_wait_cap(Some(&sign_in), false, true), 0);
+        assert_eq!(
+            human_wait_cap(Some(&sign_in), true, true),
             MAX_WORK_HUMAN_WAIT_MILLIS
         );
         let since = Instant::now();
@@ -1814,7 +1830,7 @@ mod closed_result_tests {
             since,
             late,
             None,
-            human_wait_cap(Some(&check), true)
+            human_wait_cap(Some(&check), true, false)
         ));
         assert!(human_wait_expired(since, since, late, None, 0));
         assert_eq!(
@@ -2230,6 +2246,8 @@ const SITE_LOAD_POLL: Duration = Duration::from_secs(2);
 /// person does not count against it.
 const PAGE_TASK_ACTIVE: Duration = Duration::from_secs(480);
 const PAGE_TASK_CALLS: u8 = 40;
+/// A public page read looks, extracts and ends: a few inspections at most.
+const PUBLIC_READ_CALLS: u8 = 6;
 const PAGE_TASK_ACTIONS: u64 = 60;
 const PAGE_TASK_HOPS: usize = 16;
 /// How long a finished sign-in's page must stay settled before the page continues.
@@ -2433,7 +2451,13 @@ fn compile_step(
                 },
                 None => PublicReadWorkAccount::Anonymous,
             },
-            if task { PAGE_TASK_CALLS } else { 16 },
+            if task {
+                PAGE_TASK_CALLS
+            } else if signed_in.is_some() {
+                16
+            } else {
+                PUBLIC_READ_CALLS
+            },
             probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         ),
     };
