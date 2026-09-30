@@ -42,6 +42,8 @@ pub enum McpError {
     Timeout,
     /// The server needs the person to sign in.
     Unauthorized,
+    /// The person cancelled sign-in.
+    Cancelled,
     /// The connection ended.
     Closed,
     /// The server answered outside the protocol, or too much.

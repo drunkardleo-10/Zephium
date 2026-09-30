@@ -44,6 +44,7 @@ export const commands = {
 	workDecisionPreference: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_decision_preference", { expectedProfile }),
 	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
 	workModels: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_models", { expectedProfile }),
+	workModelsReady: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsReadyV1>("work_models_ready", { expectedProfile }),
 	workChooseModel: (expectedProfile: string, role: WorkModelRole, id: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_choose_model", { expectedProfile, role, id }),
 	workSetProviderKey: (expectedProfile: string, provider: WorkModelProvider, key: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_provider_key", { expectedProfile, provider, key }),
 	workTestProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_test_provider_key", { expectedProfile, provider }),
@@ -53,15 +54,19 @@ export const commands = {
 	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
 	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
 	/**  The tools found on this Mac and the servers this profile added. */
-	workConnections: (expectedProfile: string) => __TAURI_INVOKE<WorkConnectionsResponseV1>("work_connections", { expectedProfile }),
+	workConnections: (expectedProfile: string) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_connections", { expectedProfile }),
 	/**  Adds or replaces a server; new secrets go to the Keychain. */
-	workSaveConnection: (expectedProfile: string, draft: WorkServerDraftV1) => __TAURI_INVOKE<WorkConnectionsResponseV1>("work_save_connection", { expectedProfile, draft }),
+	workSaveConnection: (expectedProfile: string, draft: WorkServerDraftV1) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_save_connection", { expectedProfile, draft }),
+	/**  Connect an unsaved draft, sign in if necessary, and preview its tools. */
+	workPreviewConnection: (expectedProfile: string, draft: WorkServerDraftV1) => __TAURI_INVOKE<WorkServerCheckV1>("work_preview_connection", { expectedProfile, draft }),
 	/**  Removes a server and forgets its secrets. */
-	workRemoveConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkConnectionsResponseV1>("work_remove_connection", { expectedProfile, id }),
+	workRemoveConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_remove_connection", { expectedProfile, id }),
 	/**  Connects to a server once and lists its tools. */
 	workCheckConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkServerCheckV1>("work_check_connection", { expectedProfile, id }),
 	/**  Signs in to an HTTP server in a new tab, then checks it. */
 	workSignInConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkServerCheckV1>("work_sign_in_connection", { expectedProfile, id }),
+	/**  The browser tab owner cancels only the flow that owns the closed tab. */
+	workCancelConnectionSignIn: (expectedProfile: string, id: string, requestId: string) => __TAURI_INVOKE<boolean>("work_cancel_connection_sign_in", { expectedProfile, id, requestId }),
 	workMemories: (expectedProfile: string, query: WorkMemoryQueryV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_memories", { expectedProfile, query }),
 	/**  Changes one memory, or all of them, and returns the list for `query`. */
 	workChangeMemory: (expectedProfile: string, query: WorkMemoryQueryV1, change: WorkMemoryChangeV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_change_memory", { expectedProfile, query, change }),
@@ -2378,11 +2383,26 @@ export type WorkChecklistItem = {
 };
 
 /**  A command-line tool as Settings shows it. */
-export type WorkCliRowV1 = {
+export type WorkCliRowV1 = WorkCliRowV1_Serialize | WorkCliRowV1_Deserialize;
+
+/**  A command-line tool as Settings shows it. */
+export type WorkCliRowV1_Deserialize = {
 	/**  `gh`, `git`, `codex` or `claude`. */
 	id: string,
 	status: WorkCliStatusV1,
 	version: string | null,
+	path?: string | null,
+	/**  The account the tool says it uses: a login, an email, "ChatGPT". */
+	account: string | null,
+};
+
+/**  A command-line tool as Settings shows it. */
+export type WorkCliRowV1_Serialize = {
+	/**  `gh`, `git`, `codex` or `claude`. */
+	id: string,
+	status: WorkCliStatusV1,
+	version: string | null,
+	path?: string | null,
 	/**  The account the tool says it uses: a login, an email, "ChatGPT". */
 	account: string | null,
 };
@@ -2610,10 +2630,20 @@ export type WorkConnectionCallV1_Serialize = {
 	url?: string | null,
 };
 
-export type WorkConnectionsResponseV1 = {
+export type WorkConnectionsResponseV1 = WorkConnectionsResponseV1_Serialize | WorkConnectionsResponseV1_Deserialize;
+
+export type WorkConnectionsResponseV1_Deserialize = {
 	version: number,
 	profile: string,
-	clis: WorkCliRowV1[],
+	clis: WorkCliRowV1_Deserialize[],
+	servers: WorkServerRowV1[],
+	error: WorkFailureV1 | null,
+};
+
+export type WorkConnectionsResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	clis: WorkCliRowV1_Serialize[],
 	servers: WorkServerRowV1[],
 	error: WorkFailureV1 | null,
 };
@@ -3755,16 +3785,25 @@ export type WorkModelsChanged = {
 
 /**  Why the last action did not do what was asked. Closed; no provider text. */
 export type WorkModelsFaultV1 = 
-/**  The provider refused the key; nothing was stored. */
+/**  The provider refused the key. */
 "key_refused" | 
 /**  The provider could not be reached. */
-"unreachable" | 
+"unreachable" | "billing" | "rate_limited" | "provider_down" | "request" | 
 /**  The Keychain refused. */
 "keychain" | 
 /**  The request was malformed (an unknown model, a bad address). */
 "invalid" | 
 /**  Models are unavailable in this build or profile. */
 "unavailable";
+
+/**  A narrow readiness contract for the Work composer. Only a missing lead blocks. */
+export type WorkModelsReadyV1 = {
+	version: number,
+	profile: string,
+	ready: boolean,
+	missing_roles: WorkModelRole[],
+	fault: WorkModelsFaultV1 | null,
+};
 
 export type WorkModelsV1 = WorkModelsV1_Serialize | WorkModelsV1_Deserialize;
 
@@ -3776,7 +3815,7 @@ export type WorkModelsV1_Deserialize = {
 	chosen: WorkModelRolesV1,
 	/**  What each role runs with now; null when no provider is usable. */
 	effective: WorkModelRolesV1,
-	providers: WorkProviderStatusV1[],
+	providers: WorkProviderStatusV1_Deserialize[],
 	cloud: WorkCloudStatusV1,
 	fault: WorkModelsFaultV1 | null,
 };
@@ -3789,7 +3828,7 @@ export type WorkModelsV1_Serialize = {
 	chosen: WorkModelRolesV1,
 	/**  What each role runs with now; null when no provider is usable. */
 	effective: WorkModelRolesV1,
-	providers: WorkProviderStatusV1[],
+	providers: WorkProviderStatusV1_Serialize[],
 	cloud: WorkCloudStatusV1,
 	fault: WorkModelsFaultV1 | null,
 };
@@ -4534,9 +4573,20 @@ export type WorkProviderSearchRecordV1_Serialize = {
 	ranking?: WorkPublicSearchRanking | null,
 };
 
-export type WorkProviderStatusV1 = {
+export type WorkProviderStatusV1 = WorkProviderStatusV1_Serialize | WorkProviderStatusV1_Deserialize;
+
+export type WorkProviderStatusV1_Deserialize = {
 	provider: WorkModelProvider,
 	key: WorkKeyStateV1,
+	fault?: WorkModelsFaultV1 | null,
+	/**  The OpenAI-compatible endpoint's base URL. */
+	base: string | null,
+};
+
+export type WorkProviderStatusV1_Serialize = {
+	provider: WorkModelProvider,
+	key: WorkKeyStateV1,
+	fault?: WorkModelsFaultV1 | null,
 	/**  The OpenAI-compatible endpoint's base URL. */
 	base: string | null,
 };
@@ -4814,6 +4864,8 @@ export type WorkServerEnvV1 = {
 export type WorkServerOutcomeV1 = "ready" | 
 /**  The server wants the person to sign in. */
 "sign_in" | 
+/**  Sign-in was closed or timed out. */
+"cancelled" | 
 /**  The program was not found or could not start. */
 "not_found" | 
 /**  It did not answer in time. */

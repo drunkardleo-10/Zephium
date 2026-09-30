@@ -12,6 +12,42 @@ pub enum KeychainError {
     Inaccessible,
 }
 
+/// Injectable boundary for connection secrets; tests provide an in-memory vault.
+pub trait SecretVault {
+    fn read(&self, profile: &str, server: &str, account: &str) -> Result<String, KeychainError>;
+    fn write(
+        &self,
+        profile: &str,
+        server: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), KeychainError>;
+    fn delete(&self, profile: &str, server: &str, account: &str) -> Result<(), KeychainError>;
+    fn delete_server(&self, profile: &str, server: &str) -> Result<(), KeychainError>;
+}
+
+pub struct SystemVault;
+impl SecretVault for SystemVault {
+    fn read(&self, profile: &str, server: &str, account: &str) -> Result<String, KeychainError> {
+        read(profile, server, account)
+    }
+    fn write(
+        &self,
+        profile: &str,
+        server: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), KeychainError> {
+        write(profile, server, account, secret)
+    }
+    fn delete(&self, profile: &str, server: &str, account: &str) -> Result<(), KeychainError> {
+        delete(profile, server, account)
+    }
+    fn delete_server(&self, profile: &str, server: &str) -> Result<(), KeychainError> {
+        delete_server(profile, server)
+    }
+}
+
 fn service(profile: &str, server: &str) -> String {
     format!("app.zephium.connection.{profile}.{server}")
 }
@@ -32,6 +68,10 @@ pub fn write(
 /// Removes one secret; removing a missing one succeeds. Blocking.
 pub fn delete(profile: &str, server: &str, account: &str) -> Result<(), KeychainError> {
     platform::delete(&service(profile, server), account)
+}
+/// Removes every secret for a server, including accounts from earlier configurations.
+pub fn delete_server(profile: &str, server: &str) -> Result<(), KeychainError> {
+    platform::delete_server(&service(profile, server))
 }
 /// Whether a secret exists, from its attributes only. Blocking.
 pub fn present(profile: &str, server: &str, account: &str) -> bool {
@@ -118,6 +158,20 @@ mod platform {
         }
     }
 
+    pub(super) fn delete_server(service: &str) -> Result<(), KeychainError> {
+        let keychain = login()?;
+        let mut options = ItemSearchOptions::new();
+        options
+            .class(ItemClass::generic_password())
+            .keychains(&[keychain])
+            .service(service);
+        match options.delete() {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == errSecItemNotFound => Ok(()),
+            Err(_) => Err(KeychainError::Inaccessible),
+        }
+    }
+
     pub(super) fn present(service: &str, account: &str) -> bool {
         let Ok(keychain) = login() else {
             return false;
@@ -138,6 +192,9 @@ mod platform {
         Err(KeychainError::Inaccessible)
     }
     pub(super) fn delete(_: &str, _: &str) -> Result<(), KeychainError> {
+        Ok(())
+    }
+    pub(super) fn delete_server(_: &str) -> Result<(), KeychainError> {
         Ok(())
     }
     pub(super) fn present(_: &str, _: &str) -> bool {

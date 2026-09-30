@@ -29,6 +29,28 @@ pub trait TokenStore: Send + Sync {
     fn clear(&self);
 }
 
+/// Ephemeral tokens for draft validation and tests. Never touches the Keychain.
+#[derive(Default)]
+pub struct MemoryTokens(pub std::sync::Mutex<Option<String>>);
+impl TokenStore for MemoryTokens {
+    fn load(&self) -> Option<String> {
+        self.0.lock().ok()?.clone()
+    }
+    fn save(&self, value: &str) -> bool {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(value.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+    fn clear(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+}
+
 pub enum HttpAuth {
     None,
     Bearer(String),
@@ -45,6 +67,16 @@ struct Store(Arc<dyn TokenStore>);
 
 #[async_trait::async_trait]
 impl CredentialStore for Store {
+    async fn acquire_refresh_guard(
+        &self,
+    ) -> Result<Option<rmcp::transport::auth::CredentialRefreshGuard>, AuthError> {
+        static REFRESH: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> =
+            std::sync::OnceLock::new();
+        let lock = REFRESH.get_or_init(Default::default).clone();
+        Ok(Some(rmcp::transport::auth::CredentialRefreshGuard::new(
+            lock.lock_owned().await,
+        )))
+    }
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
         let store = self.0.clone();
         let value = tokio::task::spawn_blocking(move || store.load())
@@ -121,6 +153,17 @@ impl HttpServer {
         lifecycle: ClientLifecycleMode,
         limit: Duration,
     ) -> Result<RunningService<RoleClient, ClientConfig>, McpError> {
+        tokio::time::timeout(limit, self.connect_inner(client, lifecycle, limit))
+            .await
+            .map_err(|_| McpError::Timeout)?
+    }
+
+    async fn connect_inner(
+        &self,
+        client: ClientConfig,
+        lifecycle: ClientLifecycleMode,
+        limit: Duration,
+    ) -> Result<RunningService<RoleClient, ClientConfig>, McpError> {
         if !valid_url(&self.url) {
             return Err(McpError::Protocol);
         }
@@ -145,6 +188,12 @@ impl HttpServer {
                 {
                     return Err(McpError::Unauthorized);
                 }
+                // The SDK refreshes expiring tokens and persists rotations through Store.
+                // A failed refresh becomes a recoverable sign-in state.
+                manager
+                    .get_access_token()
+                    .await
+                    .map_err(|_| McpError::Unauthorized)?;
                 let transport = StreamableHttpClientTransport::with_client(
                     AuthClient::new(http_client(), manager),
                     config(&self.url),
@@ -180,6 +229,30 @@ pub async fn sign_in(
     store: Arc<dyn TokenStore>,
     open: impl FnOnce(String) + Send,
 ) -> Result<(), McpError> {
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    sign_in_cancellable(url, store, open, receiver).await
+}
+
+/// Cancels the complete flow, including discovery, callback and token exchange.
+/// Dropping the flow releases the loopback listener on every exit path.
+pub async fn sign_in_cancellable(
+    url: &str,
+    store: Arc<dyn TokenStore>,
+    open: impl FnOnce(String) + Send,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), McpError> {
+    tokio::select! {
+        biased;
+        _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } => Err(McpError::Cancelled),
+        result = tokio::time::timeout(SIGN_IN_PATIENCE, sign_in_inner(url, store, open)) => result.map_err(|_| McpError::Timeout)?,
+    }
+}
+
+async fn sign_in_inner(
+    url: &str,
+    store: Arc<dyn TokenStore>,
+    open: impl FnOnce(String) + Send,
+) -> Result<(), McpError> {
     if !valid_url(url) {
         return Err(McpError::Protocol);
     }
@@ -203,20 +276,36 @@ pub async fn sign_in(
         .get_authorization_url()
         .await
         .map_err(|_| McpError::Protocol)?;
+    let expected_state = url::Url::parse(&page)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "state")
+                .map(|(_, value)| value.into_owned())
+        })
+        .ok_or(McpError::Protocol)?;
     open(page);
-    let callback = tokio::time::timeout(SIGN_IN_PATIENCE, catch_redirect(&listener, port))
-        .await
-        .map_err(|_| McpError::Timeout)??;
+    let callback = tokio::time::timeout(
+        SIGN_IN_PATIENCE,
+        catch_redirect(&listener, port, &expected_state),
+    )
+    .await
+    .map_err(|_| McpError::Timeout)??;
+    drop(listener);
     state
         .handle_callback_url(&callback)
         .await
         .map_err(|_| McpError::Unauthorized)
 }
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Signed in</title><style>body{font:15px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:90vh;margin:0;color:#1d1d1f;background:#fbfbfd}@media(prefers-color-scheme:dark){body{color:#f5f5f7;background:#161617}}p{margin:0}</style><p>Signed in. You can close this tab and return to Zephium.</p>";
+const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Returning to Zephium</title><style>body{font:15px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:90vh;margin:0;color:#1d1d1f;background:#fbfbfd}@media(prefers-color-scheme:dark){body{color:#f5f5f7;background:#161617}}p{margin:0}</style><p>Returning to Zephium…</p>";
 
 /// Waits for the one redirect to `/callback` and answers it with a short page.
-async fn catch_redirect(listener: &tokio::net::TcpListener, port: u16) -> Result<String, McpError> {
+async fn catch_redirect(
+    listener: &tokio::net::TcpListener,
+    port: u16,
+    expected_state: &str,
+) -> Result<String, McpError> {
     loop {
         let (mut socket, _) = listener.accept().await.map_err(|_| McpError::Closed)?;
         let mut request = vec![0u8; 8192];
@@ -242,18 +331,80 @@ async fn catch_redirect(listener: &tokio::net::TcpListener, port: u16) -> Result
                 .await;
             continue;
         }
+        let callback = format!("http://127.0.0.1:{port}{target}");
+        let Ok(parsed) = url::Url::parse(&callback) else {
+            continue;
+        };
+        let states: Vec<_> = parsed
+            .query_pairs()
+            .filter(|(key, _)| key == "state")
+            .collect();
+        if states.len() != 1 || states[0].1 != expected_state {
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
+        let declined = parsed
+            .query_pairs()
+            .any(|(key, value)| key == "error" && value == "access_denied");
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\ncache-control: no-store\r\nconnection: close\r\n\r\n{DONE_PAGE}",
             DONE_PAGE.len()
         );
         let _ = socket.write_all(response.as_bytes()).await;
-        return Ok(format!("http://127.0.0.1:{port}{target}"));
+        return if declined {
+            Err(McpError::Cancelled)
+        } else {
+            Ok(callback)
+        };
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_does_not_discover_or_open_a_page() {
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        cancel.send(true).unwrap();
+        assert_eq!(
+            sign_in_cancellable(
+                "https://example.invalid/mcp",
+                Arc::new(MemoryTokens::default()),
+                |_| panic!("must not open"),
+                receiver
+            )
+            .await,
+            Err(McpError::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_callback_wait_releases_the_port() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let wait =
+            tokio::spawn(async move { catch_redirect(&listener, address.port(), "xyz").await });
+        wait.abort();
+        let _ = wait.await;
+        assert!(tokio::net::TcpListener::bind(address).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn callback_timeout_releases_the_port() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(10), async move {
+            catch_redirect(&listener, address.port(), "xyz").await
+        })
+        .await
+        .is_err());
+        assert!(tokio::net::TcpListener::bind(address).await.is_ok());
+    }
 
     #[test]
     fn urls() {
@@ -274,7 +425,7 @@ mod tests {
     async fn the_redirect_is_caught_once() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let caught = tokio::spawn(async move { catch_redirect(&listener, port).await });
+        let caught = tokio::spawn(async move { catch_redirect(&listener, port, "xyz").await });
         let get = |path: &'static str| async move {
             let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
@@ -288,9 +439,12 @@ mod tests {
             answer
         };
         assert!(get("/favicon.ico").await.starts_with("HTTP/1.1 404"));
+        assert!(get("/callback?code=attacker&state=wrong")
+            .await
+            .starts_with("HTTP/1.1 400"));
         assert!(get("/callback?code=abc&state=xyz")
             .await
-            .contains("Signed in"));
+            .contains("Returning to Zephium"));
         assert_eq!(
             caught.await.unwrap().unwrap(),
             format!("http://127.0.0.1:{port}/callback?code=abc&state=xyz")

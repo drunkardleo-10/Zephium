@@ -70,6 +70,19 @@ fn category(name: &str) -> WorkConfirmCategoryV1 {
 
 /// Where a server lives for this profile, with its secrets from the Keychain.
 pub fn endpoint(profile: &str, server: &WorkServerV1) -> Result<Endpoint, McpError> {
+    endpoint_with(
+        server,
+        |account| keychain::read(profile, &server.id, account).map_err(|_| McpError::Unauthorized),
+        keychain::oauth_store(profile, &server.id),
+    )
+}
+
+/// Builds a connection against an injected secret source, including unsaved drafts.
+pub fn endpoint_with(
+    server: &WorkServerV1,
+    read: impl Fn(&str) -> Result<String, McpError>,
+    tokens: std::sync::Arc<dyn zephium_mcp::oauth::TokenStore>,
+) -> Result<Endpoint, McpError> {
     match &server.transport {
         WorkServerTransportV1::Stdio { command, args, env } => {
             let path = super::cli::login_path();
@@ -81,8 +94,7 @@ pub fn endpoint(profile: &str, server: &WorkServerV1) -> Result<Endpoint, McpErr
             vars.push(("PATH".into(), path));
             for var in env {
                 let value = if var.secret {
-                    keychain::read(profile, &server.id, &format!("env.{}", var.name))
-                        .map_err(|_| McpError::Unauthorized)?
+                    read(&format!("env.{}", var.name))?
                 } else {
                     var.value.clone().unwrap_or_default()
                 };
@@ -100,13 +112,8 @@ pub fn endpoint(profile: &str, server: &WorkServerV1) -> Result<Endpoint, McpErr
             url: url.clone(),
             auth: match auth {
                 WorkServerAuthV1::None => HttpAuth::None,
-                WorkServerAuthV1::Bearer => HttpAuth::Bearer(
-                    keychain::read(profile, &server.id, "bearer")
-                        .map_err(|_| McpError::Unauthorized)?,
-                ),
-                WorkServerAuthV1::OAuth => {
-                    HttpAuth::OAuth(keychain::oauth_store(profile, &server.id))
-                }
+                WorkServerAuthV1::Bearer => HttpAuth::Bearer(read("bearer")?),
+                WorkServerAuthV1::OAuth => HttpAuth::OAuth(tokens),
             },
         })),
     }
@@ -142,6 +149,25 @@ pub fn definitions(server: &WorkServerV1, tools: &[McpTool]) -> Vec<WorkModelToo
 /// Connects once and lists what the server offers, for Settings; what it
 /// found is kept so runs can offer the tools before connecting.
 pub async fn check(profile: &str, server: &WorkServerV1) -> WorkServerCheckV1 {
+    let endpoint = {
+        let (profile, server) = (profile.to_owned(), server.clone());
+        tokio::task::spawn_blocking(move || endpoint(&profile, &server))
+            .await
+            .unwrap_or(Err(McpError::Closed))
+    };
+    let (check, tools) = check_endpoint(profile, server, endpoint).await;
+    if let Some(store) = super::store::shared() {
+        let _ = store.put_tools(profile, &server.id, tools.as_deref());
+    }
+    check
+}
+
+/// Probe without persisting configuration, secrets or tool caches.
+pub async fn check_endpoint(
+    profile: &str,
+    server: &WorkServerV1,
+    endpoint: Result<Endpoint, McpError>,
+) -> (WorkServerCheckV1, Option<Vec<McpTool>>) {
     let mut check = WorkServerCheckV1 {
         version: 1,
         profile: profile.to_owned(),
@@ -152,12 +178,7 @@ pub async fn check(profile: &str, server: &WorkServerV1) -> WorkServerCheckV1 {
         error: None,
     };
     let outcome = async {
-        let endpoint = {
-            let (profile, server) = (profile.to_owned(), server.clone());
-            tokio::task::spawn_blocking(move || endpoint(&profile, &server))
-                .await
-                .map_err(|_| McpError::Closed)??
-        };
+        let endpoint = endpoint?;
         let session = McpSession::connect(&endpoint).await?;
         let tools = session.tools().await;
         let name = session.info().title.clone().or(session.info().name.clone());
@@ -165,11 +186,9 @@ pub async fn check(profile: &str, server: &WorkServerV1) -> WorkServerCheckV1 {
         Ok::<_, McpError>((name, tools?))
     }
     .await;
+    let mut found = None;
     match outcome {
         Ok((name, tools)) => {
-            if let Some(store) = super::store::shared() {
-                let _ = store.put_tools(profile, &server.id, Some(&tools));
-            }
             check.outcome = WorkServerOutcomeV1::Ready;
             check.server_name = name;
             check.tools = tools
@@ -180,6 +199,7 @@ pub async fn check(profile: &str, server: &WorkServerV1) -> WorkServerCheckV1 {
                     asks: asks(tool),
                 })
                 .collect();
+            found = Some(tools);
         }
         Err(error) => {
             check.outcome = match error {
@@ -190,7 +210,7 @@ pub async fn check(profile: &str, server: &WorkServerV1) -> WorkServerCheckV1 {
             }
         }
     }
-    check
+    (check, found)
 }
 
 /// One server for one run: connected on first use, asked about once.
