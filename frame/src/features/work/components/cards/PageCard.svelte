@@ -3,6 +3,7 @@
   import CardFrame from "./CardFrame.svelte";
   import HostGlyph from "./HostGlyph.svelte";
   import AccountBadge from "./AccountBadge.svelte";
+  import { thumbnail } from "../../lib/frame-thumbs";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { cardCountdown, reasonBadge, reasonSentence } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
@@ -50,14 +51,10 @@
           <span class="title" title={item.title}>{item.title}</span>
         </span>
       {:else if frame && !failed}
-        <img
-          src={frame}
-          alt={item.title}
-          draggable="false"
-          loading="eager"
-          decoding="async"
-          onerror={() => (failedFrame = frame)}
-        />
+        <canvas
+          aria-label={item.title}
+          use:thumbnail={{ url: frame, width: 360, onmissing: () => (failedFrame = frame) }}
+        ></canvas>
       {:else}
         <span class="placeholder" aria-hidden="true"
           ><HostGlyph {host} {url} size={28} initial={false} /></span
@@ -120,7 +117,7 @@
     background: var(--color-fill);
   }
 
-  .frame img {
+  .frame canvas {
     display: block;
     inline-size: 100%;
     block-size: 100%;

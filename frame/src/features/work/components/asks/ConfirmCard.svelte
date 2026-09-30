@@ -3,6 +3,7 @@
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import HostGlyph from "../cards/HostGlyph.svelte";
+  import { thumbnail } from "../../lib/frame-thumbs";
   import AskReceipt from "./AskReceipt.svelte";
   import AskShell from "./AskShell.svelte";
   import { siteName, type ConfirmAsk } from "./asks";
@@ -80,7 +81,7 @@
           aria-label={m.work_ask_open_page()}
           disabled={!onopenpage}
           onclick={() => onopenpage?.()}
-          ><img src={ask.frame} alt="" draggable="false" decoding="async" /></button
+          ><canvas use:thumbnail={{ url: ask.frame, width: 360 }}></canvas></button
         >
       {/if}
       {#if ask.text}
@@ -158,7 +159,7 @@
     cursor: default;
   }
 
-  .page img {
+  .page canvas {
     display: block;
     inline-size: 100%;
     block-size: 100%;

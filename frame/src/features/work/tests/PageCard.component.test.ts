@@ -6,8 +6,6 @@ import PageCard from "../components/cards/PageCard.svelte";
 import type { CanvasItem } from "../lib/canvas-model";
 
 const GIF = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-const PNG =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 function card(frame: string | null): CanvasItem {
   return {
@@ -21,20 +19,21 @@ function card(frame: string | null): CanvasItem {
   };
 }
 
-test("a settled page shows its frame on first mount and follows it when it changes", async () => {
+test("a settled page draws its frame on first mount and follows it when it changes", async () => {
   await page.viewport(1200, 800);
-  const screen = await render(PageCard, { item: card(GIF), selected: false });
-  const frame = screen.container.querySelector<HTMLImageElement>(".frame img");
-  expect(frame?.getAttribute("src")).toBe(GIF);
-  expect(frame?.getAttribute("loading")).toBe("eager");
-  await screen.rerender({ item: card(PNG), selected: false });
-  expect(screen.container.querySelector<HTMLImageElement>(".frame img")?.getAttribute("src")).toBe(
-    PNG,
-  );
+  // Served files: a frame is drawn at its seen size, asked for by width.
+  const first = "/zephium-logo.png";
+  const second = "/zephium-logo.png?generation=2";
+  const screen = await render(PageCard, { item: card(first), selected: false });
+  const drawn = () => screen.container.querySelector<HTMLCanvasElement>(".frame canvas");
+  expect(screen.container.querySelector(".frame img")).toBeNull();
+  await expect.poll(() => drawn()?.width ?? 0).toBeGreaterThan(0);
+  await screen.rerender({ item: card(second), selected: false });
+  await expect.poll(() => drawn()?.width ?? 0).toBeGreaterThan(0);
   // Nothing recorded yet: the site's mark when the cache holds one, never a broken image,
   // a stock globe or an initial.
   await screen.rerender({ item: card(null), selected: false });
-  expect(screen.container.querySelector(".frame img")).toBeNull();
+  expect(screen.container.querySelector(".frame canvas")).toBeNull();
   expect(
     screen.container.querySelector(".placeholder [data-favicon] .favicon-fallback"),
   ).toBeNull();

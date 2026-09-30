@@ -2397,7 +2397,7 @@
       {:else if liftedElement?.reference.kind === "resource" && liftedItem?.media}
         {@const asset = liftedItem.media.asset}
         {@const image =
-          asset.kind === "image" ? mediaUrl(liftedItem.media.profile, asset.digest) : null}
+          asset.kind === "image" ? mediaUrl(liftedItem.media.profile, asset.digest, 1600) : null}
         <div class="lift-body lift-media">
           <LiftHeader
             kind={liftedItem.kind}

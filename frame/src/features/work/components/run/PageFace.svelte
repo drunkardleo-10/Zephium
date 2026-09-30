@@ -1,7 +1,5 @@
 <script lang="ts">
-  import { getContext } from "svelte";
   import HostGlyph from "../cards/HostGlyph.svelte";
-  import { canvasFar } from "../../lib/canvas-context";
   import { thumbnail } from "../../lib/frame-thumbs";
 
   /**
@@ -24,13 +22,9 @@
     live?: boolean;
   } = $props();
 
-  /** From far away a settled page draws a small copy of its frame; the live one stays itself. */
-  const scale = getContext<{ readonly far: boolean } | undefined>(canvasFar);
-  const small = $derived(!!scale?.far && !live);
-  /** A frame that failed to load, or came back one flat colour, is not shown. */
+  /** A frame that failed to load is not shown. */
   let failed = $state<string | null>(null);
-  let blank = $state<string | null>(null);
-  const shown = $derived(!!frame && failed !== frame && blank !== frame);
+  const shown = $derived(!!frame && failed !== frame);
   const site = $derived.by(() => {
     try {
       return new URL(url).hostname.replace(/^www\./u, "");
@@ -44,32 +38,6 @@
     const own = segments.filter(Boolean);
     return own.length > 1 ? own.slice(0, -1).join(" – ") : title.trim();
   });
-
-  /** One look at a 12×8 copy: a capture of a page that had not drawn yet is a single tone. */
-  function inspect(image: HTMLImageElement) {
-    const source = image.currentSrc || image.src;
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = 12;
-      canvas.height = 8;
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context) return;
-      context.drawImage(image, 0, 0, 12, 8);
-      const data = context.getImageData(0, 0, 12, 8).data;
-      let sum = 0;
-      let square = 0;
-      const count = data.length / 4;
-      for (let index = 0; index < data.length; index += 4) {
-        const tone = 0.2126 * data[index]! + 0.7152 * data[index + 1]! + 0.0722 * data[index + 2]!;
-        sum += tone;
-        square += tone * tone;
-      }
-      const mean = sum / count;
-      if (source && Math.sqrt(Math.max(0, square / count - mean * mean)) < 2.5) blank = frame;
-    } catch {
-      // A frame from another origin can't be read back; it is shown as it is.
-    }
-  }
 </script>
 
 <span class="window" class:live>
@@ -80,18 +48,13 @@
     {#if live}{#key frame}<span class="arrived" aria-hidden="true"></span>{/key}{/if}
   </span>
   <span class="view">
-    {#if shown && small}
-      <canvas class="thumb" use:thumbnail={{ url: frame!, width: 224 }}></canvas>
-    {:else if shown}
-      <img
-        src={frame}
-        alt=""
-        draggable="false"
-        decoding="async"
-        loading="lazy"
-        onload={(event) => inspect(event.currentTarget as HTMLImageElement)}
-        onerror={() => (failed = frame)}
-      />
+    <!-- Every frame, the live one too, is drawn into a canvas at the size it is seen:
+         an image element held its decoded pixels long after the work was left. -->
+    {#if shown}
+      <canvas
+        class="thumb"
+        use:thumbnail={{ url: frame!, width: 360, onmissing: () => (failed = frame) }}
+      ></canvas>
     {:else}
       <span class="face">
         <span class="sign"><HostGlyph {host} {url} size={28} initial={false} /></span>
@@ -200,15 +163,6 @@
     min-block-size: 0;
     overflow: hidden;
     background: var(--color-surface);
-  }
-
-  img {
-    display: block;
-    inline-size: 100%;
-    block-size: 100%;
-    object-fit: cover;
-    object-position: top;
-    pointer-events: none;
   }
 
   .thumb {

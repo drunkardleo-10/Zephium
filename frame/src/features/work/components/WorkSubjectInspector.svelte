@@ -58,7 +58,7 @@
   const host = $derived(homepage ? displayHost(homepage) : "");
   let shown = $state(0);
   const picture = $derived(pictures[Math.min(shown, Math.max(0, pictures.length - 1))]);
-  const pictureSource = $derived(picture ? mediaUrl(picture.profile, picture.digest) : null);
+  const pictureSource = $derived(picture ? mediaUrl(picture.profile, picture.digest, 1600) : null);
   const page = $derived(subjectPage(pages, homepage, detail.sources));
   const frameSource = $derived(
     page?.frame ? pageFrameUrl(page.attempt, page.step, page.frame.generation) : null,
@@ -144,7 +144,7 @@
                   aria-pressed={index === shown}
                   onclick={() => (shown = index)}
                 >
-                  <img src={mediaUrl(candidate.profile, candidate.digest)} alt="" />
+                  <img src={mediaUrl(candidate.profile, candidate.digest, 160)} alt="" />
                 </button>
               </li>
             {/each}
