@@ -14,6 +14,7 @@ mod download_files;
 mod download_files;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) mod downloads;
+mod element_picker;
 #[cfg(target_os = "macos")]
 mod extension_action;
 mod extension_browser_surface;
@@ -431,6 +432,8 @@ pub(crate) struct EngineHost {
     profile_persistence_classes: HashMap<ProfileId, ProfilePersistenceClass>,
     content_policies: HashMap<ProfileId, ProfileContentPolicy>,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    picker: Option<Arc<element_picker::PickerSession>>,
+    next_picker: u64,
     // Declarative native objects are content-addressed by the SHA-256 of the
     // exact encoded JSON. Weak entries let identical policy generations and
     // profiles share one compiled 10–30 MiB object without pinning stale

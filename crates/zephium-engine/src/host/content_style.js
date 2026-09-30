@@ -61,6 +61,7 @@
     const current = picker;
     picker = null;
     current.abort.abort();
+    clearTimeout(current.expiry);
     if (current.frame) cancelAnimationFrame(current.frame);
     current.cover.remove();
     clearStyle("preview");
@@ -128,6 +129,7 @@
       picker = { cover, box, abort, session, selected: null, selectedElement: null, hovered: null, frame: 0, point: null };
       if (typeof cover.showPopover === "function") cover.showPopover();
       const current = picker;
+      current.expiry = setTimeout(() => { if (picker === current) stopPicker(); }, 120000);
       function targetAt(x, y) {
         cover.style.pointerEvents = "none";
         const target = document.elementFromPoint(x, y);
@@ -183,6 +185,12 @@
     },
     apply: setStyle,
     startPicker,
+    beginEncoded: session => {
+      const result = create(null);
+      result.token = token; result.url = location.href;
+      result.active = startPicker(token, location.href, session);
+      return stringify(result);
+    },
     selection: (expectedToken, expectedUrl, session) => matches(expectedToken, expectedUrl) && picker?.session === session ? picker.selected : null,
     pickerEncoded: (expectedToken, expectedUrl, session) => {
       const result = create(null);

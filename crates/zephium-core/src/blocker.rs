@@ -116,8 +116,9 @@ pub enum BlockerCompileFailure {
 
 /// Content digest of the canonical source/configuration used for an artifact.
 ///
-/// It is safe to log for local diagnostics: it identifies public filter
-/// material and preferences, never a page URL or browsing decision.
+/// Public subscription digests identify filter material. Digests derived from
+/// personal selections or site preferences remain private and must not enter
+/// persisted diagnostics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentRuleDigest([u8; 32]);
 
@@ -1006,3 +1007,8 @@ mod tests {
         assert_ne!(artifact_digest(&first), artifact_digest(&second));
     }
 }
+
+mod picker;
+pub use picker::{
+    ElementPickerCompletion, ElementPickerRequest, ElementPickerResult, ElementSelection,
+};

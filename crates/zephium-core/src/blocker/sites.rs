@@ -252,6 +252,14 @@ impl BlockerSitePreferences {
                 }
             }
             SitePreferenceChange::AddHide(mut hide) => {
+                if let Some(existing) = self.0.hides.iter().find(|existing| {
+                    existing.site == hide.site && existing.selector == hide.selector
+                }) {
+                    return self.changed(SitePreferenceChange::SetHideEnabled {
+                        id: existing.id,
+                        enabled: true,
+                    });
+                }
                 hide.id = next.0.next_hide_id;
                 next.0.next_hide_id = next
                     .0

@@ -1517,6 +1517,21 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn element_picker(
+        &self,
+        profile: ProfileId,
+        id: ItemId,
+        site: zephium_core::blocker::BlockerSite,
+        request: zephium_core::blocker::ElementPickerRequest,
+        completion: zephium_core::blocker::ElementPickerCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                host.element_picker(profile, id, site, request, completion)
+            });
+        });
+    }
+
     fn set_blocker_site_preferences(
         &self,
         profile: ProfileId,

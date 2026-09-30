@@ -552,6 +552,17 @@ impl Drop for BlockerSiteCompletion {
 }
 
 pub trait Engine {
+    fn element_picker(
+        &self,
+        _profile: ProfileId,
+        _id: ItemId,
+        _site: crate::blocker::BlockerSite,
+        _request: crate::blocker::ElementPickerRequest,
+        completion: crate::blocker::ElementPickerCompletion,
+    ) {
+        completion.finish(None);
+    }
+
     fn set_blocker_site_preferences(
         &self,
         _profile: ProfileId,

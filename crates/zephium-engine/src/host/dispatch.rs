@@ -410,6 +410,8 @@ pub(crate) fn install(
             profile_persistence_classes: HashMap::new(),
             content_policies: HashMap::new(),
             blocker_sites: HashMap::new(),
+            picker: None,
+            next_picker: 0,
             declarative_content_policy_cache: HashMap::new(),
             declarative_content_policy_compilations: HashMap::new(),
             #[cfg(not(target_os = "windows"))]
