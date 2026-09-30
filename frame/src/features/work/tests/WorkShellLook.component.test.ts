@@ -98,9 +98,7 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
   await expect.element(screen.getByRole("searchbox", { name: "Search works" })).toBeVisible();
   await shoot("works");
   await userEvent.keyboard("{Escape}");
-  await screen.getByRole("button", { name: "Account" }).click();
-  await shoot("account");
-  await userEvent.keyboard("{Escape}");
+  expect(screen.container.querySelector('[aria-label="Account"]')).toBeNull();
   await screen.getByRole("button", { name: "Note", exact: true }).click();
   await expect.element(screen.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
   await shoot("note");

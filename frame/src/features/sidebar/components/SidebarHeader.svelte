@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import {
+    CheckListIcon,
     ArrowLeft02Icon,
     ArrowRight02Icon,
     EllipsisIcon,
@@ -12,6 +13,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { IS_MAC } from "$shared/platform";
   import IconButton from "$shared/ui/IconButton";
+  import * as tools from "$session/tools.svelte";
   import ModeTabs from "./ModeTabs.svelte";
   import WindowControls from "./WindowControls.svelte";
 
@@ -75,6 +77,14 @@
         buttonSize={26}
         onclick={() => void commands.runCommand("launcher.toggle")}
       />
+      <!-- Work's rail keeps the person's tasks a click away, opened beside the canvas. -->
+      {#if !pageControls}<IconButton
+          icon={CheckListIcon}
+          label={m.panel_tasks()}
+          size={15}
+          buttonSize={26}
+          onclick={() => tools.open("tasks")}
+        />{/if}
     </div>
     <span class="mt-[6px] mb-[7px] h-px w-[22px] rounded-full bg-border" aria-hidden="true"></span>
   </header>

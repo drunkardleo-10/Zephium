@@ -331,14 +331,14 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: photo-led pick cards, flight routes and, in the centre, the comparing sheet. Measured 253073 JS and 44165 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
   },
   "lazy:features/work/components/objects/Plan.svelte": {
-    "js": 173100,
+    "js": 173700,
     "css": 10500,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the plan's timeline with Make tasks. Measured 169606 JS and 9977 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3's canvas and object work in the shared Work graph: 172298 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 172775 JS measured."
+    "description": "One kind's renderer, fetched the first time the canvas shows one: the plan's timeline with Make tasks. Measured 169606 JS and 9977 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3's canvas and object work in the shared Work graph: 172298 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 172775 JS measured. Round 5: made tasks link to the Tasks panel: 173251 JS measured."
   },
   "lazy:features/work/components/objects/List.svelte": {
-    "js": 167500,
+    "js": 168100,
     "css": 9100,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the list with each item's source and Make tasks. Measured 164228 JS and 8588 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3 (works named from their first run, runs without invented parts, the request's local reads and exchange, the calm working state), with the concurrent streams in the tree: 166667 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 167144 JS measured."
+    "description": "One kind's renderer, fetched the first time the canvas shows one: the list with each item's source and Make tasks. Measured 164228 JS and 8588 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3 (works named from their first run, runs without invented parts, the request's local reads and exchange, the calm working state), with the concurrent streams in the tree: 166667 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 167144 JS measured. Round 5: made tasks link to the Tasks panel: 167620 JS measured."
   },
   "lazy:features/work/components/objects/Diagram.svelte": {
     "js": 232000,

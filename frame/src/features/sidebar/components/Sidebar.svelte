@@ -35,6 +35,15 @@
   // Work gives the window to its canvas: the column is always the rail there.
   let inWork = $derived(browserPage.currentPage() === "work");
   let railPage = $derived(taskPage || inWork);
+  // Entering Work gives the column back to the rail: a panel open in Browse closes.
+  let wasWork: boolean | undefined;
+  $effect(() => {
+    const now = inWork;
+    untrack(() => {
+      if (now && wasWork === false && tools.activeTool() !== null) tools.close();
+      wasWork = now;
+    });
+  });
   // Settings takes the column for its own navigation. Tasks and Notes are part
   // of browsing, so the column stays as the tab rail: a tab is one click away
   // and choosing it returns to that page.
