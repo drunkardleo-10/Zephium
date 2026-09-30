@@ -19,13 +19,20 @@ $longestGap = 0.0
 while ($true) {
     $owner.Refresh()
     if ($owner.HasExited) { throw 'QA exited during measurement.' }
-    $inventory = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
+    $inventory = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, CreationDate)
+    $births = @{}
+    foreach ($entry in $inventory) { $births[[int]$entry.ProcessId] = $entry.CreationDate }
     $ids = [Collections.Generic.HashSet[int]]::new()
     [void]$ids.Add($QaProcessId)
     do {
         $added = $false
         foreach ($entry in $inventory) {
-            if ($ids.Contains([int]$entry.ParentProcessId) -and $ids.Add([int]$entry.ProcessId)) { $added = $true }
+            $parentId = [int]$entry.ParentProcessId
+            # Parent IDs survive parent exit and can be reused by unrelated QA
+            # descendants. A real child cannot predate its current parent.
+            if ($ids.Contains($parentId) -and $null -ne $entry.CreationDate -and
+                $null -ne $births[$parentId] -and $entry.CreationDate -ge $births[$parentId] -and
+                $ids.Add([int]$entry.ProcessId)) { $added = $true }
         }
     } while ($added)
     $now = $clock.Elapsed.TotalSeconds
