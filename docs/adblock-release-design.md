@@ -1,7 +1,8 @@
 # Adblock release design
 
-Status: implementation in progress, 2026-09-30. The user selected Quick menu;
-implementation and native qualification remain separate completion gates.
+Status: implementation and macOS QA, 2026-09-30. The user selected Quick menu.
+Windows physical qualification and user QA remain release/merge gates. See
+[the Windows handoff](adblock-windows-qualification.md).
 
 ## Agreed scope
 
@@ -218,21 +219,25 @@ a shortcut for this adapter.
 
 - Native macOS 26.6.2 grouped top-document cosmetic artifact: 2,019,933
   bytes, 3.569 seconds cold compilation, successful native admission. This is
-  separate from the still-unoptimized network artifact.
+  an earlier corpus measurement; the current pair is measured below.
 - Current constructed-sheet helper passed a real WKWebView test under
   restrictive CSP: apply and undo succeed, stale token/generation and conflicting
   identity are rejected, unrelated page sheets remain present.
 - Site-control persistence, reconciliation, exact tab/site/revision admission,
   private memory-only routing, and navigation during selection-save have actor
   regression coverage. Picker preview/cancel and late-start cancellation have
-  WebKit component interaction coverage. These are not full-browser QA.
-- Native child-frame cosmetics and native subscription-sidecar installation are
-  still outstanding. Current live style delivery covers the top document.
+  WebKit component interaction coverage. Subsequent full-browser QA verified
+  blocking, generic-hide exceptions, picker preview/undo/save, reload persistence,
+  live Show/Remove, site pause/reload/resume and the real Privacy controls.
+- Native subscription sidecars and bounded child-frame adapters are implemented.
+  Actual Rust/macOS probes verified three same/cross-origin/nested frames under
+  restrictive CSP, live clearing and no page-world command bridge. HTTP(S) frames
+  are covered; about/srcdoc/opaque frames remain outside that lookup. Windows
+  Frame2/Frame7 paths cross-compile but require physical qualification.
 - Official HTTPS acquisition is now composed into desktop startup. An isolated
   live run fetched both September 30 lists, compiled their network artifact in
   2.187 seconds and cosmetic artifact in 2.620 seconds, activated the pair and
-  shut down cleanly. Desktop currently preflights the network artifact; the
-  native cosmetic sidecar integration remains outstanding.
+  shut down cleanly. Desktop preflight now chains both artifacts before activation.
 - Picker cleanup has a single two-minute expiry while open, plus navigation,
   explicit cancel, Escape and UI context teardown; it creates no idle polling.
 
@@ -282,3 +287,22 @@ rule. Personal inline overrides are bounded and reconciled only on explicit
 style changes, preview, or initial DOM readiness; subscription CSS never starts
 a DOM scan. Same-site navigation and native document-presentation changes
 invalidate a selection that is still awaiting persistence admission.
+
+### Final local qualification additions
+
+Initial disabled profiles now bypass the compiler queue just like enabled
+profiles' provisional policy. The startup change retains exact native settlement
+and worker retirement ordering; the application suite passes 329 tests.
+
+The isolated debug QA host spent 0.01 seconds of process CPU over a 109.74-second
+idle observation with protection enabled and Privacy settings open. RSS changed
+from 133,776 to 107,712 KiB. This is host-only, without a matched baseline or
+WebKit process-family attribution; it establishes neither an overall RAM saving
+nor a battery claim. Matcher-only release measurements and the remaining Windows
+measurement matrix are in the handoff.
+
+The repository coalition sampler also recorded a 20.013-second idle interval:
+12 processes, 362,276,632-byte peak physical footprint, 1.916 ms total CPU and
+5 package idle wakeups, with no disk I/O. This was the isolated debug browser
+with a local fixture and Settings, not an on/off comparison. Raw matcher and
+process-family results are retained in [the QA record](qa/adblock-2026-09-30.json).
