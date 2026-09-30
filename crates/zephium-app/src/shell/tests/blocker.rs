@@ -1528,6 +1528,98 @@ fn enabled_source_terminal_does_not_seal_the_allow_all_disable_path() {
 }
 
 #[test]
+fn restored_enabled_profile_browses_under_explicit_provisional_policy_while_preparing() {
+    let saved = Arc::new(FakeStore::default());
+    let (mut original, _, _) = setup_with(saved.clone());
+    original.handle(Command::Bootstrap);
+    original.persist();
+    let profile = original.windows.focused().unwrap().profile;
+
+    let (mut shell, engine, compiler, store, screen) = controlled_shell();
+    *store.saved.lock().unwrap() = saved.saved.lock().unwrap().clone();
+    *store.blocker_configs.lock().unwrap() = Some(vec![ProfileBlockerConfig {
+        profile,
+        revision: BlockerConfigRevision::INITIAL,
+        config: BlockerConfig { enabled: true },
+    }]);
+    shell.handle(Command::Bootstrap);
+    assert!(
+        compiler.requests.lock().unwrap().is_empty(),
+        "provisional policy must bypass compilation"
+    );
+    let BlockerProfileState::Installing {
+        desired: provisional,
+        ..
+    } = shell.blocker.profiles[&profile].state
+    else {
+        panic!("the provisional policy must await exact native installation");
+    };
+    let status = shell.focused_blocker_status_view();
+    assert_eq!(status.desired_enabled, Some(true));
+    assert_eq!(status.protection, BlockerProtection::Pending);
+
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: provisional,
+        settlement: ContentRuleSettlement::Applied {
+            generation: provisional,
+        },
+    }));
+    assert!(shell.blocker.native_policy_available(profile));
+    let (_, enabled, config) = compiler.request(0);
+    assert!(config.enabled);
+    assert!(enabled > provisional);
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Pending
+    );
+    shell.handle(Command::Navigate {
+        id: active_id(&screen),
+        input: "instant.example".into(),
+    });
+    assert!(
+        engine
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("create ") && call.contains("instant.example")),
+        "{:?}",
+        engine.calls()
+    );
+
+    // Compilation is not installation. Starting remains visible until the
+    // exact enabled generation settles, and a late provisional event is inert.
+    compiler.complete_next(enabled_rules());
+    shell.handle(Command::BlockerReady(profile));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Pending
+    );
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: provisional,
+        settlement: ContentRuleSettlement::Applied {
+            generation: provisional,
+        },
+    }));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Pending
+    );
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: enabled,
+        settlement: ContentRuleSettlement::Applied {
+            generation: enabled,
+        },
+    }));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+    assert!(shell.blocker.profiles[&profile].config.config.enabled);
+}
+
+#[test]
 fn first_view_waits_for_exact_native_allow_all_settlement() {
     let (mut shell, engine, compiler, _store, screen) = controlled_shell();
     shell.handle(Command::Bootstrap);

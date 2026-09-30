@@ -82,6 +82,9 @@ pub(super) struct BlockerProfile {
     pending_catalog_revision: Option<u64>,
     compiling_catalog: Option<CatalogCompileAttempt>,
     applied_catalog_revision: Option<u64>,
+    /// A locally constructed allow-all is being installed before the enabled
+    /// startup target. This never changes the durable preference.
+    startup_provisional: bool,
 }
 
 pub(super) struct RuntimePolicyObserver {
@@ -377,7 +380,11 @@ impl BlockerCoordinator {
         Some(ProfileContentPolicyStatus {
             profile,
             config_revision: entry.config.revision,
-            desired_config: entry.desired_config,
+            desired_config: if entry.startup_provisional {
+                entry.config.config
+            } else {
+                entry.desired_config
+            },
             applied_config: entry.applied_config,
             applied_coverage: entry.applied_coverage,
             state: entry.state,
@@ -455,6 +462,7 @@ impl BlockerCoordinator {
                     pending_catalog_revision: None,
                     compiling_catalog: None,
                     applied_catalog_revision: None,
+                    startup_provisional: false,
                 },
             );
         }
@@ -489,6 +497,7 @@ impl BlockerCoordinator {
                 pending_catalog_revision: None,
                 compiling_catalog: None,
                 applied_catalog_revision: None,
+                startup_provisional: false,
             },
         );
         true
@@ -505,7 +514,46 @@ impl BlockerCoordinator {
         if entry.state != BlockerProfileState::Uninitialized {
             return true;
         }
-        self.start_compile(profile, entry.config.config, callback)
+        let target = entry.config.config;
+        if !target.enabled {
+            return self.start_compile(profile, target, callback);
+        }
+
+        // Browsing must not wait for source parsing or native compilation.
+        // Deliver an explicit, allocation-small allow-all artifact locally,
+        // then use the ordinary exact native settlement before starting the
+        // enabled target. No compiler queue, JSON or native rule list is used.
+        let Some(generation) = self.allocate_generation() else {
+            return false;
+        };
+        let entry = self
+            .profiles
+            .get_mut(&profile)
+            .expect("profile was checked above");
+        entry.startup_provisional = true;
+        entry.desired_config = BlockerConfig { enabled: false };
+        entry.background_target = Some(target);
+        entry.state = BlockerProfileState::Compiling {
+            desired: generation,
+            retained: None,
+            retries_remaining: MAX_EXPLICIT_POLICY_RETRIES,
+        };
+        self.inbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .results
+            .insert(
+                profile,
+                PendingCompileResult {
+                    generation,
+                    outcome: BlockerCompileOutcome::Compiled(
+                        zephium_core::blocker::ContentRules::allow_all(
+                            ContentRuleDigest::from_bytes([0; 32]),
+                        ),
+                    ),
+                },
+            );
+        true
     }
 
     pub(super) fn start_compile(
@@ -540,6 +588,9 @@ impl BlockerCoordinator {
                 | BlockerProfileState::Retired
         ) {
             return false;
+        }
+        if let Some(entry) = self.profiles.get_mut(&profile) {
+            entry.startup_provisional = false;
         }
         let Some(generation) = self.allocate_generation() else {
             let Some(exhausted) = ContentPolicyGeneration::new(u64::MAX) else {
@@ -2612,6 +2663,7 @@ fn blocker_status_view(
             },
             ProfileContentPolicyState::Ready { .. } => match authoritative_applied {
                 Some((config, _)) if config.enabled => BlockerProtection::Active,
+                Some(_) if status.desired_config.enabled => BlockerProtection::Pending,
                 Some(_) => BlockerProtection::Disabled,
                 None => BlockerProtection::Unavailable,
             },
