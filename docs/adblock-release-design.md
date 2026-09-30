@@ -1,5 +1,10 @@
 # Adblock release design
 
+The native-cosmetic/frame portions below record the earlier design and experiments.
+They are superseded by the selective main-document implementation in [adblock.md](adblock.md).
+User testing found both Full and Top variants slower; these are historical results,
+not current implementation claims. Cookie-banner filtering remains deferred.
+
 Status: implementation and macOS QA, 2026-09-30. The user selected Quick menu.
 Windows physical qualification and user QA remain release/merge gates. See
 [the Windows handoff](adblock-windows-qualification.md).

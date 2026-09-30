@@ -9,7 +9,7 @@ callbacks. Do not merge, push, or alter release defaults without the user's
 existing authorization. User QA remains the merge gate.
 
 Implementations are in `platform/windows/content_filter.rs`,
-`platform/windows/frame_styles.rs`, shared `host/content_styles.rs`,
+shared `host/content_styles.rs`, `host/style_worker.rs`,
 `host/content_style.js`, and `host/element_picker.rs`. `zephium-app` owns durable
 site controls and private-session routing. Read [adblock.md](adblock.md) and
 [the design](adblock-release-design.md) before changing native boundaries.
@@ -37,12 +37,13 @@ cargo xtask check-blocker-seed
 
 From `desktop`, build the isolated QA identity with:
 
-```text
+```powershell
+$env:CARGO_PROFILE_DEV_OPT_LEVEL = "2"
 pnpm exec tauri build --debug --features adblock-qa --config tauri.protection-qa.conf.json
 ```
 
 It must identify as **Zephium Protection QA**, `app.zephium.protection-qa`.
-The QA feature is deliberately refused in optimized release builds; use the
+The QA feature requires an optimized debug build and is refused in release builds; use the
 normal release graph in a separately isolated measurement environment for
 performance qualification. Do not disable that guard to manufacture a QA release.
 New profiles currently default to off; enable from Utilities or Privacy settings.
@@ -50,7 +51,7 @@ New profiles currently default to off; enable from Utilities or Privacy settings
 Three existing Windows engine Clippy findings were observed during cross-check:
 `download_files_windows.rs` redundant boolean conversion and test-module ordering,
 and `downloads/platform_windows.rs` large error result. Verify on the exact SHA;
-they do not originate in the adblock frame adapter. Do not suppress new warnings
+they do not originate in the adblock style changes. Do not suppress new warnings
 under those existing failures.
 
 ## Required behavior
@@ -70,10 +71,10 @@ list. A script path such as `/ads/cbr.js` is present in the current network list
 3. Static hiding: generic/domain rules, exclusions, per-selector exceptions,
    `generichide`, dynamically added matching elements, CSP `script-src 'none'` /
    `style-src 'none'`, author important styles, and ordinary content remaining visible.
-4. Frames: same/cross-origin, nested, navigation and destruction, 64-frame bound,
-   stale asynchronous completions. Confirm Frame2/Frame7 support in admitted
-   runtimes. Record first-paint flash. About/srcdoc/opaque frames are explicitly
-   outside current HTTP(S) style lookup; never borrow the top site's scope.
+4. Frames: verify network filtering and main-document container hiding. Automatic
+   child-frame cosmetic delivery has been removed. Verify that inactive tabs do
+   not run generic discovery and that DOM mutation bursts stay bounded. Record
+   first-paint flash and input/frame timing on realistic pages.
 5. Picker: page click handlers never run for selected clicks; preview, undo,
    save, live Show/Hide, remove and restart persistence. Cancel with Escape,
    navigation, same-URL reload, tab close and menu teardown. Late results must

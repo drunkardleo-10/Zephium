@@ -77,8 +77,8 @@ triggers due work; the blocker adds no idle polling timer.
 
 Headers, titles, URLs, lengths, hashes, rule counts and suspicious shrinkage are
 validated. Both sources form one candidate. The worker prepares the policy,
-then macOS preflights both network and native cosmetic artifacts before durable
-activation. Windows prepares its frozen matcher before publication. Failed
+then macOS preflights the native network artifact before durable
+activation. Static cosmetic syntax and budgets are validated by the compiler. Windows prepares its frozen matcher before publication. Failed
 candidates leave the working policy installed. Current, previous and bundled
 source material provide recovery; current bytes are verified with a bounded
 streaming buffer. A 304 is accepted only for the exact verified retained bytes
@@ -93,43 +93,21 @@ checks bind those artifacts to the shipping graph (`release-bundle` plus
 
 ## macOS
 
-Network filtering uses digest-addressed `WKContentRuleList` artifacts, installed
-before navigation. Network exceptions remain in the same artifact as their
-blocks. A separate subscription cosmetic artifact contains native
-`css-display-none` rules for the top document, with selector exceptions,
-positive/negative domain scope and generic-hide controls resolved correctly.
-Personal edits never rebuild either subscription artifact.
+Network filtering uses digest-addressed `WKContentRuleList` artifacts installed
+before protected navigation. Network exceptions remain in the same artifact as
+their blocks. The previous blanket native cosmetic sidecar and child-frame
+stylesheet adapters have been removed after the interactive performance review.
 
-Native experiments established two relevant WebKit behaviors: attaching a
-cosmetic list after load does not apply it to the existing document; removing a
-preloaded list does not undo its CSS. Constructed stylesheets provide the live
-fallback and personal hide/undo. Documents loaded with the matching native
-cosmetic artifact skip parsing a duplicate subscription sheet. Pausing a site
-removes only Zephium's subscription registrations; an explicit reload is offered
-to undo native CSS and requests that already ran. Personal hides remain separate.
+Cosmetics now use the main-document selective pipeline described below. Personal
+hides remain independent from subscriptions. Pause removes subscription styles
+live; reload is still needed for requests/scripts that already ran.
 
-Native domain/frame predicates are not used to guess a child's destination
-scope. Child HTTP(S) documents use an isolated-world lifecycle handshake bound
-to the native view/frame, then host-initiated fixed script execution. Lookup
-uses that document's own origin and URL. The page world gets no browser command
-bridge. Same-origin, cross-origin and nested frames are supported, bounded to
-64 tracked frames per view and one delivery in flight per view. Opaque,
-`about:blank` and `srcdoc` frames are not currently qualified/covered by this
-HTTP(S) lookup; picker selection offers their outer container.
-
-Network and cosmetic compilation share the bounded native queue: one physical
-compile, at most two distinct active/queued jobs, at most 64 MiB of encoded
-artifacts, and a 60-second watchdog. Timeout never reuses a physical slot before
-its exact callback returns. Native cache collection removes only digest-shaped
-Zephium entries and protects installed, previous, queued and preflight policies.
-
-The canonical literal-host boundary optimization reduced the July-corpus cold
-network compile from **42.043 s to 2.311 s**. With the September pair, an isolated
-native run measured **2.187 s network + 2.620 s cosmetics**. These are compiler
-measurements, not end-to-end page-load guarantees. The native CI network budget
-is 15 seconds. Credential/trailing-dot URL-conversion edge cases observed in a
-CSS-document fixture predate the optimization and remain a qualification item;
-the rewrite preserves their existing behavior.
+Native network compilation retains its bounded queue: one physical compile,
+two distinct active/queued jobs, 64 MiB of encoded artifacts and a 60-second
+watchdog. Timeout never reuses a physical slot before the callback returns.
+The hostname-boundary optimization remains unchanged: the September corpus
+measured 2.187 seconds in the isolated native compile fixture. The old additional
+cosmetic compilation is no longer part of startup or update preflight.
 
 ## Windows
 
@@ -153,23 +131,38 @@ allows requests where an unknown-attribution exception could matter. It never
 substitutes the mutable top-level URL or invents third-party classification.
 The report records this coverage loss separately from resource-type losses.
 
-Document-created fixed scripts and constructed sheets provide static cosmetics
-and personal hides. Live updates use `ExecuteScript`, with exact document token,
-URL, navigation identity and policy generation. Frame2 lifecycle events and
-Frame7 nested-frame notifications drive per-document lookup. No CDP, WebMessage
-or host-object capability is enabled. The frame count and in-flight work are
-bounded as on macOS. Physical qualification must establish supported-runtime
-CSP behavior, frame timing and visible flash. Page-world styles are page-mutable;
-this is not a privileged boundary against hostile page removal.
+Document-created fixed scripts and constructed sheets provide main-document
+cosmetics and personal hides. Live updates use `ExecuteScript`, with exact
+document token, URL, navigation identity and policy generation. There are no
+adblock FrameCreated/Frame2/Frame7 handlers, CDP, WebMessage or host objects.
+Physical Windows qualification must still establish CSP behavior and rendering.
 
 ## Cosmetics, site controls and picker
 
-Static selectors are parsed/validated, with explicit rejection of procedural
-syntax. The compiler resolves hide exceptions, includes/excludes and
-`generichide`; it does not emit exception selectors as independent hide rules.
-Generic CSS is shared across unaffected documents. Subscription CSS relies on
-the browser's selector engine for new DOM elements, without continuous scans or
-mutation observers.
+Static selectors are parsed/validated, with procedural syntax rejected. The
+compiler uses adblock-rust's URL-specific resources, generic class/ID lookup,
+selector exceptions and generic-hide controls. For the current seed the initial
+CSS is about 25.8 KB. A shared 487 KB serialized class/ID lookup table travels to
+the main document once per policy/document; it does not become a blanket sheet.
+
+A bounded worker handles document lookup, hashing and script serialization.
+Completion returns through the existing main-thread dispatcher before native
+script evaluation. Heavy Rust preparation never runs on the UI thread.
+
+The document installs generic CSS only for observed classes/IDs. Mutation work
+is limited to added elements and id/class changes, with at most 256 queued roots,
+200 elements / 2 ms per idle batch, and 2,048 discovered selectors. Attribute
+changes inspect only that element. Quiet pages schedule no timer, hidden pages
+and pagehide disconnect observation, and there are no child-frame deliveries.
+Initial document discovery and visibility/BFCache restoration are bounded walks.
+Network filtering still applies to supported frame requests; main-page rules
+can hide frame containers. These budgets deliberately prefer partial cosmetics
+to excessive rendering work on pathological documents.
+
+Cache reads validate and compare network JSON one rule at a time rather than
+reconstructing/re-encoding the full object graph. Cold canonical serialization
+also avoids a second all-rules object vector. Personal rules never enter the
+subscription cache.
 
 Site scope is the exact canonical HTTP(S) host across schemes and ports;
 subdomains do not inherit a pause automatically. Durable pauses and personal
@@ -220,10 +213,9 @@ No test result claims Windows runtime, installer, battery or broad-web coverage.
 
 Use `cargo xtask check-blocker-seed` for exact bundled artifacts; blocker
 property/fuzz/fork-contract tests for compiler boundaries; and
-`synthetic_blocker_lab` for bounded matcher measurements. The native probe
-`macos-blocker-frames-probe` requires `native-isolation-probes` and is excluded
-from normal desktop builds. The `adblock-qa` desktop feature builds a separate,
-debug-only `app.zephium.protection-qa` application and data directory.
+`synthetic_blocker_lab` for bounded matcher measurements. The native child-frame probe was removed with that delivery path. The `adblock-qa` desktop feature builds a separate,
+debug-only `app.zephium.protection-qa` application and data directory. This
+feature rejects opt-level 0; use `CARGO_PROFILE_DEV_OPT_LEVEL=2` for QA builds.
 
 Before merge/release: run the [Windows qualification](adblock-windows-qualification.md),
 complete packaged endurance/process-family CPU/RAM/battery measurements, test

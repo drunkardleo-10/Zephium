@@ -56,6 +56,9 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         Err(error) => return Err(Box::new(error)),
     };
     let adblock_qa = env::var_os("CARGO_FEATURE_ADBLOCK_QA").is_some();
+    if adblock_qa && env::var("OPT_LEVEL").as_deref() == Ok("0") {
+        return Err("protection QA must be optimized: set CARGO_PROFILE_DEV_OPT_LEVEL=2".into());
+    }
     let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
     let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
