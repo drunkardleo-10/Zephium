@@ -416,6 +416,7 @@ pub(crate) fn install(
             content_rule_preflight: None,
             #[cfg(not(target_os = "windows"))]
             preflight_cache_digests: Default::default(),
+            blocker_statistics: HashMap::new(),
             blocker_sites: HashMap::new(),
             picker: None,
             next_picker: 0,

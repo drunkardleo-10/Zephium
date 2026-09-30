@@ -203,6 +203,7 @@ pub(crate) fn install_scoped_on_view(
     let callback_policy = policy.clone();
     let callback_environment = environment.clone();
     let paused = pause.signal();
+    let statistics = pause.statistics().cloned();
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
         run_web_resource_callback_fail_open(|| {
             if paused.load(std::sync::atomic::Ordering::Relaxed) {
@@ -232,7 +233,10 @@ pub(crate) fn install_scoped_on_view(
             }) else {
                 return Ok(());
             };
-            let _ = unsafe { args.SetResponse(&response) };
+            crate::platform::content_pause::record_installed_block(
+                statistics.as_ref(),
+                unsafe { args.SetResponse(&response) }.is_ok(),
+            );
             Ok(())
         })
     }));

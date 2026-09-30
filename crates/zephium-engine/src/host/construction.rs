@@ -592,6 +592,9 @@ impl EngineHost {
             .or_default()
             .clone();
         let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        if let Some(counter) = self.blocker_statistics.get(&partition.profile()) {
+            site_scope.pause.set_statistics(counter.clone());
+        }
         let load_site_scope = site_scope.clone();
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();

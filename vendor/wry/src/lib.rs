@@ -2982,6 +2982,20 @@ impl WebViewExtDarwin for WebView {
 /// Additional methods on `WebView` that are specific to macOS.
 #[cfg(target_os = "macos")]
 pub trait WebViewExtMacOS {
+  /// Observes only the exact host-owned subscription rule list. Returns false
+  /// if the optional private WebKit action class/getter is unavailable.
+  fn set_content_block_counter(
+    &self,
+    identifier: &str,
+    aggregate: std::sync::Arc<(
+      std::sync::atomic::AtomicU64,
+      std::sync::atomic::AtomicBool,
+      std::sync::atomic::AtomicBool,
+    )>,
+  ) -> bool;
+  /// Transfers the plain per-view counter without inspecting request metadata.
+  fn collect_content_block_counter(&self, reset: bool);
+
   /// Returns WKWebView handle
   fn webview(&self) -> Retained<WryWebView>;
   /// Returns WKWebView manager [(userContentController)](https://developer.apple.com/documentation/webkit/wkscriptmessagehandler/1396222-usercontentcontroller) handle
@@ -3013,6 +3027,78 @@ pub trait WebViewExtMacOS {
 
 #[cfg(target_os = "macos")]
 impl WebViewExtMacOS for WebView {
+  fn set_content_block_counter(
+    &self,
+    identifier: &str,
+    aggregate: std::sync::Arc<(
+      std::sync::atomic::AtomicU64,
+      std::sync::atomic::AtomicBool,
+      std::sync::atomic::AtomicBool,
+    )>,
+  ) -> bool {
+    use objc2::{msg_send, sel, DefinedClass};
+    let Some(class) = objc2::runtime::AnyClass::get(c"_WKContentRuleListAction") else {
+      aggregate
+        .2
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+      return false;
+    };
+    let available: bool =
+      unsafe { msg_send![class, instancesRespondToSelector: sel!(blockedLoad)] };
+    if !available {
+      aggregate
+        .2
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+      return false;
+    }
+    let mut slot = self
+      .webview
+      .navigation_policy_delegate
+      .ivars()
+      .blocked_loads
+      .borrow_mut();
+    let identifier = objc2_foundation::NSString::from_str(identifier);
+    if slot.as_ref().is_some_and(|c| {
+      c.identifier.isEqualToString(&identifier) && std::sync::Arc::ptr_eq(&c.aggregate, &aggregate)
+    }) {
+      return true;
+    }
+    let previous_identifier = slot
+      .as_ref()
+      .filter(|c| std::sync::Arc::ptr_eq(&c.aggregate, &aggregate))
+      .map(|c| c.identifier.clone());
+    *slot = Some(crate::wkwebview::BlockedLoadCounter {
+      identifier,
+      previous_identifier,
+      count: Default::default(),
+      aggregate,
+    });
+    drop(slot);
+    // WebKit caches optional delegate capabilities when this property is set.
+    unsafe {
+      self
+        .webview
+        .webview
+        .setNavigationDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
+          &*self.webview.navigation_policy_delegate,
+        )));
+    }
+    true
+  }
+  fn collect_content_block_counter(&self, reset: bool) {
+    use objc2::DefinedClass;
+    if let Some(counter) = self
+      .webview
+      .navigation_policy_delegate
+      .ivars()
+      .blocked_loads
+      .borrow()
+      .as_ref()
+    {
+      counter.flush(reset);
+    }
+  }
+
   fn webview(&self) -> Retained<WryWebView> {
     self.webview.webview.clone()
   }

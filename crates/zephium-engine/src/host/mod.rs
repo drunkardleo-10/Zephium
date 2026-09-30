@@ -2,6 +2,7 @@
 mod agent_context;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
 mod agent_cookie_source;
+mod blocker_statistics;
 mod construction;
 mod content_rules;
 mod content_styles;
@@ -441,6 +442,7 @@ pub(crate) struct EngineHost {
     )>,
     #[cfg(not(target_os = "windows"))]
     preflight_cache_digests: std::collections::VecDeque<[u8; 32]>,
+    blocker_statistics: HashMap<ProfileId, zephium_core::blocker::BlockedLoadCounter>,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
     picker: Option<Arc<element_picker::PickerSession>>,
     next_picker: u64,

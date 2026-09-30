@@ -583,6 +583,21 @@ impl Drop for ContentRuleValidationCompletion {
 }
 
 pub trait Engine {
+    fn set_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _counter: crate::blocker::BlockedLoadCounter,
+    ) {
+    }
+    fn collect_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _reset: bool,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
+        done();
+    }
+
     fn validate_content_rules(
         &self,
         _rules: Arc<ContentRules>,

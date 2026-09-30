@@ -17,6 +17,7 @@ pub(crate) struct ContentPause(Rc<Inner>);
 #[derive(Default)]
 struct Inner {
     paused: Arc<AtomicBool>,
+    statistics: std::cell::OnceCell<zephium_core::blocker::BlockedLoadCounter>,
     callbacks: RefCell<Vec<ApplyPause>>,
 }
 
@@ -28,6 +29,13 @@ pub(crate) struct PauseRegistration {
 }
 
 impl ContentPause {
+    pub(crate) fn set_statistics(&self, counter: zephium_core::blocker::BlockedLoadCounter) {
+        let _ = self.0.statistics.set(counter);
+    }
+    pub(crate) fn statistics(&self) -> Option<&zephium_core::blocker::BlockedLoadCounter> {
+        self.0.statistics.get()
+    }
+
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn signal(&self) -> Arc<AtomicBool> {
         self.0.paused.clone()
@@ -85,9 +93,32 @@ impl Drop for PauseRegistration {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn record_installed_block(
+    counter: Option<&zephium_core::blocker::BlockedLoadCounter>,
+    installed: bool,
+) {
+    if installed {
+        if let Some(counter) = counter {
+            counter.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_block_delivery_counts_only_success_in_the_owning_profile() {
+        let first: zephium_core::blocker::BlockedLoadCounter = Arc::default();
+        let second: zephium_core::blocker::BlockedLoadCounter = Arc::default();
+        record_installed_block(Some(&first), false);
+        record_installed_block(None, true);
+        assert_eq!(first.0.load(Ordering::Relaxed), 0);
+        record_installed_block(Some(&first), true);
+        assert_eq!(first.0.load(Ordering::Relaxed), 1);
+        assert_eq!(second.0.load(Ordering::Relaxed), 0);
+    }
     #[test]
     fn overlapping_cohorts_share_pause_and_retired_callbacks_disappear() {
         let pause = ContentPause::default();

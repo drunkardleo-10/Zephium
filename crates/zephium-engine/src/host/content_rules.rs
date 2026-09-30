@@ -1394,6 +1394,7 @@ impl EngineHost {
     pub(super) fn retire_content_policy(&mut self, profile: ProfileId) {
         self.content_policies.remove(&profile);
         self.blocker_sites.remove(&profile);
+        self.blocker_statistics.remove(&profile);
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }

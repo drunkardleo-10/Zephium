@@ -152,6 +152,9 @@ pub(crate) fn install_scoped_on_view(
     else {
         return Ok(ContentPolicyRegistration::allow_all());
     };
+    if let Some(counter) = pause.statistics() {
+        let _ = view.set_content_block_counter(identifier, counter.clone());
+    }
     if unsafe { list.identifier() }.to_string() != identifier.as_ref() {
         return Err(ContentRuleApplyFailure::NativeInstallation);
     }

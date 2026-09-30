@@ -1518,6 +1518,29 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn set_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        counter: zephium_core::blocker::BlockedLoadCounter,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_blocker_statistics(profile, counter));
+        });
+    }
+    fn collect_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        reset: bool,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                host.collect_blocker_statistics(profile, reset);
+                done();
+            });
+        });
+    }
+
     fn validate_content_rules(
         &self,
         rules: Arc<ContentRules>,
