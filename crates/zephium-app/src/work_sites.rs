@@ -385,8 +385,9 @@ impl RunSites {
             edits: Vec::new(),
         }
     }
-    /// A page task on the site reads what anyone sees there: it opens
-    /// without the person's session and asks nothing. Undone by `personal`.
+    /// A page task on the site reads what anyone sees there: it never asks,
+    /// and where the person is signed in it opens without their session.
+    /// Undone by `personal`.
     pub fn public(&mut self, site: &str) {
         if !self.public.iter().any(|known| known == site) {
             self.public.push(site.to_owned());
@@ -450,13 +451,12 @@ impl RunSites {
             None if is_sensitive(site) => return Entry::Private(PrivateBecause::Sensitive),
             _ => {}
         }
-        if self.public.iter().any(|known| known == site) {
-            return Entry::Private(PrivateBecause::Public);
-        }
-        if present {
-            Entry::Ask
-        } else {
-            Entry::Session(self.yours(site))
+        match (present, self.public.iter().any(|known| known == site)) {
+            // A public read where the person is signed in stays out of their
+            // session rather than asking to use it.
+            (true, true) => Entry::Private(PrivateBecause::Public),
+            (true, false) => Entry::Ask,
+            (false, _) => Entry::Session(self.yours(site)),
         }
     }
     /// Records the person's answer; Always also needs the standing write.
@@ -611,6 +611,11 @@ mod tests {
             run.entry("lego.com", true),
             Entry::Private(PrivateBecause::Public)
         );
+        run.public("kayak.com");
+        assert!(matches!(
+            run.entry("kayak.com", false),
+            Entry::Session(SiteSession::Yours { .. })
+        ));
         assert!(matches!(
             run.entry("notion.so", true),
             Entry::Session(SiteSession::Yours { .. })
@@ -628,6 +633,7 @@ mod tests {
             [
                 ("figma.com".to_owned(), "private"),
                 ("fresh.com".to_owned(), "yours"),
+                ("kayak.com".to_owned(), "yours"),
                 ("notion.so".to_owned(), "yours"),
                 ("slack.com".to_owned(), "yours"),
             ]
