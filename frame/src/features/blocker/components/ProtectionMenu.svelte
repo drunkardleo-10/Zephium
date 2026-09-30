@@ -1,161 +1,199 @@
 <script lang="ts">
-  import { Shield01Icon } from "@hugeicons/core-free-icons";
-  import { blocker, blockerSites, shieldPresentation } from "$domain/blocker";
-  import { commands } from "$shared/ipc/bindings";
+  import { ArrowRight01Icon, Cancel01Icon, Shield01Icon } from "@hugeicons/core-free-icons";
+  import { blocker, blockerSites, hiding, shieldPresentation } from "$domain/blocker";
   import type { BlockerSiteAction } from "$shared/ipc/bindings";
+  import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
-  import ElementPickerControls from "./ElementPickerControls.svelte";
+  import Switch from "$shared/ui/Switch";
 
   let { labelled = false }: { labelled?: boolean } = $props();
   let status = $derived(blocker.status());
   let shield = $derived(shieldPresentation(status));
   let site = $derived(status.site);
-  let saving = $state(false);
+  let on = $derived(status.applied_enabled === true);
+  let busy = $state(false);
   let managing = $state(false);
-  let feedback = $state("");
-  let reloadSuggested = $state(false);
+  let failure = $state("");
   let contextKey = $derived(
     site ? `${site.context.profile}:${site.context.tab}:${site.context.site}` : "",
   );
   $effect(() => {
     void contextKey;
-    feedback = "";
-    reloadSuggested = false;
+    failure = "";
     managing = false;
   });
 
-  async function enable() {
-    if (saving) return;
-    saving = true;
+  let title = $derived(
+    status.protection === "disabled"
+      ? "Protection is off"
+      : status.protection === "pending"
+        ? "Starting protection…"
+        : status.protection === "degraded"
+          ? "Protection needs attention"
+          : site?.paused
+            ? "Paused on this site"
+            : "Protected",
+  );
+
+  function ok(result: blocker.BlockerMutationResult) {
+    return (
+      result.state === "processed" &&
+      (result.disposition.outcome === "applied" || result.disposition.outcome === "no_op")
+    );
+  }
+
+  // The context's revision moves with every change, so each step reads it fresh.
+  async function change(action: BlockerSiteAction): Promise<boolean> {
+    const context = blocker.status().site?.context;
+    if (!context) return false;
+    const done = ok(await blockerSites.changeSite(context, action));
+    if (!done) failure = "That didn't go through. Try again.";
+    return done;
+  }
+
+  async function run(task: () => Promise<void>) {
+    if (busy) return;
+    busy = true;
+    failure = "";
     try {
-      const result = await blocker.setEnabled(true);
-      feedback =
-        result.state === "processed" && ["applied", "no_op"].includes(result.disposition.outcome)
-          ? "Protection enabled."
-          : result.state === "pending"
-            ? "Protection starting… You can keep browsing."
-            : "Could not enable protection. Try again from Privacy settings.";
+      await task();
     } finally {
-      saving = false;
+      busy = false;
     }
   }
 
-  async function change(action: BlockerSiteAction) {
-    if (!site || saving) return;
-    const context = site.context;
-    const key = contextKey;
-    saving = true;
-    feedback = "";
-    try {
-      const result = await blockerSites.changeSite(context, action);
-      if (key !== contextKey) return;
-      if (
-        result.state === "processed" &&
-        (result.disposition.outcome === "applied" || result.disposition.outcome === "no_op")
-      ) {
-        feedback =
-          action.kind === "pause" ? "Saved. Reload to apply to requests already made." : "Saved.";
-        reloadSuggested = action.kind === "pause";
-      } else {
-        feedback = "Could not confirm this change. Check the current setting or try again.";
-      }
-    } finally {
-      saving = false;
-    }
+  // Requests the page already made stay made; reloading is what makes the
+  // switch mean what it says, so it happens here rather than as advice.
+  const setProtected = (protect: boolean) =>
+    run(async () => {
+      const tab = site?.context.tab;
+      if ((await change({ kind: "pause", paused: !protect })) && tab) void commands.tabsReload(tab);
+    });
+
+  const enable = () =>
+    run(async () => {
+      if (!ok(await blocker.setEnabled(true))) failure = "Protection couldn't start. Try again.";
+    });
+
+  const showAgain = (ids: string[]) =>
+    run(async () => {
+      for (const id of ids) if (!(await change({ kind: "remove_hide", id }))) return;
+    });
+
+  async function hide() {
+    if (site && !(await hiding.start(site.context)))
+      failure = "Elements can't be hidden on this page.";
   }
 </script>
 
 {#if shield.visible && labelled}
-  <div class="protection" data-keep-open>
-    <div class="standing" class:warning={shield.tone === "warning"} role="status">
-      <Icon icon={Shield01Icon} size={15} />
+  <div class="protection">
+    <div class="head" data-keep-open>
       <span
-        >{site?.paused && status.applied_enabled === true
-          ? "Paused on this site"
-          : shield.label}</span
+        class="glyph"
+        class:quiet={!on || site?.paused}
+        class:warning={shield.tone === "warning"}><Icon icon={Shield01Icon} size={16} /></span
       >
+      <span class="text">
+        <span class="title">{title}</span>
+        {#if site}<span class="site" title={site.context.site}
+            >{site.context.site}{site.private_session ? " · private" : ""}</span
+          >{/if}
+      </span>
+      {#if on && site?.ready}
+        <Switch
+          label="Protection on this site"
+          labelHidden
+          checked={!site.paused}
+          disabled={busy || site.busy}
+          onchange={(value) => void setProtected(value)}
+        />
+      {/if}
     </div>
+
     {#if status.desired_enabled !== true}
       <button
         type="button"
         role="menuitem"
-        class="ui-menu-item action"
-        disabled={saving || !status.can_enable || status.preference !== "authoritative"}
-        onclick={() => void enable()}>Enable protection</button
+        class="ui-menu-item row"
+        data-keep-open
+        disabled={busy || !status.can_enable || status.preference !== "authoritative"}
+        onclick={() => void enable()}>Turn on protection</button
       >
     {/if}
-    {#if site}
-      <p class="site" title={site.context.site}>{site.context.site}</p>
-      {#if site.private_session}<p class="hint">For this private session</p>{/if}
+
+    {#if site && on}
       {#if site.ready}
         <button
-          class="ui-menu-item action"
           type="button"
           role="menuitem"
-          disabled={saving || site.busy || status.applied_enabled !== true}
-          onclick={() => void change({ kind: "pause", paused: !site.paused })}
+          class="ui-menu-item row"
+          disabled={busy || site.busy}
+          onclick={() => void hide()}
         >
-          {saving || site.busy
-            ? "Saving…"
-            : site.paused
-              ? "Resume on this site"
-              : "Pause on this site"}
+          <span>Hide elements</span>
         </button>
       {:else}
         <button
-          class="ui-menu-item action"
           type="button"
           role="menuitem"
-          disabled={saving || site.busy}
-          onclick={() => void change({ kind: "retry" })}>Retry site controls</button
+          class="ui-menu-item row"
+          data-keep-open
+          disabled={busy || site.busy}
+          onclick={() => void run(async () => void (await change({ kind: "retry" })))}
+          >Retry site controls</button
         >
       {/if}
-      <ElementPickerControls context={site.context} disabled={!site.ready || site.busy || saving} />
       {#if site.hides.length > 0}
         <button
-          class="ui-menu-item action"
           type="button"
           role="menuitem"
+          class="ui-menu-item row"
+          data-keep-open
           aria-expanded={managing}
-          onclick={() => (managing = !managing)}>Hidden elements · {site.hides.length}</button
+          onclick={() => (managing = !managing)}
         >
+          <span>Hidden on this site</span>
+          <span class="count">{site.hides.length}</span>
+          <span class="chevron" class:open={managing}
+            ><Icon icon={ArrowRight01Icon} size={14} /></span
+          >
+        </button>
         {#if managing}
-          <div class="hides">
+          <ul class="hides" data-keep-open>
             {#each site.hides as hide (hide.id)}
-              <div class="hide-row">
-                <span class="hide-label" title={hide.label}>{hide.label}</span>
+              <li>
+                <span class="label" title={hide.label}>{hide.label}</span>
                 <button
                   type="button"
-                  role="menuitem"
-                  disabled={saving || site.busy}
-                  onclick={() =>
-                    void change({ kind: "set_hide_enabled", id: hide.id, enabled: !hide.enabled })}
-                  >{hide.enabled ? "Show" : "Hide"}</button
+                  class="restore"
+                  title="Show again"
+                  aria-label={`Show ${hide.label} again`}
+                  disabled={busy || site.busy}
+                  onclick={() => void showAgain([hide.id])}
+                  ><Icon icon={Cancel01Icon} size={12} /></button
                 >
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-label={`Remove ${hide.label}`}
-                  disabled={saving || site.busy}
-                  onclick={() => void change({ kind: "remove_hide", id: hide.id })}>Remove</button
-                >
-              </div>
+              </li>
             {/each}
-          </div>
+            {#if site.hides.length > 1}
+              <li>
+                <button
+                  type="button"
+                  class="all"
+                  disabled={busy || site.busy}
+                  onclick={() => void showAgain(site?.hides.map((hide) => hide.id) ?? [])}
+                  >Show all</button
+                >
+              </li>
+            {/if}
+          </ul>
         {/if}
       {/if}
-      {#if reloadSuggested}<button
-          class="ui-menu-item action"
-          type="button"
-          role="menuitem"
-          onclick={() => {
-            if (site) void commands.tabsReload(site.context.tab);
-          }}>Reload page</button
-        >{/if}
-    {:else}
-      <p class="hint">Site controls are available on web pages.</p>
+    {:else if !site && on}
+      <p class="hint">Site controls work on web pages.</p>
     {/if}
-    {#if feedback}<p class="hint" role="status">{feedback}</p>{/if}
+
+    {#if failure}<p class="hint failure" role="status">{failure}</p>{/if}
   </div>
 {:else if shield.visible}
   <span
@@ -169,86 +207,165 @@
 
 <style>
   .protection {
+    display: flex;
+    flex-direction: column;
     min-inline-size: 0;
-    padding: 4px;
+    padding-block-end: 4px;
+    border-block-end: 0.5px solid var(--color-border);
   }
 
-  .standing {
+  .head {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 4px;
-    color: var(--color-text);
-    font-size: var(--text-body);
+    gap: 10px;
+    padding: 6px var(--menu-item-inset) 8px;
   }
 
-  .warning {
+  .glyph {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-inset);
+    background: color-mix(in srgb, var(--color-success) 16%, transparent);
+    color: var(--color-success);
+  }
+
+  .glyph.quiet {
+    background: var(--row-active);
+    color: var(--color-muted);
+  }
+
+  .glyph.warning {
+    background: color-mix(in srgb, var(--color-warning) 16%, transparent);
     color: var(--color-warning);
+  }
+
+  .text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-inline-size: 0;
+  }
+
+  .title {
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 500;
+    line-height: 18px;
   }
 
   .site {
     overflow: hidden;
-    max-inline-size: 220px;
-    padding: 0 4px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--color-muted);
-    font-size: var(--text-body);
-  }
-
-  .hint {
-    max-inline-size: 220px;
-    margin: 4px;
     color: var(--color-muted);
     font-size: var(--text-caption);
+    line-height: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .action {
+  .row {
     inline-size: 100%;
     border: 0;
     background: transparent;
-    text-align: start;
     font: inherit;
-    font-size: var(--text-body);
+    text-align: start;
   }
 
-  .action:hover,
-  .action:focus-visible {
+  .row:disabled {
+    opacity: 0.45;
+  }
+
+  .row:focus-visible,
+  .row:hover:not(:disabled) {
     background: var(--row-active);
   }
 
-  button:disabled {
-    opacity: 0.5;
+  .count {
+    margin-inline-start: auto;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chevron {
+    display: grid;
+    color: var(--color-faint);
+    transition: rotate var(--motion-fast) var(--ease-out);
+  }
+
+  .chevron.open {
+    rotate: 90deg;
   }
 
   .hides {
-    max-block-size: 180px;
+    max-block-size: 184px;
+    margin: 0 0 2px;
+    padding: 0 0 0 calc(var(--menu-item-inset) + 8px);
     overflow: auto;
+    list-style: none;
   }
 
-  .hide-row {
+  .hides li {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 4px;
+    gap: 6px;
+    min-block-size: 28px;
+    padding-inline-end: 4px;
   }
 
-  .hide-label {
+  .label {
     flex: 1;
     min-inline-size: 0;
     overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-caption);
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .restore {
+    display: grid;
+    flex: none;
+    place-items: center;
+    inline-size: 22px;
+    block-size: 22px;
+    border: 0;
+    border-radius: var(--radius-inset);
+    background: transparent;
+    color: var(--color-faint);
+    cursor: default;
+  }
+
+  .restore:hover:not(:disabled) {
+    background: var(--row-hover);
+    color: var(--color-text);
+  }
+
+  .all {
+    padding: 2px 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-caption);
+    cursor: default;
+  }
+
+  .all:hover:not(:disabled) {
+    color: var(--color-text);
+  }
+
+  .hint {
+    max-inline-size: 240px;
+    margin: 2px var(--menu-item-inset) 4px;
+    color: var(--color-muted);
     font-size: var(--text-caption);
   }
 
-  .hide-row button {
-    border: 0;
-    border-radius: var(--radius-inset);
-    padding: 4px;
-    background: var(--row-hover);
-    color: var(--color-text);
-    font-size: var(--text-caption);
+  .failure {
+    color: var(--color-warning);
   }
 
   .compact {
@@ -257,5 +374,9 @@
     inline-size: 20px;
     block-size: 20px;
     color: var(--color-faint);
+  }
+
+  .compact.warning {
+    color: var(--color-warning);
   }
 </style>

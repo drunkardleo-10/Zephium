@@ -24,7 +24,7 @@
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
   import { blocker } from "$domain/blocker";
-  import { BlockerShield } from "$features/blocker";
+  import { BlockerShield, HidingBar } from "$features/blocker";
 
   import { preview } from "$features/settings";
   import { onMount } from "svelte";
@@ -195,6 +195,7 @@
             </UtilityTray>
           {/snippet}
         </AddressField>
+        <HidingBar />
         {#if tabs.profile()?.id}<DownloadStatus
             profile={tabs.profile()!.id}
             onopen={() => toolHost.open("downloads")}
