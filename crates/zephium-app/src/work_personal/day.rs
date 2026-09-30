@@ -280,7 +280,7 @@ pub(crate) async fn day_sources(
                 "name": app.name,
                 "part": {
                     "title": app.name, "helper": "browser", "service": app.host,
-                    "brief": format!("Start at https://{}/ as it is: the app opens on the view to read from. Read from its lists; open an item only when its row lacks what the plan needs.", app.host)
+                    "brief": format!("Browse https://{}/ as it is, with mine and view set: the app opens on the view to read from and its rows come back at once. Open an item only when its row lacks what the plan needs.", app.host)
                 },
                 "read": app.read
             }),
