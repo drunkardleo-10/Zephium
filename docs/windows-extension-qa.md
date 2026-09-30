@@ -15,6 +15,11 @@ The binary, `revision.txt` and `build-profile.txt` live in `target\webext-qa`.
 Data stays in `%APPDATA%\app.zephium.webext-qa`; normal profiles are not imported.
 Execution policy changes only for the invoked PowerShell process.
 
+For repeatable checks without changing the usual QA session, append
+`-Session memory-review-20260930`. This QA-only option uses
+`qa-sessions\session-memory-review-20260930` beneath that same isolated root.
+Close QA before changing sessions; omit `-Session` to return to the usual data.
+
 If a packaged development tool reports that a WebView2 generation escaped its
 runtime root, use ordinary PowerShell or open the verified binary in File Explorer.
 Packaged-parent AppData redirection can cause that mismatch. Keep the startup
@@ -32,6 +37,11 @@ authentication callback URLs. Use disposable accounts for credential tests.
 2. On an ordinary webpage, open Utilities and the action. Check title/icon/badge,
    anchoring and close/reopen. Rapidly switch tabs, then open it again: state and
    target must belong to the current tab. Internal pages intentionally omit tiles.
+   Check the borderless popup with Bitwarden, 1Password, Dark Reader and Grammarly
+   at 100% and 150% display scaling: short/tall content, no initial white flash,
+   placement near the screen edge, and keyboard focus. Dismiss with Esc, outside
+   click, the same action button, tab switch/navigation, and browser move/resize/
+   minimize. A second-monitor check remains separate from single-monitor scaling.
 3. Check account workflows separately: Grammarly login and persistence after
    restart; 1Password setup, sign-in, fill, repeat click and extension-tab restore;
    Bitwarden sign-in, fill, and its right-click submenu on a login field.
@@ -54,6 +64,11 @@ The keyed fixture at `crates/zephium-webext-windows/fixtures/storage` can be
 installed via **Install from file > Unpacked folder**. Save its value, switch
 All -> Specific -> All, restart and recheck without account data. Remove test
 fixtures when finished.
+
+The `fixtures/popup` folder provides short/tall content and `window.close()`
+buttons without account data. It shares the storage fixture's public test key:
+use only one of those fixtures in a session. It must not be enabled in the
+three-extension memory comparison.
 
 ## Performance checks
 

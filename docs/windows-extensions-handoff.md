@@ -37,12 +37,20 @@ profile data to work around it. See [the QA checklist](windows-extension-qa.md).
   and active-tab raster; unchanged refreshes avoid worker messages and decoding.
   Updates are event-driven, with drift repair on the existing maintenance
   heartbeat, not a new polling timer.
-- Anchored native popups with a small popup-only active-tab query binding.
+- Owned, borderless native popups with a small popup-only active-tab query binding.
+  Content is measured before first reveal, then observed for resizing within
+  25×25–800×600 CSS pixels. Placement respects DPI and the monitor work area.
+  Native deactivation/Esc, owner movement/resizing, bound-tab changes, repeat
+  action clicks and page close requests dismiss the popup. A 15-second watchdog
+  bounds invisible startup. Native appearance/focus acceptance is listed below.
   No-popup buttons relay explicit clicks to registered worker listeners without
   granting activeTab. The worker `tabs.create` wrapper supplies WebView2's missing
-  result using FIFO native `tabs.onCreated` events, preserves native errors, and
+  result by matching normalized requested URLs to `pendingUrl || url` from native
+  `tabs.onCreated` events. FIFO is reserved for indistinguishable events lacking
+  URL information; a known different URL is ignored, including a user's new tab.
+  It preserves native errors and
   removes its temporary listener on settlement or a 15-second timeout.
-  Promise/callback concurrent-create fixtures pass.
+  Promise/callback concurrent-create and unrelated-user-tab fixtures pass.
 - Focused popup requests use bounded native tab adoption with runtime, profile,
   environment and focus checks. Hidden managers need an explicit action/options
   command within five seconds, at most eight requests, and a live foreground
@@ -53,7 +61,9 @@ profile data to work around it. See [the QA checklist](windows-extension-qa.md).
   public/private fixture navigations were qualified.
 - Native extension context-menu entries/submenus are retained. The store's Add
   to Chrome control is hidden on the exact HTTPS store origin, leaving Zephium's
-  reviewed sidebar installation. English, Polish and unrelated-page negative
+  reviewed sidebar installation. Both platforms use the shared store script
+  (builtin ID 5); the Windows duplicate is removed. This is a cosmetic affordance,
+  not an installation security boundary. English, Polish and unrelated-page negative
   checks passed. Internal pages intentionally omit action tiles.
 - Package/ID/add/enable failures affect only that install (Failed / Retry).
   Native startup integrity failures, failed revocation, or failed disable during
@@ -70,14 +80,64 @@ click/tab restoration, not individual recorded results. Bitwarden installation
 and popup usability were confirmed; signed-in filling and context-menu use were
 not separately recorded. Vimium and Return YouTube Dislike worked in owner testing.
 Dark Reader changes page content; its per-site popup limitation remains below.
+The new account-free popup fixture was observed opening at its natural short
+size with the native rounded border/shadow and no caption. The owner confirmed
+Tall → Short resizing, Esc dismissal, and the page's `window.close()` button in
+the optimized QA build (`6dd04c4e`). Tall content keeps normal Chromium scrolling
+at the height limit. This does not replace the four real-extension/scaling checks.
+Named QA sessions preserve ordinary Win32 path spelling after canonical
+containment checks. The initial QA helper passed verbatim `\\?\` paths to the
+extension loader: Grammarly failed with `0x80004005`. The lab reproduced failure
+when canonicalizing the exact directory that had just loaded through an ordinary
+path (`target/webext-path-probe/fresh-025335` and `canonical-025513`). The fix is
+QA-only; ordinary product paths and profile integrity checks are unchanged.
+The rebuilt `01751efa` QA app successfully loaded all three benchmark packages
+in that same session after the fix.
 
 ## Performance evidence and decisions
 
 Machine: Intel i3-1115G4 (2 cores / 4 logical processors), about 12 GB RAM,
-Windows 11, WebView2 154.0.4258.37. Native lab binaries are debug; the release
+Windows 11. Earlier measurements used WebView2 154.0.4258.37; the September 30
+comparison uses 154.0.4258.48. Native lab binaries are debug; the release
 QA sample below uses the optimized app. Private bytes cover the owned process
 tree. Task Manager groupings and summed working sets are different metrics;
 working sets double-count shared pages.
+
+### Fixed-tab release comparison (2026-09-30)
+
+Optimized QA source `01751efa`, executable SHA-256
+`6E8D34F018D205B05281532BD8ED7F635F26364146F63AEE0C132E40A65E1FD5`.
+Disposable session `memory-review-20260930`; five tabs loaded and reloaded in
+order: MDN JavaScript (`developer.mozilla.org/en-US/docs/Web/JavaScript`),
+Wikipedia Rust (`en.wikipedia.org/wiki/Rust_(programming_language)`),
+`github.com/rust-lang/rust`, `www.rust-lang.org`, then active
+`news.ycombinator.com`. The manager tab and all popups were closed. No build,
+native lab or debugger ran during sampling.
+
+| Condition | End private MiB | End processes | Mean CPU, one core | End interval CPU |
+| --- | ---: | ---: | ---: | ---: |
+| Extensions disabled, 600 seconds | 1003.17 | 24 | 0.167% | 0% |
+| Bitwarden + Dark Reader + Grammarly enabled | Pending | Pending | Pending | Pending |
+
+Baseline: 21 samples, largest gap 30.34 seconds, private memory range
+993.31–1035.34 MiB. CPU is interval-weighted; the mean is about 0.042% of this
+four-thread machine. An earlier run was interrupted by owner navigation and
+excluded; the app was restarted and all five tabs reloaded for this replacement.
+At completion the accessibility tree still reported Hacker News, but screenshots
+were black and native window activation failed twice. Display/foreground state
+during the idle interval was not instrumented. The second condition is pending
+owner wake/unlock; this is **not yet a completed A/B or a battery-life result**.
+Raw baseline: `target/webext-qa-resources/20260930-033455-controlled-off-retry`;
+retained samples: [baseline CSV](windows-extension-memory-20260930-off.csv).
+
+Installed versions for both conditions are Bitwarden **2026.9.2**, Dark Reader
+**4.9.133**, and Grammarly **14.1333.0**, without account sign-ins. All are
+disabled in the completed baseline; the popup fixture stays disabled in both.
+Use the same executable, window size, page order and All sites access for the
+second run. These live public pages and caches can vary between runs; results
+describe this workload, not a universal memory ceiling or optimization saving.
+
+### Earlier measurements
 
 - Twenty steady action refreshes per extension fell from 20 icon fetches,
   decodes and worker requests to **one each**. Three-extension runs fell from
@@ -126,6 +186,9 @@ shared sample was replaced by `20260928-225018`.
 
 ## Remaining release decisions and acceptance
 
+- Check popup appearance/focus and all dismissal paths with short/tall Bitwarden,
+  1Password, Dark Reader and Grammarly popups at 100% and 150%. A second physical
+  monitor is unavailable here; geometry coverage does not qualify that scenario.
 - Resolve the **eight running extensions process-wide** budget before public
   release: measure a higher supported count and adjust resource pools, or make
   a deliberate product-limit decision. Eight is provisional QA capacity,
@@ -141,12 +204,33 @@ shared sample was replaced by `20260928-225018`.
   removal residue and the full extension catalog remain unqualified.
 - Qualify sustained idle, repeated install/remove cycles, realistic page loads
   and cold/warm startup with fixed tabs/packages and release binaries.
+  The fixed-tab extensions-on ten-minute sample above is still pending.
   Battery savings require a controlled power measurement. A single Task Manager
   screenshot, or lower memory after lazy restoration, is insufficient evidence.
 - Requalify the store selector when its markup changes and native paths when
   WebView2 changes. Rejected action reads retain prior presentation.
 
-## Final review validation (2026-09-29)
+## Latest review validation (2026-09-30)
+
+Merged `origin/main` at `a49d614e`, including the shared store script and compact
+install spinner. This pass: xtask **154**, engine **203** (including popup geometry
+at both scales), webext **53**, QA desktop **111 passed / one existing ignored**,
+desktop configuration integration **8**. Worker/action-host/popup-sizing JavaScript:
+**19 passed**. Strict QA desktop + Windows lab clippy, formatting, whitespace and
+emitted frontend style checks passed.
+The follow-up QA path tests both passed, including path-spelling preservation;
+strict desktop clippy passed again after that fix.
+
+Frontend type/lint/style/format/dependency checks passed. The initial concurrent
+frontend unit run hit two five-second timeouts while Rust compiled; the complete
+suite rerun with one worker and unchanged timeouts passed **295 tests / 54 files**.
+Address/extension components passed **10 tests / two files** and the production
+frontend build passed. Native worker create/action and shared store UI checks
+passed at `target/webext-worker-compat/20260930-023414` and
+`target/webext-store-ui/20260930-023425` (English/Polish listings and unrelated-page
+negative check). Three pre-existing vendored Wry dead-code warnings remain.
+
+### Previous broader platform validation (2026-09-29)
 
 Full xtask: **154 passed**. App: **318**; core: **211**; engine with
 agentic-browser feature: **277**; webext: **53**; desktop: **110 passed, one
@@ -170,7 +254,7 @@ workspace/platform CI or the remaining manual release gates passed.
 $env:TAURI_CONFIG = Get-Content desktop/tauri.webext-qa.conf.json -Raw
 cargo test -p zephium-desktop -p zephium-engine -p zephium-app -p zephium-core -p zephium-webext -p xtask --features zephium-desktop/webext-qa,zephium-engine/agentic-browser
 cargo clippy -p zephium-desktop -p zephium-webext-windows --features zephium-desktop/webext-qa,zephium-webext-windows/lab --all-targets -- -D warnings
-node --test crates/zephium-webext/src/windows/action-host.test.mjs crates/zephium-webext/src/windows/worker-compat.test.mjs
+node --test crates/zephium-webext/src/windows/action-host.test.mjs crates/zephium-webext/src/windows/worker-compat.test.mjs crates/zephium-webext/src/windows/popup-size.test.mjs
 cargo fmt --all --check
 ```
 
