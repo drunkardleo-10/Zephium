@@ -249,3 +249,29 @@ fn navigation_during_selection_read_cannot_save_on_either_site() {
     );
     assert!(store.site_preferences.lock().unwrap().hides().is_empty());
 }
+
+#[test]
+fn same_site_navigation_during_picker_read_does_not_save_a_stale_document_selection() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, _, operations) = setup_with_operation_log(store.clone());
+    shell.handle(Command::Bootstrap);
+    visit(&mut shell, "https://example.com/first");
+    let profile = shell.windows.focused().unwrap().profile;
+    let (command, result) = selection_command(shell.focused_blocker_site_view().unwrap().context);
+    engine.hold_picker.store(true, Ordering::Relaxed);
+    shell.handle(command);
+    visit(&mut shell, "https://example.com/second");
+    engine
+        .held_picker
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .finish(Some(result));
+    shell.handle(Command::BlockerStoreReady(profile));
+    assert_eq!(
+        operations.lock().unwrap().last().unwrap().reason,
+        OperationReason::InvalidScope
+    );
+    assert!(store.site_preferences.lock().unwrap().hides().is_empty());
+}

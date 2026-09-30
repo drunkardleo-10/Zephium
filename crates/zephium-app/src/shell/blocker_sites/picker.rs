@@ -7,6 +7,12 @@ pub(super) struct PendingSelectionSave {
     pub(super) context: BlockerSiteContext,
     pub(super) session: u64,
     pub(super) selection: String,
+    document: Option<(
+        zephium_core::ports::engine::NavigationPresentationId,
+        String,
+    )>,
+    pending_document: Option<zephium_core::ports::engine::NavigationPresentationId>,
+    url: String,
 }
 
 fn parse_session(value: &str) -> Option<u64> {
@@ -116,6 +122,18 @@ impl Shell {
                 OperationReason::NativeDispatchRejected,
             ));
         };
+        let document = self.presentation.presented_navigations.get(&id).cloned();
+        let pending_document = self
+            .presentation
+            .pending_presentations
+            .get(&id)
+            .map(|p| p.navigation);
+        let url = self
+            .items
+            .tab(id)
+            .and_then(|tab| tab.url.as_ref())
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let state = &mut self
             .blocker
             .profiles
@@ -128,6 +146,9 @@ impl Shell {
             context: context.clone(),
             session,
             selection: selection.into(),
+            document,
+            pending_document,
+            url,
         });
         self.blocker
             .inbox
@@ -189,6 +210,23 @@ impl Shell {
             .remove(&profile);
         let validated = || -> Option<_> {
             let view = self.focused_blocker_site_view()?;
+            let id = ItemId::parse(&pending.context.tab)?;
+            if self.presentation.presented_navigations.get(&id) != pending.document.as_ref()
+                || self
+                    .presentation
+                    .pending_presentations
+                    .get(&id)
+                    .map(|p| p.navigation)
+                    != pending.pending_document
+                || self
+                    .items
+                    .tab(id)
+                    .and_then(|tab| tab.url.as_ref())
+                    .map(|url| url.as_str())
+                    != Some(pending.url.as_str())
+            {
+                return None;
+            }
             if view.context != pending.context || !view.ready {
                 return None;
             }

@@ -74,7 +74,10 @@
     });
     if (generation !== lifetime) return;
     busy = false;
-    if (result.state === "processed" && result.disposition.outcome === "applied") {
+    if (
+      result.state === "processed" &&
+      (result.disposition.outcome === "applied" || result.disposition.outcome === "no_op")
+    ) {
       cancel();
       feedback = "Hide saved. You can undo it under Hidden elements.";
     } else {

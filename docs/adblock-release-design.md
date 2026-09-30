@@ -228,8 +228,11 @@ a shortcut for this adapter.
   WebKit component interaction coverage. These are not full-browser QA.
 - Native child-frame cosmetics and native subscription-sidecar installation are
   still outstanding. Current live style delivery covers the top document.
-- Direct HTTPS acquisition and native-validated candidate activation remain
-  outstanding; the product is still composed with its embedded release seed.
+- Official HTTPS acquisition is now composed into desktop startup. An isolated
+  live run fetched both September 30 lists, compiled their network artifact in
+  2.187 seconds and cosmetic artifact in 2.620 seconds, activated the pair and
+  shut down cleanly. Desktop currently preflights the network artifact; the
+  native cosmetic sidecar integration remains outstanding.
 - Picker cleanup has a single two-minute expiry while open, plus navigation,
   explicit cancel, Escape and UI context teardown; it creates no idle polling.
 
@@ -246,3 +249,36 @@ its own feature is unchanged. Its JS allowance is deliberately adjusted from
 the browser and panel limits remain unchanged. The new lazy ProtectionMenu graph
 measures 302,972 JS / 90,190 CSS bytes, with 310,000 / 93,000 limits. This is a
 bundle-size review, not a claim about runtime RAM or navigation latency.
+
+### Network compilation and current fallback
+
+The hostname-only boundary rewrite preserves the existing converter prefix and
+separator semantics for canonical network URLs. Native WebKit normalizes bare
+HTTP authorities to include `/`; path patterns, wildcard hosts and explicit
+right anchors retain their end-of-URL branches. The July corpus cold compile
+fell from 42.043 seconds to 2.311 seconds. The current September 30 corpus takes
+2.187 seconds in the same isolated native fixture. Artifact identity format 4
+is now shared by Core and the compiler to prevent version drift. CI's cold
+network compile gate is 15 seconds; production's cancellation watchdog is 60
+seconds and still waits for the physical native callback before reusing its slot.
+
+Native URL fixtures also exposed pre-existing credential/trailing-dot quirks in
+the converter prefix. The optimization preserves those results; they are not
+claimed as fixed. Real network qualification must distinguish these from the
+CSS-document URL fixture and record any remaining conversion limitations.
+
+The embedded fallback is now the exact official 202609300903 pair (3,568,061
+uncompressed bytes). Publisher updates accept the actual ABP 2.0 EasyList and
+ABP 1.1 EasyPrivacy headers. A deliberately strict first live attempt rejected
+the older header and retained the release pair; the corrected run succeeded.
+The source store verifies a retained current with a fixed streaming buffer at
+startup and chooses previous/bundled material if corrupt. Compilation-cache
+hits still skip filter parsing. Conditional HTTP success refreshes only exact
+verified source material, and never extends a TUF signed expiry.
+
+A real native picker click under restrictive CSP now verifies preview, undo,
+and zero page click-handler invocations, including an inline important display
+rule. Personal inline overrides are bounded and reconciled only on explicit
+style changes, preview, or initial DOM readiness; subscription CSS never starts
+a DOM scan. Same-site navigation and native document-presentation changes
+invalidate a selection that is still awaiting persistence admission.

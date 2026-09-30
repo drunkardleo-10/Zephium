@@ -14,10 +14,12 @@
   const getSheets = () => apply(descriptor.get, document, []);
   const setSheets = sheets => apply(descriptor.set, document, [sheets]);
   const queryAll = Document.prototype.querySelectorAll;
+  const focus = HTMLElement.prototype.focus;
   const random = new Uint32Array(4);
   crypto.getRandomValues(random);
   const token = Array.from(random, n => n.toString(16).padStart(8, "0")).join("");
   const slots = new Map();
+  const inlineOverrides = new Map();
   const allowed = new Set(["subscription", "personal", "preview"]);
   let picker = null;
 
@@ -45,11 +47,54 @@
       // Keep only the native-supplied identity, not a second copy of the CSS
       // text alongside the browser's parsed stylesheet in every document.
       slots.set(slot, { sheet, fingerprint, generation });
+      if (slot === "personal") { clearStyle("preview"); enforceInline(slot); }
+      if (slot === "preview") enforceInline(slot);
       return true;
     } catch (_) { return false; }
   }
 
+  function restoreInline(slot) {
+    const entries = inlineOverrides.get(slot) ?? [];
+    inlineOverrides.delete(slot);
+    for (const entry of entries) {
+      const element = entry.element.deref();
+      if (!element || element.style.getPropertyValue("display") !== "none" || element.style.getPropertyPriority("display") !== "important") continue;
+      if (entry.value) element.style.setProperty("display", entry.value, entry.priority);
+      else element.style.removeProperty("display");
+    }
+  }
+
+  function enforceInline(slot) {
+    // Personal edits may target inline !important declarations. Reconcile a
+    // bounded set only on an explicit edit/preview or initial DOM readiness;
+    // subscription CSS never causes a document scan or repair observer.
+    restoreInline(slot);
+    const owned = slots.get(slot);
+    if (!owned) return;
+    const entries = [];
+    const seen = new Set();
+    try {
+      for (const rule of owned.sheet.cssRules) {
+        if (typeof rule.selectorText !== "string") continue;
+        for (const element of apply(queryAll, document, [rule.selectorText])) {
+          if (seen.has(element)) continue;
+          seen.add(element);
+          if (seen.size > 1000) break;
+          if (!(element instanceof HTMLElement) && !(element instanceof SVGElement)) continue;
+          if (getComputedStyle(element).display === "none") continue;
+          const value = element.style.getPropertyValue("display");
+          if (value.length > 1024) continue;
+          entries.push({ element: new WeakRef(element), value, priority: element.style.getPropertyPriority("display") });
+          element.style.setProperty("display", "none", "important");
+        }
+        if (seen.size > 1000) break;
+      }
+    } catch (_) {}
+    inlineOverrides.set(slot, entries);
+  }
+
   function clearStyle(slot) {
+    restoreInline(slot);
     const old = slots.get(slot);
     if (!old) return;
     try { setSheets(getSheets().filter(s => s !== old.sheet)); } catch (_) {}
@@ -65,6 +110,10 @@
     if (current.frame) cancelAnimationFrame(current.frame);
     current.cover.remove();
     clearStyle("preview");
+    enforceInline("personal");
+    if (current.previousFocus instanceof HTMLElement && current.previousFocus.isConnected) {
+      try { apply(focus, current.previousFocus, [{ preventScroll: true }]); } catch (_) {}
+    }
   }
 
   function cssString(value) {
@@ -107,7 +156,7 @@
       if (count === 0 || count > 100) return null;
       const label = id ? `${element.localName} #${id}` : element.localName === "iframe" ? "Embedded content" : element.localName;
       const result = create(null);
-      result.selector = selector; result.label = Array.from(label).slice(0, 80).join("");
+      result.selector = selector; result.label = Array.from(label).slice(0, 64).join("");
       result.count = count; result.positional = positional;
       return result;
     } catch (_) { return null; }
@@ -126,7 +175,10 @@
       shadow.append(box);
       document.documentElement.append(cover);
       const abort = new AbortController();
-      picker = { cover, box, abort, session, selected: null, selectedElement: null, hovered: null, frame: 0, point: null };
+      picker = { cover, box, abort, session, selected: null, selectedElement: null, hovered: null, frame: 0, point: null, previousFocus: document.activeElement, choose: null };
+      cover.tabIndex = -1;
+      cover.setAttribute("aria-label", "Element picker. Click an element; press Escape to cancel.");
+      apply(focus, cover, [{ preventScroll: true }]);
       if (typeof cover.showPopover === "function") cover.showPopover();
       const current = picker;
       current.expiry = setTimeout(() => { if (picker === current) stopPicker(); }, 120000);
@@ -158,21 +210,31 @@
           highlight(current.hovered);
         });
       }, { signal: abort.signal, passive: true });
-      cover.addEventListener("click", event => {
-        if (!event.isTrusted) return;
-        event.preventDefault(); event.stopImmediatePropagation();
+      current.choose = event => {
+        if (!event.isTrusted || picker !== current) return;
         const target = targetAt(event.clientX, event.clientY);
         clearStyle("preview");
         current.selected = candidate(target);
         current.selectedElement = current.selected ? new WeakRef(target) : null;
         highlight(target);
-      }, { signal: abort.signal, capture: true });
-      document.addEventListener("keydown", event => {
-        if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); stopPicker(); }
-      }, { signal: abort.signal, capture: true });
+      };
       globalThis.addEventListener("pagehide", stopPicker, { signal: abort.signal, once: true });
       return true;
     } catch (_) { stopPicker(); return false; }
+  }
+
+  document.addEventListener("DOMContentLoaded", () => enforceInline("personal"), { once: true });
+
+  // Register before page scripts so capture listeners cannot turn selecting
+  // an element into a page click. These guards are dormant when the picker is
+  // closed; highlighting/pointer work remains strictly session-owned.
+  for (const kind of ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "auxclick", "contextmenu", "keydown"]) {
+    globalThis.addEventListener(kind, event => {
+      if (!picker) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (kind === "keydown" && event.key === "Escape") stopPicker();
+      else if (kind === "click") picker.choose?.(event);
+    }, { capture: true, passive: false });
   }
 
   Object.defineProperty(globalThis, key, { value: Object.freeze({
