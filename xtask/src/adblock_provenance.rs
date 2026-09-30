@@ -7,10 +7,11 @@ use std::path::{Component, Path};
 use std::process::Command;
 
 pub(crate) const SHIPPING_FEATURE_SETS: [&str; 2] = [
-    "full-regex-handling",
-    "full-regex-handling,content-blocking",
+    "full-regex-handling,css-validation",
+    "full-regex-handling,css-validation,content-blocking",
 ];
-pub(crate) const OPTIONAL_EXACT_FEATURES: &str = "full-regex-handling,embedded-domain-resolver";
+pub(crate) const OPTIONAL_EXACT_FEATURES: &str =
+    "full-regex-handling,css-validation,embedded-domain-resolver";
 
 const UPSTREAM_COMMIT: &str = "00b19a06508ddd4f3453779f8618983421ddf32b";
 const UPSTREAM_TREE: &str = "17f03b25091db8ce9ef88408e4be9d11f3e6f755";
@@ -332,39 +333,39 @@ fn validate_release_gates(gates: &toml::Table) -> Result<(), String> {
         ),
         (
             "fork_windows_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation",
         ),
         (
             "fork_windows_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation -- -D warnings",
         ),
         (
             "fork_windows_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation",
         ),
         (
             "fork_webkit_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,content-blocking",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,content-blocking",
         ),
         (
             "fork_webkit_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,content-blocking -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,content-blocking -- -D warnings",
         ),
         (
             "fork_webkit_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,content-blocking",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,content-blocking",
         ),
         (
             "fork_optional_exact_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,embedded-domain-resolver",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_optional_exact_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,embedded-domain-resolver -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver -- -D warnings",
         ),
         (
             "fork_optional_exact_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,embedded-domain-resolver",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_upstream_compatibility_tests",
@@ -776,11 +777,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         "runtime-exact",
         &["runtime", "adblock/embedded-domain-resolver"],
     )?;
-    require_string_array(
-        blocker_features,
-        "webkit",
-        &["adblock/content-blocking", "dep:serde", "dep:serde_json"],
-    )?;
+    require_string_array(blocker_features, "webkit", &["adblock/content-blocking"])?;
     let blocker_adblock = require_table(&blocker, "dependencies")?
         .get("adblock")
         .and_then(toml::Value::as_table)
@@ -792,7 +789,11 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     )?;
     require_string(blocker_adblock, "version", "=0.13.2")?;
     require_bool(blocker_adblock, "default-features", false)?;
-    require_string_array(blocker_adblock, "features", &["full-regex-handling"])?;
+    require_string_array(
+        blocker_adblock,
+        "features",
+        &["full-regex-handling", "css-validation"],
+    )?;
     reject_dependency_aliases(
         require_table(&blocker, "dependencies")?,
         "zephium-blocker dependency table",
@@ -2007,22 +2008,45 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
         (
             "x86_64-pc-windows-msvc",
             &["runtime"],
-            &["full-regex-handling"],
+            &[
+                "css-validation",
+                "cssparser",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
         (
             "x86_64-apple-darwin",
             &["webkit"],
-            &["content-blocking", "full-regex-handling"],
+            &[
+                "content-blocking",
+                "css-validation",
+                "cssparser",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
         (
             "aarch64-apple-darwin",
             &["webkit"],
-            &["content-blocking", "full-regex-handling"],
+            &[
+                "content-blocking",
+                "css-validation",
+                "cssparser",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
         (
             "x86_64-unknown-linux-gnu",
             &["webkit"],
-            &["content-blocking", "full-regex-handling"],
+            &[
+                "content-blocking",
+                "css-validation",
+                "cssparser",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
     ];
 

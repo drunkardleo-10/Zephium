@@ -1550,6 +1550,15 @@ impl BlockerCatalog for ManagedBlocker {
 }
 
 impl BlockerCompiler for ManagedBlocker {
+    fn prepare_site_preferences(
+        &self,
+        preferences: &zephium_core::blocker::BlockerSitePreferences,
+    ) -> Option<Arc<zephium_core::blocker::PreparedBlockerSites>> {
+        zephium_blocker::prepare_site_preferences(preferences)
+    }
+    fn validate_personal_selector(&self, selector: &str) -> Option<String> {
+        zephium_blocker::validate_personal_selector(selector)
+    }
     fn compile(
         &self,
         profile: ProfileId,

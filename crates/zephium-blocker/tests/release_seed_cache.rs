@@ -33,6 +33,40 @@ const SOURCES: [(&str, &[u8]); 2] = [
     ),
 ];
 
+#[test]
+fn shipped_cosmetics_are_validated_and_round_trip_independently_of_network_rules() {
+    let sources: Vec<_> = SOURCES
+        .iter()
+        .map(|(_, bytes)| {
+            let mut source = String::new();
+            flate2::read::GzDecoder::new(*bytes)
+                .read_to_string(&mut source)
+                .unwrap();
+            source
+        })
+        .collect();
+    let policy =
+        zephium_blocker::CosmeticPolicy::compile(sources.iter().map(String::as_str)).unwrap();
+    assert!(policy.report().accepted > 20_000, "{:?}", policy.report());
+    assert!(policy.report().generic_controls > 100);
+    let bytes = policy.encode().unwrap();
+    let loaded = zephium_blocker::CosmeticPolicy::decode(&bytes).unwrap();
+    for url in [
+        "https://example.com/",
+        "https://howtogeek.com/",
+        "https://amazon.com/",
+    ] {
+        assert_eq!(
+            policy.stylesheet(url).unwrap(),
+            loaded.stylesheet(url).unwrap()
+        );
+    }
+    // This subscription explicitly exempts the domain from generic hiding.
+    let generic = policy.stylesheet("https://example.com/").unwrap();
+    assert!(!generic.is_empty());
+    assert!(policy.stylesheet("https://howtogeek.com/").unwrap().len() < generic.len());
+}
+
 fn compile(worker: &WorkerBlocker, profile: u128) -> Arc<ContentRules> {
     let (send, receive) = mpsc::sync_channel(1);
     assert_eq!(
@@ -93,10 +127,28 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
     let first = compile(&cold, 1);
     let digest = first.digest();
     let coverage = first.coverage();
+    let style = first
+        .cosmetics()
+        .expect("the shipped static cosmetics must survive adaptation")
+        .stylesheet("https://example.com/")
+        .unwrap();
+    let native_style = first.native_cosmetics().map(|native| native.digest());
     drop(first);
     let recovered = compile(&cold, 2);
     assert_eq!(recovered.digest(), digest);
     assert_eq!(recovered.coverage(), coverage);
+    assert_eq!(
+        recovered
+            .cosmetics()
+            .unwrap()
+            .stylesheet("https://example.com/")
+            .unwrap(),
+        style
+    );
+    assert_eq!(
+        recovered.native_cosmetics().map(|native| native.digest()),
+        native_style
+    );
     drop(recovered);
     assert_eq!(loads.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -114,6 +166,18 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
     let recovered = compile(&warm, 3);
     assert_eq!(recovered.digest(), digest);
     assert_eq!(recovered.coverage(), coverage);
+    assert_eq!(
+        recovered
+            .cosmetics()
+            .unwrap()
+            .stylesheet("https://example.com/")
+            .unwrap(),
+        style
+    );
+    assert_eq!(
+        recovered.native_cosmetics().map(|native| native.digest()),
+        native_style
+    );
     assert_eq!(loads.load(Ordering::SeqCst), 1);
     assert_eq!(
         warm.shutdown_until(Instant::now() + Duration::from_secs(5)),

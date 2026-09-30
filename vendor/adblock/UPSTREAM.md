@@ -118,8 +118,9 @@ and rejects earlier artifacts. Stable serialization hashes are fork
 compatibility sentinels, not values to update mechanically.
 
 Zephium's shipped feature graphs deliberately disable adblock-rust defaults:
-Windows uses `full-regex-handling`; macOS and Linux use
-`full-regex-handling,content-blocking`. The optional exact-attribution graph
+Windows uses `full-regex-handling,css-validation`; macOS and Linux use
+`full-regex-handling,css-validation,content-blocking`. Static cosmetic admission
+uses the upstream CSS parser; unchecked selectors are never treated as validated. The optional exact-attribution graph
 adds `embedded-domain-resolver`, but the desktop does not currently ship that
 graph. The provenance gate checks both the manifest declarations and Cargo's
 resolved desktop graph for Windows, Linux, and both shipped macOS

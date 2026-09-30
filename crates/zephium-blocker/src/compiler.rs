@@ -290,7 +290,26 @@ impl Compiler {
             return Err(CompileError::NoUsableRules);
         }
 
-        let digest = digest_policy(&prepared);
+        let cosmetic_policy =
+            crate::CosmeticPolicy::compile(prepared.iter().map(|source| source.cosmetics.as_str()))
+                .map_err(CompileError::Cosmetics)?;
+        let cosmetics = if cosmetic_policy.report().accepted == 0 {
+            None
+        } else {
+            Some(
+                crate::cosmetics::PreparedCosmetics::new(cosmetic_policy, target)
+                    .map_err(CompileError::Cosmetics)?,
+            )
+        };
+        let mut digest = digest_policy(&prepared);
+        if let Some(cosmetics) = &cosmetics {
+            use zephium_core::blocker::DocumentStyleProvider;
+            let mut combined = Sha256::new();
+            combined.update(b"zephium-network-and-cosmetic-policy-v1");
+            combined.update(digest.as_bytes());
+            combined.update(cosmetics.policy.fingerprint().as_bytes());
+            digest = PolicyDigest(combined.finalize().into());
+        }
         let (runtime, runtime_coverage, webkit, webkit_coverage, native_blocking_rule_entries) =
             match target {
                 CompileTarget::Runtime => {
@@ -339,6 +358,7 @@ impl Compiler {
             webkit,
             report,
             self.limits,
+            cosmetics,
         ))
     }
 }
@@ -361,6 +381,7 @@ struct PreparedSource {
     id: SourceId,
     format: SourceFormat,
     rules: String,
+    cosmetics: String,
     #[cfg(feature = "webkit")]
     accepted: Vec<AcceptedRule>,
     report: SourceReport,
@@ -376,6 +397,7 @@ fn prepare_source(
 ) -> Result<PreparedSource, CompileError> {
     let options = parse_options(source.format);
     let mut rules = String::new();
+    let mut cosmetics = String::new();
     #[cfg(feature = "webkit")]
     let mut accepted = Vec::new();
     let mut input_drops = BTreeMap::new();
@@ -425,6 +447,8 @@ fn prepare_source(
                     limit: limits.max_rules(),
                 });
             }
+            cosmetics.push_str(line);
+            cosmetics.push('\n');
             increment(&mut input_drops, InputDropReason::UnsupportedCosmeticRule);
             continue;
         }
@@ -447,6 +471,10 @@ fn prepare_source(
             }
         };
 
+        if matches!(&parsed, ParsedLine::Network(filter) if filter.is_generic_hide()) {
+            cosmetics.push_str(line);
+            cosmetics.push('\n');
+        }
         let admission = inspect_rule(target, line, parsed)?;
         let (
             webkit_failure,
@@ -537,6 +565,7 @@ fn prepare_source(
         id: source.id,
         format: source.format,
         rules,
+        cosmetics,
         #[cfg(feature = "webkit")]
         accepted,
         report,
@@ -772,7 +801,7 @@ fn parse_options(format: SourceFormat) -> ParseOptions {
     }
 }
 
-fn looks_like_cosmetic_rule(line: &str) -> bool {
+pub(crate) fn looks_like_cosmetic_rule(line: &str) -> bool {
     if line.starts_with('|') || line.starts_with("@@|") {
         return false;
     }
@@ -1272,6 +1301,9 @@ fn increment<K: Ord>(counts: &mut BTreeMap<K, usize>, key: K) {
 /// Compilation failed before a complete generation could be published.
 #[derive(Debug, Error)]
 pub enum CompileError {
+    /// Static cosmetics could not be admitted within their syntax/resource bounds.
+    #[error("static cosmetic policy failed: {0}")]
+    Cosmetics(crate::CosmeticError),
     /// The crate was built without the requested native artifact feature.
     #[error("requested blocker artifact target is not enabled")]
     TargetUnavailable,

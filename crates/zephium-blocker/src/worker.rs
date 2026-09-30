@@ -680,6 +680,15 @@ pub enum CatalogReplacementDispatch {
 }
 
 impl BlockerCompiler for WorkerBlocker {
+    fn prepare_site_preferences(
+        &self,
+        preferences: &zephium_core::blocker::BlockerSitePreferences,
+    ) -> Option<Arc<zephium_core::blocker::PreparedBlockerSites>> {
+        crate::prepare_site_preferences(preferences)
+    }
+    fn validate_personal_selector(&self, selector: &str) -> Option<String> {
+        crate::validate_personal_selector(selector)
+    }
     fn compile(
         &self,
         profile: ProfileId,
@@ -1279,6 +1288,7 @@ const fn native_target() -> CompileTarget {
 pub(crate) fn adapt_rules(
     rules: CompiledRules,
 ) -> Result<Arc<ContentRules>, BlockerCompileFailure> {
+    let cosmetics = rules.cosmetics().cloned();
     let report = rules.report();
     let (
         platform_omitted_rules,
@@ -1340,7 +1350,7 @@ pub(crate) fn adapt_rules(
         blocking_rule_entries: u64::try_from(report.native_blocking_rule_entries())
             .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
     };
-    match rules.target() {
+    let result = match rules.target() {
         CompileTarget::Runtime => {
             let digest = ContentRuleDigest::from_bytes(*rules.digest().as_bytes());
             ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::compiled(rules)))
@@ -1367,6 +1377,17 @@ pub(crate) fn adapt_rules(
             }
             Ok(content_rules)
         }
+    }?;
+    Ok(attach_cosmetics(result, cosmetics))
+}
+
+fn attach_cosmetics(
+    rules: Arc<ContentRules>,
+    cosmetics: Option<crate::cosmetics::PreparedCosmetics>,
+) -> Arc<ContentRules> {
+    match cosmetics {
+        Some(cosmetics) => rules.with_cosmetics(cosmetics.policy, cosmetics.native),
+        None => rules,
     }
 }
 
@@ -1377,13 +1398,16 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             digest,
             coverage,
             rules,
-        } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules))),
+            cosmetics,
+        } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules)))
+            .map(|rules| attach_cosmetics(rules, cosmetics)),
         #[cfg(feature = "webkit")]
         LoadedArtifact::WebKit {
             digest,
             coverage,
             artifact_digest,
             encoded,
+            cosmetics,
         } => {
             let rules = ContentRules::declarative(
                 digest,
@@ -1398,7 +1422,7 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             else {
                 return None;
             };
-            (observed.as_bytes() == &artifact_digest).then_some(rules)
+            (observed.as_bytes() == &artifact_digest).then(|| attach_cosmetics(rules, cosmetics))
         }
     }
 }
@@ -1613,6 +1637,10 @@ fn allow_all_digest() -> ContentRuleDigest {
 
 fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
     match error {
+        CompileError::Cosmetics(crate::CosmeticError::ResourceLimit) => {
+            BlockerCompileFailure::ResourceLimit
+        }
+        CompileError::Cosmetics(_) => BlockerCompileFailure::InvalidSource,
         CompileError::TargetUnavailable => BlockerCompileFailure::Internal,
         CompileError::NoSources => BlockerCompileFailure::SourceUnavailable,
         CompileError::NoUsableRules

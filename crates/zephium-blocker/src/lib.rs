@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 mod cache;
 mod compiler;
+mod cosmetics;
 mod limits;
 mod report;
 mod rules;
@@ -21,6 +22,10 @@ mod worker;
 pub use cache::{CompiledArtifactCacheConfig, CompiledArtifactCacheConfigError};
 pub use compiler::{
     CompileError, CompileTarget, Compiler, FilterSource, SourceFormat, SourceId, SourceIdError,
+};
+pub use cosmetics::{
+    prepare_site_preferences, validate_personal_selector, CosmeticError, CosmeticPolicy,
+    CosmeticReport,
 };
 pub use limits::{CompileLimitValues, CompileLimits, LimitConfigurationError};
 pub use report::{
@@ -41,7 +46,7 @@ pub use zephium_core::ports::blocker::BlockerCompileFailure;
 ///
 /// Increment this whenever the accepted rule subset, canonicalization, digest
 /// construction, or WebKit serialization changes.
-pub const POLICY_FORMAT_VERSION: u32 = 4;
+pub const POLICY_FORMAT_VERSION: u32 = 5;
 
 /// Exact canonical WebKit JSON schema owned by Zephium.
 pub const WEBKIT_ARTIFACT_FORMAT_VERSION: u32 = 3;

@@ -99,6 +99,7 @@ struct CompiledRulesInner {
     webkit: Option<WebKitRules>,
     report: CompilationReport,
     limits: CompileLimits,
+    cosmetics: Option<crate::cosmetics::PreparedCosmetics>,
 }
 
 /// Immutable, cheaply cloneable artifacts compiled from one effective policy.
@@ -113,6 +114,7 @@ impl CompiledRules {
         webkit: Option<WebKitRules>,
         report: CompilationReport,
         limits: CompileLimits,
+        cosmetics: Option<crate::cosmetics::PreparedCosmetics>,
     ) -> Self {
         Self(Arc::new(CompiledRulesInner {
             target,
@@ -121,6 +123,7 @@ impl CompiledRules {
             webkit,
             report,
             limits,
+            cosmetics,
         }))
     }
 
@@ -142,6 +145,27 @@ impl CompiledRules {
     /// Returns the immutable compilation report.
     pub fn report(&self) -> &CompilationReport {
         &self.0.report
+    }
+
+    pub(crate) fn cosmetics(&self) -> Option<&crate::cosmetics::PreparedCosmetics> {
+        self.0.cosmetics.as_ref()
+    }
+
+    /// Returns the independently validated static selector policy.
+    pub fn cosmetic_policy(&self) -> Option<&crate::CosmeticPolicy> {
+        self.0
+            .cosmetics
+            .as_ref()
+            .map(|prepared| prepared.policy.as_ref())
+    }
+
+    /// Returns the optional top-document native cosmetic artifact, prepared on
+    /// the compiler worker rather than generated on the native UI thread.
+    pub fn native_cosmetic_rules(&self) -> Option<&zephium_core::blocker::DeclarativeStyleRules> {
+        self.0
+            .cosmetics
+            .as_ref()
+            .and_then(|prepared| prepared.native.as_ref())
     }
 
     #[cfg(feature = "runtime")]
