@@ -295,8 +295,32 @@ pub fn load_macos_development_typesafe_credential(
     }
 }
 
+/// One Keychain call at a time across the process: concurrent reads of the
+/// login keychain fail transiently, so every caller takes a turn.
+#[cfg(target_os = "macos")]
+pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(target_os = "macos")]
 fn load_keychain_login_credential<P: AgentCredentialBinding>(
+    provider: P,
+    service: &'static str,
+    account: &'static str,
+) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
+    let _turn = keychain_turn();
+    match read_keychain_login_credential(provider, service, account) {
+        Err(MacosAgentProviderCredentialError::Inaccessible) => {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            read_keychain_login_credential(provider, service, account)
+        }
+        loaded => loaded,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_keychain_login_credential<P: AgentCredentialBinding>(
     provider: P,
     service: &'static str,
     account: &'static str,

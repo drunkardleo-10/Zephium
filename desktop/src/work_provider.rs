@@ -625,17 +625,23 @@ async fn credential() -> Result<zephium_agentic::AgentProviderCredential, WorkEr
     {
         let started = std::time::Instant::now();
         record_diagnostic(format_args!("work: phase=credential state=requested"));
-        let result =
+        let loaded =
             tokio::task::spawn_blocking(zephium_agentic::load_macos_development_openai_credential)
-                .await
-                .map_err(|_| WorkError::Unavailable)
-                .and_then(|result| result.map_err(|_| WorkError::Unavailable));
+                .await;
+        let fault = match &loaded {
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(format!("{error:?}")),
+            Err(_) => Some("Join".to_owned()),
+        };
         record_diagnostic(format_args!(
-            "work: phase=credential available={} elapsed_ms={}",
-            result.is_ok(),
+            "work: phase=credential available={} fault={:?} elapsed_ms={}",
+            fault.is_none(),
+            fault,
             started.elapsed().as_millis()
         ));
-        result
+        loaded
+            .map_err(|_| WorkError::Unavailable)
+            .and_then(|result| result.map_err(|_| WorkError::Unavailable))
     }
     #[cfg(not(target_os = "macos"))]
     {

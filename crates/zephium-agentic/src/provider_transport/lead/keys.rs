@@ -179,7 +179,22 @@ mod platform {
         options
     }
 
+    fn turn() -> std::sync::MutexGuard<'static, ()> {
+        crate::provider_transport::keychain_turn()
+    }
+
     pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
+        let _turn = turn();
+        match read_once(service) {
+            Err(LeadKeyError::Inaccessible) => {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                read_once(service)
+            }
+            read => read,
+        }
+    }
+
+    fn read_once(service: &str) -> Result<LeadSecret, LeadKeyError> {
         let keychain = login()?;
         let (password, _item) = find_generic_password(Some(&[keychain]), service, ACCOUNT)
             .map_err(|error| {
@@ -195,6 +210,7 @@ mod platform {
     }
 
     pub(super) fn write(service: &str, secret: &LeadSecret) -> Result<(), LeadKeyError> {
+        let _turn = turn();
         let keychain = login()?;
         // Replace by delete + add: updating in place would first read the
         // old secret, which prompts when another binary created the item.
@@ -208,6 +224,7 @@ mod platform {
     }
 
     pub(super) fn delete(service: &str) -> Result<(), LeadKeyError> {
+        let _turn = turn();
         let keychain = login()?;
         match search(service, &keychain).delete() {
             Ok(()) => Ok(()),
@@ -217,6 +234,7 @@ mod platform {
     }
 
     pub(super) fn present(service: &str) -> Result<bool, LeadKeyError> {
+        let _turn = turn();
         let keychain = login()?;
         let mut options = search(service, &keychain);
         options.load_attributes(true);
