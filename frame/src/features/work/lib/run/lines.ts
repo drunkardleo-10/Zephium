@@ -3,10 +3,13 @@ export type Point = { x: number; y: number };
 /** Elbows turn on a 12 px radius. */
 const ELBOW = 12;
 
+const diagonal = (a: Point, b: Point) => a.x !== b.x && a.y !== b.y;
+
 /**
- * An orthogonal polyline as an SVG path with rounded elbows. A corner takes
- * the whole of a segment that ends the line and half of one it shares with
- * another corner, so a short bus stub still turns on its full radius.
+ * A polyline as an SVG path: orthogonal elbows turn on a 12 px radius, and a
+ * diagonal stretch is drawn as a curve that leaves and lands level, the way a
+ * branch leaves its stem. A corner takes the whole of a segment that ends the
+ * line and half of one it shares with another corner.
  */
 export function roundedPath(points: readonly Point[], radius = ELBOW): string {
   const list = points.filter(
@@ -16,19 +19,30 @@ export function roundedPath(points: readonly Point[], radius = ELBOW): string {
   if (!list.length) return "";
   const first = list[0]!;
   let d = `M ${first.x},${first.y}`;
-  for (let index = 1; index < list.length - 1; index++) {
+  for (let index = 1; index < list.length; index++) {
     const prev = list[index - 1]!;
     const at = list[index]!;
-    const next = list[index + 1]!;
+    const next = list[index + 1];
+    if (diagonal(prev, at)) {
+      const half = (at.x - prev.x) / 2;
+      d += ` C ${prev.x + half},${prev.y} ${at.x - half},${at.y} ${at.x},${at.y}`;
+      continue;
+    }
     const inLength = Math.hypot(at.x - prev.x, at.y - prev.y);
-    const outLength = Math.hypot(next.x - at.x, next.y - at.y);
-    const r = Math.min(
-      radius,
-      index === 1 ? inLength : inLength / 2,
-      index === list.length - 2 ? outLength : outLength / 2,
-    );
+    const outLength = next ? Math.hypot(next.x - at.x, next.y - at.y) : 0;
+    const r = next
+      ? Math.min(
+          radius,
+          index === 1 || diagonal(list[index - 2] ?? prev, prev) ? inLength : inLength / 2,
+          index === list.length - 2 ? outLength : outLength / 2,
+        )
+      : 0;
     const straight =
-      (prev.x === at.x && at.x === next.x) || (prev.y === at.y && at.y === next.y) || r <= 0;
+      !next ||
+      diagonal(at, next) ||
+      (prev.x === at.x && at.x === next.x) ||
+      (prev.y === at.y && at.y === next.y) ||
+      r <= 0;
     if (straight) {
       d += ` L ${at.x},${at.y}`;
       continue;
@@ -43,50 +57,26 @@ export function roundedPath(points: readonly Point[], radius = ELBOW): string {
     };
     d += ` L ${a.x},${a.y} Q ${at.x},${at.y} ${b.x},${b.y}`;
   }
-  const last = list.at(-1)!;
-  if (list.length > 1) d += ` L ${last.x},${last.y}`;
   return d;
 }
 
 /**
- * Lines from one point to several ends stacked below it, as a bus: the first
- * end straight across, every later one taking the trunk down from where the
- * one above it turned off, so no two lines ever draw the same pixels.
+ * Lines from one point to several ends, as branches from one stem: the end
+ * level with it straight across, every other one curving away from the same
+ * point, up or down, so parallel work forks symmetrically.
  */
-export function fanOut(start: Point, trunk: number, ends: readonly Point[]): Point[][] {
-  const sorted = ends.map((end, index) => ({ end, index })).sort((a, b) => a.end.y - b.end.y);
-  const out: Point[][] = [];
-  // Where the next line takes the trunk from: the start, or where the one above turned off.
-  let joint: Point | undefined;
-  for (const { end, index } of sorted) {
-    const from: Point | undefined = joint;
-    let route: Point[];
-    if (!from)
-      route =
-        end.y === start.y
-          ? [start, end]
-          : [start, { x: trunk, y: start.y }, { x: trunk, y: end.y }, end];
-    else if (from.x !== trunk)
-      // The line above ran straight: this one turns off it an elbow before the trunk.
-      route = [from, { x: trunk, y: from.y }, { x: trunk, y: end.y }, end];
-    else route = [from, { x: trunk, y: end.y }, end];
-    joint =
-      route.length === 2
-        ? { x: trunk - ELBOW, y: end.y }
-        : { x: trunk, y: Math.max(from?.y ?? start.y, end.y - ELBOW) };
-    out[index] = route;
-  }
-  return out;
+export function branch(start: Point, ends: readonly Point[]): Point[][] {
+  return ends.map((end) => [start, end]);
 }
 
 /**
- * Lines from several starts stacked below one end, merging on a collector
- * before it: the mirror of `fanOut`, each line joining the one above it.
+ * Lines from several starts into one end: each runs level to the collector,
+ * then curves in, the mirror of a fork.
  */
-export function fanIn(starts: readonly Point[], collector: number, end: Point): Point[][] {
-  return fanOut(
-    { x: -end.x, y: end.y },
-    -collector,
-    starts.map((start) => ({ x: -start.x, y: start.y })),
-  ).map((route) => route.map((point) => ({ x: -point.x, y: point.y })).reverse());
+export function merge(starts: readonly Point[], collector: number, end: Point): Point[][] {
+  return starts.map((start) =>
+    start.y === end.y || start.x >= collector
+      ? [start, end]
+      : [start, { x: collector, y: start.y }, end],
+  );
 }

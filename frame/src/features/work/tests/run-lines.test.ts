@@ -1,47 +1,40 @@
 import { expect, test } from "vitest";
-import { fanIn, fanOut, roundedPath } from "../lib/run/lines";
+import { branch, merge, roundedPath } from "../lib/run/lines";
 import { registrableSite, siteKey, siteName } from "../lib/run/site";
 
-const segments = (routes: { x: number; y: number }[][]) =>
-  routes.flatMap((route) => route.slice(1).map((point, index) => [route[index]!, point] as const));
-
-test("a bus leaves one point once: the first line straight, each later one off the trunk", () => {
-  const routes = fanOut({ x: 326, y: 32 }, 344, [
-    { x: 362, y: 32 },
-    { x: 362, y: 200 },
-    { x: 362, y: 360 },
+test("parallel parts branch from one point, up and down alike", () => {
+  const start = { x: 326, y: 200 };
+  const routes = branch(start, [
+    { x: 410, y: 32 },
+    { x: 410, y: 200 },
+    { x: 410, y: 368 },
   ]);
-  expect(routes[0]).toEqual([
-    { x: 326, y: 32 },
-    { x: 362, y: 32 },
-  ]);
-  expect(routes[1]![0]).toEqual({ x: 332, y: 32 });
-  expect(routes[2]![0]).toEqual({ x: 344, y: 188 });
-  // No two lines draw the same stretch of trunk: they meet only where one's elbow turns away.
-  const trunk = segments(routes).filter(([a, b]) => a.x === 344 && b.x === 344);
-  for (const [index, [a, b]] of trunk.entries())
-    for (const [c, d] of trunk.slice(index + 1)) {
-      const low = Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y));
-      const high = Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y));
-      expect(high - low).toBeLessThanOrEqual(12);
-    }
+  for (const route of routes) expect(route[0]).toEqual(start);
+  expect(routes[1]).toEqual([start, { x: 410, y: 200 }]);
+  // A branch leaves and lands level: a curve whose handles lie on its two ends' lines.
+  expect(roundedPath(routes[0]!)).toBe("M 326,200 C 368,200 368,32 410,32");
+  expect(roundedPath(routes[2]!)).toBe("M 326,200 C 368,200 368,368 410,368");
 });
 
-test("lines into one end merge on a collector, each joining the one above it", () => {
-  const routes = fanIn(
+test("lines into one end run level to the collector, then curve in", () => {
+  const routes = merge(
     [
       { x: 900, y: 32 },
       { x: 700, y: 200 },
     ],
-    1000,
-    { x: 1018, y: 32 },
+    900,
+    { x: 1018, y: 116 },
   );
   expect(routes[0]).toEqual([
     { x: 900, y: 32 },
-    { x: 1018, y: 32 },
+    { x: 1018, y: 116 },
   ]);
-  expect(routes[1]!.at(0)).toEqual({ x: 700, y: 200 });
-  expect(routes[1]!.at(-1)).toEqual({ x: 1012, y: 32 });
+  expect(routes[1]).toEqual([
+    { x: 700, y: 200 },
+    { x: 900, y: 200 },
+    { x: 1018, y: 116 },
+  ]);
+  expect(roundedPath(routes[1]!)).toBe("M 700,200 L 900,200 C 959,200 959,116 1018,116");
 });
 
 test("elbows turn on a 12 px radius", () => {

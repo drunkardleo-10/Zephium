@@ -35,7 +35,8 @@
 
 <script lang="ts">
   import { getContext, onMount } from "svelte";
-  import { useStore, type EdgeProps } from "@xyflow/svelte";
+  import { useStore, ViewportPortal, type EdgeProps } from "@xyflow/svelte";
+  import { watchStill } from "$shared/ui/presence/still";
   import { canvasArrival } from "../lib/canvas-context";
   import { duration, easing, reducedMotion, type Duration } from "$shared/lib/motion";
   import { roundedPath } from "../lib/run/lines";
@@ -93,6 +94,51 @@
       : curve(sourceX, sourceY, `${sourcePosition}`, targetX, targetY, `${targetPosition}`),
   );
   let line = $state<SVGPathElement>();
+  let pulse = $state<HTMLElement>();
+  const carrying = $derived(!!data?.live && tone === "flow");
+  /**
+   * A line at work carries a pulse of light from its start to its end: one
+   * element moved by transform along points sampled from the path, so it runs
+   * on the compositor. It holds still off screen, while the window is hidden
+   * and under reduced motion, and is gone once the part is done.
+   */
+  $effect(() => {
+    const element = pulse;
+    const d = path;
+    if (!element || !carrying) return;
+    const probe = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    probe.setAttribute("d", d);
+    const length = probe.getTotalLength();
+    if (length < 24) return;
+    const steps = Math.max(8, Math.min(48, Math.round(length / 16)));
+    const travel = 0.72;
+    const keys: { offset: number; transform: string; opacity: number }[] = [];
+    for (let index = 0; index <= steps; index++) {
+      const at = (index / steps) * length;
+      const point = probe.getPointAtLength(at);
+      const ahead = probe.getPointAtLength(Math.min(length, at + 1));
+      const behind = probe.getPointAtLength(Math.max(0, at - 1));
+      const angle = (Math.atan2(ahead.y - behind.y, ahead.x - behind.x) * 180) / Math.PI;
+      const edge = index === 0 || index === steps;
+      keys.push({
+        offset: (index / steps) * travel,
+        transform: `translate(${point.x}px, ${point.y}px) rotate(${angle}deg)`,
+        opacity: edge ? 0 : 1,
+      });
+    }
+    keys.push({ offset: 1, transform: keys.at(-1)!.transform, opacity: 0 });
+    const run = element.animate(keys, {
+      duration: Math.min(2600, Math.max(1100, length * 3.2)) / travel,
+      iterations: Infinity,
+      easing: "linear",
+    });
+    run.pause();
+    const stop = watchStill(element, (still) => (still ? run.pause() : run.play()));
+    return () => {
+      stop();
+      run.cancel();
+    };
+  });
   // A line whose part just began draws itself in from where it leaves.
   onMount(() => {
     if (tone === "relation" || !line || !arrival?.(target)) return;
@@ -119,6 +165,9 @@
   stroke-dasharray={tone === "relation" ? undefined : "1"}
   fill="none"
 />
+{#if carrying}<ViewportPortal target="back"
+    ><span class="pulse" bind:this={pulse} aria-hidden="true"></span></ViewportPortal
+  >{/if}
 
 <style>
   .work-edge-line {
@@ -143,7 +192,27 @@
 
   /* A line into a part at work is lit, and still: the part itself says what it does. */
   .work-edge-line.flow.live {
-    stroke: color-mix(in srgb, var(--color-accent) 70%, var(--color-border-strong));
+    stroke: color-mix(in oklab, var(--color-soft-sky) 55%, var(--color-border-strong));
+  }
+
+  /* The light a line at work carries: a short comet, its head brightest. */
+  .pulse {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    inline-size: 44px;
+    block-size: 3px;
+    margin: -1.5px 0 0 -44px;
+    border-radius: var(--radius-capsule);
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklab, var(--color-soft-sky) 80%, transparent) 70%,
+      color-mix(in oklab, var(--color-soft-sky) 45%, var(--color-agent-light))
+    );
+    opacity: 0;
+    transform-origin: 100% 50%;
+    pointer-events: none;
   }
 
   /* A tie lit by a focused card comes and goes with the pointer. */

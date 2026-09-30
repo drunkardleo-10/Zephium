@@ -315,7 +315,7 @@ export function partShape(part: RunPart, projection?: WorkRuntimeProjection): Pa
       rows: Math.max(rows, Math.min(PART.helperLines, part.lines?.length ?? 0)),
     };
   }
-  if (part.helper === "research")
+  if (part.helper === "research" && !part.pages.length)
     return {
       kind: "sources",
       rows: part.sources.length,

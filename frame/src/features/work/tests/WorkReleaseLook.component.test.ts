@@ -109,6 +109,8 @@ function midRun(loaded: BoardScene, at: number, only = 1): BoardScene {
 const only = (import.meta.env.VITE_LOOK as string | undefined)?.split(",");
 const LOOKS: [string, number][] = [
   ["research", 0],
+  ["research", 50],
+  ["blueprint", 50],
   ["research-live", 100],
   ["blueprint", 0],
   ["trip5", 0],
@@ -118,33 +120,34 @@ const LOOKS: [string, number][] = [
   ["cando", 0],
 ];
 
-test.each(LOOKS.filter(([name]) => !only || only.includes(name)))(
-  "%s at %d%%",
-  async (name, percent) => {
-    await page.viewport(1440, 900);
-    const base = name.replace(/-live$/u, "");
-    const found = await scene(base);
-    if (!found) return;
-    const loaded = name.endsWith("-live") ? midRun(found, base === "research" ? 3 : 2) : found;
-    shown = base;
-    const errors: string[] = [];
-    const listen = (event: ErrorEvent) => errors.push(event.message);
-    window.addEventListener("error", listen);
-    const zoom = percent / 100;
-    const screen = await render(BoardCanvas, {
-      scene: loaded,
-      ...(zoom ? { viewport: { x: 120, y: 72, zoom } } : {}),
-    });
-    screen.container.style.width = "1440px";
-    screen.container.style.height = "900px";
-    for (const theme of ["dark", "light"]) {
-      document.documentElement.dataset.theme = theme;
-      await new Promise((done) => setTimeout(done, 900));
-      await page.screenshot({ path: `${shots}/${name}-${percent || "open"}-${theme}.png` });
-    }
-    document.documentElement.dataset.theme = "dark";
-    window.removeEventListener("error", listen);
-    if (errors.length) console.error(name, errors.join(" | "));
-    await screen.unmount();
-  },
-);
+test.each(
+  LOOKS.filter(
+    ([name, percent]) => !only || only.some((one) => one === name || one === `${name}@${percent}`),
+  ),
+)("%s at %d%%", async (name, percent) => {
+  await page.viewport(1440, 900);
+  const base = name.replace(/-live$/u, "");
+  const found = await scene(base);
+  if (!found) return;
+  const loaded = name.endsWith("-live") ? midRun(found, base === "research" ? 3 : 2) : found;
+  shown = base;
+  const errors: string[] = [];
+  const listen = (event: ErrorEvent) => errors.push(event.message);
+  window.addEventListener("error", listen);
+  const zoom = percent / 100;
+  const screen = await render(BoardCanvas, {
+    scene: loaded,
+    ...(zoom ? { viewport: { x: 120, y: 72, zoom } } : {}),
+  });
+  screen.container.style.width = "1440px";
+  screen.container.style.height = "900px";
+  for (const theme of ["dark", "light"]) {
+    document.documentElement.dataset.theme = theme;
+    await new Promise((done) => setTimeout(done, 900));
+    await page.screenshot({ path: `${shots}/${name}-${percent || "open"}-${theme}.png` });
+  }
+  document.documentElement.dataset.theme = "dark";
+  window.removeEventListener("error", listen);
+  if (errors.length) console.error(name, errors.join(" | "));
+  await screen.unmount();
+});

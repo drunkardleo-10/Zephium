@@ -158,7 +158,7 @@ export type PartView = {
   title: string;
   /** The site whose mark stands for the part. */
   host?: string;
-  helper: "browser" | "research" | "computer" | "connection";
+  helper: "browser" | "research" | "computer" | "connection" | "lead";
   state: "planned" | "running" | "waiting" | "done" | "failed" | "stopped";
   /**
    * Its pages as windows, a list of what search cited, a helper's own view of
@@ -167,6 +167,8 @@ export type PartView = {
   shape: "pages" | "sources" | "helper" | "ask" | "label";
   /** What it came to, in a few words: "3 homes". */
   summary?: string;
+  /** What the lead gave it to do. */
+  goal?: string;
   /** While it works, what it is doing now, in words. */
   now?: string;
   pages: readonly PartPage[];

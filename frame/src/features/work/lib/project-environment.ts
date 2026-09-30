@@ -20,7 +20,7 @@ import { hostOf, siteName } from "./run/site";
 import type { SourceRow } from "./project-environment-stage";
 import { RUN } from "./run/layout";
 import { pageName } from "./run/sources";
-import { PART, partLead } from "./run/part-size";
+import { PART } from "./run/part-size";
 import { fileName } from "./work-files";
 import { linkVideo } from "./link-media";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
@@ -505,26 +505,25 @@ function agentCaption(
 }
 
 /**
- * Where the orb stands for what the agent does: at the start of the run's
- * lines while it thinks, on the live page of the part it works in, at the
- * result's anchor while it writes.
+ * Where the lead stands for what it does, always clear of words and lines:
+ * over the request's end while it thinks, beside the line into the part it
+ * coordinates (on the side the line does not come from), over the answer
+ * while it writes.
  */
 function standFor(doing: AgentDoing, stage: WorkStage): CanvasPosition {
-  const spine = stage.place.y + RUN.spine - MARK / 2;
+  const spine = stage.place.y + RUN.spine;
   const working = stage.parts.find((part) => part.state === "running");
   const rect = working ? stage.lane.rects[working.id] : undefined;
   if (rect && doing !== "writing" && doing !== "done") {
-    if (working!.helper === "browser" && working!.pages.length)
-      return {
-        x: rect.x + partLead + PART.window - MARK / 2,
-        y: rect.y - MARK / 2,
-      };
-    // Beside a row that shows its own work, off its end on the row's line.
-    return { x: rect.x + rect.width + 8, y: rect.y + RUN.labelMid - MARK / 2 };
+    const arrives = rect.y + RUN.labelMid;
+    return {
+      x: rect.x - MARK - 10,
+      y: arrives > spine + 1 ? arrives + 8 : arrives - MARK - 8,
+    };
   }
   if (doing === "writing" || doing === "done")
-    return { x: stage.lane.corner.x - RUN.air - MARK, y: spine };
-  return { x: RUN.request + RUN.air, y: spine };
+    return { x: stage.lane.corner.x, y: stage.lane.corner.y - MARK - 10 };
+  return { x: RUN.request - MARK, y: stage.place.y - MARK - 6 };
 }
 const MARK = 24;
 
@@ -650,7 +649,7 @@ function partSummary(part: RunPart, stage: WorkStage): string | undefined {
   if (part.state === "failed") return m.work_part_failed();
   if (part.state === "running")
     return (
-      part.now ??
+      part.goal ??
       (part.helper === "research"
         ? m.work_line_searching()
         : part.helper === "browser"
@@ -720,6 +719,7 @@ export function environmentParts(
           url: entry.url,
           title: clipText(
             observed?.trim() ||
+              entry.page?.title?.trim() ||
               entry.tab?.title.trim() ||
               pageName(projection.executions, entry.url, entry.steps.at(-1)?.id),
             TITLE_TEXT,
@@ -747,7 +747,7 @@ export function environmentParts(
       const state = needs ? "waiting" : part.state;
       const summary = needs ? m.work_line_waiting_for_you() : partSummary(part, stage);
       const rows: NonNullable<CanvasItem["sources"]> =
-        part.helper === "research"
+        part.helper === "research" && !part.pages.length
           ? part.sources.slice(0, SOURCE_ROWS).map((row) => ({
               key: row.key,
               url: row.url,
@@ -785,6 +785,7 @@ export function environmentParts(
           shape: partShape(part).kind,
           ...(summary ? { summary } : {}),
           ...(part.state === "running" && part.now ? { now: part.now } : {}),
+          ...(part.goal ? { goal: part.goal } : {}),
           pages: entries,
           objective: stage.objective,
           ...(part.steps ? { steps: part.steps } : {}),

@@ -1,19 +1,23 @@
 import type { BoardLayout, Rect } from "../board/layout";
-import { fanIn, fanOut, type Point } from "./lines";
+import { branch, merge, type Point } from "./lines";
 
 /**
  * A run on the 8 px grid, left to right: the inputs hang left of the request
- * at x = 0, the parts start 48 past the request, the result 96 past the
- * widest part row, so the lines from what the parts found merge in a gutter
- * of their own. Every line of a run meets its ends on one spine, 32 under
- * the run's top: the request's first line, each part's name, the answer's
- * headline. The run's Sources stand under its result.
+ * at x = 0, the parts start 96 past the request, the result 96 past the
+ * widest part row. The parts stand as a column centred on the request, so
+ * parallel work forks from one point, up and down alike, and merges the same
+ * way into the result. The run's spine runs through the request's first line,
+ * the middle of the fork and the answer's headline. Its Sources stand under
+ * its result.
  */
 export const RUN = {
   inputs: 200,
   request: 320,
   gutter: 48,
-  rowGap: 32,
+  /** From the request to its parts: room for the branches to curve. */
+  fork: 96,
+  /** Between part rows: room for each helper's line over its part. */
+  rowGap: 48,
   between: 120,
   /** From the widest part row to the result: room for the lines to merge. */
   feed: 96,
@@ -84,42 +88,9 @@ const ORIGIN = { source: { x: 0, y: 0 }, target: { x: 0, y: 0 } };
 
 export function placeRun(top: number, run: RunInputs): RunPlace {
   const rects: Record<string, Rect> = {};
-  const spine = top + RUN.spine;
-  const request = { x: 0, y: top, width: RUN.request, height: run.request.height };
-  rects[run.request.id] = request;
   const lines: RunLine[] = [];
-
-  let inputsBottom = top;
-  const inputs = run.inputs ?? [];
-  if (inputs.length) {
-    const x = -(RUN.inputs + RUN.gutter);
-    let y = spine - (inputs[0]?.height ?? 0) / 2;
-    const ends: Point[] = [];
-    for (const input of inputs) {
-      rects[input.id] = { x, y, width: input.width, height: input.height };
-      ends.push({ x: x + input.width + RUN.air, y: y + input.height / 2 });
-      y += input.height + 8;
-    }
-    inputsBottom = y;
-    const into = { x: -RUN.air, y: spine };
-    fanIn(ends, -RUN.gutter / 2, into).forEach((points, index) => {
-      const input = inputs[index]!;
-      const rect = rects[input.id]!;
-      lines.push({
-        id: `input:${input.id}`,
-        kind: "input",
-        source: input.id,
-        target: run.request.id,
-        points,
-        from: { x: rect.width + RUN.air, y: rect.height / 2 },
-        to: { x: -RUN.air, y: RUN.spine },
-        laid: ORIGIN,
-      });
-    });
-  }
-
-  const partsX = RUN.request + RUN.gutter;
-  let y = spine - RUN.labelMid;
+  const partsX = RUN.request + RUN.fork;
+  let y = top + RUN.spine - RUN.labelMid;
   let widest = 0;
   const rowEnds: { row: RunRow; end: Point; last: string; lastRect: Rect }[] = [];
   for (const row of run.rows) {
@@ -169,8 +140,44 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     y = snap(rowTop + height + RUN.rowGap);
   }
   const partsBottom = run.rows.length ? y - RUN.rowGap : top;
+  const labels = run.rows.map((row) => rects[row.part.id]!.y + RUN.labelMid);
+  const spine = labels.length
+    ? Math.max(top + RUN.spine, Math.round((labels[0]! + labels.at(-1)!) / 8) * 4)
+    : top + RUN.spine;
+  const request = { x: 0, y: spine - RUN.spine, width: RUN.request, height: run.request.height };
+  rects[run.request.id] = request;
 
-  const resultX = run.rows.length ? snap(partsX + widest + RUN.feed) : partsX;
+  let inputsBottom = top;
+  const inputs = run.inputs ?? [];
+  if (inputs.length) {
+    const x = -(RUN.inputs + RUN.gutter);
+    const tall = inputs.reduce((sum, input) => sum + input.height, 0) + (inputs.length - 1) * 8;
+    let y = Math.max(top, spine - tall / 2);
+    const ends: Point[] = [];
+    for (const input of inputs) {
+      rects[input.id] = { x, y, width: input.width, height: input.height };
+      ends.push({ x: x + input.width + RUN.air, y: y + input.height / 2 });
+      y += input.height + 8;
+    }
+    inputsBottom = y;
+    const into = { x: -RUN.air, y: spine };
+    merge(ends, Math.max(...ends.map((end) => end.x)), into).forEach((points, index) => {
+      const input = inputs[index]!;
+      const rect = rects[input.id]!;
+      lines.push({
+        id: `input:${input.id}`,
+        kind: "input",
+        source: input.id,
+        target: run.request.id,
+        points,
+        from: { x: rect.width + RUN.air, y: rect.height / 2 },
+        to: { x: -RUN.air, y: RUN.spine },
+        laid: ORIGIN,
+      });
+    });
+  }
+
+  const resultX = run.rows.length ? snap(partsX + widest + RUN.feed) : RUN.request + RUN.gutter;
   const resultTop = spine - RUN.resultMid;
   let blocks = resultTop;
   if (run.head) {
@@ -188,14 +195,10 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   const resultId = run.head?.id ?? Object.keys(run.board.at)[0];
   let resultRight = resultX + Math.max(run.head?.width ?? 0, run.board.width);
 
-  // A request's line reaches the head of every row; its row's end reaches the result.
+  // A request's line branches to the head of every row; each row's end merges into the result.
   const start = { x: RUN.request + RUN.air, y: spine };
-  const trunk = RUN.request + RUN.gutter / 2;
-  const partEnds = run.rows.map((row) => ({
-    x: partsX - RUN.air,
-    y: rects[row.part.id]!.y + RUN.labelMid,
-  }));
-  fanOut(start, trunk, partEnds).forEach((points, index) => {
+  const partEnds = labels.map((y) => ({ x: partsX - RUN.air, y }));
+  branch(start, partEnds).forEach((points, index) => {
     const row = run.rows[index]!;
     lines.push({
       id: `line:${row.part.id}`,
@@ -213,11 +216,8 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     const result = rects[resultId]!;
     const to = { x: -RUN.air, y: spine - result.y };
     const feeding = rowEnds.filter((entry) => entry.row.feeds);
-    fanIn(
-      feeding.map((entry) => entry.end),
-      resultX - RUN.feed / 2,
-      into,
-    ).forEach((points, index) => {
+    const ends = feeding.map((entry) => entry.end);
+    merge(ends, Math.max(...ends.map((end) => end.x)), into).forEach((points, index) => {
       const entry = feeding[index]!;
       lines.push({
         id: `feed:${entry.row.part.id}`,
@@ -257,7 +257,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     resultRight = Math.max(resultRight, x + run.sources.width);
   }
   let extent = Math.max(
-    top + run.request.height,
+    request.y + run.request.height,
     inputsBottom,
     partsBottom,
     resultBottom,

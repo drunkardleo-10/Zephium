@@ -243,28 +243,30 @@ describe("the process column", () => {
     ]);
   });
 
-  test("a run reads left to right on one spine: the request, a row per site, then the result", () => {
+  test("a run reads left to right: the request, its parts forking from it, then the result", () => {
     const scene = runningScene();
     const [stage] = environmentStages(scene.snapshot, scene.objectives, {
       recorded: () => scene.pages,
     });
     const rects = stage!.lane.rects;
-    expect(rects[stage!.card]).toMatchObject({ x: 0, y: 0, width: 320 });
     expect(stage!.parts.length).toBeGreaterThan(0);
     const browsing = stage!.parts.filter((part) => part.helper === "browser");
     for (const part of browsing) {
-      expect(rects[part.id]!.x).toBe(320 + 48);
+      expect(rects[part.id]!.x).toBe(320 + 96);
       expect(new Set(part.pages.map((page) => siteKey(new URL(page.url).host)))).toEqual(
         new Set([part.key]),
       );
     }
-    // Rows stack 32 apart, the first on the request's spine.
+    // Rows stack 48 apart from the run's top; the request stands at the middle of the fork.
     const tops = stage!.parts.map((part) => rects[part.id]!.y);
     expect(tops[0]! + 12).toBe(32);
     for (let index = 1; index < tops.length; index++)
       expect(tops[index]!).toBeGreaterThanOrEqual(
-        tops[index - 1]! + rects[stage!.parts[index - 1]!.id]!.height + 32,
+        tops[index - 1]! + rects[stage!.parts[index - 1]!.id]!.height + 48,
       );
+    const middle = (tops[0]! + tops.at(-1)! + 24) / 2;
+    expect(Math.abs(rects[stage!.card]!.y + 32 - middle)).toBeLessThanOrEqual(2);
+    expect(rects[stage!.card]).toMatchObject({ x: 0, width: 320 });
     expect(stage!.lane.board.x % 8).toBe(0);
     for (const part of stage!.parts)
       expect(stage!.lane.board.x).toBeGreaterThanOrEqual(

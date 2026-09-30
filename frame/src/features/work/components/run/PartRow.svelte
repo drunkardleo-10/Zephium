@@ -11,6 +11,7 @@
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
   import PartMark from "../presence/PartMark.svelte";
+  import PartAgent from "../presence/PartAgent.svelte";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -102,6 +103,7 @@
   aria-label={part.title}
   data-part={item.id}
 >
+  <div class="agent"><PartAgent {part} /></div>
   <div class="label" bind:this={labelBody}>
     <button
       type="button"
@@ -290,12 +292,24 @@
     font-size: var(--text-label);
     line-height: 16px;
     text-wrap: pretty;
+
+    /* A few lines at most: a long goal or query never runs down the canvas. */
+    display: -webkit-box;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
   }
 
-  /* At work, the row says what it does now, in the text's own colour, whole: never cut with dots. */
-  .working .summary {
-    color: var(--color-text);
-    overflow-wrap: anywhere;
+  /* The helper that owns the part, at its top-right, over its work. */
+  .agent {
+    position: absolute;
+    inset-block-end: calc(100% + 10px);
+    inset-inline-end: 0;
+    display: flex;
+    justify-content: flex-end;
+    max-inline-size: 100%;
   }
 
   .summary.turn {

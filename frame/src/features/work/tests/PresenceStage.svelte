@@ -17,7 +17,7 @@
       title: string;
       now: string;
       host?: string;
-      helper?: "browser" | "research" | "computer" | "connection";
+      helper?: "browser" | "research" | "computer" | "connection" | "lead";
     }[];
     viewport: { x: number; y: number; zoom: number };
   } = $props();

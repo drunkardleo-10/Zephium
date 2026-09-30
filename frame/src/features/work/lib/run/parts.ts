@@ -30,7 +30,7 @@ export type RunInputView = {
 };
 
 type PartState = "planned" | "running" | "waiting" | "done" | "failed" | "stopped";
-type PartHelper = "browser" | "research" | "computer" | "connection";
+type PartHelper = "browser" | "research" | "computer" | "connection" | "lead";
 
 /**
  * One row of a run: a helper's share of the work. A legacy run has no parts
@@ -55,6 +55,8 @@ export type RunPart = {
   connection?: string;
   /** What the part came to, in its helper's words: "3 homes". */
   summary?: string;
+  /** What the lead gave it to do: "Warsaw to San Francisco and back". */
+  goal?: string;
   /** The sites a row of pages that wouldn't open stands for. */
   names?: string[];
   /** The steps a computer part took, in order, for its own view. */
@@ -73,12 +75,8 @@ export type RunPart = {
 function nowWords(step: Step): string | undefined {
   const kind = step.kind;
   switch (kind.kind) {
-    case "read": {
-      const title = step.local?.page_title?.trim();
-      return title
-        ? m.work_now_reading({ what: title })
-        : m.work_line_reading({ host: hostOf(kind.url) || kind.url });
-    }
+    case "read":
+      return m.work_line_reading({ host: (hostOf(kind.url) || kind.url).replace(/^www\./u, "") });
     case "search":
     case "discover":
       return m.work_now_searching({ query: kind.query });
@@ -191,6 +189,7 @@ function factParts(
             : [],
         order: parts.length,
         ...(fact.summary ? { summary: fact.summary } : {}),
+        ...(fact.goal?.trim() ? { goal: fact.goal.trim() } : {}),
         ...(going && state === "running" && nowOf(steps) ? { now: nowOf(steps)! } : {}),
         ...(fact.need && !going ? { need: fact.need } : {}),
         ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
@@ -204,8 +203,66 @@ function factParts(
       if (part.lines) for (const step of steps) addLine(part, step.kind);
       parts.push(part);
     }
+    const lead = leadReads(card, run, recorded, going);
+    if (lead) parts.push({ ...lead, order: parts.length });
   }
   return parts;
+}
+
+/**
+ * The pages the lead read itself, outside any part, as a row of their own
+ * under its mark: named by their sites, live while one is being read.
+ */
+function leadReads(
+  card: string,
+  run: WorkExecutionFact,
+  recorded: readonly WorkPageV1[],
+  going: boolean,
+): RunPart | null {
+  const steps = (run.steps ?? []).filter((step) => !step.part && step.kind.kind === "read");
+  if (!steps.length) return null;
+  const ids = new Set(steps.map((step) => step.id));
+  const pages = pageGroups(run, recorded).filter((group) =>
+    group.steps.some((step) => ids.has(step.id)),
+  );
+  const unread = unreadPages(run).filter((page) => ids.has(page.key.split(":").at(-1)!));
+  if (!pages.length && !unread.length) return null;
+  const sites = [
+    ...new Set(
+      [...pages.map((page) => page.url), ...unread.map((page) => page.url)].map((url) =>
+        registrableSite(hostOf(url)),
+      ),
+    ),
+  ].filter(Boolean);
+  const titled = (site: string) =>
+    pages.flatMap((page) =>
+      registrableSite(hostOf(page.url)) === site
+        ? [
+            ...page.steps.flatMap((step) =>
+              step.local?.page_title ? [step.local.page_title] : [],
+            ),
+            ...(page.page?.title ? [page.page.title] : []),
+          ]
+        : [],
+    );
+  const names = sites.map((site) => siteName(site, titled(site)));
+  const reading = going && steps.some((step) => step.status === "running");
+  return {
+    id: `part:${card}:lead:${run.id}`,
+    key: `lead:${run.id}`,
+    title:
+      names.length > 2
+        ? m.work_part_lead_sites({ first: names[0]!, second: names[1]!, count: names.length - 2 })
+        : names.join(" · "),
+    ...(sites.length === 1 ? { host: sites[0]! } : {}),
+    helper: "lead",
+    state: reading ? "running" : "done",
+    pages,
+    unread,
+    sources: [],
+    order: 0,
+    ...(reading && nowOf(steps) ? { now: nowOf(steps)! } : {}),
+  };
 }
 
 /** A search part appears once search cited this many sites; below it the answer's chips say it. */

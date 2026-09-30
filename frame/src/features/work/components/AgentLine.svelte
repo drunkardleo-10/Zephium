@@ -47,7 +47,7 @@
       title: string;
       now: string;
       host?: string;
-      helper?: "browser" | "research" | "computer" | "connection";
+      helper?: "browser" | "research" | "computer" | "connection" | "lead";
     }[];
     /** Why the run in view ended short, in a person's words, and the one thing that helps. */
     ended?: { text: string; action: string; onact: () => void } | null;
