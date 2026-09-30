@@ -317,6 +317,11 @@ where
         }
         // A page whose outcome is unknown is one lost page, not the end of
         // the run: its step says so and the run's usage becomes a ceiling.
+        if let Err(error) = &outcome {
+            crate::work_trace::record(format_args!(
+                "work: phase=lead event=hands_failed error={error:?}"
+            ));
+        }
         let terminal = match outcome {
             Ok(Some(WorkAttemptStatus::OutcomeUnknown)) | Err(WorkError::OutcomeUnknown) => {
                 self.run.charge(WorkUsage {
@@ -329,6 +334,9 @@ where
             }
             Ok(Some(status)) => Some(status),
             Ok(None) => None,
+            // One request the machinery refused is that request's failure:
+            // the pages that ran keep their results and the part goes on.
+            Err(WorkError::Invalid | WorkError::Capacity | WorkError::Unavailable) => None,
             Err(_) => Some(WorkAttemptStatus::Failed),
         };
         let execution = self.run.execution().await.ok();
@@ -398,7 +406,13 @@ where
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
         match terminal {
-            Some(status) if status != WorkAttemptStatus::Succeeded => Err(status),
+            Some(status) if status != WorkAttemptStatus::Succeeded => {
+                crate::work_trace::record(format_args!(
+                    "work: phase=lead event=hands_ended status={status:?} part={}",
+                    self.part.is_some()
+                ));
+                Err(status)
+            }
             _ => Ok(results),
         }
     }

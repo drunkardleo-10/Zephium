@@ -831,9 +831,12 @@ pub(crate) fn part_holds<'a>(
             && names
                 .iter()
                 .filter(|name| {
-                    items
-                        .iter()
-                        .any(|item| item.name.trim().to_lowercase() == **name)
+                    items.iter().any(|item| {
+                        let held = item.name.trim().to_lowercase();
+                        held == **name
+                            || (name.len() >= 4 && held.contains(name.as_str()))
+                            || (held.len() >= 4 && name.contains(held.as_str()))
+                    })
                 })
                 .count()
                 * 2

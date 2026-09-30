@@ -139,6 +139,9 @@ impl Driver {
                 let id = match self.begin(step, vec![], None).await {
                     Ok(id) => id,
                     Err(error) => {
+                        crate::work_trace::record(format_args!(
+                            "work: phase=page event=begin_refused error={error:?}"
+                        ));
                         failure = Some(error);
                         break;
                     }
@@ -264,7 +267,12 @@ impl Driver {
                         terminal = Some(WorkAttemptStatus::OutcomeUnknown)
                     }
                     Ok(Some(status)) if terminal.is_none() => terminal = Some(status),
-                    Err(error) if failure.is_none() => failure = Some(error),
+                    Err(error) if failure.is_none() => {
+                        crate::work_trace::record(format_args!(
+                            "work: phase=page event=settle_refused error={error:?}"
+                        ));
+                        failure = Some(error)
+                    }
                     _ => {}
                 }
             }
