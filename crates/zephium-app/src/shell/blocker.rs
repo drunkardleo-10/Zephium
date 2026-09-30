@@ -507,11 +507,7 @@ impl BlockerCoordinator {
         true
     }
 
-    pub(super) fn start_uninitialized(
-        &mut self,
-        profile: ProfileId,
-        callback: Option<CallbackHandle>,
-    ) -> bool {
+    pub(super) fn start_uninitialized(&mut self, profile: ProfileId) -> bool {
         let Some(entry) = self.profiles.get(&profile) else {
             return false;
         };
@@ -519,10 +515,6 @@ impl BlockerCoordinator {
             return true;
         }
         let target = entry.config.config;
-        if !target.enabled {
-            return self.start_compile(profile, target, callback);
-        }
-
         // Browsing must not wait for source parsing or native compilation.
         // Deliver an explicit, allocation-small allow-all artifact locally,
         // then use the ordinary exact native settlement before starting the
@@ -534,9 +526,9 @@ impl BlockerCoordinator {
             .profiles
             .get_mut(&profile)
             .expect("profile was checked above");
-        entry.startup_provisional = true;
+        entry.startup_provisional = target.enabled;
         entry.desired_config = BlockerConfig { enabled: false };
-        entry.background_target = Some(target);
+        entry.background_target = target.enabled.then_some(target);
         entry.state = BlockerProfileState::Compiling {
             desired: generation,
             retained: None,
@@ -1433,12 +1425,7 @@ impl Shell {
 
     pub(super) fn start_blocker_profile(&mut self, profile: ProfileId) -> bool {
         self.ensure_blocker_site_preferences(profile);
-        let accepted = self.blocker.start_uninitialized(
-            profile,
-            self.self_queue.as_ref().map(|queue| CallbackHandle {
-                queue: Arc::downgrade(&queue.inner),
-            }),
-        );
+        let accepted = self.blocker.start_uninitialized(profile);
         self.finish_terminalized_blocker_native_operations();
         self.project_blocker_status();
         // Deterministic compilers may complete inside `compile`. Consume that
