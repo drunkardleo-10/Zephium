@@ -24,7 +24,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 const shots = "../../../../../target/work-models";
 const settle = () => new Promise((done) => setTimeout(done, 500));
 
-test("Settings → AI with Cloud, keys and model roles, in both themes", async () => {
+test("Settings → AI with BYOK keys and model roles, in both themes", async () => {
   await page.viewport(1100, 1300);
   const screen = await render(AiPageStage);
   for (const theme of ["dark", "light"]) {

@@ -7,16 +7,13 @@
     entryOf,
     keyedProviders,
     pickerGroups,
-    providerMark,
     providerName,
     usable,
   } from "$domain/ai";
   import Button from "$shared/ui/Button";
-  import Icon from "$shared/ui/Icon";
   import Select from "$shared/ui/Select";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
-  import * as settings from "../../lib/settings-state.svelte";
   import AiProviderRow from "../AiProviderRow.svelte";
 
   let profile = $derived(tabs.profile());
@@ -39,25 +36,34 @@
     if (usable(models, "compatible")) void session?.listEndpoint();
   });
   const AUTO = "auto";
+  let expanded = $state(false);
   const roles: {
     role: Exclude<WorkModelRole, "decision">;
     title: () => string;
     description: () => string;
   }[] = [
     { role: "lead", title: m.ai_role_lead, description: m.ai_role_lead_desc },
-    { role: "page", title: m.ai_role_page, description: m.ai_role_page_desc },
+    { role: "page", title: m.ai_role_page, description: m.ai_role_page_byok_desc },
     { role: "light", title: m.ai_role_light, description: m.ai_role_light_desc },
   ];
   const anyUsable = $derived(
-    !!models &&
-      (models.cloud.signed_in || keyedProviders.some((provider) => usable(models, provider))),
+    !!models && keyedProviders.some((provider) => usable(models, provider)),
   );
 
   function label(entry: WorkModelEntry) {
     const provider = entry.model.provider;
-    return provider === "anthropic" || provider === "deep_seek" || provider === "cloud"
-      ? entry.display_name
-      : `${entry.display_name} · ${providerName(provider)}`;
+    const note = [
+      entry.supports.vision ? m.ai_capability_vision() : null,
+      entry.supports.native_search ? m.ai_capability_search() : null,
+      entry.recommended && entry.roles.includes("light") ? m.ai_capability_fast() : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const name =
+      provider === "anthropic" || provider === "deep_seek" || provider === "cloud"
+        ? entry.display_name
+        : `${entry.display_name} · ${providerName(provider)}`;
+    return note ? `${name} · ${note}` : name;
   }
 
   function options(role: Exclude<WorkModelRole, "decision">) {
@@ -66,9 +72,10 @@
       value: AUTO,
       label: effective ? m.ai_role_auto({ model: effective.display_name }) : m.ai_role_auto_none(),
     };
-    const offered = pickerGroups(models, role, session?.endpoint ?? []).ready.flatMap(
-      (group) => group.entries,
-    );
+    const offered = pickerGroups(models, role, [
+      ...(session?.endpoint ?? []),
+      ...(expanded ? (session?.more ?? []) : []),
+    ]).ready.flatMap((group) => group.entries);
     return [automatic, ...offered.map((entry) => ({ value: entry.id, label: label(entry) }))];
   }
 </script>
@@ -76,24 +83,7 @@
 {#if !profile || profile.kind === "incognito"}<p class="ai-note">{m.work_regular_profile()}</p>
 {:else if session?.unavailable && !models}<p class="ai-note" role="alert">{m.ai_unavailable()}</p>
 {:else}
-  <SettingsGroup title={m.ai_cloud_group()}>
-    <div class="cloud">
-      <span class="tile" aria-hidden="true"
-        ><Icon icon={providerMark("cloud")} size={17} strokeWidth={1.5} /></span
-      >
-      <div class="copy">
-        <h3>{m.ai_cloud_title()}</h3>
-        <p>
-          {#if models?.cloud.signed_in}{models.cloud.plan
-              ? m.ai_cloud_signed_in_plan({ plan: models.cloud.plan })
-              : m.ai_cloud_signed_in()}{:else}{m.ai_cloud_signed_out()}{/if}
-        </p>
-      </div>
-      <Button size="compact" onclick={() => settings.select("account")}
-        >{m.ai_cloud_account()}</Button
-      >
-    </div>
-  </SettingsGroup>
+  {#if !anyUsable}<p class="ai-note">{m.ai_byok_start()}</p>{/if}
 
   <SettingsGroup title={m.ai_keys_group()} description={m.ai_keys_note()}>
     {#if session}{#each keyedProviders as provider (provider)}<AiProviderRow
@@ -118,6 +108,19 @@
         /></SettingsRow
       >
     {/each}
+    <div class="more">
+      <Button
+        size="compact"
+        pending={session?.listingMore}
+        onclick={() => {
+          expanded = true;
+          void session?.listMore(keyedProviders.filter((provider) => usable(models, provider)));
+        }}>{m.ai_more_models()}</Button
+      >
+    </div>
+    {#if session?.fault?.action === "more"}<p class="ai-note" role="alert">
+        {m.ai_more_failed()}
+      </p>{/if}
   </SettingsGroup>
 {/if}
 
@@ -129,44 +132,7 @@
     color: var(--color-muted);
   }
 
-  .cloud {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    box-sizing: border-box;
-    min-height: var(--row-page);
-    padding: 12px 18px 12px 14px;
-  }
-
-  .tile {
-    display: grid;
-    flex: none;
-    inline-size: 32px;
-    block-size: 32px;
-    border-radius: var(--radius-control);
-    background: var(--color-fill);
-    color: var(--color-text);
-    place-items: center;
-  }
-
-  .copy {
-    flex: 1;
-    min-width: 0;
-  }
-
-  h3 {
-    margin: 0;
-    color: var(--color-text);
-    font-size: var(--text-page-title);
-    font-weight: 500;
-    line-height: 19px;
-    letter-spacing: -0.008em;
-  }
-
-  p {
-    margin: 2px 0 0;
-    color: var(--color-muted);
-    font-size: var(--text-label);
-    line-height: 1.5;
+  .more {
+    padding: 12px 14px;
   }
 </style>

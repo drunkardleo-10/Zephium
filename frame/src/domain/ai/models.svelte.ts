@@ -27,7 +27,11 @@ export class ModelsSession {
   fault = $state.raw<{ action: string; fault: WorkModelsFaultV1 } | null>(null);
   /** The models the person's own server serves, once asked. */
   endpoint = $state.raw<WorkModelEntry[]>([]);
+  more = $state.raw<WorkModelEntry[]>([]);
+  listingMore = $state(false);
   private listing = false;
+  private readSequence = 0;
+  private readPending = false;
   private active = false;
   private generation = 0;
   private stop: (() => void) | null = null;
@@ -50,13 +54,18 @@ export class ModelsSession {
   }
 
   private async read() {
+    if (this.busy) {
+      this.readPending = true;
+      return;
+    }
+    const sequence = ++this.readSequence;
     const generation = this.generation;
     const response = await observe(
       Promise.resolve().then(() => commands.workModels(this.profile)),
       TIMEOUT,
       this.lifetime.signal,
     );
-    if (generation !== this.generation) return;
+    if (generation !== this.generation || sequence !== this.readSequence) return;
     if (response.state !== "received") {
       this.unavailable = true;
       return;
@@ -74,12 +83,16 @@ export class ModelsSession {
       return;
     }
     this.unavailable = false;
+    const previousBase = this.models?.providers.find((row) => row.provider === "compatible")?.base;
+    const nextBase = response.providers.find((row) => row.provider === "compatible")?.base;
+    if (previousBase !== nextBase) this.endpoint = [];
     this.models = response;
   }
 
   private async act(action: string, request: () => Promise<WorkModelsV1>, timeout = TIMEOUT) {
     if (this.busy) return false;
     this.busy = action;
+    this.readSequence++;
     this.fault = null;
     const generation = this.generation;
     const response = await observe(Promise.resolve().then(request), timeout, this.lifetime.signal);
@@ -87,11 +100,19 @@ export class ModelsSession {
     this.busy = null;
     if (response.state !== "received") {
       this.fault = { action, fault: "unreachable" };
+      if (this.readPending) {
+        this.readPending = false;
+        void this.read();
+      }
       return false;
     }
     this.adopt(response.value);
     const fault = response.value.fault;
     if (fault && fault !== "unavailable") this.fault = { action, fault };
+    if (this.readPending) {
+      this.readPending = false;
+      void this.read();
+    }
     return !fault;
   }
 
@@ -142,6 +163,33 @@ export class ModelsSession {
       this.endpoint = response.value.entries;
   }
 
+  async listMore(providers: readonly WorkModelProvider[]) {
+    if (this.listingMore) return;
+    this.listingMore = true;
+    const generation = this.generation;
+    const results = await Promise.all(
+      providers.map((provider) =>
+        observe(
+          Promise.resolve().then(() => commands.workMoreModels(this.profile, provider)),
+          KEY_TIMEOUT,
+          this.lifetime.signal,
+        ),
+      ),
+    );
+    if (generation !== this.generation) return;
+    this.listingMore = false;
+    const entries = results.flatMap((result) =>
+      result.state === "received" && !result.value.fault ? result.value.entries : [],
+    );
+    this.more = entries;
+    const failed = results.find((result) => result.state !== "received" || result.value.fault);
+    if (failed)
+      this.fault = {
+        action: "more",
+        fault: failed.state === "received" ? (failed.value.fault ?? "unreachable") : "unreachable",
+      };
+  }
+
   dispose() {
     this.active = false;
     this.generation++;
@@ -152,6 +200,10 @@ export class ModelsSession {
     this.busy = null;
     this.fault = null;
     this.endpoint = [];
+    this.more = [];
+    this.listingMore = false;
     this.listing = false;
+    this.readPending = false;
+    this.readSequence++;
   }
 }

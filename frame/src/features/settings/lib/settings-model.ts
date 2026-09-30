@@ -20,7 +20,7 @@ import {
   InformationCircleIcon,
   Plug01Icon,
 } from "@hugeicons/core-free-icons";
-export const sections = [
+const allSections = [
   {
     id: "general",
     group: "browser",
@@ -190,7 +190,8 @@ export const sections = [
     icon: InformationCircleIcon,
   },
 ] as const;
-export type SettingsSection = (typeof sections)[number]["id"];
+export type SettingsSection = (typeof allSections)[number]["id"];
+export const sections = allSections.filter((section) => section.id !== "account");
 export const groups = [
   { id: "browser", label: m.settings_browser },
   { id: "personalize", label: m.settings_personalize },

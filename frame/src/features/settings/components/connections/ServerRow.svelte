@@ -23,12 +23,18 @@
   let editing = $state(false);
 
   const oauth = $derived(server.transport.kind === "http" && server.transport.auth === "oauth");
-  const needsSignIn = $derived(check?.outcome === "sign_in" || (oauth && !row.signed_in && !check));
+  const needsSignIn = $derived(
+    check?.outcome === "sign_in" ||
+      check?.outcome === "cancelled" ||
+      (oauth && !row.signed_in && !check),
+  );
 
   const status = $derived.by(() => {
     if (!server.enabled) return { tone: "quiet", text: m.connections_off() };
     if (signing) return { tone: "quiet", text: m.connections_signing_in() };
     if (checking) return { tone: "quiet", text: m.connections_checking() };
+    if (check?.outcome === "cancelled")
+      return { tone: "attention", text: m.connections_sign_in_cancelled() };
     if (needsSignIn) return { tone: "attention", text: m.connections_sign_in_needed() };
     if (!check) return null;
     switch (check.outcome) {
@@ -80,6 +86,9 @@
     </div>
     {#if !editing}
       <div class="actions">
+        {#if signing}<Button size="compact" onclick={() => void session.cancelSignIn(id)}
+            >{m.connections_cancel()}</Button
+          >{/if}
         {#if needsSignIn && server.enabled}<Button
             size="compact"
             pending={signing}
@@ -90,7 +99,10 @@
             variant="ghost"
             pending={checking}
             disabled={!!session.busy && !checking}
-            onclick={() => void session.check(id)}>{m.connections_test()}</Button
+            onclick={() => void session.check(id)}
+            >{check && check.outcome !== "ready"
+              ? m.connections_retry()
+              : m.connections_reconnect()}</Button
           >{/if}
         <Menu
           label={m.connections_options({ name: server.name })}
@@ -122,8 +134,12 @@
       editing={row}
       {taken}
       saving={session.busy === "save"}
+      onpreview={(draft) => session.preview(draft)}
       onsave={(draft) => void save(draft)}
-      oncancel={() => (editing = false)}
+      oncancel={() => {
+        void session.cancelPreview();
+        editing = false;
+      }}
     />
   {/if}
 </div>

@@ -46,9 +46,12 @@ export function keyState(models: WorkModelsV1 | null, provider: WorkModelProvide
 /** A provider can run calls now: its key is set and not refused. */
 export function usable(models: WorkModelsV1 | null, provider: WorkModelProvider): boolean {
   if (!models) return false;
-  if (provider === "cloud") return models.cloud.signed_in;
+  if (provider === "cloud") return false;
   if (provider === "compatible")
-    return !!models.providers.find((row) => row.provider === "compatible")?.base;
+    return (
+      !!models.providers.find((row) => row.provider === "compatible")?.base &&
+      keyState(models, provider) !== "invalid"
+    );
   const key = keyState(models, provider);
   return key === "set" || key === "valid";
 }
@@ -57,7 +60,7 @@ type ModelGroup = { provider: WorkModelProvider; entries: WorkModelEntry[] };
 
 /**
  * The picker's list for a role: every curated model of usable providers,
- * recommended first, grouped by provider, Zephium first. The person's own
+ * recommended first, grouped by provider. The person's own
  * server adds the models it serves. Providers without a key are listed
  * apart, as needing one.
  */
@@ -67,14 +70,18 @@ export function pickerGroups(
   endpoint: readonly WorkModelEntry[] = [],
 ) {
   const entries = [...(models?.entries ?? []), ...endpoint];
-  const order: WorkModelProvider[] = ["cloud", ...keyedProviders];
+  const order: readonly WorkModelProvider[] = keyedProviders;
   const ready: ModelGroup[] = [];
   const needsKey: WorkModelProvider[] = [];
   for (const provider of order) {
     const seen = new Set<string>();
     const offered = entries
       .filter((entry) => {
-        if (entry.model.provider !== provider || !entry.roles.includes(role)) return false;
+        if (
+          entry.model.provider !== provider ||
+          !(entry.roles.includes(role) || (role !== "decision" && entry.roles.includes("lead")))
+        )
+          return false;
         if (seen.has(entry.id)) return false;
         seen.add(entry.id);
         return true;

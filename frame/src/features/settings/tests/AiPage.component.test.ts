@@ -19,7 +19,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 
-test("a refused key is not kept and says so; an accepted one shows it works", async () => {
+test("a refused key is explained and acceptance makes no billing promise", async () => {
   await page.viewport(1100, 1200);
   native.read.mockResolvedValue(models({ keys: { open_ai: "set" }, lead: "openai/gpt-6-sol" }));
   native.set
@@ -35,7 +35,7 @@ test("a refused key is not kept and says so; an accepted one shows it works", as
 
   await screen.getByLabelText("Anthropic API key").fill("sk-ant-right");
   await screen.getByRole("button", { name: "Save" }).click();
-  await expect.element(screen.getByText("Key works")).toBeVisible();
+  await expect.element(screen.getByText("Key accepted")).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Save" })).not.toBeInTheDocument();
 });
 
@@ -66,6 +66,23 @@ test("a role follows Automatic until the person chooses a model", async () => {
   const screen = await render(AiPage);
   await expect.element(screen.getByText("Automatic · Claude Opus 5.5")).toBeVisible();
   await screen.getByText("Automatic · Claude Opus 5.5").click();
-  await page.getByRole("option", { name: "Claude Sonnet 5.5" }).click();
+  await page.getByRole("option", { name: /Claude Sonnet 5.5/ }).click();
   expect(native.choose).toHaveBeenCalledWith(PROFILE, "lead", "anthropic/claude-sonnet-5-5");
+});
+
+test("billing trouble preserves acceptance and dormant Cloud stays hidden", async () => {
+  await page.viewport(1100, 1200);
+  const view = models({ keys: { open_ai: "valid" }, cloud: true });
+  view.providers = view.providers.map((provider) =>
+    provider.provider === "open_ai" ? { ...provider, fault: "billing" } : provider,
+  );
+  native.read.mockResolvedValue(view);
+  const screen = await render(AiPage);
+  await expect.element(screen.getByText("Key accepted")).toBeVisible();
+  await expect
+    .element(
+      screen.getByText("Check your provider’s billing or available credits, then try again."),
+    )
+    .toBeVisible();
+  await expect.element(screen.getByText("Zephium Cloud", { exact: true })).not.toBeInTheDocument();
 });

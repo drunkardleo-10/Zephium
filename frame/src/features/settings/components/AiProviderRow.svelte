@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import { commands } from "$shared/ipc/bindings";
   import type { WorkModelProvider } from "$shared/ipc/bindings";
   import { type ModelsSession, keyState, providerMark, providerName } from "$domain/ai";
   import Button from "$shared/ui/Button";
@@ -16,6 +17,15 @@
   const models = $derived(session.models);
   const key = $derived(keyState(models, provider));
   const base = $derived(models?.providers.find((row) => row.provider === provider)?.base ?? null);
+  const providerFault = $derived(models?.providers.find((row) => row.provider === provider)?.fault);
+  const keyUrls: Partial<Record<WorkModelProvider, string>> = {
+    anthropic: "https://platform.claude.com/settings/keys",
+    open_ai: "https://platform.openai.com/api-keys",
+    google: "https://aistudio.google.com/apikey",
+    deep_seek: "https://platform.deepseek.com/api_keys",
+    open_router: "https://openrouter.ai/settings/keys",
+  };
+  const keyUrl = $derived(keyUrls[provider]);
   const configured = $derived(custom ? !!base : key !== "missing");
   const description = $derived(
     {
@@ -42,7 +52,7 @@
 
   const status = $derived.by(() => {
     if (custom) return base ?? null;
-    if (key === "valid") return { text: m.ai_key_valid(), tone: "valid" as const };
+    if (key === "valid") return { text: m.ai_key_accepted(), tone: "valid" as const };
     if (key === "invalid")
       return { text: m.ai_key_invalid({ provider: name }), tone: "invalid" as const };
     if (key === "set") return { text: m.ai_key_set(), tone: "set" as const };
@@ -53,6 +63,14 @@
     switch (fault) {
       case "key_refused":
         return m.ai_key_refused({ provider: name });
+      case "billing":
+        return m.ai_fault_billing();
+      case "rate_limited":
+        return m.ai_fault_rate_limit();
+      case "provider_down":
+        return m.ai_fault_provider_down();
+      case "request":
+        return m.ai_fault_request();
       case "keychain":
         return m.ai_key_keychain();
       case "invalid":
@@ -106,7 +124,7 @@
     message = null;
     const passed = await session.testKey(provider);
     message = passed
-      ? { text: m.ai_key_tested({ provider: name }), tone: "done" }
+      ? { text: m.ai_key_accepted(), tone: "done" }
       : { text: explain(session.fault?.fault), tone: "error" };
   }
 
@@ -174,6 +192,18 @@
       </div>
     {/if}
   </div>
+  {#if !configured && keyUrl}<p class="message">
+      <a
+        href={keyUrl}
+        onclick={(event) => {
+          event.preventDefault();
+          void commands.browserOpenUrl(keyUrl, true).catch(() => {
+            message = { text: m.ai_link_failed(), tone: "error" };
+          });
+        }}>{m.ai_get_key({ provider: name })}</a
+      >
+    </p>{/if}
+  {#if providerFault && !message}<p class="message" role="status">{explain(providerFault)}</p>{/if}
   {#if editing}
     <form
       class="editor"
@@ -367,6 +397,11 @@
   .message {
     margin: 8px 0 0 44px;
     white-space: normal;
+  }
+
+  a {
+    color: var(--color-text);
+    text-decoration: underline;
   }
 
   .message[data-tone="error"] {
