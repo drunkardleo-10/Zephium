@@ -11,6 +11,9 @@ use crate::ExtensionId;
 
 const UPDATE_ENDPOINT: &str = "https://clients2.google.com/service/update2/crx";
 
+/// Runs at document start in every top-level page; does nothing off the store.
+pub const PAGE_SCRIPT: &str = include_str!("store-page.js");
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub id: ExtensionId,

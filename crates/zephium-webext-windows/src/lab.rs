@@ -528,7 +528,7 @@ pub fn run() -> Result<()> {
             initialization: steps
                 .iter()
                 .any(|step| step["chrome_store_ui"] == true)
-                .then_some(zephium_webext::windows::CHROME_STORE_SCRIPT),
+                .then_some(zephium_webext::store::PAGE_SCRIPT),
         },
     )?;
     if visible {

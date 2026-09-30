@@ -169,4 +169,5 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 ] }
 objc2-quartz-core = "0.3"
 raw-window-handle.workspace = true
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 zephium-webext-macos = { path = "../zephium-webext-macos", version = "=0.1.0" }

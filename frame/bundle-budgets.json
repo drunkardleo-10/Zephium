@@ -180,7 +180,7 @@
     "css": 4000
   },
   "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 422500,
-    "css": 101000
+    "js": 423000,
+    "css": 101500
   }
 }
