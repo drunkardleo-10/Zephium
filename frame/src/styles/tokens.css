@@ -277,6 +277,7 @@
   --color-visor: #10111b;
   --color-visor-rim: rgb(255 255 255 / 0.22);
   --color-eye-lit: #f4fbff;
+  --color-eye-lead: #fff3dc;
 
   /* The dots of a working indicator: the text's own tone, brighter in front. */
   --color-dots: var(--color-text);

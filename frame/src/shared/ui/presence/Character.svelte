@@ -78,14 +78,12 @@
   {#if grounded}<span class="ground"></span>{/if}
   <span class="pose">
     <span class="figure">
-      {#if kind === "lead"}<span class="orbit back"><i></i></span>{/if}
       <span class="body" style:mask-image={mask}></span>
       <span class="visor">
         <span class="face">
           {#key mood}<span class="eyes"><i class="eye"></i><i class="eye"></i></span>{/key}
         </span>
       </span>
-      {#if kind === "lead"}<span class="orbit front"><i></i></span>{/if}
     </span>
   </span>
 </span>
@@ -136,7 +134,8 @@
     --visor-y: 49%;
   }
 
-  /* The lead: a two-tone figure from its family, with an orbit round it. */
+  /* The lead: a two-tone figure from its family, its eyes a shade warmer: the
+     one in charge, told apart by its colour and its gaze, not by an ornament. */
   .lead {
     --hue: var(--color-lead-pearl);
     --hue-to: var(--color-lead-pearl-to);
@@ -187,30 +186,41 @@
     transition: transform var(--motion-slow) var(--ease-spring);
   }
 
-  /* Lit from the upper left: a soft highlight, the hue running into its second
-     tone, and the light the ground throws back along the lower rim. */
+  /* Lit like a soft glossy stone from the upper left: a crisp specular glint
+     inside a broad soft highlight, the hue running into its second tone, a
+     shade gathering under the chin, and the ground's light along the lower rim. */
   .body {
     background:
       radial-gradient(
-        28% 20% at 34% 22%,
-        color-mix(in oklab, var(--color-agent-light) 80%, transparent),
+        9% 6% at 30% 19%,
+        color-mix(in oklab, var(--color-agent-light) 95%, transparent),
         transparent
       ),
       radial-gradient(
-        64% 34% at 52% 98%,
+        42% 30% at 36% 24%,
+        color-mix(in oklab, var(--color-agent-light) 55%, transparent),
+        transparent 70%
+      ),
+      radial-gradient(
+        70% 26% at 52% 100%,
         color-mix(
           in oklab,
-          color-mix(in oklab, var(--hue-to) 55%, var(--color-agent-light)) 70%,
+          color-mix(in oklab, var(--hue-to) 45%, var(--color-agent-light)) 75%,
           transparent
         ),
         transparent
       ),
+      radial-gradient(
+        80% 60% at 50% 88%,
+        color-mix(in oklab, var(--color-agent-deep) 22%, transparent),
+        transparent 70%
+      ),
       linear-gradient(
-        150deg,
-        color-mix(in oklab, var(--hue) 62%, var(--color-agent-light)) 0%,
-        var(--hue) 34%,
-        var(--hue-to) 72%,
-        color-mix(in oklab, var(--hue-to) 55%, var(--color-agent-deep)) 100%
+        155deg,
+        color-mix(in oklab, var(--hue) 58%, var(--color-agent-light)) 0%,
+        var(--hue) 36%,
+        var(--hue-to) 74%,
+        color-mix(in oklab, var(--hue-to) 60%, var(--color-agent-deep)) 100%
       );
     mask-size: 100% 100%;
     mask-repeat: no-repeat;
@@ -228,9 +238,15 @@
     border-radius: var(--radius-capsule);
     background:
       linear-gradient(
+        112deg,
+        transparent 18%,
+        color-mix(in oklab, var(--color-agent-light) 20%, transparent) 26%,
+        transparent 34%
+      ),
+      linear-gradient(
         180deg,
-        color-mix(in oklab, var(--color-agent-light) 16%, transparent) 0%,
-        transparent 38%
+        color-mix(in oklab, var(--color-agent-light) 18%, transparent) 0%,
+        transparent 40%
       ),
       radial-gradient(
         70% 90% at 50% 60%,
@@ -266,6 +282,10 @@
     background: var(--color-eye-lit);
   }
 
+  .lead .eye {
+    background: var(--color-eye-lead);
+  }
+
   .computer .eye {
     border-radius: 0.02em;
   }
@@ -277,34 +297,6 @@
       var(--color-eye-lit) 62%,
       color-mix(in oklab, var(--hue) 70%, var(--color-eye-lit))
     );
-  }
-
-  /* The lead's orbit: a thin ring tipped toward the viewer, half behind the
-     figure and half in front of it. */
-  .orbit {
-    position: absolute;
-    inset-inline: -12%;
-    inset-block-start: 52%;
-    block-size: 26%;
-    rotate: -16deg;
-    translate: 0 -30%;
-  }
-
-  .orbit i {
-    position: absolute;
-    inset: 0;
-    border: max(0.75px, 0.03em) solid
-      color-mix(in oklab, var(--hue-to) 55%, var(--color-agent-light));
-    border-radius: 50%;
-    opacity: 0.85;
-  }
-
-  .orbit.front {
-    clip-path: inset(50% 0 0 0);
-  }
-
-  .orbit.back i {
-    opacity: 0.4;
   }
 
   /* Waiting on you: eyes a little wider, on you, the head tilted. */
@@ -343,8 +335,7 @@
     opacity: 0.55;
   }
 
-  .stopped .body,
-  .stopped .orbit {
+  .stopped .body {
     filter: saturate(0.25);
     opacity: 0.75;
   }
