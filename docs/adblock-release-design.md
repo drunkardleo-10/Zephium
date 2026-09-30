@@ -306,3 +306,11 @@ The repository coalition sampler also recorded a 20.013-second idle interval:
 5 package idle wakeups, with no disk I/O. This was the isolated debug browser
 with a local fixture and Settings, not an on/off comparison. Raw matcher and
 process-family results are retained in [the QA record](qa/adblock-2026-09-30.json).
+
+The final QA build was restarted with saved protection enabled. It rendered the
+restored page during preparation, transitioned to Active, and blocked/hid the
+fixture after reload. Existing compiled-policy/native/source cache files were
+unchanged across restart. Public-page smoke checks loaded BBC News (including
+consent dismissal and working site navigation) and Wikipedia's Web browser
+article with protection active. These two pages are compatibility smoke evidence,
+not a representative benchmark or comprehensive site qualification.
