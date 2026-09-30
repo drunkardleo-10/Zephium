@@ -445,6 +445,23 @@ pub trait Store {
     /// Removes every visit to each address; returns how many rows went.
     fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32;
     /// Removes visits at or after `since`, or all of them when it is absent.
+    fn load_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        done: Box<dyn FnOnce(Option<crate::blocker::BlockerStatistics>) + Send>,
+    ) -> bool {
+        done(Some(crate::blocker::BlockerStatistics::default()));
+        true
+    }
+    fn save_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _statistics: crate::blocker::BlockerStatistics,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) -> bool {
+        done(false);
+        true
+    }
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32;
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;

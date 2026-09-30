@@ -2375,6 +2375,17 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 24,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE blocker_statistics (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 1 AND 512)
+             ) STRICT;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2451,6 +2462,7 @@ mod tests {
         (21, 0x3483_1796_92c9_33a6),
         (22, 0xd5d5_eec8_ddc1_ca18),
         (23, 0xfa14_edb0_3a39_f586),
+        (24, 0x7f905292c3b461b8),
     ];
 
     #[test]

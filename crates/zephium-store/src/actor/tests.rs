@@ -3948,3 +3948,24 @@ fn saving_an_icon_clears_rows_that_can_never_be_read_back() {
         .favicon_raster_with_age(profile, "https://legacy.example")
         .is_none());
 }
+
+#[test]
+fn blocker_statistics_roundtrip_and_clear_with_browsing_data() {
+    let mut hub = Hub::in_memory().unwrap();
+    let session = sample();
+    let profile = session.profiles[0].id;
+    hub.save(&session).unwrap();
+    let mut statistics = zephium_core::blocker::BlockerStatistics::default();
+    statistics.record(700_000, 12);
+    statistics.record(700_001, 9);
+    hub.save_blocker_statistics(profile, &statistics).unwrap();
+    assert_eq!(hub.load_blocker_statistics(profile).unwrap(), statistics);
+    hub.clear_history(profile, None);
+    assert_eq!(
+        hub.load_blocker_statistics(profile).unwrap(),
+        Default::default()
+    );
+    assert!(hub
+        .save_blocker_statistics(ProfileId::from(999), &statistics)
+        .is_err());
+}

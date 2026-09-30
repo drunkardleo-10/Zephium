@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::ProfileId;
 
+mod statistics;
+pub use statistics::{BlockedLoadCounter, BlockerStatistics};
+
 mod cosmetics;
 pub use cosmetics::{DocumentStyleFailure, DocumentStylePlan, DocumentStyleProvider};
 mod sites;

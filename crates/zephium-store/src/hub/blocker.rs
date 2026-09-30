@@ -319,3 +319,47 @@ fn load_profile_blocker_configs(
     }
     Ok(configs)
 }
+
+impl Hub {
+    pub(crate) fn load_blocker_statistics(
+        &mut self,
+        profile: ProfileId,
+    ) -> rusqlite::Result<zephium_core::blocker::BlockerStatistics> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+        {
+            return Err(invalid_data("blocker statistics profile unavailable"));
+        }
+        let conn = self.profile_conn(profile)?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM blocker_statistics WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.map_or_else(
+            || Ok(Default::default()),
+            |raw| {
+                serde_json::from_str(&raw).map_err(|_| invalid_data("invalid blocker statistics"))
+            },
+        )
+    }
+    pub(crate) fn save_blocker_statistics(
+        &mut self,
+        profile: ProfileId,
+        statistics: &zephium_core::blocker::BlockerStatistics,
+    ) -> rusqlite::Result<()> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+        {
+            return Err(invalid_data("blocker statistics profile unavailable"));
+        }
+        let raw = serde_json::to_string(statistics)
+            .map_err(|_| invalid_data("invalid blocker statistics"))?;
+        self.profile_conn(profile)?.execute("INSERT INTO blocker_statistics(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [raw])?;
+        Ok(())
+    }
+}

@@ -298,6 +298,15 @@ enum Cmd {
     ),
     LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
     LoadProfileBlockerSites(ProfileId, BlockerSiteLoadDone),
+    LoadBlockerStatistics(
+        ProfileId,
+        Box<dyn FnOnce(Option<zephium_core::blocker::BlockerStatistics>) + Send>,
+    ),
+    SaveBlockerStatistics(
+        ProfileId,
+        zephium_core::blocker::BlockerStatistics,
+        Box<dyn FnOnce(bool) + Send>,
+    ),
     UpdateProfileBlockerSites(
         ProfileId,
         u64,
@@ -717,6 +726,33 @@ impl Store for SqliteStore {
             .is_ok()
     }
 
+    fn load_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<zephium_core::blocker::BlockerStatistics>) + Send>,
+    ) -> bool {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(|p| p.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadBlockerStatistics(profile, done))
+            .is_ok()
+    }
+    fn save_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        statistics: zephium_core::blocker::BlockerStatistics,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) -> bool {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(|p| p.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::SaveBlockerStatistics(profile, statistics, done))
+            .is_ok()
+    }
     fn load_profile_blocker_sites(&self, profile: ProfileId, done: BlockerSiteLoadDone) -> bool {
         let lifecycle = self
             .lifecycle
@@ -1363,6 +1399,20 @@ fn actor(
                     }
                 };
                 done(outcome);
+            }
+            Some(Cmd::LoadBlockerStatistics(profile, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(None);
+                    continue;
+                }
+                done(hub.load_blocker_statistics(profile).ok());
+            }
+            Some(Cmd::SaveBlockerStatistics(profile, statistics, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(false);
+                    continue;
+                }
+                done(hub.save_blocker_statistics(profile, &statistics).is_ok());
             }
             Some(Cmd::LoadProfileBlockerSites(profile, done)) => {
                 if !hub.knows(profile) && !flush(&mut hub, &mut pending) {

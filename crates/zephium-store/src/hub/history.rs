@@ -321,6 +321,7 @@ impl Hub {
                 }
                 None => tx.execute("DELETE FROM search_queries", [])?,
             };
+            tx.execute("DELETE FROM blocker_statistics", [])?;
             tx.commit()?;
             Ok(removed)
         });
