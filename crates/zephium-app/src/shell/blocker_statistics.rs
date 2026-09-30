@@ -10,6 +10,7 @@ type Reply = std::sync::mpsc::SyncSender<Option<BlockerStatsView>>;
 struct State {
     value: Option<BlockerStatistics>,
     loading: bool,
+    waiting: Option<Reply>,
     retired: bool,
     private: bool,
     dirty: bool,
@@ -35,6 +36,7 @@ impl Statistics {
             state: Arc::new(Mutex::new(State {
                 value: private.then(BlockerStatistics::default),
                 loading: false,
+                waiting: None,
                 retired: false,
                 private,
                 dirty: false,
@@ -53,19 +55,41 @@ impl Statistics {
             }
             state.loading = true;
         }
-        let owned = self.state.clone();
+        let owned = self.clone();
+        let storage = store.clone();
         if !store.load_blocker_statistics(
             profile,
-            Box::new(move |value| {
-                let mut state = owned.lock().unwrap_or_else(|p| p.into_inner());
-                state.loading = false;
-                if !state.retired {
-                    state.value = value;
-                }
-            }),
+            Box::new(move |value| owned.loaded(profile, &storage, value)),
         ) {
-            self.state.lock().unwrap_or_else(|p| p.into_inner()).loading = false;
+            self.loaded(profile, store, None);
         }
+    }
+
+    fn loaded(&self, profile: ProfileId, store: &SharedStore, value: Option<BlockerStatistics>) {
+        let waiting = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.loading = false;
+            if !state.retired {
+                state.value = value;
+            }
+            state.waiting.take()
+        };
+        if let Some(reply) = waiting {
+            self.reply(profile, store, reply);
+        }
+    }
+
+    fn reply(&self, profile: ProfileId, store: &SharedStore, reply: Reply) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            if !state.retired && state.value.is_none() && state.loading {
+                if let Some(previous) = state.waiting.replace(reply) {
+                    let _ = previous.try_send(None);
+                }
+                return;
+            }
+        }
+        let _ = reply.try_send(self.collect(profile, store, false));
     }
 
     fn collect(
@@ -103,7 +127,7 @@ impl Statistics {
         }
         if let Some((revision, result)) = &state.pending {
             match result.load(Ordering::Acquire) {
-                0 => return,
+                0 if !force => return,
                 1 if *revision == state.revision => state.dirty = false,
                 _ => {}
             }
@@ -152,7 +176,7 @@ impl Statistics {
 }
 
 impl Shell {
-    pub(super) fn ensure_blocker_statistics(&mut self, profile: ProfileId) {
+    pub(super) fn ensure_blocker_statistics(&mut self, profile: ProfileId, fresh: bool) {
         let Some(profile_info) = self.profiles.get(profile) else {
             return;
         };
@@ -161,6 +185,13 @@ impl Shell {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let statistics = Statistics::new(private);
+                if fresh {
+                    statistics
+                        .state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .value = Some(BlockerStatistics::default());
+                }
                 self.engine
                     .set_blocker_statistics(profile, statistics.counter.clone());
                 entry.insert(statistics)
@@ -174,7 +205,7 @@ impl Shell {
             let _ = reply.try_send(None);
             return;
         }
-        self.ensure_blocker_statistics(profile);
+        self.ensure_blocker_statistics(profile, false);
         let Some(statistics) = self.blocker_statistics.get(&profile).cloned() else {
             let _ = reply.try_send(None);
             return;
@@ -185,11 +216,11 @@ impl Shell {
                 profile,
                 false,
                 Box::new(move || {
-                    let _ = reply.try_send(statistics.collect(profile, &store, false));
+                    statistics.reply(profile, &store, reply);
                 }),
             );
         } else {
-            let _ = reply.try_send(statistics.collect(profile, &store, false));
+            statistics.reply(profile, &store, reply);
         }
     }
 
@@ -265,6 +296,20 @@ mod tests {
     use super::super::tests::FakeStore;
     use super::*;
     #[test]
+    fn initial_query_waits_for_loaded_totals_without_polling() {
+        let store: SharedStore = Arc::new(FakeStore::default());
+        let statistics = Statistics::new(false);
+        statistics.state.lock().unwrap().loading = true;
+        let (reply, receive) = std::sync::mpsc::sync_channel(1);
+        statistics.reply(ProfileId::from(4), &store, reply);
+        assert!(receive.try_recv().is_err());
+        let mut saved = BlockerStatistics::default();
+        saved.record(chrono::Local::now().date_naive().num_days_from_ce(), 12);
+        statistics.loaded(ProfileId::from(4), &store, Some(saved));
+        assert_eq!(receive.try_recv().unwrap().unwrap().today, 12);
+    }
+
+    #[test]
     fn flush_is_dirty_only_rate_limited_and_forced_at_shutdown() {
         let fake = Arc::new(FakeStore::default());
         let store: SharedStore = fake.clone();
@@ -300,6 +345,21 @@ mod tests {
         assert!(late.collect(profile, &store, true).is_none());
         assert_eq!(statistics.collect(profile, &store, true).unwrap().today, 4);
         assert_eq!(fake.statistics.lock().unwrap()[&profile].today(), 4);
+    }
+
+    #[test]
+    fn shutdown_queues_latest_totals_after_an_unacknowledged_older_write() {
+        let fake = Arc::new(FakeStore::default());
+        let store: SharedStore = fake.clone();
+        let statistics = Statistics::new(false);
+        statistics.load(ProfileId::from(5), &store);
+        statistics.state.lock().unwrap().pending = Some((0, Arc::new(AtomicU8::new(0))));
+        statistics.counter.0.store(8, Ordering::Relaxed);
+        statistics.collect(ProfileId::from(5), &store, true);
+        assert_eq!(
+            fake.statistics.lock().unwrap()[&ProfileId::from(5)].today(),
+            8
+        );
     }
 
     #[test]

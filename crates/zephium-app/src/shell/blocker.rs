@@ -1433,11 +1433,15 @@ impl Shell {
     }
 
     pub(super) fn initialize_new_blocker_profile(&mut self, profile: ProfileId) -> bool {
-        self.blocker.initialize_new_profile(profile)
+        if !self.blocker.initialize_new_profile(profile) {
+            return false;
+        }
+        self.ensure_blocker_statistics(profile, true);
+        true
     }
 
     pub(super) fn start_blocker_profile(&mut self, profile: ProfileId) -> bool {
-        self.ensure_blocker_statistics(profile);
+        self.ensure_blocker_statistics(profile, false);
         self.ensure_blocker_site_preferences(profile);
         let accepted = self.blocker.start_uninitialized(profile);
         self.finish_terminalized_blocker_native_operations();

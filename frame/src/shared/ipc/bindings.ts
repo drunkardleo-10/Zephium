@@ -84,11 +84,7 @@ export const commands = {
 	 */
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
-	blockerStats: (profile: string) => typedError<{
-	today: number | null,
-	last7Days: number | null,
-	days: (number | null)[],
-} | null, null>(__TAURI_INVOKE("blocker_stats", { profile })),
+	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
 	blockerSiteChange: (context: BlockerSiteContext, action: BlockerSiteAction) => __TAURI_INVOKE<OperationAdmission>("blocker_site_change", { context, action }),
 	blockerPicker: (context: BlockerSiteContext, action: BlockerPickerAction) => typedError<{

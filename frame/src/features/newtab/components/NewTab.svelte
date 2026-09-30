@@ -27,26 +27,46 @@
     personalize?: boolean;
     showClock?: boolean;
   } = $props();
+  let now = $state(new Date());
+  let statisticsDay = $derived(now.toDateString());
+  let statisticsProfile = $derived(tabs.profile()?.id);
+  let statisticsTab = $derived(tabs.activeId());
   let blockedToday = $state<number | null>(null);
+  let statisticsBusy = false;
+  let statisticsPending = false;
   let statisticsRequest = 0;
   async function refreshStatistics(profile: string) {
+    if (statisticsBusy) {
+      statisticsPending = true;
+      return;
+    }
+    statisticsBusy = true;
     const request = ++statisticsRequest;
     try {
       const result = await commands.blockerStats(profile);
       if (request === statisticsRequest && tabs.profile()?.id === profile) {
-        blockedToday = result.status === "ok" ? (result.data?.today ?? null) : null;
+        blockedToday = result.status === "ok" ? result.data.today : null;
       }
     } catch {
       if (request === statisticsRequest) blockedToday = null;
+    } finally {
+      statisticsBusy = false;
+      if (statisticsPending) {
+        statisticsPending = false;
+        const current = tabs.profile()?.id;
+        if (current) void refreshStatistics(current);
+      }
     }
   }
   $effect(() => {
-    void tabs.activeId();
-    const profile = tabs.profile()?.id;
+    void statisticsTab;
+    void statisticsDay;
+    const profile = statisticsProfile;
     blockedToday = null;
     if (profile) void refreshStatistics(profile);
     return () => {
       statisticsRequest++;
+      statisticsPending = false;
     };
   });
   onMount(() => {
@@ -59,7 +79,6 @@
   });
 
   let input = $state<HTMLInputElement>();
-  let now = $state(new Date());
   let firstName = $derived((tabs.profile()?.name ?? "").trim().split(/\s+/u)[0] ?? "");
   let greeting = $derived(greetingFor(now));
   let clock = $derived(
