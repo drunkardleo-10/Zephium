@@ -22,6 +22,9 @@
   const inlineOverrides = new Map();
   const allowed = new Set(["subscription", "personal", "preview"]);
   let picker = null;
+  let nativeCss;
+  let restoredDocument = false;
+  globalThis.addEventListener("pageshow", event => { if (event.isTrusted && event.persisted) restoredDocument = true; });
 
   function matches(expectedToken, expectedUrl) {
     return expectedToken === token && expectedUrl === location.href;
@@ -244,6 +247,11 @@
       if (location.href.length > 32768) return null;
       const result = create(null); result.token = token; result.url = location.href;
       return stringify(result);
+    },
+    nativeCoverage: (expectedToken, expectedUrl, initial, desired) => {
+      if (!matches(expectedToken, expectedUrl)) return false;
+      if (nativeCss === undefined) nativeCss = !restoredDocument && typeof initial === "string" && /^[0-9a-f]{64}$/.test(initial) ? initial : null;
+      return nativeCss !== null && nativeCss === desired;
     },
     apply: setStyle,
     startPicker,

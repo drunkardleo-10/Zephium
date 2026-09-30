@@ -62,6 +62,8 @@ struct StyleKey {
     subscription: Option<ContentRuleDigest>,
     personal: Option<ContentRuleDigest>,
     paused: bool,
+    #[cfg(target_os = "macos")]
+    native_cosmetics: Option<[u8; 32]>,
 }
 
 #[derive(Default)]
@@ -92,6 +94,8 @@ struct Delivery {
     permit: EventPermit,
     subscription: Arc<str>,
     personal: Arc<str>,
+    #[cfg(target_os = "macos")]
+    native_hint: Option<[u8; 32]>,
 }
 
 impl Drop for Delivery {
@@ -180,6 +184,18 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return;
         };
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let provider = self
+                .content_policies
+                .get(&profile)
+                .and_then(|p| p.applied.as_ref())
+                .and_then(|p| p.cosmetics.clone());
+            view.frame_style_source.update(provider);
+            if let Some(frames) = &view.frame_styles {
+                frames.refresh();
+            }
+        }
         let Some((epoch, url)) = view.navigation.committed_snapshot() else {
             return;
         };
@@ -199,6 +215,8 @@ impl EngineHost {
             subscription: provider.map(|p| p.fingerprint()),
             personal: site_policy.map(|p| p.fingerprint),
             paused,
+            #[cfg(target_os = "macos")]
+            native_cosmetics: self.native_cosmetic_digest(profile),
         };
         let state = view.content_styles.clone();
         {
@@ -273,6 +291,8 @@ impl EngineHost {
             personal,
             navigation: view.navigation.clone(),
             permit: view.event_permit.clone(),
+            #[cfg(target_os = "macos")]
+            native_hint: view.native_style_document.committed.get(),
         };
         // Wry's callback is Send + Fn, not FnOnce. Contain duplicate callbacks
         // and retain exactly one owner without holding a lock across native work.
@@ -341,6 +361,13 @@ impl EngineHost {
         {
             return;
         }
+        #[cfg(target_os = "macos")]
+        let native = (
+            delivery.native_hint.map(digest_text),
+            delivery.key.native_cosmetics.map(digest_text),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let native: (Option<String>, Option<String>) = (None, None);
         let arguments = serde_json::json!([
             identity.token,
             delivery.key.url,
@@ -348,9 +375,11 @@ impl EngineHost {
             css_digest(&delivery.subscription),
             delivery.subscription.as_ref(),
             css_digest(&delivery.personal),
-            delivery.personal.as_ref()
+            delivery.personal.as_ref(),
+            native.0,
+            native.1
         ]);
-        let script = format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s=a.apply('subscription',p[0],p[1],p[2],p[3],p[4]);const u=a.apply('personal',p[0],p[1],p[2],p[5],p[6]);return s===true&&u===true;}})({arguments})");
+        let script = format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const covered=a.nativeCoverage?.(p[0],p[1],p[7],p[8])===true;const s=a.apply('subscription',p[0],p[1],p[2],p[3],covered?'':p[4]);const u=a.apply('personal',p[0],p[1],p[2],p[5],p[6]);return s===true&&u===true;}})({arguments})");
         if script.len() > 4 * 1024 * 1024 {
             return;
         }
@@ -400,4 +429,100 @@ fn decode_identity(text: &str) -> Option<DocumentIdentity> {
         token: object.get("token")?.as_str()?.to_owned(),
         url: object.get("url")?.as_str()?.to_owned(),
     })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[derive(PartialEq, Eq)]
+struct FrameStyleKey {
+    provider: Option<ContentRuleDigest>,
+    preferences: Option<u64>,
+    paused: bool,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) struct FrameStyleSource {
+    scope: Rc<ViewSiteScope>,
+    provider: RefCell<Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>>,
+    key: RefCell<Option<FrameStyleKey>>,
+    generation: std::cell::Cell<u64>,
+}
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl FrameStyleSource {
+    pub(super) fn new(
+        scope: Rc<ViewSiteScope>,
+        provider: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
+    ) -> Rc<Self> {
+        let value = Rc::new(Self {
+            scope,
+            provider: RefCell::new(None),
+            key: RefCell::new(None),
+            generation: std::cell::Cell::new(0),
+        });
+        value.update(provider);
+        value
+    }
+    pub(super) fn update(
+        &self,
+        provider: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
+    ) -> bool {
+        let key = FrameStyleKey {
+            provider: provider.as_ref().map(|p| p.fingerprint()),
+            preferences: self
+                .scope
+                .preferences
+                .borrow()
+                .as_ref()
+                .map(|p| p.revision()),
+            paused: self.scope.pause.paused(),
+        };
+        if self.key.borrow().as_ref() == Some(&key) {
+            return false;
+        }
+        let Some(generation) = self.generation.get().checked_add(1) else {
+            return false;
+        };
+        self.generation.set(generation);
+        self.key.replace(Some(key));
+        self.provider.replace(provider);
+        true
+    }
+    pub(super) fn lookup(
+        &self,
+        url: &str,
+    ) -> Option<crate::platform::frame_styles::FrameStyleData> {
+        let site = BlockerSite::from_url(url)?;
+        let preferences = self.scope.preferences.borrow();
+        let paused = self.scope.pause.paused();
+        let subscription = if paused {
+            Arc::from("")
+        } else {
+            self.provider
+                .borrow()
+                .as_ref()
+                .map(|p| p.stylesheet(url))
+                .transpose()
+                .ok()?
+                .unwrap_or_else(|| Arc::from(""))
+        };
+        let personal = preferences
+            .as_ref()
+            .and_then(|p| p.get(&site))
+            .map(|p| p.css.clone())
+            .unwrap_or_else(|| Arc::from(""));
+        Some(crate::platform::frame_styles::FrameStyleData {
+            generation: self.generation.get(),
+            subscription,
+            personal,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn digest_text(digest: [u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut result = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
 }

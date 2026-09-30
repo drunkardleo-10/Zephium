@@ -11,9 +11,7 @@ use objc2_web_kit::{
     WKContentRuleList, WKContentRuleListStore, WKErrorCode, WKErrorDomain, WKUserContentController,
 };
 use wry::WebViewExtMacOS;
-use zephium_core::blocker::{
-    ContentRuleApplyFailure, ContentRules, ContentRulesPayload, DeclarativeRuleFormat,
-};
+use zephium_core::blocker::ContentRuleApplyFailure;
 
 #[derive(Clone)]
 pub(crate) enum NativeContentPolicy {
@@ -441,7 +439,7 @@ fn transition_phase(
 
 pub(crate) fn compile(
     cache: &Path,
-    rules: Arc<ContentRules>,
+    encoded: Arc<str>,
     artifact_digest: [u8; 32],
     done: impl FnOnce(Result<NativeContentPolicy, ContentRuleApplyFailure>) + 'static,
 ) -> ContentPolicyCompilationCancellation {
@@ -449,17 +447,6 @@ pub(crate) fn compile(
     let cancellation = ContentPolicyCompilationCancellation {
         cancelled: cancelled.clone(),
     };
-    let ContentRulesPayload::Declarative {
-        format, encoded, ..
-    } = rules.payload()
-    else {
-        done(Err(ContentRuleApplyFailure::UnsupportedArtifact));
-        return cancellation;
-    };
-    if *format != DeclarativeRuleFormat::WebKitContentBlockerV1 {
-        done(Err(ContentRuleApplyFailure::UnsupportedArtifact));
-        return cancellation;
-    }
     let Some(mtm) = MainThreadMarker::new() else {
         done(Err(ContentRuleApplyFailure::NativeCompilation));
         return cancellation;

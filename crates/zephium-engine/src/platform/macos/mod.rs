@@ -15,6 +15,12 @@ mod agentic_semantic_probe;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod content_filter;
+mod frame_styles;
+#[cfg(feature = "native-isolation-probes")]
+mod frame_styles_probe;
+pub(crate) use frame_styles::{install as install_frame_styles, FrameStylesRegistration};
+#[cfg(feature = "native-isolation-probes")]
+pub(crate) use frame_styles_probe::run as run_blocker_frames_probe;
 mod credentials;
 mod native;
 mod navigation;

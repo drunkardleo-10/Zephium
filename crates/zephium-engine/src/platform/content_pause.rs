@@ -1,7 +1,11 @@
 //! UI-thread-owned pause signal shared by overlapping registration cohorts.
 
-use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+#[cfg(any(not(target_os = "windows"), test))]
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::rc::Rc;
+#[cfg(any(not(target_os = "windows"), test))]
+use std::rc::Weak;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -16,6 +20,7 @@ struct Inner {
     callbacks: RefCell<Vec<ApplyPause>>,
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 pub(crate) struct PauseRegistration {
     owner: Weak<Inner>,
     callback: ApplyPause,
@@ -42,6 +47,7 @@ impl ContentPause {
         }
     }
 
+    #[cfg(any(not(target_os = "windows"), test))]
     pub(crate) fn register(&self, callback: impl Fn(bool) + 'static) -> Option<PauseRegistration> {
         let alive = Rc::new(Cell::new(true));
         let active = alive.clone();
@@ -52,7 +58,7 @@ impl ContentPause {
         });
         {
             let mut callbacks = self.0.callbacks.borrow_mut();
-            if callbacks.len() >= 2 {
+            if callbacks.len() >= 4 {
                 return None;
             }
             callbacks.push(callback.clone());
@@ -66,6 +72,7 @@ impl ContentPause {
     }
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 impl Drop for PauseRegistration {
     fn drop(&mut self) {
         self.alive.set(false);
@@ -94,7 +101,11 @@ mod tests {
         let second = pause
             .register(move |paused| second_changes.borrow_mut().push((2, paused)))
             .unwrap();
+        let cosmetic_old = pause.register(|_| {}).unwrap();
+        let cosmetic_new = pause.register(|_| {}).unwrap();
         assert!(pause.register(|_| {}).is_none());
+        drop(cosmetic_old);
+        drop(cosmetic_new);
         pause.set(true);
         assert!(signal.load(Ordering::Relaxed));
         drop(first);

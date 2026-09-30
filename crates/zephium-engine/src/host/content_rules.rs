@@ -67,15 +67,6 @@ impl EngineHost {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            if self.content_rule_preflight.is_some()
-                || self
-                    .active_declarative_content_policy_maintenance
-                    .as_ref()
-                    .and_then(active_compilation)
-                    .is_some_and(|active| active.timed_out)
-            {
-                return;
-            }
             let ContentRulesPayload::Declarative {
                 format,
                 artifact_digest,
@@ -87,49 +78,104 @@ impl EngineHost {
             if *format != zephium_core::blocker::DeclarativeRuleFormat::WebKitContentBlockerV1 {
                 return;
             }
-            let digest = *artifact_digest.as_bytes();
-            if self
-                .declarative_content_policy_cache
-                .get(&digest)
-                .and_then(std::rc::Weak::upgrade)
-                .is_some()
-            {
-                self.preflight_cache_digest = Some(digest);
-                completion.finish(ContentRuleValidationOutcome::Valid);
-                return;
-            }
-            if self
-                .declarative_content_policy_compilations
-                .contains_key(&digest)
-            {
-                self.content_rule_preflight = Some((digest, completion));
-                return;
-            }
-            let encoded_bytes = encoded.len();
-            let Some(total_bytes) = self
-                .declarative_content_policy_bytes
-                .checked_add(encoded_bytes)
-                .filter(|bytes| *bytes <= MAX_RESIDENT_DECLARATIVE_CONTENT_POLICY_BYTES)
-            else {
-                return;
+            #[cfg(target_os = "macos")]
+            let completion = if let Some(styles) = rules.native_cosmetics().cloned() {
+                zephium_core::ports::engine::ContentRuleValidationCompletion::new(move |outcome| {
+                    if outcome != ContentRuleValidationOutcome::Valid {
+                        completion.finish(outcome);
+                        return;
+                    }
+                    let _ = super::try_with(move |host| {
+                        host.validate_declarative_artifact(
+                            styles.encoded().clone(),
+                            *styles.digest().as_bytes(),
+                            completion,
+                        )
+                    });
+                })
+            } else {
+                completion
             };
-            if self.declarative_content_policy_compilations.len()
-                >= MAX_DECLARATIVE_CONTENT_POLICY_JOBS
-            {
-                return;
-            }
-            self.content_rule_preflight = Some((digest, completion));
-            self.declarative_content_policy_compilations
-                .insert(digest, Vec::new());
-            self.declarative_content_policy_bytes = total_bytes;
-            self.declarative_content_policy_queue
-                .push_back(DeclarativeContentPolicyJob {
-                    digest,
-                    encoded_bytes,
-                    rules,
-                });
-            self.start_next_declarative_content_policy_compilation();
+            self.validate_declarative_artifact(
+                encoded.clone(),
+                *artifact_digest.as_bytes(),
+                completion,
+            );
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn validate_declarative_artifact(
+        &mut self,
+        encoded: Arc<str>,
+        digest: [u8; 32],
+        completion: zephium_core::ports::engine::ContentRuleValidationCompletion,
+    ) {
+        if self.content_rule_preflight.is_some() || self.shutdown_completion.is_some() {
+            return;
+        }
+        if self
+            .declarative_content_policy_cache
+            .get(&digest)
+            .and_then(std::rc::Weak::upgrade)
+            .is_some()
+        {
+            self.protect_preflight_digest(digest);
+            completion.finish(ContentRuleValidationOutcome::Valid);
+            return;
+        }
+        if !self.queue_native_artifact(encoded, digest) {
+            return;
+        }
+        self.content_rule_preflight = Some((digest, completion));
+        self.start_next_declarative_content_policy_compilation();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn protect_preflight_digest(&mut self, digest: [u8; 32]) {
+        self.preflight_cache_digests.retain(|d| *d != digest);
+        self.preflight_cache_digests.push_front(digest);
+        self.preflight_cache_digests.truncate(2);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn queue_native_artifact(&mut self, encoded: Arc<str>, digest: [u8; 32]) -> bool {
+        if self
+            .active_declarative_content_policy_maintenance
+            .as_ref()
+            .and_then(active_compilation)
+            .is_some_and(|active| active.timed_out)
+        {
+            return false;
+        }
+        if self
+            .declarative_content_policy_compilations
+            .contains_key(&digest)
+        {
+            return true;
+        }
+        let encoded_bytes = encoded.len();
+        let Some(total) = self
+            .declarative_content_policy_bytes
+            .checked_add(encoded_bytes)
+            .filter(|bytes| *bytes <= MAX_RESIDENT_DECLARATIVE_CONTENT_POLICY_BYTES)
+        else {
+            return false;
+        };
+        if self.declarative_content_policy_compilations.len() >= MAX_DECLARATIVE_CONTENT_POLICY_JOBS
+        {
+            return false;
+        }
+        self.declarative_content_policy_bytes = total;
+        self.declarative_content_policy_compilations
+            .insert(digest, Vec::new());
+        self.declarative_content_policy_queue
+            .push_back(DeclarativeContentPolicyJob {
+                digest,
+                encoded_bytes,
+                encoded,
+            });
+        true
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -148,7 +194,7 @@ impl EngineHost {
                 .take()
                 .expect("matching preflight");
             if outcome == ContentRuleValidationOutcome::Valid {
-                self.preflight_cache_digest = Some(digest);
+                self.protect_preflight_digest(digest);
             }
             completion.finish(outcome);
         }
@@ -229,6 +275,8 @@ impl EngineHost {
             } else if let Some(queued) = state.queued.take() {
                 state.compiling = Some(CompilingContentPolicy {
                     generation: queued.generation,
+                    #[cfg(target_os = "macos")]
+                    native_cosmetics: queued.rules.native_cosmetics().cloned(),
                     cosmetics: queued.rules.cosmetics().cloned(),
                     superseded: false,
                 });
@@ -352,7 +400,7 @@ impl EngineHost {
                     .push_back(DeclarativeContentPolicyJob {
                         digest,
                         encoded_bytes,
-                        rules,
+                        encoded: encoded.clone(),
                     });
                 self.start_next_declarative_content_policy_compilation();
             }
@@ -367,7 +415,7 @@ impl EngineHost {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn start_next_declarative_content_policy_compilation(&mut self) {
+    pub(super) fn start_next_declarative_content_policy_compilation(&mut self) {
         if self.active_declarative_content_policy_maintenance.is_some() {
             return;
         }
@@ -380,6 +428,12 @@ impl EngineHost {
                 .declarative_content_policy_compilations
                 .get(&job.digest)
                 .is_some_and(|waiters| !waiters.is_empty());
+            #[cfg(target_os = "macos")]
+            let has_waiters = has_waiters
+                || self
+                    .cosmetic_compilations
+                    .get(&job.digest)
+                    .is_some_and(|w| !w.is_empty());
             if has_waiters
                 || self
                     .content_rule_preflight
@@ -461,14 +515,14 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         let cancellation = crate::platform::imp::compile_content_policy(
             &self.content_rule_cache,
-            job.rules,
+            job.encoded,
             digest,
             callback,
         );
         #[cfg(all(unix, not(target_os = "macos")))]
         let cancellation = crate::platform::imp::compile_content_policy(
             &self.content_rule_cache,
-            job.rules,
+            job.encoded,
             digest,
             callback,
         );
@@ -533,6 +587,17 @@ impl EngineHost {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        if let Some(waiters) = self.cosmetic_compilations.remove(&digest) {
+            for (profile, generation) in waiters {
+                self.finish_native_cosmetics(
+                    profile,
+                    generation,
+                    digest,
+                    result.as_ref().ok().cloned(),
+                );
+            }
+        }
         for (profile, generation) in waiters {
             let result = match &result {
                 Ok(native) => Ok(native.clone()),
@@ -583,6 +648,8 @@ impl EngineHost {
 
         // The timed-out physical compiler also drains queued candidates.
         self.content_rule_preflight.take();
+        #[cfg(target_os = "macos")]
+        self.cosmetic_compilations.clear();
         let active_waiters = self
             .declarative_content_policy_compilations
             .get_mut(&digest)
@@ -923,7 +990,7 @@ impl EngineHost {
 
     #[cfg(not(target_os = "windows"))]
     fn is_content_rule_cache_digest_protected(&self, digest: &[u8; 32]) -> bool {
-        if self.preflight_cache_digest.as_ref() == Some(digest) {
+        if self.preflight_cache_digests.contains(digest) {
             return true;
         }
         if self.content_policies.values().any(|state| {
@@ -969,6 +1036,8 @@ impl EngineHost {
     #[cfg(not(target_os = "windows"))]
     fn fail_unstarted_declarative_content_policy(&mut self, job: DeclarativeContentPolicyJob) {
         self.finish_content_rule_preflight(job.digest, ContentRuleValidationOutcome::Unavailable);
+        #[cfg(target_os = "macos")]
+        self.cosmetic_compilations.remove(&job.digest);
         self.release_declarative_content_policy_bytes(job.encoded_bytes);
         let waiters = self
             .declarative_content_policy_compilations
@@ -1060,6 +1129,8 @@ impl EngineHost {
                 #[cfg(not(target_os = "windows"))]
                 digest: native_digest,
             });
+            #[cfg(target_os = "macos")]
+            self.request_native_cosmetics(profile, generation, compiling.native_cosmetics);
             self.refresh_profile_document_styles(profile);
             self.emit_content_policy_settlement(
                 profile,
@@ -1295,6 +1366,8 @@ impl EngineHost {
             #[cfg(not(target_os = "windows"))]
             digest: native_digest,
         });
+        #[cfg(target_os = "macos")]
+        self.request_native_cosmetics(profile, generation, compiling.native_cosmetics);
         self.refresh_profile_document_styles(profile);
         self.emit_content_policy_settlement(
             profile,
@@ -1366,6 +1439,13 @@ impl EngineHost {
     pub(super) fn retire_content_policy(&mut self, profile: ProfileId) {
         self.content_policies.remove(&profile);
         self.blocker_sites.remove(&profile);
+        #[cfg(target_os = "macos")]
+        {
+            self.native_cosmetics.remove(&profile);
+            for waiters in self.cosmetic_compilations.values_mut() {
+                waiters.retain(|(owner, _)| *owner != profile);
+            }
+        }
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }
@@ -1375,7 +1455,12 @@ impl EngineHost {
         #[cfg(not(target_os = "windows"))]
         {
             self.content_rule_preflight.take();
-            self.preflight_cache_digest = None;
+            self.preflight_cache_digests.clear();
+            #[cfg(target_os = "macos")]
+            {
+                self.cosmetic_compilations.clear();
+                self.native_cosmetics.clear();
+            }
         }
         self.content_policies.clear();
         self.declarative_content_policy_cache.clear();
@@ -1682,6 +1767,8 @@ mod tests {
             compiling: Some(CompilingContentPolicy {
                 generation: ContentPolicyGeneration::new(1).unwrap(),
                 cosmetics: None,
+                #[cfg(target_os = "macos")]
+                native_cosmetics: None,
                 superseded: false,
             }),
             queued: None,
@@ -1725,6 +1812,8 @@ mod tests {
             compiling: Some(CompilingContentPolicy {
                 generation: compiling,
                 cosmetics: None,
+                #[cfg(target_os = "macos")]
+                native_cosmetics: None,
                 superseded: true,
             }),
             queued: Some(QueuedContentPolicy {

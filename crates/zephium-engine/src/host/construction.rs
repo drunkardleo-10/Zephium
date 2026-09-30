@@ -592,6 +592,19 @@ impl EngineHost {
             .or_default()
             .clone();
         let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let frame_style_source = super::content_styles::FrameStyleSource::new(
+            site_scope.clone(),
+            self.content_policies
+                .get(&partition.profile())
+                .and_then(|p| p.applied.as_ref())
+                .and_then(|p| p.cosmetics.clone()),
+        );
+        #[cfg(target_os = "macos")]
+        let native_style_document =
+            Rc::new(super::native_cosmetics::NativeStyleDocument::default());
+        #[cfg(target_os = "macos")]
+        let load_native_style_document = native_style_document.clone();
         let load_site_scope = site_scope.clone();
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
@@ -1231,6 +1244,8 @@ impl EngineHost {
             match transition {
                 NavigationTransition::Started(epoch) => {
                     #[cfg(target_os = "macos")]
+                    load_native_style_document.started(load_site_scope.pause.paused());
+                    #[cfg(target_os = "macos")]
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
                     }
@@ -1247,9 +1262,13 @@ impl EngineHost {
                     }
                 }
                 NavigationTransition::Redirected(_) => {
+                    #[cfg(target_os = "macos")]
+                    load_native_style_document.redirected();
                     load_site_scope.navigating(&event.url);
                 }
                 NavigationTransition::Committed(epoch) => {
+                    #[cfg(target_os = "macos")]
+                    load_native_style_document.committed();
                     load_site_scope.navigating(&event.url);
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
@@ -1568,6 +1587,32 @@ impl EngineHost {
                     return None;
                 }
             };
+        #[cfg(target_os = "macos")]
+        let cosmetic_registration =
+            self.native_cosmetic_policy(partition.profile())
+                .and_then(|policy| {
+                    let registration = crate::platform::imp::install_scoped_content_policy_on_view(
+                        &view,
+                        &policy,
+                        &site_scope.pause,
+                    )
+                    .ok()?;
+                    native_style_document
+                        .current
+                        .set(crate::platform::imp::content_policy_digest(&policy));
+                    Some(registration)
+                });
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let frame_styles = {
+            let source = frame_style_source.clone();
+            let permit = event_permit.clone();
+            crate::platform::imp::install_frame_styles(
+                &view,
+                Rc::new(move |url| source.lookup(url)),
+                move || permit.active_token().is_some(),
+            )
+            .ok()
+        };
         #[cfg(target_os = "windows")]
         let process_failure_permit = crash_permit.clone();
         #[cfg(target_os = "windows")]
@@ -1719,6 +1764,14 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            #[cfg(target_os = "macos")]
+            cosmetic_registration,
+            #[cfg(target_os = "macos")]
+            native_style_document,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            frame_style_source,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            frame_styles,
             site_scope,
             content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]

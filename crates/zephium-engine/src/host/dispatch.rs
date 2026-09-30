@@ -409,10 +409,14 @@ pub(crate) fn install(
             partitions: HashMap::new(),
             profile_persistence_classes: HashMap::new(),
             content_policies: HashMap::new(),
+            #[cfg(target_os="macos")]
+            native_cosmetics: HashMap::new(),
+            #[cfg(target_os="macos")]
+            cosmetic_compilations: HashMap::new(),
             #[cfg(not(target_os = "windows"))]
             content_rule_preflight: None,
             #[cfg(not(target_os = "windows"))]
-            preflight_cache_digest: None,
+            preflight_cache_digests: Default::default(),
             blocker_sites: HashMap::new(),
             picker: None,
             next_picker: 0,

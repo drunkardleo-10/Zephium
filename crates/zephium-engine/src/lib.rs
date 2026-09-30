@@ -2522,6 +2522,13 @@ impl Engine for WebviewEngine {
     }
 }
 
+/// Runs the production native frame-style adapter against a local fixture.
+#[cfg(all(target_os = "macos", feature = "native-isolation-probes"))]
+#[doc(hidden)]
+pub fn run_macos_blocker_frames_probe(url: &str) -> Result<(), String> {
+    platform::macos::run_blocker_frames_probe(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

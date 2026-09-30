@@ -494,7 +494,7 @@ where
 
 pub(crate) fn compile<F>(
     cache: &Path,
-    rules: Arc<ContentRules>,
+    encoded: Arc<str>,
     artifact_digest: [u8; 32],
     done: F,
 ) -> ContentPolicyCompilationCancellation
@@ -506,17 +506,6 @@ where
     let owner_context = glib::MainContext::ref_thread_default();
     if !owner_context.is_owner() {
         done(Err(ContentRuleApplyFailure::NativeCompilation));
-        return cancellation_handle;
-    }
-    let ContentRulesPayload::Declarative {
-        format, encoded, ..
-    } = rules.payload()
-    else {
-        done(Err(ContentRuleApplyFailure::UnsupportedArtifact));
-        return cancellation_handle;
-    };
-    if *format != DeclarativeRuleFormat::WebKitContentBlockerV1 {
-        done(Err(ContentRuleApplyFailure::UnsupportedArtifact));
         return cancellation_handle;
     }
     let Some(cache) = cache.to_str() else {
@@ -1081,9 +1070,17 @@ mod tests {
         let callback_result = result.clone();
         let timed_out = Rc::new(Cell::new(false));
         let timeout_fired = timed_out.clone();
-        let cancellation = compile(cache, rules, artifact_digest, move |outcome| {
-            *callback_result.borrow_mut() = Some(outcome);
-        });
+        let cancellation = compile(
+            cache,
+            match rules.payload() {
+                ContentRulesPayload::Declarative { encoded, .. } => encoded.clone(),
+                _ => panic!("declarative fixture"),
+            },
+            artifact_digest,
+            move |outcome| {
+                *callback_result.borrow_mut() = Some(outcome);
+            },
+        );
         let timeout = crate::platform::linux::schedule_content_policy_timeout(
             Duration::from_secs(120),
             move || timeout_fired.set(true),
