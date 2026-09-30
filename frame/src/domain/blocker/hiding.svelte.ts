@@ -14,6 +14,7 @@ let baseline: string[] = [];
 let timer: ReturnType<typeof setTimeout> | undefined;
 let lifetime = 0;
 let misses = 0;
+let ended: (() => void) | null = null;
 
 export const isActive = () => active;
 export const isSaving = () => saving;
@@ -34,11 +35,13 @@ function context(owner: BlockerSiteContext): BlockerSiteContext | null {
     : null;
 }
 
-export async function start(site: BlockerSiteContext): Promise<boolean> {
+/** `onEnd` runs once when this hiding session ends, however it ends. */
+export async function start(site: BlockerSiteContext, onEnd?: () => void): Promise<boolean> {
   finish();
   const generation = ++lifetime;
   const view = await picker(site, { kind: "start" });
   if (generation !== lifetime || !view?.active) return false;
+  ended = onEnd ?? null;
   owner = site;
   session = view.session;
   baseline = status().site?.hides.map((hide) => hide.id) ?? [];
@@ -101,4 +104,7 @@ export function finish(): void {
   session = null;
   active = false;
   saving = false;
+  const end = ended;
+  ended = null;
+  end?.();
 }

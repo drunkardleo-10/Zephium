@@ -2,7 +2,8 @@
   import { hiding } from "$domain/blocker";
   import { tabs } from "$domain/tabs";
 
-  let count = $derived(hiding.added().length);
+  let added = $derived(hiding.added());
+  let last = $derived(added.at(-1));
 
   // Leaving the page ends hiding; the picker belongs to that document.
   $effect(() => {
@@ -27,21 +28,22 @@
 
 {#if hiding.isActive()}
   <div class="hiding" role="status" aria-live="polite">
-    <span class="pulse" aria-hidden="true"></span>
     <span class="text">
-      <span class="title">Hiding elements</span>
+      <span class="title"
+        >Hiding elements{#if added.length > 0}<span class="count">{added.length}</span>{/if}</span
+      >
       <span class="detail"
         >{hiding.isSaving()
           ? "Saving…"
-          : count === 0
-            ? "Click anything on the page"
-            : `${count} hidden on this site`}</span
+          : last
+            ? `${last.label} hidden`
+            : "Click anything on the page"}</span
       >
     </span>
     <button
       type="button"
       class="undo"
-      disabled={count === 0 || hiding.isSaving()}
+      disabled={!last || hiding.isSaving()}
       title="Undo (⌘Z)"
       onclick={() => void hiding.undo()}>Undo</button
     >
@@ -54,24 +56,13 @@
     display: flex;
     flex: none;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     margin: 2px 8px 6px;
-    padding: 8px 8px 8px 10px;
+    padding: 8px 8px 8px 12px;
     border-radius: var(--radius-row);
-    background: var(--row-active);
-    box-shadow: inset 0 0 0 0.5px var(--color-border);
+    background: var(--color-card);
+    box-shadow: var(--row-rim);
     animation: rise var(--motion-base) var(--ease-out) both;
-  }
-
-  /* A live dot, not an icon: hiding is a mode that is on, not a button. */
-  .pulse {
-    flex: none;
-    width: 8px;
-    height: 8px;
-    margin-inline: 3px;
-    border-radius: var(--radius-capsule);
-    background: rgb(64 132 255);
-    box-shadow: 0 0 0 3px rgb(64 132 255 / 22%);
   }
 
   .text {
@@ -82,10 +73,26 @@
   }
 
   .title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     color: var(--color-text);
     font-size: var(--text-body);
     font-weight: 500;
     line-height: 18px;
+  }
+
+  .count {
+    min-width: 16px;
+    padding: 0 5px;
+    border-radius: var(--radius-capsule);
+    background: var(--row-active);
+    color: var(--color-muted);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 16px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
   }
 
   .detail {

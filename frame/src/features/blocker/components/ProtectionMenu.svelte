@@ -6,7 +6,8 @@
   import Icon from "$shared/ui/Icon";
   import Switch from "$shared/ui/Switch";
 
-  let { labelled = false }: { labelled?: boolean } = $props();
+  /** `opened` counts menu openings, so the day's count is fresh each time. */
+  let { labelled = false, opened = 0 }: { labelled?: boolean; opened?: number } = $props();
   let status = $derived(blocker.status());
   let shield = $derived(shieldPresentation(status));
   let site = $derived(status.site);
@@ -23,7 +24,24 @@
     managing = false;
   });
 
-  let title = $derived(
+  let blockedToday = $state<number | null>(null);
+  $effect(() => {
+    void opened;
+    const profile = site?.context.profile;
+    if (!profile) return;
+    let current = true;
+    void commands
+      .blockerStats(profile)
+      .then((result) => {
+        if (current) blockedToday = result.status === "ok" ? result.data.today : null;
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  });
+
+  let standing = $derived(
     status.protection === "disabled"
       ? "Protection is off"
       : status.protection === "pending"
@@ -32,8 +50,11 @@
           ? "Protection needs attention"
           : site?.paused
             ? "Paused on this site"
-            : "Protected",
+            : blockedToday
+              ? `${blockedToday.toLocaleString()} ads and trackers blocked today`
+              : "Blocking ads and trackers",
   );
+  let active = $derived(status.protection === "active" && !site?.paused);
 
   function ok(result: blocker.BlockerMutationResult) {
     return (
@@ -89,16 +110,16 @@
 {#if shield.visible && labelled}
   <div class="protection">
     <div class="head" data-keep-open>
-      <span
-        class="glyph"
-        class:quiet={!on || site?.paused}
-        class:warning={shield.tone === "warning"}><Icon icon={Shield01Icon} size={16} /></span
-      >
       <span class="text">
-        <span class="title">{title}</span>
-        {#if site}<span class="site" title={site.context.site}
-            >{site.context.site}{site.private_session ? " · private" : ""}</span
-          >{/if}
+        <span class="site" title={site?.context.site}
+          >{site ? site.context.site : "Ad and tracker protection"}{site?.private_session
+            ? " · private"
+            : ""}</span
+        >
+        <span class="standing" class:active class:warning={shield.tone === "warning"}>
+          <Icon icon={Shield01Icon} size={12} />
+          <span>{standing}</span>
+        </span>
       </span>
       {#if on && site?.ready}
         <Switch
@@ -217,52 +238,54 @@
   .head {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px var(--menu-item-inset) 8px;
-  }
-
-  .glyph {
-    display: grid;
-    flex: none;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-inset);
-    background: color-mix(in srgb, var(--color-success) 16%, transparent);
-    color: var(--color-success);
-  }
-
-  .glyph.quiet {
-    background: var(--row-active);
-    color: var(--color-muted);
-  }
-
-  .glyph.warning {
-    background: color-mix(in srgb, var(--color-warning) 16%, transparent);
-    color: var(--color-warning);
+    gap: 12px;
+    padding: 8px var(--menu-item-inset) 10px;
   }
 
   .text {
     display: flex;
     flex: 1;
     flex-direction: column;
+    gap: 2px;
     min-inline-size: 0;
-  }
-
-  .title {
-    color: var(--color-text);
-    font-size: var(--text-body);
-    font-weight: 500;
-    line-height: 18px;
   }
 
   .site {
     overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 500;
+    line-height: 18px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .standing {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-inline-size: 0;
     color: var(--color-muted);
     font-size: var(--text-caption);
     line-height: 16px;
+  }
+
+  .standing > span {
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .standing :global(svg) {
+    flex: none;
+  }
+
+  .standing.active :global(svg) {
+    color: var(--color-success);
+  }
+
+  .standing.warning {
+    color: var(--color-warning);
   }
 
   .row {

@@ -24,7 +24,7 @@
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
   import { blocker } from "$domain/blocker";
-  import { BlockerShield, HidingBar } from "$features/blocker";
+  import { BlockerShield, HidingBar, ProtectionStack } from "$features/blocker";
 
   import { preview } from "$features/settings";
   import { onMount } from "svelte";
@@ -206,9 +206,9 @@
         <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
       {/if}
     {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
-          {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
+          {#snippet extensions()}<ProtectionStack /><ExtensionActions
               variant="stack"
-            />{/snippet}
+            /><ManageExtensions variant="stack" />{/snippet}
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
               onSelect={selectTab}

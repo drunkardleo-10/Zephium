@@ -33,7 +33,7 @@
   Coverage and source diagnostics stay in Settings.
 -->
 {#if Menu && labelled}
-  <Menu {labelled} />
+  <Menu {labelled} opened={activated} />
 {:else if failed}
   <span role="status">Site controls unavailable. Reopen the menu to retry.</span>
 {:else if shield.visible && labelled}
