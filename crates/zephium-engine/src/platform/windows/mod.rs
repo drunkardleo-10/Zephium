@@ -20,8 +20,6 @@ mod agentic_semantic_probe;
 #[allow(dead_code)]
 mod cdp;
 mod content_filter;
-mod frame_styles;
-pub(crate) use frame_styles::{install as install_frame_styles, FrameStylesRegistration};
 #[cfg(feature = "agentic-browser")]
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.

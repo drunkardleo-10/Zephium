@@ -142,8 +142,8 @@ invariants = [
 ]
 
 [production_graphs]
-windows_runtime = "full-regex-handling,css-validation"
-webkit_native = "full-regex-handling,css-validation,content-blocking"
+windows_runtime = "full-regex-handling,css-validation,embedded-domain-resolver"
+webkit_native = "full-regex-handling,css-validation,content-blocking,embedded-domain-resolver"
 optional_exact_attribution = "full-regex-handling,css-validation,embedded-domain-resolver"
 default_features = "not used by Zephium production builds"
 test_threading = "upstream single-thread feature is disabled in every production-graph gate"
@@ -156,12 +156,12 @@ standalone_dev_graph = "may contain additional independently pinned test-only pa
 [release_gates]
 fork_provenance = "cargo xtask check-security-fork-locks"
 fork_fmt = "cargo fmt --manifest-path vendor/adblock/Cargo.toml -- --check"
-fork_windows_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation"
-fork_windows_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation -- -D warnings"
-fork_windows_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation"
-fork_webkit_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,content-blocking"
-fork_webkit_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,content-blocking -- -D warnings"
-fork_webkit_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,content-blocking"
+fork_windows_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver"
+fork_windows_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver -- -D warnings"
+fork_windows_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver"
+fork_webkit_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver"
+fork_webkit_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver -- -D warnings"
+fork_webkit_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver"
 fork_optional_exact_check = "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver"
 fork_optional_exact_clippy = "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver -- -D warnings"
 fork_optional_exact_tests = "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver"

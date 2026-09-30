@@ -22,9 +22,108 @@
   const inlineOverrides = new Map();
   const allowed = new Set(["subscription", "personal", "preview"]);
   let picker = null;
-  let nativeCss;
-  let restoredDocument = false;
-  globalThis.addEventListener("pageshow", event => { if (event.isTrusted && event.persisted) restoredDocument = true; });
+  let generic = null;
+
+  function stopGeneric() {
+    if (!generic) return;
+    generic.observer.disconnect();
+    if (generic.idle !== null) {
+      if (globalThis.cancelIdleCallback) cancelIdleCallback(generic.idle);
+      else clearTimeout(generic.idle);
+    }
+    generic.idle = null;
+    generic.roots.clear(); generic.walker = null;
+  }
+  function scheduleGeneric() {
+    const state = generic;
+    if (!state || document.hidden || state.idle !== null || (!state.walker && !state.roots.size)) return;
+    const callback = deadline => {
+      state.idle = null;
+      if (generic !== state || document.hidden) return;
+      const end = performance.now() + 2;
+      let visited = 0;
+      while (visited < 200 && performance.now() < end && (!deadline || deadline.timeRemaining() > 1 || deadline.didTimeout)) {
+        if (!state.walker) {
+          const entry = state.roots.entries().next().value;
+          if (!entry) break;
+          const [root, subtree] = entry;
+          state.roots.delete(root);
+          if (!root.isConnected) continue;
+          state.walker = subtree ? document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT) : { root, currentNode: root, nextNode: () => null };
+          state.first = true;
+        }
+        const node = state.first ? state.walker.currentNode : state.walker.nextNode();
+        state.first = false;
+        if (!node || !state.walker.root.isConnected) { state.walker = null; continue; }
+        visited++;
+        const add = key => {
+          const selectors = state.index.get(key);
+          if (!selectors) return;
+          for (const selector of selectors) {
+            if (state.seen.has(selector) || state.exceptions.has(selector)) continue;
+            if (state.seen.size >= 2048) return;
+            state.seen.add(selector);
+            try { state.sheet.insertRule(`${selector}{display:none!important}`, state.sheet.cssRules.length); } catch (_) {}
+          }
+        };
+        if (node.id && node.id.length <= 4096) add(`#${node.id}`);
+        let count = 0;
+        for (const name of node.classList) {
+          if (++count > 128) break;
+          if (name.length <= 4096) add(`.${name}`);
+        }
+      }
+      scheduleGeneric();
+    };
+    state.idle = globalThis.requestIdleCallback
+      ? requestIdleCallback(callback, { timeout: 200 })
+      : setTimeout(() => callback(null), 32);
+  }
+  function observeGeneric() {
+    if (!generic || document.hidden) return;
+    generic.observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ["id", "class"] });
+    if (document.documentElement) generic.roots.set(document.documentElement, true);
+    scheduleGeneric();
+  }
+  function setSubscription(expectedToken, expectedUrl, generation, fingerprint, css, indexJson, exceptionJson) {
+    if (!matches(expectedToken, expectedUrl) || typeof indexJson !== "string" || indexJson.length > 1048576 ||
+        typeof exceptionJson !== "string" || exceptionJson.length > 1048576) return false;
+    const old = slots.get("subscription");
+    if (old && generation < old.generation) return false;
+    if (old && generation === old.generation && fingerprint !== old.fingerprint) return false;
+    if (old?.fingerprint === fingerprint && (getSheets().includes(old.sheet) || (!css && indexJson === "[]")) && (!generic || generic.fingerprint === fingerprint)) {
+      old.generation = generation; return true;
+    }
+    try {
+      const entries = JSON.parse(indexJson), exceptions = JSON.parse(exceptionJson);
+      if (!Array.isArray(entries) || entries.length > 50000 || !Array.isArray(exceptions) || exceptions.length > 50000) return false;
+      stopGeneric(); generic = null;
+      if (!setStyle("subscription", expectedToken, expectedUrl, generation, fingerprint, css)) return false;
+      if (!entries.length) return true;
+      const sheet = slots.get("subscription").sheet;
+      if (!getSheets().includes(sheet)) setSheets([...getSheets(), sheet]);
+      const state = { fingerprint, sheet, index: new Map(entries), exceptions: new Set(exceptions), seen: new Set(), roots: new Map(), walker: null, first: false, idle: null, observer: null };
+      state.observer = new MutationObserver(records => {
+        if (generic !== state || document.hidden) return;
+        let admitted = 0;
+        for (const record of records) {
+          if (++admitted > 256 || state.roots.size >= 256) break;
+          if (record.type === "attributes") {
+            if (!state.roots.has(record.target)) state.roots.set(record.target, false);
+          }
+          else for (const node of record.addedNodes) {
+            if (++admitted > 256 || state.roots.size >= 256) break;
+            if (node.nodeType === Node.ELEMENT_NODE) state.roots.set(node, true);
+          }
+        }
+        scheduleGeneric();
+      });
+      generic = state; observeGeneric(); return true;
+    } catch (_) { stopGeneric(); generic = null; return false; }
+  }
+  document.addEventListener("visibilitychange", () => document.hidden ? stopGeneric() : observeGeneric());
+  globalThis.addEventListener("pagehide", stopGeneric);
+  globalThis.addEventListener("pageshow", event => { if (event.isTrusted && event.persisted) observeGeneric(); });
 
   function matches(expectedToken, expectedUrl) {
     return expectedToken === token && expectedUrl === location.href;
@@ -248,11 +347,7 @@
       const result = create(null); result.token = token; result.url = location.href;
       return stringify(result);
     },
-    nativeCoverage: (expectedToken, expectedUrl, initial, desired) => {
-      if (!matches(expectedToken, expectedUrl)) return false;
-      if (nativeCss === undefined) nativeCss = !restoredDocument && typeof initial === "string" && /^[0-9a-f]{64}$/.test(initial) ? initial : null;
-      return nativeCss !== null && nativeCss === desired;
-    },
+    subscription: setSubscription,
     apply: setStyle,
     startPicker,
     beginEncoded: session => {

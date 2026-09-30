@@ -62,8 +62,6 @@ struct StyleKey {
     subscription: Option<ContentRuleDigest>,
     personal: Option<ContentRuleDigest>,
     paused: bool,
-    #[cfg(target_os = "macos")]
-    native_cosmetics: Option<[u8; 32]>,
 }
 
 #[derive(Default)]
@@ -92,10 +90,8 @@ struct Delivery {
     key: StyleKey,
     navigation: NavigationEpochTracker,
     permit: EventPermit,
-    subscription: Arc<str>,
+    provider: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     personal: Arc<str>,
-    #[cfg(target_os = "macos")]
-    native_hint: Option<[u8; 32]>,
 }
 
 impl Drop for Delivery {
@@ -167,6 +163,10 @@ impl EngineHost {
     }
 
     pub(super) fn refresh_document_styles(&mut self, id: ItemId) {
+        #[cfg(not(target_os = "windows"))]
+        if self.shutdown_completion.is_some() {
+            return;
+        }
         #[cfg(target_os = "windows")]
         if self.dormant.contains(&id) || self.suspending.contains(&id) {
             return;
@@ -184,18 +184,6 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return;
         };
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            let provider = self
-                .content_policies
-                .get(&profile)
-                .and_then(|p| p.applied.as_ref())
-                .and_then(|p| p.cosmetics.clone());
-            view.frame_style_source.update(provider);
-            if let Some(frames) = &view.frame_styles {
-                frames.refresh();
-            }
-        }
         let Some((epoch, url)) = view.navigation.committed_snapshot() else {
             return;
         };
@@ -208,15 +196,13 @@ impl EngineHost {
             .content_policies
             .get(&profile)
             .and_then(|p| p.applied.as_ref())
-            .and_then(|p| p.cosmetics.as_ref());
+            .and_then(|p| p.cosmetics.clone());
         let key = StyleKey {
             epoch,
             url: url.clone(),
-            subscription: provider.map(|p| p.fingerprint()),
+            subscription: provider.as_ref().map(|p| p.fingerprint()),
             personal: site_policy.map(|p| p.fingerprint),
             paused,
-            #[cfg(target_os = "macos")]
-            native_cosmetics: self.native_cosmetic_digest(profile),
         };
         let state = view.content_styles.clone();
         {
@@ -237,21 +223,13 @@ impl EngineHost {
                 }
             }
         }
-        let subscription: Arc<str> = if paused {
-            Arc::from("")
-        } else {
-            match provider.map(|p| p.stylesheet(&url)).transpose() {
-                Ok(Some(css)) => css,
-                Ok(None) => Arc::from(""),
-                Err(_) => return,
-            }
-        };
         let personal = site_policy
             .map(|p| p.css.clone())
             .unwrap_or_else(|| Arc::from(""));
         let sequence = {
             let status = state.lock();
-            if subscription.is_empty() && personal.is_empty() && status.applied_key.is_none() {
+            if (paused || provider.is_none()) && personal.is_empty() && status.applied_key.is_none()
+            {
                 return;
             }
             let Some(sequence) = status.sequence.checked_add(1) else {
@@ -259,19 +237,12 @@ impl EngineHost {
             };
             sequence
         };
-        // Bound application-owned strings through both native callback phases.
-        // Old documents retain their physical charge until callback/drop proof.
-        let charged_bytes = (subscription.len() + personal.len())
-            .saturating_mul(4)
-            .saturating_add(64 * 1024);
-        if DELIVERY_BYTES
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
-                bytes
-                    .checked_add(charged_bytes)
-                    .filter(|total| *total <= MAX_DELIVERY_BYTES)
-            })
-            .is_err()
-        {
+        // Heavy policy lookup, hashing and JSON construction run on one worker.
+        if self.style_worker.is_none() {
+            self.style_worker =
+                super::style_worker::StyleWorker::new(self.main_dispatch.clone()).ok();
+        }
+        if self.style_worker.is_none() {
             return;
         }
         {
@@ -285,14 +256,12 @@ impl EngineHost {
         let delivery = Delivery {
             state,
             sequence,
-            charged_bytes,
+            charged_bytes: 0,
             key,
-            subscription,
+            provider: if paused { None } else { provider },
             personal,
             navigation: view.navigation.clone(),
             permit: view.event_permit.clone(),
-            #[cfg(target_os = "macos")]
-            native_hint: view.native_style_document.committed.get(),
         };
         // Wry's callback is Send + Fn, not FnOnce. Contain duplicate callbacks
         // and retain exactly one owner without holding a lock across native work.
@@ -323,17 +292,44 @@ impl EngineHost {
                 return;
             }
             let _ = with_document_style(id, move |host| {
-                host.deliver_document_styles(id, delivery, identity)
+                host.prepare_document_styles(id, delivery, identity)
             });
         });
     }
 
-    fn deliver_document_styles(
+    fn prepare_document_styles(
         &mut self,
         id: ItemId,
-        delivery: Delivery,
+        mut delivery: Delivery,
         identity: DocumentIdentity,
     ) {
+        let Some(worker) = &self.style_worker else {
+            return;
+        };
+        worker.submit(move || {
+            if !delivery.navigation.matches_committed_snapshot(delivery.key.epoch, &delivery.key.url) { return None; }
+            let plan = match delivery.provider.as_ref().map(|p| p.document_plan(&delivery.key.url)).transpose() {
+                Ok(Some(plan)) => plan,
+                Ok(None) => zephium_core::blocker::DocumentStylePlan { css: Arc::from(""), generic_index: Arc::from("[]"), exceptions: Arc::from("[]") },
+                Err(_) => return None,
+            };
+            let fingerprint = { let mut hash=Sha256::new(); for text in [&plan.css,&plan.generic_index,&plan.exceptions] {hash.update((text.len() as u64).to_le_bytes());hash.update(text.as_bytes());} format!("{:x}",hash.finalize()) };
+            let arguments = serde_json::json!([
+                identity.token, delivery.key.url, format!("{:016x}", delivery.sequence),
+                fingerprint,
+                plan.css.as_ref(), plan.generic_index.as_ref(), plan.exceptions.as_ref(),
+                css_digest(&delivery.personal), delivery.personal.as_ref()
+            ]);
+            let script = format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s=a.subscription(p[0],p[1],p[2],p[3],p[4],p[5],p[6]);const u=a.apply('personal',p[0],p[1],p[2],p[7],p[8]);return s===true&&u===true;}})({arguments})");
+            if script.len() > 4 * 1024 * 1024 { return None; }
+            let charge = script.len().saturating_mul(3);
+            if DELIVERY_BYTES.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|v|v.checked_add(charge).filter(|v|*v<=MAX_DELIVERY_BYTES)).is_err(){return None;}
+            delivery.charged_bytes = charge;
+            Some(Box::new(move || { let _ = with_document_style(id, move |host| host.deliver_document_styles(id, delivery, script)); }))
+        });
+    }
+
+    fn deliver_document_styles(&mut self, id: ItemId, delivery: Delivery, script: String) {
         let restart = {
             let mut state = delivery.state.lock();
             if state.active != Some(delivery.sequence) {
@@ -359,28 +355,6 @@ impl EngineHost {
             .navigation
             .matches_committed_snapshot(delivery.key.epoch, &delivery.key.url)
         {
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        let native = (
-            delivery.native_hint.map(digest_text),
-            delivery.key.native_cosmetics.map(digest_text),
-        );
-        #[cfg(not(target_os = "macos"))]
-        let native: (Option<String>, Option<String>) = (None, None);
-        let arguments = serde_json::json!([
-            identity.token,
-            delivery.key.url,
-            format!("{:016x}", delivery.sequence),
-            css_digest(&delivery.subscription),
-            delivery.subscription.as_ref(),
-            css_digest(&delivery.personal),
-            delivery.personal.as_ref(),
-            native.0,
-            native.1
-        ]);
-        let script = format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const covered=a.nativeCoverage?.(p[0],p[1],p[7],p[8])===true;const s=a.apply('subscription',p[0],p[1],p[2],p[3],covered?'':p[4]);const u=a.apply('personal',p[0],p[1],p[2],p[5],p[6]);return s===true&&u===true;}})({arguments})");
-        if script.len() > 4 * 1024 * 1024 {
             return;
         }
         let completion = Mutex::new(Some(delivery));
@@ -429,100 +403,4 @@ fn decode_identity(text: &str) -> Option<DocumentIdentity> {
         token: object.get("token")?.as_str()?.to_owned(),
         url: object.get("url")?.as_str()?.to_owned(),
     })
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[derive(PartialEq, Eq)]
-struct FrameStyleKey {
-    provider: Option<ContentRuleDigest>,
-    preferences: Option<u64>,
-    paused: bool,
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(super) struct FrameStyleSource {
-    scope: Rc<ViewSiteScope>,
-    provider: RefCell<Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>>,
-    key: RefCell<Option<FrameStyleKey>>,
-    generation: std::cell::Cell<u64>,
-}
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-impl FrameStyleSource {
-    pub(super) fn new(
-        scope: Rc<ViewSiteScope>,
-        provider: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
-    ) -> Rc<Self> {
-        let value = Rc::new(Self {
-            scope,
-            provider: RefCell::new(None),
-            key: RefCell::new(None),
-            generation: std::cell::Cell::new(0),
-        });
-        value.update(provider);
-        value
-    }
-    pub(super) fn update(
-        &self,
-        provider: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
-    ) -> bool {
-        let key = FrameStyleKey {
-            provider: provider.as_ref().map(|p| p.fingerprint()),
-            preferences: self
-                .scope
-                .preferences
-                .borrow()
-                .as_ref()
-                .map(|p| p.revision()),
-            paused: self.scope.pause.paused(),
-        };
-        if self.key.borrow().as_ref() == Some(&key) {
-            return false;
-        }
-        let Some(generation) = self.generation.get().checked_add(1) else {
-            return false;
-        };
-        self.generation.set(generation);
-        self.key.replace(Some(key));
-        self.provider.replace(provider);
-        true
-    }
-    pub(super) fn lookup(
-        &self,
-        url: &str,
-    ) -> Option<crate::platform::frame_styles::FrameStyleData> {
-        let site = BlockerSite::from_url(url)?;
-        let preferences = self.scope.preferences.borrow();
-        let paused = self.scope.pause.paused();
-        let subscription = if paused {
-            Arc::from("")
-        } else {
-            self.provider
-                .borrow()
-                .as_ref()
-                .map(|p| p.stylesheet(url))
-                .transpose()
-                .ok()?
-                .unwrap_or_else(|| Arc::from(""))
-        };
-        let personal = preferences
-            .as_ref()
-            .and_then(|p| p.get(&site))
-            .map(|p| p.css.clone())
-            .unwrap_or_else(|| Arc::from(""));
-        Some(crate::platform::frame_styles::FrameStyleData {
-            generation: self.generation.get(),
-            subscription,
-            personal,
-        })
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn digest_text(digest: [u8; 32]) -> String {
-    use std::fmt::Write;
-    let mut result = String::with_capacity(64);
-    for byte in digest {
-        let _ = write!(result, "{byte:02x}");
-    }
-    result
 }

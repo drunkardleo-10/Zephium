@@ -171,8 +171,3 @@ objc2-quartz-core = "0.3"
 raw-window-handle.workspace = true
 zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 zephium-webext-macos = { path = "../zephium-webext-macos", version = "=0.1.0" }
-
-[[bin]]
-name = "macos-blocker-frames-probe"
-path = "src/bin/macos_blocker_frames_probe.rs"
-required-features = ["native-isolation-probes"]

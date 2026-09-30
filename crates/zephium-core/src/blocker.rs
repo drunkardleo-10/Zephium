@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::ids::ProfileId;
 
 mod cosmetics;
-pub use cosmetics::{DeclarativeStyleRules, DocumentStyleFailure, DocumentStyleProvider};
+pub use cosmetics::{DocumentStyleFailure, DocumentStylePlan, DocumentStyleProvider};
 mod sites;
 pub use sites::{
     BlockerSite, BlockerSitePreferences, PersonalHide, PreparedBlockerSite, PreparedBlockerSites,
@@ -540,7 +540,6 @@ pub struct ContentRules {
     coverage: ContentRuleCoverage,
     payload: ContentRulesPayload,
     cosmetics: Option<Arc<dyn DocumentStyleProvider>>,
-    native_cosmetics: Option<DeclarativeStyleRules>,
 }
 
 impl ContentRules {
@@ -550,7 +549,6 @@ impl ContentRules {
             coverage: ContentRuleCoverage::default(),
             payload: ContentRulesPayload::AllowAll,
             cosmetics: None,
-            native_cosmetics: None,
         })
     }
 
@@ -565,7 +563,6 @@ impl ContentRules {
                 coverage,
                 payload: ContentRulesPayload::Runtime(policy),
                 cosmetics: None,
-                native_cosmetics: None,
             })
         })
     }
@@ -593,7 +590,6 @@ impl ContentRules {
                 encoded,
             },
             cosmetics: None,
-            native_cosmetics: None,
         }))
     }
 
@@ -602,22 +598,16 @@ impl ContentRules {
     pub fn with_cosmetics(
         mut self: Arc<Self>,
         provider: Arc<dyn DocumentStyleProvider>,
-        native: Option<DeclarativeStyleRules>,
     ) -> Arc<Self> {
         if self.enabled() {
             let rules = Arc::make_mut(&mut self);
             rules.cosmetics = Some(provider);
-            rules.native_cosmetics = native;
         }
         self
     }
 
     pub fn cosmetics(&self) -> Option<&Arc<dyn DocumentStyleProvider>> {
         self.cosmetics.as_ref()
-    }
-
-    pub fn native_cosmetics(&self) -> Option<&DeclarativeStyleRules> {
-        self.native_cosmetics.as_ref()
     }
 
     pub const fn digest(&self) -> ContentRuleDigest {

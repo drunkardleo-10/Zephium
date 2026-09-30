@@ -571,7 +571,7 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 4 + cfg!(target_os = "macos"
     ProtectedScriptSpec {
         id: 6,
         source: include_str!("content_style.js"),
-        all_frames: true,
+        all_frames: false,
     },
     ProtectedScriptSpec {
         id: 1,

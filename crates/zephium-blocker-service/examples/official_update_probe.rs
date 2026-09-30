@@ -62,17 +62,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         return Ok(false);
                     }
-                    if let Some(cosmetics) = rules.native_cosmetics() {
-                        let path = root.join("native-cosmetics.json");
-                        std::fs::write(&path, cosmetics.encoded().as_bytes())?;
-                        if !std::process::Command::new(&verifier)
-                            .arg(&path)
-                            .status()?
-                            .success()
-                        {
-                            return Ok(false);
-                        }
-                    }
                     Ok(true)
                 })();
                 completion.finish(if matches!(result, Ok(true)) {

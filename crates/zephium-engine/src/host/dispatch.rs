@@ -313,6 +313,7 @@ static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     data_root: PathBuf,
+    main_dispatch: crate::MainThreadDispatch,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
     #[cfg(any(target_os = "macos", target_os = "windows"))] native_open_authority: Arc<
@@ -409,10 +410,8 @@ pub(crate) fn install(
             partitions: HashMap::new(),
             profile_persistence_classes: HashMap::new(),
             content_policies: HashMap::new(),
-            #[cfg(target_os="macos")]
-            native_cosmetics: HashMap::new(),
-            #[cfg(target_os="macos")]
-            cosmetic_compilations: HashMap::new(),
+            style_worker: None,
+            main_dispatch,
             #[cfg(not(target_os = "windows"))]
             content_rule_preflight: None,
             #[cfg(not(target_os = "windows"))]

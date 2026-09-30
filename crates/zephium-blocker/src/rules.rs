@@ -159,15 +159,6 @@ impl CompiledRules {
             .map(|prepared| prepared.policy.as_ref())
     }
 
-    /// Returns the optional top-document native cosmetic artifact, prepared on
-    /// the compiler worker rather than generated on the native UI thread.
-    pub fn native_cosmetic_rules(&self) -> Option<&zephium_core::blocker::DeclarativeStyleRules> {
-        self.0
-            .cosmetics
-            .as_ref()
-            .and_then(|prepared| prepared.native.as_ref())
-    }
-
     #[cfg(feature = "runtime")]
     pub(crate) fn serialize_runtime_engine(&self) -> Option<Vec<u8>> {
         self.0.engine.as_ref().map(Engine::serialize)

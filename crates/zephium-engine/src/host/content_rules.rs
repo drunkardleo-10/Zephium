@@ -78,24 +78,6 @@ impl EngineHost {
             if *format != zephium_core::blocker::DeclarativeRuleFormat::WebKitContentBlockerV1 {
                 return;
             }
-            #[cfg(target_os = "macos")]
-            let completion = if let Some(styles) = rules.native_cosmetics().cloned() {
-                zephium_core::ports::engine::ContentRuleValidationCompletion::new(move |outcome| {
-                    if outcome != ContentRuleValidationOutcome::Valid {
-                        completion.finish(outcome);
-                        return;
-                    }
-                    let _ = super::try_with(move |host| {
-                        host.validate_declarative_artifact(
-                            styles.encoded().clone(),
-                            *styles.digest().as_bytes(),
-                            completion,
-                        )
-                    });
-                })
-            } else {
-                completion
-            };
             self.validate_declarative_artifact(
                 encoded.clone(),
                 *artifact_digest.as_bytes(),
@@ -275,8 +257,6 @@ impl EngineHost {
             } else if let Some(queued) = state.queued.take() {
                 state.compiling = Some(CompilingContentPolicy {
                     generation: queued.generation,
-                    #[cfg(target_os = "macos")]
-                    native_cosmetics: queued.rules.native_cosmetics().cloned(),
                     cosmetics: queued.rules.cosmetics().cloned(),
                     superseded: false,
                 });
@@ -428,12 +408,6 @@ impl EngineHost {
                 .declarative_content_policy_compilations
                 .get(&job.digest)
                 .is_some_and(|waiters| !waiters.is_empty());
-            #[cfg(target_os = "macos")]
-            let has_waiters = has_waiters
-                || self
-                    .cosmetic_compilations
-                    .get(&job.digest)
-                    .is_some_and(|w| !w.is_empty());
             if has_waiters
                 || self
                     .content_rule_preflight
@@ -587,17 +561,6 @@ impl EngineHost {
                 }
             }
         }
-        #[cfg(target_os = "macos")]
-        if let Some(waiters) = self.cosmetic_compilations.remove(&digest) {
-            for (profile, generation) in waiters {
-                self.finish_native_cosmetics(
-                    profile,
-                    generation,
-                    digest,
-                    result.as_ref().ok().cloned(),
-                );
-            }
-        }
         for (profile, generation) in waiters {
             let result = match &result {
                 Ok(native) => Ok(native.clone()),
@@ -648,8 +611,6 @@ impl EngineHost {
 
         // The timed-out physical compiler also drains queued candidates.
         self.content_rule_preflight.take();
-        #[cfg(target_os = "macos")]
-        self.cosmetic_compilations.clear();
         let active_waiters = self
             .declarative_content_policy_compilations
             .get_mut(&digest)
@@ -1036,8 +997,6 @@ impl EngineHost {
     #[cfg(not(target_os = "windows"))]
     fn fail_unstarted_declarative_content_policy(&mut self, job: DeclarativeContentPolicyJob) {
         self.finish_content_rule_preflight(job.digest, ContentRuleValidationOutcome::Unavailable);
-        #[cfg(target_os = "macos")]
-        self.cosmetic_compilations.remove(&job.digest);
         self.release_declarative_content_policy_bytes(job.encoded_bytes);
         let waiters = self
             .declarative_content_policy_compilations
@@ -1129,8 +1088,6 @@ impl EngineHost {
                 #[cfg(not(target_os = "windows"))]
                 digest: native_digest,
             });
-            #[cfg(target_os = "macos")]
-            self.request_native_cosmetics(profile, generation, compiling.native_cosmetics);
             self.refresh_profile_document_styles(profile);
             self.emit_content_policy_settlement(
                 profile,
@@ -1366,8 +1323,6 @@ impl EngineHost {
             #[cfg(not(target_os = "windows"))]
             digest: native_digest,
         });
-        #[cfg(target_os = "macos")]
-        self.request_native_cosmetics(profile, generation, compiling.native_cosmetics);
         self.refresh_profile_document_styles(profile);
         self.emit_content_policy_settlement(
             profile,
@@ -1439,28 +1394,17 @@ impl EngineHost {
     pub(super) fn retire_content_policy(&mut self, profile: ProfileId) {
         self.content_policies.remove(&profile);
         self.blocker_sites.remove(&profile);
-        #[cfg(target_os = "macos")]
-        {
-            self.native_cosmetics.remove(&profile);
-            for waiters in self.cosmetic_compilations.values_mut() {
-                waiters.retain(|(owner, _)| *owner != profile);
-            }
-        }
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }
     }
 
     pub(super) fn begin_content_policy_shutdown(&mut self) {
+        self.style_worker.take();
         #[cfg(not(target_os = "windows"))]
         {
             self.content_rule_preflight.take();
             self.preflight_cache_digests.clear();
-            #[cfg(target_os = "macos")]
-            {
-                self.cosmetic_compilations.clear();
-                self.native_cosmetics.clear();
-            }
         }
         self.content_policies.clear();
         self.declarative_content_policy_cache.clear();
@@ -1767,8 +1711,6 @@ mod tests {
             compiling: Some(CompilingContentPolicy {
                 generation: ContentPolicyGeneration::new(1).unwrap(),
                 cosmetics: None,
-                #[cfg(target_os = "macos")]
-                native_cosmetics: None,
                 superseded: false,
             }),
             queued: None,
@@ -1812,8 +1754,6 @@ mod tests {
             compiling: Some(CompilingContentPolicy {
                 generation: compiling,
                 cosmetics: None,
-                #[cfg(target_os = "macos")]
-                native_cosmetics: None,
                 superseded: true,
             }),
             queued: Some(QueuedContentPolicy {

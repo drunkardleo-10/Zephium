@@ -12,7 +12,7 @@ webkit = ["adblock/content-blocking"]
 
 [dependencies]
 zephium-core.workspace = true
-adblock = { version = "=0.13.2", default-features = false, features = ["full-regex-handling", "css-validation"] }
+adblock = { version = "=0.13.2", default-features = false, features = ["full-regex-handling", "css-validation", "embedded-domain-resolver"] }
 idna = "=1.1.0"
 serde.workspace = true
 serde_json.workspace = true

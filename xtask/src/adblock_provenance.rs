@@ -7,8 +7,8 @@ use std::path::{Component, Path};
 use std::process::Command;
 
 pub(crate) const SHIPPING_FEATURE_SETS: [&str; 2] = [
-    "full-regex-handling,css-validation",
-    "full-regex-handling,css-validation,content-blocking",
+    "full-regex-handling,css-validation,embedded-domain-resolver",
+    "full-regex-handling,css-validation,content-blocking,embedded-domain-resolver",
 ];
 pub(crate) const OPTIONAL_EXACT_FEATURES: &str =
     "full-regex-handling,css-validation,embedded-domain-resolver";
@@ -333,27 +333,27 @@ fn validate_release_gates(gates: &toml::Table) -> Result<(), String> {
         ),
         (
             "fork_windows_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_windows_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver -- -D warnings",
         ),
         (
             "fork_windows_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_webkit_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,content-blocking",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver",
         ),
         (
             "fork_webkit_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,content-blocking -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver -- -D warnings",
         ),
         (
             "fork_webkit_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,content-blocking",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver",
         ),
         (
             "fork_optional_exact_check",
@@ -792,7 +792,11 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     require_string_array(
         blocker_adblock,
         "features",
-        &["full-regex-handling", "css-validation"],
+        &[
+            "full-regex-handling",
+            "css-validation",
+            "embedded-domain-resolver",
+        ],
     )?;
     reject_dependency_aliases(
         require_table(&blocker, "dependencies")?,
@@ -2035,8 +2039,10 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
             "x86_64-pc-windows-msvc",
             &["runtime"],
             &[
+                "addr",
                 "css-validation",
                 "cssparser",
+                "embedded-domain-resolver",
                 "full-regex-handling",
                 "selectors",
             ],
@@ -2046,8 +2052,10 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
             &["webkit"],
             &[
                 "content-blocking",
+                "addr",
                 "css-validation",
                 "cssparser",
+                "embedded-domain-resolver",
                 "full-regex-handling",
                 "selectors",
             ],
@@ -2057,8 +2065,10 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
             &["webkit"],
             &[
                 "content-blocking",
+                "addr",
                 "css-validation",
                 "cssparser",
+                "embedded-domain-resolver",
                 "full-regex-handling",
                 "selectors",
             ],
@@ -2068,8 +2078,10 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
             &["webkit"],
             &[
                 "content-blocking",
+                "addr",
                 "css-validation",
                 "cssparser",
+                "embedded-domain-resolver",
                 "full-regex-handling",
                 "selectors",
             ],

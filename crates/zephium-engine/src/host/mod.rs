@@ -21,8 +21,6 @@ mod extension_browser_surface;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod lifecycle;
-#[cfg(target_os = "macos")]
-mod native_cosmetics;
 mod navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod page_open;
@@ -34,6 +32,7 @@ mod profiles;
 mod resources;
 mod scripts;
 mod stages;
+mod style_worker;
 #[cfg(target_os = "macos")]
 mod webext;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
@@ -119,10 +118,6 @@ struct Spare {
 struct ObservedView {
     site_scope: Rc<content_styles::ViewSiteScope>,
     content_styles: Arc<content_styles::DocumentStyleState>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    frame_style_source: Rc<content_styles::FrameStyleSource>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    frame_styles: Option<crate::platform::imp::FrameStylesRegistration>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
     // A current layout may request a view before its first document commits
@@ -170,10 +165,6 @@ struct ObservedView {
     // never used to authorize browsing. `Option` exists solely so teardown
     // can retire it before closing the native controller.
     content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
-    #[cfg(target_os = "macos")]
-    cosmetic_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
-    #[cfg(target_os = "macos")]
-    native_style_document: Rc<native_cosmetics::NativeStyleDocument>,
     _observer: crate::platform::imp::InstalledNavigationObserver,
     #[cfg(target_os = "windows")]
     cleanup_profile: ProfileId,
@@ -327,8 +318,6 @@ struct AppliedContentPolicy {
 
 struct CompilingContentPolicy {
     generation: ContentPolicyGeneration,
-    #[cfg(target_os = "macos")]
-    native_cosmetics: Option<zephium_core::blocker::DeclarativeStyleRules>,
     cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     superseded: bool,
 }
@@ -443,10 +432,8 @@ pub(crate) struct EngineHost {
     // relax this binding and therefore cannot resurrect a UDF in private mode.
     profile_persistence_classes: HashMap<ProfileId, ProfilePersistenceClass>,
     content_policies: HashMap<ProfileId, ProfileContentPolicy>,
-    #[cfg(target_os = "macos")]
-    native_cosmetics: HashMap<ProfileId, native_cosmetics::NativeCosmeticState>,
-    #[cfg(target_os = "macos")]
-    cosmetic_compilations: HashMap<[u8; 32], Vec<(ProfileId, ContentPolicyGeneration)>>,
+    style_worker: Option<style_worker::StyleWorker>,
+    main_dispatch: crate::MainThreadDispatch,
     #[cfg(not(target_os = "windows"))]
     content_rule_preflight: Option<(
         [u8; 32],

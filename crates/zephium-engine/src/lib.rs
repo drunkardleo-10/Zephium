@@ -1380,6 +1380,7 @@ pub fn install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
+        dispatch.clone(),
         initial_user_content.generation,
         initial_user_content.content,
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2520,13 +2521,6 @@ impl Engine for WebviewEngine {
             }
         }
     }
-}
-
-/// Runs the production native frame-style adapter against a local fixture.
-#[cfg(all(target_os = "macos", feature = "native-isolation-probes"))]
-#[doc(hidden)]
-pub fn run_macos_blocker_frames_probe(url: &str) -> Result<(), String> {
-    platform::macos::run_blocker_frames_probe(url)
 }
 
 #[cfg(test)]

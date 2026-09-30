@@ -31,6 +31,3 @@ pub mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use linux as imp;
 pub(crate) mod content_pause;
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(crate) mod frame_styles;

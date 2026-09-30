@@ -1404,7 +1404,7 @@ fn attach_cosmetics(
     cosmetics: Option<crate::cosmetics::PreparedCosmetics>,
 ) -> Arc<ContentRules> {
     match cosmetics {
-        Some(cosmetics) => rules.with_cosmetics(cosmetics.policy, cosmetics.native),
+        Some(cosmetics) => rules.with_cosmetics(cosmetics.policy),
         None => rules,
     }
 }
@@ -1578,9 +1578,9 @@ impl NetworkRequestPolicy for RuntimePolicy {
                     }
                     #[cfg(not(feature = "runtime-exact"))]
                     {
-                        // The shipped WebView2 graph intentionally has neither an
-                        // exact initiating-frame URL nor the public-suffix
-                        // resolver required to classify one. Treat an unexpected
+                        // The shipped WebView2 callback has no exact initiating-frame
+                        // URL. The resolver is used for document cosmetics only;
+                        // it does not grant request attribution. Treat an unexpected
                         // exact request as a capability mismatch and fail open.
                         self.counters.record_attribution_unavailable();
                         return CoreDecision::Allow;
@@ -2989,7 +2989,6 @@ mod tests {
             matches!(preflight.payload(), zephium_core::blocker::ContentRulesPayload::Declarative { encoded, .. } if !encoded.is_empty())
         );
         assert!(preflight.cosmetics().is_some());
-        assert!(preflight.native_cosmetics().is_some());
         drop(preflight);
 
         assert_eq!(loads.load(Ordering::Relaxed), 1);

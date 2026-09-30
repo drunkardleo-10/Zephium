@@ -9,6 +9,7 @@ use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
+use zephium_core::blocker::DocumentStyleProvider;
 
 use sha2::{Digest, Sha256};
 use zephium_blocker::{
@@ -57,14 +58,21 @@ fn shipped_cosmetics_are_validated_and_round_trip_independently_of_network_rules
         "https://amazon.com/",
     ] {
         assert_eq!(
-            policy.stylesheet(url).unwrap(),
-            loaded.stylesheet(url).unwrap()
+            policy.document_plan(url).unwrap(),
+            loaded.document_plan(url).unwrap()
         );
     }
     // This subscription explicitly exempts the domain from generic hiding.
-    let generic = policy.stylesheet("https://example.com/").unwrap();
-    assert!(!generic.is_empty());
-    assert!(policy.stylesheet("https://howtogeek.com/").unwrap().len() < generic.len());
+    let generic = policy.document_plan("https://example.com/").unwrap();
+    assert!(generic.generic_index.len() > 100_000);
+    assert_eq!(
+        policy
+            .document_plan("https://howtogeek.com/")
+            .unwrap()
+            .generic_index
+            .as_ref(),
+        "[]"
+    );
 }
 
 fn compile(worker: &WorkerBlocker, profile: u128) -> Arc<ContentRules> {
@@ -130,9 +138,8 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
     let style = first
         .cosmetics()
         .expect("the shipped static cosmetics must survive adaptation")
-        .stylesheet("https://example.com/")
+        .document_plan("https://example.com/")
         .unwrap();
-    let native_style = first.native_cosmetics().map(|native| native.digest());
     drop(first);
     let recovered = compile(&cold, 2);
     assert_eq!(recovered.digest(), digest);
@@ -141,13 +148,9 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
         recovered
             .cosmetics()
             .unwrap()
-            .stylesheet("https://example.com/")
+            .document_plan("https://example.com/")
             .unwrap(),
         style
-    );
-    assert_eq!(
-        recovered.native_cosmetics().map(|native| native.digest()),
-        native_style
     );
     drop(recovered);
     assert_eq!(loads.load(Ordering::SeqCst), 1);
@@ -170,13 +173,9 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
         recovered
             .cosmetics()
             .unwrap()
-            .stylesheet("https://example.com/")
+            .document_plan("https://example.com/")
             .unwrap(),
         style
-    );
-    assert_eq!(
-        recovered.native_cosmetics().map(|native| native.digest()),
-        native_style
     );
     assert_eq!(loads.load(Ordering::SeqCst), 1);
     assert_eq!(

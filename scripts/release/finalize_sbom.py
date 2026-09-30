@@ -53,9 +53,9 @@ EXPECTED_ADBLOCK_LICENSE_SHA256 = (
     "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
 )
 EXPECTED_ADBLOCK_FEATURE_GRAPHS = {
-    "windows": "css-validation,cssparser,full-regex-handling,selectors",
-    "linux": "content-blocking,css-validation,cssparser,full-regex-handling,selectors",
-    "macos": "content-blocking,css-validation,cssparser,full-regex-handling,selectors",
+    "windows": "addr,css-validation,cssparser,embedded-domain-resolver,full-regex-handling,selectors",
+    "linux": "addr,content-blocking,css-validation,cssparser,embedded-domain-resolver,full-regex-handling,selectors",
+    "macos": "addr,content-blocking,css-validation,cssparser,embedded-domain-resolver,full-regex-handling,selectors",
 }
 EXPECTED_BLOCKER_FEATURE_GRAPHS = {
     "windows": "runtime",
@@ -75,7 +75,7 @@ EXPECTED_BLOCKER_SEED_REVISION = 202609300903
 EXPECTED_BLOCKER_SEED_FILE_SHA256 = {
     "catalog.json": "2889f78f4016dcbc127a3ceaf26eb267411f7885d8b50d72b9052e870a696cf0",
     "release-seed.json": "4d500d3207e17a236d8ecf0386de73ce7c4a8fc51792f24fd246dadee70e754a",
-    "compile-report.json": "1f301c2a1b6abd193a4cd9ab89df3359112899a11a06644acac1745053d184d2",
+    "compile-report.json": "e0c854f2728d65c8f7252bf1857e70265b49a8a87c39f76acf2d0a31bdf1a93d",
     "easylist.txt.gz": "421c75f11cac2ab9c34ba1f83e8e37011f48ae56301e8a95998d940c67bfe7c2",
     "easyprivacy.txt.gz": "d4fa2492d96e6aa15626ec9aea83fa4662945898869bb576d9205dc2fa1fe20a",
     "LICENSE-CC-BY-SA-3.0.txt": EXPECTED_BLOCKER_SEED_LICENSE_SHA256,
@@ -1078,14 +1078,8 @@ def blocker_seed_provenance(
             value = cosmetics.get(name)
             if type(value) is not int or not 0 <= value <= maximum:
                 raise SbomError(f"blocker seed cosmetic {name} exceeds its budget")
-        if target == "runtime":
-            if cosmetics.get("native_artifact_sha256") is not None or cosmetics.get("native_json_bytes") is not None:
-                raise SbomError("runtime cosmetics unexpectedly contain a native WebKit artifact")
-        else:
-            _lower_sha256(cosmetics.get("native_artifact_sha256"), "blocker seed native cosmetic digest")
-            size = cosmetics.get("native_json_bytes")
-            if type(size) is not int or not 0 < size <= 32 * 1024 * 1024:
-                raise SbomError("native cosmetic artifact exceeds its byte budget")
+        if cosmetics.get("native_artifact_sha256") is not None or cosmetics.get("native_json_bytes") is not None:
+            raise SbomError("selective cosmetics unexpectedly contain a blanket native artifact")
         if policy_digest is None:
             policy_digest = digest
         if (

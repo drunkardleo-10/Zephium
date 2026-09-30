@@ -53,6 +53,10 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            contentStyleSource: readFileSync(
+              new URL("../crates/zephium-engine/src/host/content_style.js", import.meta.url),
+              "utf8",
+            ),
             packagedStylePolicy: {
               styleSource: JSON.parse(
                 readFileSync(new URL("../desktop/tauri.conf.json", import.meta.url), "utf8"),

@@ -70,18 +70,18 @@ struct Data {
 /// Immutable selector index shared by profiles and documents. Queries only
 /// inspect generic rules and rules indexed under the document's domain labels.
 pub struct CosmeticPolicy {
-    data: Data,
-    generic: Vec<usize>,
-    domains: BTreeMap<String, Vec<usize>>,
-    controls: Engine,
+    report: CosmeticReport,
+    encoded: Arc<[u8]>,
     fingerprint: [u8; 32],
-    default_css: Arc<str>,
+    selective: Engine,
+    generic_index: Arc<str>,
+    fallback_generic: Vec<Rule>,
 }
 
 impl std::fmt::Debug for CosmeticPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CosmeticPolicy")
-            .field("report", &self.data.report)
+            .field("report", &self.report)
             .finish_non_exhaustive()
     }
 }
@@ -156,11 +156,7 @@ impl CosmeticPolicy {
     /// Serializes portable policy data; no browsing decisions or document URLs
     /// are retained in this representation.
     pub fn encode(&self) -> Result<Vec<u8>, CosmeticError> {
-        let bytes = serde_json::to_vec(&self.data).map_err(|_| CosmeticError::InvalidPolicy)?;
-        if bytes.len() > MAX_POLICY_BYTES {
-            return Err(CosmeticError::ResourceLimit);
-        }
-        Ok(bytes)
+        Ok(self.encoded.to_vec())
     }
 
     /// Revalidates persisted data, including selectors and domain boundaries.
@@ -177,193 +173,7 @@ impl CosmeticPolicy {
 
     /// Returns static filtering admission counts.
     pub fn report(&self) -> CosmeticReport {
-        self.data.report
-    }
-
-    /// Emits a separate WebKit cosmetic list for top-level documents.
-    /// WebKit evaluates frame conditions using the initiating frame when a
-    /// child document loads. Child cosmetics must therefore use `stylesheet`
-    /// with native frame attribution; do not apply this list to child loads.
-    /// Network exceptions must remain in their own list so a cosmetic control
-    /// cannot cancel network blocking. An empty policy returns no native list.
-    #[cfg(feature = "webkit")]
-    pub fn webkit_top_document_rules(&self) -> Result<Option<Arc<str>>, CosmeticError> {
-        use adblock::content_blocking::CbRuleEquivalent;
-        use adblock::filters::network::{NetworkFilter, NetworkFilterMask};
-        use serde_json::json;
-
-        let mut generic = Vec::new();
-        let mut specific = Vec::new();
-        let mut scope_budget = 8_000_000usize;
-        let mut selectors: BTreeMap<&str, Vec<&Rule>> = BTreeMap::new();
-        for rule in &self.data.rules {
-            selectors.entry(&rule.selector).or_default().push(rule);
-        }
-        for (selector, rules) in selectors {
-            for is_generic in [true, false] {
-                let hides: Vec<_> = rules
-                    .iter()
-                    .copied()
-                    .filter(|r| !r.exception && r.include.is_empty() == is_generic)
-                    .collect();
-                if hides.is_empty() {
-                    continue;
-                }
-                let exceptions: Vec<_> = rules.iter().copied().filter(|r| r.exception).collect();
-                for (include, exclude) in scope_regions(&hides, &exceptions, &mut scope_budget)? {
-                    let mut trigger = json!({
-                        "url-filter": include.as_deref().map(domain_url_pattern).unwrap_or_else(|| "^https?://".into()),
-                        "resource-type": ["top-document"]
-                    });
-                    if !exclude.is_empty() {
-                        trigger["unless-top-url"] = json!(exclude
-                            .iter()
-                            .map(|s| domain_url_pattern(s))
-                            .collect::<Vec<_>>());
-                    }
-                    let rule = json!({"action":{"type":"css-display-none","selector":selector},"trigger":trigger});
-                    if is_generic {
-                        generic.push(rule);
-                    } else {
-                        specific.push(rule);
-                    }
-                }
-            }
-        }
-
-        if generic.is_empty() && specific.is_empty() {
-            return Ok(None);
-        }
-        let mut generic = group_native_styles(generic)?;
-        let specific = group_native_styles(specific)?;
-        // Controls only erase preceding generic CSS. Site-specific CSS follows
-        // them, and the native network list is independent.
-        for control in &self.data.controls {
-            let mut filter = NetworkFilter::parse(control, true, Default::default())
-                .map_err(|_| CosmeticError::InvalidPolicy)?;
-            filter.mask.remove(NetworkFilterMask::FROM_ALL_TYPES);
-            filter.mask.insert(NetworkFilterMask::FROM_IMAGE);
-            let equivalent =
-                CbRuleEquivalent::try_from(filter).map_err(|_| CosmeticError::InvalidPolicy)?;
-            for native in equivalent {
-                let mut trigger = json!({"url-filter":native.trigger.url_filter,"resource-type":["top-document"]});
-                if let Some(domains) = native.trigger.if_domain {
-                    trigger["if-top-url"] = json!(domains
-                        .iter()
-                        .map(|d| domain_url_pattern(d.trim_start_matches('*')))
-                        .collect::<Vec<_>>());
-                }
-                if let Some(domains) = native.trigger.unless_domain {
-                    trigger["unless-top-url"] = json!(domains
-                        .iter()
-                        .map(|d| domain_url_pattern(d.trim_start_matches('*')))
-                        .collect::<Vec<_>>());
-                }
-                if let Some(case_sensitive) = native.trigger.url_filter_is_case_sensitive {
-                    trigger["url-filter-is-case-sensitive"] = json!(case_sensitive);
-                }
-                generic.push(json!({"action":{"type":"ignore-previous-rules"},"trigger":trigger}));
-            }
-        }
-        generic.extend(specific);
-        if generic.is_empty() {
-            return Ok(None);
-        }
-        if generic.len() > 140_000 {
-            return Err(CosmeticError::ResourceLimit);
-        }
-        let encoded = serde_json::to_string(&generic).map_err(|_| CosmeticError::InvalidPolicy)?;
-        if encoded.len() > 32 * 1024 * 1024 {
-            return Err(CosmeticError::ResourceLimit);
-        }
-        Ok(Some(encoded.into()))
-    }
-
-    /// Resolves CSS for one document, honoring matching exceptions and
-    /// generic-hide controls. This is navigation work, never request-callback
-    /// work. A matcher availability failure suppresses generic hiding.
-    pub fn stylesheet(&self, document: &str) -> Result<Arc<str>, CosmeticError> {
-        if document.len() > 32 * 1024 {
-            return Err(CosmeticError::InvalidDocument);
-        }
-        let url = url::Url::parse(document).map_err(|_| CosmeticError::InvalidDocument)?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(CosmeticError::InvalidDocument);
-        }
-        let host = url
-            .host_str()
-            .ok_or(CosmeticError::InvalidDocument)?
-            .trim_end_matches('.');
-        let request = adblock::request::Request::preparsed(
-            url.as_str(),
-            host,
-            host,
-            "document",
-            false,
-            "get",
-        );
-        let suppress_generic = self
-            .controls
-            .try_check_prepared_network_request(&request)
-            .map_or(true, |result| result.should_block());
-        if !suppress_generic {
-            let mut suffix = host;
-            let mut scoped = false;
-            loop {
-                if self.domains.contains_key(suffix) {
-                    scoped = true;
-                    break;
-                }
-                let Some((_, tail)) = suffix.split_once('.') else {
-                    break;
-                };
-                suffix = tail;
-            }
-            if !scoped {
-                return Ok(self.default_css.clone());
-            }
-        }
-        let mut hidden = BTreeSet::new();
-        let mut exceptions = BTreeSet::new();
-        let mut visit = |index: usize| {
-            let rule = &self.data.rules[index];
-            if !rule.matches(host) {
-                return;
-            }
-            if rule.exception {
-                exceptions.insert(rule.selector.as_str());
-            } else if !suppress_generic || !rule.include.is_empty() {
-                hidden.insert(rule.selector.as_str());
-            }
-        };
-        if !suppress_generic {
-            for &index in &self.generic {
-                visit(index);
-            }
-        }
-        let mut suffix = host;
-        loop {
-            if let Some(indices) = self.domains.get(suffix) {
-                for &index in indices {
-                    visit(index);
-                }
-            }
-            let Some((_, tail)) = suffix.split_once('.') else {
-                break;
-            };
-            suffix = tail;
-        }
-        let mut css = String::new();
-        // Separate rules keep an unsupported browser selector from invalidating
-        // every other selector in a comma-separated list.
-        for selector in hidden.difference(&exceptions) {
-            if css.len() + selector.len() + 26 > MAX_STYLESHEET_BYTES {
-                return Err(CosmeticError::ResourceLimit);
-            }
-            css.push_str(selector);
-            css.push_str("{display:none!important}\n");
-        }
-        Ok(css.into())
+        self.report
     }
 
     fn from_data(data: Data) -> Result<Arc<Self>, CosmeticError> {
@@ -381,7 +191,6 @@ impl CosmeticPolicy {
             return Err(CosmeticError::InvalidPolicy);
         }
         let mut generic = Vec::new();
-        let mut domains: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut predicates = 0usize;
         for (index, rule) in data.rules.iter().enumerate() {
             validate_selector(&rule.selector)?;
@@ -406,13 +215,7 @@ impl CosmeticPolicy {
             if rule.include.is_empty() {
                 generic.push(index);
             }
-            // Negative predicates also make a hostname differ from the common
-            // generic stylesheet. Index them for the fast-path admission test.
-            for domain in rule.include.iter().chain(&rule.exclude) {
-                domains.entry(domain.clone()).or_default().push(index);
-            }
         }
-        let mut filters = FilterSet::new(false);
         for control in &data.controls {
             // Reconstruct the only admitted syntax; persisted controls cannot
             // introduce redirect, CSP, removeparam, or executable resources.
@@ -429,9 +232,37 @@ impl CosmeticPolicy {
             adblock::filters::network::NetworkFilter::parse(control, false, Default::default())
                 .map_err(|_| CosmeticError::InvalidPolicy)?;
         }
-        filters.add_filter_list(data.controls.join("\n"), Default::default());
-        let controls = Engine::new_with_filter_set(filters);
-        controls
+        // Let adblock-rust own generic classification and hostname exceptions.
+        let mut selected_filters = FilterSet::new(false);
+        let mut selected_lines = Vec::new();
+        for rule in &data.rules {
+            let scope = rule
+                .include
+                .iter()
+                .cloned()
+                .chain(rule.exclude.iter().map(|d| format!("~{d}")))
+                .collect::<Vec<_>>()
+                .join(",");
+            selected_lines.push(format!(
+                "{scope}{}{}",
+                if rule.exception { "#@#" } else { "##" },
+                rule.selector
+            ));
+        }
+        for control in &data.controls {
+            let (pattern, modifiers) = control
+                .rsplit_once('$')
+                .ok_or(CosmeticError::InvalidPolicy)?;
+            selected_lines.push(format!(
+                "@@{pattern}$generichide{}",
+                modifiers
+                    .strip_prefix("document")
+                    .ok_or(CosmeticError::InvalidPolicy)?
+            ));
+        }
+        selected_filters.add_filter_list(selected_lines.join("\n"), Default::default());
+        let selective = Engine::new_with_filter_set(selected_filters);
+        selective
             .prepare_and_freeze_network_matcher(adblock::blocker::NetworkMatcherPreparationLimits {
                 max_regexes: 256,
                 max_pattern_bytes: 256 * 1024,
@@ -442,31 +273,80 @@ impl CosmeticPolicy {
                 max_filter_checks_per_request: 256,
             })
             .map_err(|_| CosmeticError::ResourceLimit)?;
-        let selectors: BTreeSet<_> = generic
-            .iter()
-            .map(|&index| data.rules[index].selector.as_str())
-            .collect();
-        let mut default_css = String::new();
-        for selector in selectors {
-            if default_css.len() + selector.len() + 26 > MAX_STYLESHEET_BYTES {
-                return Err(CosmeticError::ResourceLimit);
+        let mut keys = BTreeSet::new();
+        let mut fallback_generic = Vec::new();
+        for &i in &generic {
+            let selector = &data.rules[i].selector;
+            let prefix = selector.as_bytes().first().copied();
+            if !matches!(prefix, Some(b'.' | b'#')) {
+                continue;
             }
-            default_css.push_str(selector);
-            default_css.push_str("{display:none!important}\n");
+            let key: String = selector
+                .chars()
+                .skip(1)
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                .collect();
+            // Escaped/non-ASCII keys stay in the small unconditional group.
+            let end = key.len() + 1;
+            if key.is_empty()
+                || selector[end..].starts_with('\\')
+                || selector[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_ascii())
+            {
+                fallback_generic.push(selector.clone());
+            } else {
+                keys.insert(format!("{}{key}", prefix.unwrap() as char));
+            }
         }
-        let mut policy = Arc::new(Self {
-            data,
-            generic,
-            domains,
-            controls,
-            fingerprint: [0; 32],
-            default_css: default_css.into(),
-        });
-        let encoded = policy.encode()?;
-        Arc::get_mut(&mut policy)
-            .expect("unpublished policy has one owner")
-            .fingerprint = Sha256::digest(&encoded).into();
-        Ok(policy)
+        let empty = std::collections::HashSet::new();
+        let mut index = Vec::new();
+        for key in keys {
+            let mut selectors = if let Some(name) = key.strip_prefix('.') {
+                selective.hidden_class_id_selectors(
+                    std::iter::once(name),
+                    std::iter::empty::<&str>(),
+                    &empty,
+                )
+            } else {
+                selective.hidden_class_id_selectors(
+                    std::iter::empty::<&str>(),
+                    std::iter::once(key.strip_prefix('#').ok_or(CosmeticError::InvalidPolicy)?),
+                    &empty,
+                )
+            };
+            selectors.sort();
+            selectors.dedup();
+            if !selectors.is_empty() {
+                index.push((key, selectors));
+            }
+        }
+        let generic_index: Arc<str> = serde_json::to_string(&index)
+            .map_err(|_| CosmeticError::InvalidPolicy)?
+            .into();
+        if generic_index.len() > MAX_STYLESHEET_BYTES {
+            return Err(CosmeticError::ResourceLimit);
+        }
+        let fallback_names: BTreeSet<_> = fallback_generic.into_iter().collect();
+        let fallback_generic = data
+            .rules
+            .iter()
+            .filter(|r| fallback_names.contains(&r.selector))
+            .cloned()
+            .collect();
+        let encoded = serde_json::to_vec(&data).map_err(|_| CosmeticError::InvalidPolicy)?;
+        if encoded.len() > MAX_POLICY_BYTES {
+            return Err(CosmeticError::ResourceLimit);
+        }
+        Ok(Arc::new(Self {
+            report: data.report,
+            fingerprint: Sha256::digest(&encoded).into(),
+            encoded: encoded.into(),
+            selective,
+            generic_index,
+            fallback_generic,
+        }))
     }
 }
 
@@ -475,20 +355,57 @@ impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
         zephium_core::blocker::ContentRuleDigest::from_bytes(self.fingerprint)
     }
 
-    fn stylesheet(
+    fn document_plan(
         &self,
         url: &str,
-    ) -> Result<Arc<str>, zephium_core::blocker::DocumentStyleFailure> {
-        CosmeticPolicy::stylesheet(self, url).map_err(|error| match error {
-            CosmeticError::ResourceLimit => {
-                zephium_core::blocker::DocumentStyleFailure::ResourceLimit
+    ) -> Result<zephium_core::blocker::DocumentStylePlan, zephium_core::blocker::DocumentStyleFailure>
+    {
+        use zephium_core::blocker::{DocumentStyleFailure, DocumentStylePlan};
+        let parsed = url::Url::parse(url).map_err(|_| DocumentStyleFailure::InvalidDocument)?;
+        if url.len() > 32768 || !matches!(parsed.scheme(), "http" | "https") {
+            return Err(DocumentStyleFailure::InvalidDocument);
+        }
+        let resources = self.selective.url_cosmetic_resources(url);
+        let mut selectors: BTreeSet<_> = resources.hide_selectors.into_iter().collect();
+        if !resources.generichide {
+            let host = parsed
+                .host_str()
+                .ok_or(DocumentStyleFailure::InvalidDocument)?
+                .trim_end_matches('.');
+            for rule in &self.fallback_generic {
+                let selector = &rule.selector;
+                if self
+                    .fallback_generic
+                    .iter()
+                    .any(|r| r.selector == *selector && !r.exception && r.matches(host))
+                    && !self
+                        .fallback_generic
+                        .iter()
+                        .any(|r| r.selector == *selector && r.exception && r.matches(host))
+                {
+                    selectors.insert(selector.clone());
+                }
             }
-            CosmeticError::InvalidDocument => {
-                zephium_core::blocker::DocumentStyleFailure::InvalidDocument
-            }
-            CosmeticError::InvalidPolicy => {
-                zephium_core::blocker::DocumentStyleFailure::Unavailable
-            }
+        }
+        let mut css = String::new();
+        for selector in selectors {
+            css.push_str(&selector);
+            css.push_str("{display:none!important}\n");
+        }
+        if css.len() > MAX_STYLESHEET_BYTES {
+            return Err(DocumentStyleFailure::ResourceLimit);
+        }
+        let exceptions: BTreeSet<_> = resources.exceptions.into_iter().collect();
+        Ok(DocumentStylePlan {
+            css: css.into(),
+            generic_index: if resources.generichide {
+                Arc::from("[]")
+            } else {
+                self.generic_index.clone()
+            },
+            exceptions: serde_json::to_string(&exceptions)
+                .map_err(|_| DocumentStyleFailure::Unavailable)?
+                .into(),
         })
     }
 }
@@ -496,7 +413,6 @@ impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedCosmetics {
     pub(crate) policy: Arc<CosmeticPolicy>,
-    pub(crate) native: Option<zephium_core::blocker::DeclarativeStyleRules>,
 }
 
 impl PreparedCosmetics {
@@ -504,24 +420,8 @@ impl PreparedCosmetics {
         policy: Arc<CosmeticPolicy>,
         target: crate::CompileTarget,
     ) -> Result<Self, CosmeticError> {
-        #[cfg(feature = "webkit")]
-        let native = if target == crate::CompileTarget::WebKit {
-            policy
-                .webkit_top_document_rules()?
-                .map(|encoded| {
-                    zephium_core::blocker::DeclarativeStyleRules::new(encoded)
-                        .ok_or(CosmeticError::ResourceLimit)
-                })
-                .transpose()?
-        } else {
-            None
-        };
-        #[cfg(not(feature = "webkit"))]
-        let native = {
-            let _ = target;
-            None
-        };
-        Ok(Self { policy, native })
+        let _ = target;
+        Ok(Self { policy })
     }
 }
 
@@ -530,127 +430,6 @@ fn within(host: &str, domain: &str) -> bool {
         || host
             .strip_suffix(domain)
             .is_some_and(|prefix| prefix.ends_with('.'))
-}
-
-#[cfg(feature = "webkit")]
-fn domain_url_pattern(domain: &str) -> String {
-    // Domain strings have already passed IDNA/DNS validation. Anchor the
-    // authority and port boundary: a hostname inside userinfo is not a match.
-    format!(
-        "^https?://([^/@]*@)?([^/@]+\\.)?{}(:[0-9]+)?([/?#].*)?$",
-        domain.replace('.', "\\.")
-    )
-}
-
-/// CSS rules with the exact same scope commute. Group within the generic and
-/// specific stages separately, never across an ignore-previous-rules control.
-/// Small groups bound native selector parsing while removing repeated trigger
-/// JSON and declarations from the large generic stylesheet.
-#[cfg(feature = "webkit")]
-fn group_native_styles(
-    rules: Vec<serde_json::Value>,
-) -> Result<Vec<serde_json::Value>, CosmeticError> {
-    use serde_json::json;
-    let mut groups: BTreeMap<String, (serde_json::Value, Vec<String>)> = BTreeMap::new();
-    for mut rule in rules {
-        let trigger = rule["trigger"].take();
-        let key = serde_json::to_string(&trigger).map_err(|_| CosmeticError::InvalidPolicy)?;
-        let selector = rule["action"]["selector"]
-            .as_str()
-            .ok_or(CosmeticError::InvalidPolicy)?
-            .to_owned();
-        groups
-            .entry(key)
-            .or_insert_with(|| (trigger, Vec::new()))
-            .1
-            .push(selector);
-    }
-    let mut output = Vec::new();
-    for (_, (trigger, selectors)) in groups {
-        let mut group = String::new();
-        let mut count = 0usize;
-        for selector in selectors {
-            if !group.is_empty() && (group.len() + selector.len() + 1 > 16 * 1024 || count == 128) {
-                output.push(json!({"action":{"type":"css-display-none","selector":std::mem::take(&mut group)},"trigger":trigger}));
-                count = 0;
-            }
-            if !group.is_empty() {
-                group.push(',');
-            }
-            group.push_str(&selector);
-            count += 1;
-        }
-        if !group.is_empty() {
-            output.push(
-                json!({"action":{"type":"css-display-none","selector":group},"trigger":trigger}),
-            );
-        }
-    }
-    Ok(output)
-}
-
-/// Partition a selector's hide-minus-exception set into positive domain
-/// regions and their nearest negative descendants. A more specific region
-/// can re-enable a selector excluded by its parent's scope.
-#[cfg(feature = "webkit")]
-fn scope_regions(
-    hides: &[&Rule],
-    exceptions: &[&Rule],
-    budget: &mut usize,
-) -> Result<BTreeMap<Option<String>, Vec<String>>, CosmeticError> {
-    let root = hides.iter().any(|r| r.include.is_empty());
-    let domains: BTreeSet<_> = hides
-        .iter()
-        .chain(exceptions)
-        .flat_map(|rule| rule.include.iter().chain(&rule.exclude))
-        .collect();
-    let predicates: usize = hides
-        .iter()
-        .chain(exceptions)
-        .map(|r| 1 + r.include.len() + r.exclude.len())
-        .sum();
-    let checks = domains
-        .len()
-        .checked_mul(predicates)
-        .ok_or(CosmeticError::ResourceLimit)?;
-    *budget = budget
-        .checked_sub(checks)
-        .ok_or(CosmeticError::ResourceLimit)?;
-    let mut domains: Vec<_> = domains.into_iter().collect();
-    domains.sort_by_key(|domain| {
-        (
-            domain.bytes().filter(|b| *b == b'.').count(),
-            domain.as_str(),
-        )
-    });
-    let mut boundaries: BTreeMap<&str, bool> = BTreeMap::new();
-    let mut regions = BTreeMap::new();
-    if root {
-        regions.insert(None, Vec::new());
-    }
-    for domain in domains {
-        let wanted = hides.iter().any(|r| r.matches(domain))
-            && !exceptions.iter().any(|r| r.matches(domain));
-        let mut ancestor = domain.as_str();
-        let mut parent = (root, None);
-        while let Some((_, suffix)) = ancestor.split_once('.') {
-            if let Some(&enabled) = boundaries.get(suffix) {
-                parent = (enabled, Some(suffix.to_owned()));
-                break;
-            }
-            ancestor = suffix;
-        }
-        if wanted == parent.0 {
-            continue;
-        }
-        if wanted {
-            regions.insert(Some(domain.clone()), Vec::new());
-        } else if let Some(excluded) = regions.get_mut(&parent.1) {
-            excluded.push(domain.clone());
-        }
-        boundaries.insert(domain, wanted);
-    }
-    Ok(regions)
 }
 
 fn normalize_domain(domain: &str) -> Option<String> {
@@ -893,6 +672,29 @@ fn generic_control(line: &str) -> Result<Option<String>, CosmeticError> {
 mod tests {
     use super::*;
 
+    use zephium_core::blocker::DocumentStyleProvider;
+    impl CosmeticPolicy {
+        fn stylesheet(
+            &self,
+            url: &str,
+        ) -> Result<Arc<str>, zephium_core::blocker::DocumentStyleFailure> {
+            let plan = self.document_plan(url)?;
+            let entries: Vec<(String, Vec<String>)> =
+                serde_json::from_str(&plan.generic_index).unwrap();
+            let exceptions: BTreeSet<String> = serde_json::from_str(&plan.exceptions).unwrap();
+            let mut css = plan.css.to_string();
+            for selector in entries
+                .into_iter()
+                .flat_map(|(_, v)| v)
+                .collect::<BTreeSet<_>>()
+            {
+                if !exceptions.contains(&selector) {
+                    css.push_str(&format!("{selector}{{display:none!important}}\n"));
+                }
+            }
+            Ok(css.into())
+        }
+    }
     #[test]
     fn scopes_exceptions_and_generic_controls_compose_across_sources() {
         let policy = CosmeticPolicy::compile([
@@ -949,11 +751,11 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_documents_share_the_generic_stylesheet_allocation() {
+    fn unrelated_documents_share_the_generic_lookup_allocation() {
         let policy = CosmeticPolicy::compile(["##.ad\nexample.com#@#.ad"]).unwrap();
-        let first = policy.stylesheet("https://first.invalid/").unwrap();
-        let second = policy.stylesheet("https://second.invalid/").unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
+        let first = policy.document_plan("https://first.invalid/").unwrap();
+        let second = policy.document_plan("https://second.invalid/").unwrap();
+        assert!(Arc::ptr_eq(&first.generic_index, &second.generic_index));
         assert!(policy
             .stylesheet("https://example.com/")
             .unwrap()
@@ -963,23 +765,15 @@ mod tests {
         assert!(validate_personal_selector(".ad\n##body").is_none());
     }
 
-    #[cfg(feature = "webkit")]
     #[test]
-    fn native_top_document_scopes_reenable_explicit_scopes() {
-        let policy = CosmeticPolicy::compile([
-            "~safe.example,~safe.other##.ad\nsafe.example#@#.ad\nforce.safe.other##.ad\n@@||quiet.example^$generichide\nquiet.example##.specific",
-        ]).unwrap();
-        let encoded = policy.webkit_top_document_rules().unwrap().unwrap();
-        let rules: Vec<serde_json::Value> = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(rules.len(), 4);
-        assert!(rules[0]["trigger"]["unless-top-url"].is_array());
-        assert!(rules[2]["trigger"]["url-filter"]
-            .as_str()
-            .unwrap()
-            .contains("force\\.safe\\.other"));
-        assert_eq!(rules[1]["action"]["type"], "ignore-previous-rules");
-        assert_eq!(rules[3]["action"]["selector"], ".specific");
-        assert!(!encoded.contains("\"if-domain\""));
-        assert!(!encoded.contains("\"unless-domain\""));
+    fn selective_plan_preserves_scope_exceptions_without_blanket_generic_css() {
+        let policy = CosmeticPolicy::compile(["##.ad\nexample.com##.specific\nexample.com#@#.ad\n@@||quiet.example^$generichide\nquiet.example##.specific"]).unwrap();
+        let plan = policy.document_plan("https://example.com/").unwrap();
+        assert!(!plan.css.contains(".ad{"));
+        assert!(plan.css.contains(".specific{"));
+        assert!(plan.exceptions.contains(".ad"));
+        let quiet = policy.document_plan("https://quiet.example/").unwrap();
+        assert_eq!(quiet.generic_index.as_ref(), "[]");
+        assert!(quiet.css.contains(".specific{"));
     }
 }

@@ -1452,12 +1452,8 @@ pub(crate) fn compile_hidden(
                 generic_hide_controls: report.generic_controls,
                 policy_sha256: hex_sha256(&encoded),
                 policy_bytes: encoded.len(),
-                native_artifact_sha256: compiled
-                    .native_cosmetic_rules()
-                    .map(|rules| lower_hex(rules.digest().as_bytes())),
-                native_json_bytes: compiled
-                    .native_cosmetic_rules()
-                    .map(|rules| rules.encoded().len()),
+                native_artifact_sha256: None,
+                native_json_bytes: None,
             })
         })
         .transpose()?;
