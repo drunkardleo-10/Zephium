@@ -37,9 +37,9 @@ const PART_MIN_COST: u32 = 150_000;
 /// The note a page step ends with when its page asked to sign in.
 const SIGN_IN_NOTE: &str = "The page asked to sign in";
 /// Searches one part may run; past them it reports what it has.
-const PART_SEARCHES: usize = 6;
+const PART_SEARCHES: usize = 4;
 /// Searches a part runs before each further one is weighed against its goal.
-const PART_FREE_SEARCHES: usize = 3;
+const PART_FREE_SEARCHES: usize = 2;
 /// What of a part's search answers the goal check reads.
 const FOUND_CHARS: usize = 6_000;
 

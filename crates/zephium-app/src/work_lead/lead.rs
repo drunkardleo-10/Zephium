@@ -42,7 +42,7 @@ const CONVERSATION_CHARS: usize = 240_000;
 const KEEP_GOING: &str = "Keep going";
 /// The lead's own searches and page reads in one request; wide research
 /// goes to parts, which keep page text out of the lead's view.
-const LEAD_SEARCHES: usize = 5;
+const LEAD_SEARCHES: usize = 4;
 const LEAD_READS: usize = 8;
 /// A part's own object stays compact; the lead composes the result.
 const PART_SHEET_ROWS: usize = 12;
