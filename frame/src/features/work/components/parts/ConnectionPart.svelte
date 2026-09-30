@@ -1,7 +1,9 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
-  import { serviceMark } from "$domain/connections";
+  import { serviceKey, serviceMark } from "$domain/connections";
+  import Orb from "$shared/ui/presence/Orb.svelte";
+  import Shimmer from "$shared/ui/presence/Shimmer.svelte";
   import Icon from "$shared/ui/Icon";
   import Cancel01Icon from "@hugeicons/core-free-icons/Cancel01Icon";
   import CheckListIcon from "@hugeicons/core-free-icons/CheckListIcon";
@@ -25,6 +27,16 @@
   const ROWS = 4;
   const shown = $derived(view.calls.slice(-ROWS));
   const hidden = $derived(view.calls.length - shown.length);
+  /** Calls through several servers stand under each server's mark and name, in the order first used. */
+  const groups = $derived.by(() => {
+    const servers = [...new Set(shown.map((call) => call.server ?? ""))];
+    return servers.map((server) => ({
+      server,
+      calls: shown.filter((call) => (call.server ?? "") === server),
+    }));
+  });
+  const headed = $derived(groups.length > 1);
+  const nameOf = (server: string) => server.charAt(0).toUpperCase() + server.slice(1);
   /** What a row is about, from its words: an issue, a pull request, checks, a comment. */
   function glyph(text: string): IconSvgElement {
     if (/^(Commented|Comment)\b/u.test(text)) return Comment01Icon;
@@ -54,26 +66,43 @@
           ? m.work_connection_earlier_one()
           : m.work_connection_earlier({ count: String(hidden) })}
       </li>{/if}
-    {#each shown as call (call.key)}
-      <li class="call" data-state={call.state} title={call.url ?? call.text}>
-        <span class="glyph"
-          >{#if call.state === "declined" || call.state === "failed"}<Icon
-              icon={Cancel01Icon}
-              size={11}
-              strokeWidth={2}
-            />{:else}<Icon icon={glyph(call.text)} size={13} strokeWidth={1.6} />{/if}</span
+    {#each groups as group (group.server)}
+      {#if headed && group.server}<li class="server">
+          <span class="glyph"
+            ><Icon icon={serviceMark(serviceKey(group.server))} size={13} strokeWidth={1.6} /></span
+          ><span class="text">{nameOf(group.server)}</span>
+        </li>{/if}
+      {#each group.calls as call (call.key)}
+        <li
+          class="call"
+          class:nested={headed}
+          data-state={call.state}
+          title={call.url ?? call.text}
         >
-        <span class="text"
-          ><span class="what">{call.text}</span>{#if call.detail}<span class="detail"
-              >{#each spans(call.detail) as piece, index (index)}{#if piece.code}<code
-                    >{piece.text}</code
-                  >{:else}{piece.text}{/if}{/each}</span
-            >{/if}</span
-        >
-        {#if call.state === "waiting"}<span class="pill">{m.work_computer_waiting()}</span
-          >{:else if call.state === "declined"}<span class="note">{m.work_computer_declined()}</span
-          >{/if}
-      </li>
+          <span class="glyph"
+            >{#if call.state === "running"}<Orb
+                size={13}
+              />{:else if call.state === "declined" || call.state === "failed"}<Icon
+                icon={Cancel01Icon}
+                size={11}
+                strokeWidth={2}
+              />{:else}<Icon icon={glyph(call.text)} size={13} strokeWidth={1.6} />{/if}</span
+          >
+          <span class="text"
+            >{#if call.state === "running"}<span class="what"><Shimmer text={call.text} /></span
+              >{:else}<span class="what">{call.text}</span>{/if}{#if call.detail}<span
+                class="detail"
+                >{#each spans(call.detail) as piece, index (index)}{#if piece.code}<code
+                      >{piece.text}</code
+                    >{:else}{piece.text}{/if}{/each}</span
+              >{/if}</span
+          >
+          {#if call.state === "waiting"}<span class="pill">{m.work_computer_waiting()}</span
+            >{:else if call.state === "declined"}<span class="note"
+              >{m.work_computer_declined()}</span
+            >{/if}
+        </li>
+      {/each}
     {/each}
     {#if !view.calls.length}<li class="empty">
         <span class="glyph"><Icon icon={mark} size={13} strokeWidth={1.6} /></span>
@@ -164,6 +193,15 @@
     flex: none;
     color: var(--color-muted);
     font-size: var(--text-caption);
+  }
+
+  .server {
+    color: var(--color-muted);
+    font-weight: 600;
+  }
+
+  .nested {
+    padding-inline-start: 12px;
   }
 
   .earlier {

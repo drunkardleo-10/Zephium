@@ -2,7 +2,7 @@ import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { serviceKey, type ServiceKey } from "$domain/connections";
 import { stepsOf } from "./computer";
 
-type CallState = "done" | "failed" | "waiting" | "declined";
+type CallState = "done" | "failed" | "waiting" | "declined" | "running";
 
 /** A display-only view of one call a connection made. */
 type ConnectionCall = {
@@ -13,6 +13,8 @@ type ConnectionCall = {
   detail: string | null;
   state: CallState;
   url: string | null;
+  /** The server it went through, as the call named it: "ticktick". */
+  server: string | null;
 };
 
 export type ConnectionView = {
@@ -20,6 +22,52 @@ export type ConnectionView = {
   calls: ConnectionCall[];
   working: boolean;
 };
+
+const DONE: Record<string, [string, string]> = {
+  list: ["Listed", "Listing"],
+  get: ["Read", "Reading"],
+  read: ["Read", "Reading"],
+  fetch: ["Fetched", "Fetching"],
+  find: ["Found", "Finding"],
+  search: ["Searched", "Searching"],
+  query: ["Queried", "Querying"],
+  filter: ["Filtered", "Filtering"],
+  create: ["Created", "Creating"],
+  add: ["Added", "Adding"],
+  update: ["Updated", "Updating"],
+  edit: ["Edited", "Editing"],
+  delete: ["Deleted", "Deleting"],
+  remove: ["Removed", "Removing"],
+  move: ["Moved", "Moving"],
+  complete: ["Completed", "Completing"],
+  send: ["Sent", "Sending"],
+  post: ["Posted", "Posting"],
+  reply: ["Replied to", "Replying to"],
+  comment: ["Commented on", "Commenting on"],
+  check: ["Checked", "Checking"],
+  sync: ["Synced", "Syncing"],
+  run: ["Ran", "Running"],
+};
+
+/**
+ * A tool's name in a person's words: `list_projects` is "Listed projects"
+ * once done and "Listing projects" while it runs; an unknown verb keeps the
+ * tool's own words.
+ */
+export function toolWords(tool: string, running: boolean): string {
+  const words = tool
+    .replace(/^[a-z0-9-]+__/iu, "")
+    .replace(/([a-z])([A-Z])/gu, "$1 $2")
+    .split(/[\s_.-]+/u)
+    .filter(Boolean)
+    .map((word) => word.toLowerCase());
+  if (!words.length) return tool;
+  const verb = DONE[words[0]!];
+  const rest = words.slice(1).join(" ");
+  if (verb) return rest ? `${verb[running ? 1 : 0]} ${rest}` : verb[running ? 1 : 0];
+  const said = words.join(" ");
+  return said.charAt(0).toUpperCase() + said.slice(1);
+}
 
 /** "Read issue #123 · Crash on start" as the row's words and what they concern. */
 function split(note: string): [string, string | null] {
@@ -44,15 +92,21 @@ export function connectionView(
     if (step.status === "running") working = true;
     const kind = step.kind;
     // A call is its own step with its row in the note; earlier runs said it on a read.
-    if ((kind.kind === "call" || kind.kind === "read") && step.note) {
-      const [text, detail] = split(step.note);
+    if (kind.kind === "call" || (kind.kind === "read" && step.note)) {
+      const running = step.status === "running";
+      const [said, detail] = split(step.note ?? "");
+      // A bare "Used list_projects" says nothing a person reads: the tool's own name, in words.
+      const text =
+        kind.kind === "call" && (!said || /^Used \S+$/u.test(said))
+          ? toolWords(kind.call.tool, running)
+          : said;
       calls.push({
         key: step.id,
         text,
         detail,
-        state:
-          step.status === "succeeded" ? "done" : step.status === "running" ? "waiting" : "failed",
+        state: step.status === "succeeded" ? "done" : running ? "running" : "failed",
         url: kind.kind === "call" ? (kind.call.url ?? null) : kind.url,
+        server: kind.kind === "call" ? kind.call.service : null,
       });
     } else if (kind.kind === "confirm") {
       const decision = kind.confirm.decision;
@@ -65,6 +119,7 @@ export function connectionView(
         state:
           decision === "declined" ? "declined" : step.status === "running" ? "waiting" : "failed",
         url: null,
+        server: null,
       });
     }
   }

@@ -306,9 +306,9 @@
     "description": "Measured 119078 JS and 7393 CSS bytes: a computer part's own view (changed files, the command that matters with its tests, what it read), loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 121991 JS and 7393 CSS. Round two lists every command with its time and outcome (tests, the first failure, a failed command's error): 120830 JS and 7903 CSS."
   },
   "lazy:features/work/components/parts/ConnectionPart.svelte": {
-    "js": 117000,
-    "css": 5900,
-    "description": "Measured 112647 JS and 5407 CSS bytes: a connection part's calls as rows with the service's mark, loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 115560 JS and 5407 CSS."
+    "js": 123600,
+    "css": 6600,
+    "description": "Measured 112647 JS and 5407 CSS bytes: a connection part's calls as rows with the service's mark, loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 115560 JS and 5407 CSS. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 123022 JS measured. Its CSS: 6410 measured."
   },
   "lazy:features/work/components/asks/AskCard.svelte": {
     "js": 251500,
@@ -361,9 +361,9 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: the document as a sheet of paper over the shared document view. Measured 199010 JS and 26056 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
   },
   "lazy:features/work/components/objects/Draft.svelte": {
-    "js": 180500,
+    "js": 186300,
     "css": 14200,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a draft in the shape of its destination. Measured 163682 JS and 8634 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 177763 JS and 13429 CSS. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 180112 JS measured."
+    "description": "One kind's renderer, fetched the first time the canvas shows one: a draft in the shape of its destination. Measured 163682 JS and 8634 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 177763 JS and 13429 CSS. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 180112 JS measured. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 185736 JS measured."
   },
   "lazy:features/work/components/objects/Media.svelte": {
     "js": 164500,
@@ -376,9 +376,9 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: a page's frame under its title bar. Measured 162175 JS and 5971 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The live page's one-shot hairline on a new look and the small copy a far-away page frame draws as: 6801 CSS measured. Round 4: the live page's reading orb and pages over what they gave bring the presence runtime into this graph: 170535 JS measured. Round 4 memory: frame copies kept within a byte budget and let go as their canvas leaves: 170834 JS measured. Round 5: the island's new words in the shared catalog: 171300 JS measured. The lead's figures and the shimmer bring 2.3 KB CSS: 15473 measured."
   },
   "lazy:features/work/components/objects/Note.svelte": {
-    "js": 170700,
-    "css": 10700,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a note as text on the canvas that edits in place. Measured 86520 JS and 4572 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 168611 JS and 10171 CSS."
+    "js": 174800,
+    "css": 11200,
+    "description": "One kind's renderer, fetched the first time the canvas shows one: a note as text on the canvas that edits in place. Measured 86520 JS and 4572 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 168611 JS and 10171 CSS. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 174271 JS measured. Its CSS: 11008 measured."
   },
   "lazy:features/work/components/objects/File.svelte": {
     "js": 102700,
@@ -401,9 +401,9 @@
     "description": "The model picker in the ask bar, loaded the first time the bar is engaged: measured 284234 JS and 13947 CSS. The shared chunk grown by the concurrent streams: 285825 measured."
   },
   "lazy:features/work/components/objects/ObjectCentre.svelte": {
-    "js": 166500,
-    "css": 9500,
-    "description": "An object opened in the centre, loaded with the first lift of an object: measured 164683 JS and 8899 CSS. The shared chunk grown by the concurrent streams: 165902 measured. 9316 CSS measured."
+    "js": 172200,
+    "css": 10600,
+    "description": "An object opened in the centre, loaded with the first lift of an object: measured 164683 JS and 8899 CSS. The shared chunk grown by the concurrent streams: 165902 measured. 9316 CSS measured. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 171635 JS measured. Its CSS: 10417 measured."
   },
   "lazy:features/settings/components/sections/AiPage.svelte": {
     "js": 508200,

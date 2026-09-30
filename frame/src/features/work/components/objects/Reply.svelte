@@ -2,6 +2,8 @@
   import type { ReplyView } from "../../lib/board/types";
   import DocumentView from "$shared/ui/data/Artifact/DocumentView.svelte";
   import Inline from "./Inline.svelte";
+  import Orb from "$shared/ui/presence/Orb.svelte";
+  import Shimmer from "$shared/ui/presence/Shimmer.svelte";
   /** The answer, set on the canvas like a caption: a headline, a few lines, the figures. */
   let {
     object,
@@ -15,9 +17,10 @@
 
 <article class="reply" class:waiting={object.state === "pending"} aria-label={object.headline}>
   {#if object.state === "pending"}
-    <!-- Still coming: a quiet line, never set as the answer's headline. -->
-    <p class="pending" role="status">{object.headline}</p>
-    <span class="bar" aria-hidden="true"></span><span class="bar short" aria-hidden="true"></span>
+    <!-- Still coming: the working indicator and a line of light, never set as the answer's headline. -->
+    <p class="pending" role="status">
+      <Orb size={22} /><span class="coming"><Shimmer text={object.headline} /></span>
+    </p>
   {:else}
     <h2>{object.headline}</h2>
     {#if object.text}<p class="text"><Inline text={object.text} /></p>{/if}
@@ -141,26 +144,21 @@
   }
 
   .pending {
+    display: flex;
+    align-items: center;
+    gap: 12px;
     margin: 0;
-    color: var(--color-muted);
-    font-size: var(--text-reading);
+    font-size: var(--text-title);
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: -0.016em;
+
+    --shimmer-rest: var(--color-faint);
+    --shimmer-lit: var(--color-text);
   }
 
-  .bar {
-    display: block;
-    inline-size: 100%;
-    max-inline-size: 460px;
-    block-size: 10px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill);
-  }
-
-  .bar.short {
-    max-inline-size: 300px;
-  }
-
-  .waiting {
-    gap: 10px;
+  .coming {
+    min-inline-size: 0;
   }
 
   .more {

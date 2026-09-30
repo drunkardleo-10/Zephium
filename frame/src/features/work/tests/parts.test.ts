@@ -8,7 +8,7 @@ import {
   firstFailure,
   testsIn,
 } from "../lib/parts/computer";
-import { connectionRows, connectionView } from "../lib/parts/connection";
+import { connectionRows, connectionView, toolWords } from "../lib/parts/connection";
 import { fixScene } from "./parts-look";
 
 const projection = (stage: "done" | "working" | "handoff") =>
@@ -138,5 +138,15 @@ describe("a connection part's view", () => {
       ["Listed 4 pull requests", "done"],
       ["Read checks on #14543", "done"],
     ]);
+  });
+
+  test("a tool with no words of its own is named in a person's words", () => {
+    expect(toolWords("ticktick__list_projects", false)).toBe("Listed projects");
+    expect(toolWords("ticktick__list_projects", true)).toBe("Listing projects");
+    expect(toolWords("get_project_with_undone_tasks", false)).toBe(
+      "Read project with undone tasks",
+    );
+    expect(toolWords("notion__search", true)).toBe("Searching");
+    expect(toolWords("summarizeThread", false)).toBe("Summarize thread");
   });
 });
