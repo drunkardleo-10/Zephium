@@ -2297,8 +2297,9 @@
             >{/if}
         </div>{/if}
       {#if ACCOUNTS}<AccountButton name={profileLabel} />{/if}
+      <!-- The zoom level reads in the top-right corner, a quiet counterpart to the work's name. -->
+      <div class="zoom-slot" data-work-zoom-slot></div>
     </div>
-    <div class="zoom-slot" data-work-zoom-slot></div>
   </div>
   {#if lifted && cardBounds}
     <Lift
@@ -2748,11 +2749,9 @@
   }
 
   .zoom-slot {
-    position: absolute;
-    inset-block-end: 12px;
-    inset-inline-end: 12px;
-    z-index: 5;
     display: flex;
+    flex: none;
+    pointer-events: auto;
   }
 
   .bar-dock {
