@@ -588,8 +588,12 @@ where
                                 ))
                             }
                             Ok(mut kind) => {
-                                let view = tool_call.arguments.get("view").and_then(Value::as_bool) == Some(true)
-                                    || reads_app(&kind);
+                                // Only a daily app has views: a store or a listings
+                                // site read "as a view" would lose its page planner.
+                                let view = reads_app(&kind)
+                                    || (tool_call.arguments.get("view").and_then(Value::as_bool)
+                                        == Some(true)
+                                        && daily_app(&kind));
                                 if let (true, WorkStepKindV1::Read { goal: Some(_), collection, .. }) = (view, &mut kind) {
                                     *collection = None;
                                 }
@@ -1091,6 +1095,23 @@ fn connected(run: &super::run::LeadRun, connection: &str) -> bool {
 /// with no model call, whatever the helper set. A goal that asks to send,
 /// post or change something is a task, not a read; a sentence that forbids
 /// it ("do not change anything") asks nothing.
+fn daily_app(kind: &WorkStepKindV1) -> bool {
+    let WorkStepKindV1::Read { url, .. } = kind else {
+        return false;
+    };
+    // Loopback replicas of the apps (.test sites) stand in for them in
+    // qualification.
+    url::Url::parse(url)
+        .ok()
+        .is_some_and(|url| match url.host() {
+            Some(url::Host::Domain(host)) => {
+                zephium_agentic::DailyApp::of(host).is_some() || host.ends_with(".test")
+            }
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            _ => false,
+        })
+}
+
 fn reads_app(kind: &WorkStepKindV1) -> bool {
     const ACTS: [&str; 22] = [
         "send", "post", "reply", "write", "create", "draft", "comment", "assign", "archive",
@@ -1099,17 +1120,12 @@ fn reads_app(kind: &WorkStepKindV1) -> bool {
     ];
     const NOT: [&str; 5] = ["do not", "don't", "never", "without", "no "];
     let WorkStepKindV1::Read {
-        url,
-        goal: Some(goal),
-        ..
+        goal: Some(goal), ..
     } = kind
     else {
         return false;
     };
-    let app = url::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().and_then(zephium_agentic::DailyApp::of));
-    if app.is_none() {
+    if !daily_app(kind) {
         return false;
     }
     let goal = goal.to_lowercase();

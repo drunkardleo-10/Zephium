@@ -441,14 +441,12 @@ where
                         vec![(index, content, error)]
                     }))
                 }
+                // Answered before the turn's other calls run, so a part
+                // started beside it already has the folder.
                 "ask_folder" => {
-                    let args = args.clone();
-                    pending.push(Box::pin(async move {
-                        let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
-                        let (content, error) =
-                            super::folders::request(self.run, text("folder"), text("why")).await;
-                        vec![(index, content, error)]
-                    }))
+                    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("");
+                    answers[index] =
+                        Some(super::folders::request(self.run, text("folder"), text("why")).await);
                 }
                 "load_skill" => answers[index] = Some(self.load_skill(args).await),
                 "finish" => finish_at = Some(index),

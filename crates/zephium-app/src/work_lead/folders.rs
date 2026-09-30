@@ -249,7 +249,8 @@ pub(crate) async fn ask_in_place(run: &LeadRun, objective: &str) -> Vec<Named> {
 }
 
 /// The folder a name means: a path as written, `~/…`, or a folder of the
-/// home folder by its name in any case ("my Documents folder").
+/// home folder by its name in any case ("my Documents folder"); a name no
+/// folder has yet is where the person would make it, in the home folder.
 pub(crate) fn resolve(named: &str, home: &Path) -> Option<PathBuf> {
     let named = named.trim().trim_end_matches('/');
     if let Some(rest) = named.strip_prefix("~/") {
@@ -265,17 +266,19 @@ pub(crate) fn resolve(named: &str, home: &Path) -> Option<PathBuf> {
     if word.is_empty() || word.contains('/') {
         return None;
     }
-    std::fs::read_dir(home)
-        .ok()?
-        .filter_map(Result::ok)
-        .find(|entry| {
-            entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(word)
-        })
-        .map(|entry| entry.path())
+    let found = std::fs::read_dir(home).ok().and_then(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(word)
+            })
+            .map(|entry| entry.path())
+    });
+    Some(found.unwrap_or_else(|| home.join(word)))
 }
 
 /// Asks the person for a folder the run needs while it works: "Choose
@@ -455,7 +458,7 @@ mod tests {
             resolve("/Users/ana/Notes", &home),
             Some(PathBuf::from("/Users/ana/Notes"))
         );
-        assert_eq!(resolve("Pictures", &home), None);
+        assert_eq!(resolve("Pictures", &home), Some(home.join("Pictures")));
         assert_eq!(resolve("a/b", &home), None);
         std::fs::remove_dir_all(&home).unwrap();
     }

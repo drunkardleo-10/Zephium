@@ -2264,6 +2264,15 @@ const PAGE_TASK_CALLS: u8 = 40;
 /// A daily app's view read is Rust's own; the page planner, when it is
 /// needed at all, gets a few calls to reach a view, not a wander.
 const VIEW_TASK_CALLS: u8 = 8;
+
+/// A page task on one of the person's daily apps.
+fn app_view(request: &WorkAgentBrowseRequest) -> bool {
+    matches!(&request.step, WorkStepKindV1::Read { url, .. }
+        if ContextNavigationTarget::parse(url)
+            .ok()
+            .and_then(|target| target.as_url().host_str().and_then(zephium_agentic::DailyApp::of))
+            .is_some())
+}
 /// A public page read looks, extracts and ends: a few inspections at most.
 const PUBLIC_READ_CALLS: u8 = 6;
 const PAGE_TASK_ACTIONS: u64 = 60;
@@ -2469,7 +2478,7 @@ fn compile_step(
                 },
                 None => PublicReadWorkAccount::Anonymous,
             },
-            if task && request.view {
+            if task && request.view && app_view(&request) {
                 VIEW_TASK_CALLS
             } else if task {
                 PAGE_TASK_CALLS
