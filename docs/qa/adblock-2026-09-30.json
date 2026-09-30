@@ -196,5 +196,42 @@
     "Synthetic matcher workload is not the full subscription or WebView2 callback.",
     "Process-family observation is a debug build with one local test page plus Settings, not an on/off comparison.",
     "Windows physical qualification and user QA remain pending."
-  ]
+  ],
+  "default_on_follow_up": {
+    "baseline_commit": "9b7ff758",
+    "profile_migration": "META 23: enable existing disabled profiles once; keep later opt-outs, site pauses and personal hides",
+    "component_measurement": {
+      "build": "cargo --release cosmetic_lab",
+      "runs": 3,
+      "source_revision": 202609300903,
+      "before_medians_ms": {
+        "compile_ms": 82.102541,
+        "decode_ms": 58.448,
+        "query_ms": 0.12983299999999998
+      },
+      "after_medians_ms": {
+        "compile_ms": 83.304166,
+        "decode_ms": 58.196290999999995,
+        "query_ms": 0.122583,
+        "shared_decode_ms": 0.06970900000000001
+      },
+      "all_shared_restores_reused_instance": true,
+      "limitation": "Component-only microbenchmark; background compilation was running. These are not page speed, memory, CPU or battery comparisons."
+    },
+    "style_delivery": "Unchanged subscription identity uses a sub-1-KiB command; first-document index remains 487107 bytes. Removed sheet retries full delivery once.",
+    "native_smoke": [
+      "optimized QA restart preserved saved tabs",
+      "request fixture blocked ad script",
+      "main-document ad placeholder hidden",
+      "site pause restored placeholder live; resume hid it again"
+    ],
+    "release_gaps": [
+      "99-run live-page matrix has not been completed",
+      "generic index remains per document",
+      "isolated-world worker-query delivery not implemented",
+      "native domain cosmetics not reintroduced",
+      "resource-gap audit and updater simplification remain pending",
+      "Windows physical performance and lifecycle qualification pending"
+    ]
+  }
 }

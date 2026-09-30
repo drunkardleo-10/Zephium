@@ -165,23 +165,6 @@ fn valid_header(value: &str) -> bool {
     !value.is_empty() && value.len() <= 512 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn conditional_headers_are_bounded_and_cannot_inject_requests() {
-        assert!(valid_header("W/\"abc\""));
-        assert!(!valid_header("abc\r\nX-Test: value"));
-        assert!(!valid_header(&"a".repeat(513)));
-        assert_eq!(retry_delay("3600", std::time::UNIX_EPOCH), Some(3600));
-        assert_eq!(
-            retry_delay("Thu, 01 Jan 1970 01:00:00 GMT", std::time::UNIX_EPOCH),
-            Some(3600)
-        );
-        assert_eq!(retry_delay("invalid", std::time::UNIX_EPOCH), None);
-    }
-}
-
 fn retry_delay(value: &str, now: std::time::SystemTime) -> Option<u64> {
     if !valid_header(value) {
         return None;
@@ -198,4 +181,21 @@ fn retry_delay(value: &str, now: std::time::SystemTime) -> Option<u64> {
         )
     })?;
     Some(seconds.clamp(60, 30 * 24 * 60 * 60))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn conditional_headers_are_bounded_and_cannot_inject_requests() {
+        assert!(valid_header("W/\"abc\""));
+        assert!(!valid_header("abc\r\nX-Test: value"));
+        assert!(!valid_header(&"a".repeat(513)));
+        assert_eq!(retry_delay("3600", std::time::UNIX_EPOCH), Some(3600));
+        assert_eq!(
+            retry_delay("Thu, 01 Jan 1970 01:00:00 GMT", std::time::UNIX_EPOCH),
+            Some(3600)
+        );
+        assert_eq!(retry_delay("invalid", std::time::UNIX_EPOCH), None);
+    }
 }

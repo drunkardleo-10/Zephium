@@ -13,8 +13,9 @@ not WebView2 runtime qualification: the separate Windows machine must complete
 [the handoff](adblock-windows-qualification.md). Merge remains gated on user QA.
 Linux is not a release qualification target for this change.
 
-Protection remains opt-in for new profiles, and existing saved preferences are
-preserved. Both enabled and disabled profiles receive a locally prepared,
+Protection defaults on for new profiles. META migration 23 enables existing
+profiles once, preserving site pauses and personal hides; subsequent explicit
+opt-outs remain durable. Both enabled and disabled profiles receive a locally prepared,
 explicit empty policy at startup without joining the compiler queue. Enabled
 profiles prepare real protection in the background. Browsing is available as
 soon as the empty native policy is acknowledged; the UI never describes that
@@ -144,6 +145,11 @@ compiler uses adblock-rust's URL-specific resources, generic class/ID lookup,
 selector exceptions and generic-hide controls. For the current seed the initial
 CSS is about 25.8 KB. A shared 487 KB serialized class/ID lookup table travels to
 the main document once per policy/document; it does not become a blanket sheet.
+Unchanged same-document navigation and personal edits reuse the installed
+subscription identity instead of resending this payload. Removing the page copy
+altogether remains performance work, not a completed optimization.
+A bounded weak reference also reuses an identical live public cosmetic policy
+across later profile restores without retaining it after the last owner exits.
 
 A bounded worker handles document lookup, hashing and script serialization.
 Completion returns through the existing main-thread dispatcher before native
@@ -205,10 +211,13 @@ cosmetic syntax intentionally processed by the separate cosmetic compiler;
 do not add those counts or describe them as total unsupported rules.
 
 macOS whole-browser QA verified actual request blocking; generic-hide exceptions;
-main/child cosmetic hiding; picker preview/undo/save; hide reload persistence;
+main-document cosmetic hiding; picker preview/undo/save; hide reload persistence;
 live Show/Remove; site pause/reload/resume; and the real Privacy settings control.
 Independent native fixtures cover strict CSP, nested/cross-origin frames, live
 style clearing, stale document/generation rejection and click suppression.
+Child-frame cosmetic delivery is no longer enabled. Native QA also caught and
+fixed stale site controls after navigation: site identity/readiness now participate
+in status deduplication and focused tab updates publish that status.
 No test result claims Windows runtime, installer, battery or broad-web coverage.
 
 Use `cargo xtask check-blocker-seed` for exact bundled artifacts; blocker
