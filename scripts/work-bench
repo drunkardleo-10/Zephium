@@ -37,6 +37,7 @@ SCENARIOS = {
     "exam": (["--live-lead", "exam"], False, "prepare for an algorithms final (MIT 6.006)"),
     "tasks": (["--live-lead", "day"], False, "plan the day from seeded Zephium tasks (real lead)"),
     "save": (["--live-lead", "save"], False, "save an answer in a folder the run asks for as it works"),
+    "best": (["--live-lead", "best"], False, "an open request: one finished piece of real work"),
 }
 TIMEOUT = 1000
 STOP_ERRORS = ("Unauthorized", "MissingKey")

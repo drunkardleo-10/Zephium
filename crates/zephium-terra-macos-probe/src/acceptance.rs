@@ -399,7 +399,16 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
     }
 }
 
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 18] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 19] = [
+    // An open request: one finished piece of real work, never the person's
+    // own apps.
+    LeadScenario {
+        name: "best",
+        requests: &["Show me the best that you can do"],
+        answer: "",
+        folder: false,
+        site: None,
+    },
     // A file saved in a folder the run asks for as it works: the person
     // chooses it in the folder panel, and the same run writes the file.
     LeadScenario {
