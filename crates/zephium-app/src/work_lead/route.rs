@@ -17,6 +17,24 @@ const SERVICES: [(&str, &str, &str); 8] = [
     ("discord", "Discord", "discord.com"),
 ];
 
+/// Services with an MCP server people add in Settings → Connections, by
+/// the brand the lead names them with (the presets Settings offers).
+const KNOWN_SERVERS: [(&str, &str); 5] = [
+    ("linear", "Linear"),
+    ("notion", "Notion"),
+    ("sentry", "Sentry"),
+    ("stripe", "Stripe"),
+    ("figma", "Figma"),
+];
+
+/// The name of the server people add for a service, when there is one.
+pub(crate) fn known_server(brand: &str) -> Option<&'static str> {
+    KNOWN_SERVERS
+        .iter()
+        .find(|(key, _)| *key == brand)
+        .map(|(_, name)| *name)
+}
+
 /// A connection the person has for a service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Offer {
@@ -190,6 +208,8 @@ mod tests {
             settle(WorkHelperV1::Browser, "slack", Some(&slack), false),
             None
         );
+        assert_eq!(known_server("linear"), Some("Linear"));
+        assert_eq!(known_server("slack"), None);
         let website = settle(WorkHelperV1::Connection, "linear", None, false).unwrap();
         assert_eq!(website.0, WorkHelperV1::Browser);
         assert_eq!(website.1.host.as_deref(), Some("linear.app"));

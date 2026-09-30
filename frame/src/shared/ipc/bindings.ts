@@ -4068,6 +4068,11 @@ export type WorkPartNeedV1_Deserialize =
  *  reason says why its website did not do.
  */
 ({ kind: "use_connection"; connection: string; reason?: WorkPartReasonV1 | null }) & { host?: never; path?: never } | 
+/**
+ *  Connect a service in Settings → Connections first: the person has no
+ *  connection for it, and it has one people add ("Linear").
+ */
+({ kind: "connect"; connection: string }) & { host?: never; path?: never; reason?: never } | 
 /**  Trying again may work; the reason says what went wrong. */
 ({ kind: "retry"; host?: string | null; reason?: WorkPartReasonV1 | null }) & { connection?: never; path?: never };
 
@@ -4087,6 +4092,11 @@ export type WorkPartNeedV1_Serialize =
  *  reason says why its website did not do.
  */
 ({ kind: "use_connection"; connection: string; reason?: WorkPartReasonV1 | null }) & { host?: never; path?: never } | 
+/**
+ *  Connect a service in Settings → Connections first: the person has no
+ *  connection for it, and it has one people add ("Linear").
+ */
+({ kind: "connect"; connection: string }) & { host?: never; path?: never; reason?: never } | 
 /**  Trying again may work; the reason says what went wrong. */
 ({ kind: "retry"; host?: string | null; reason?: WorkPartReasonV1 | null }) & { connection?: never; path?: never };
 

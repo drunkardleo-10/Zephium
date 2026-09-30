@@ -72,6 +72,9 @@ pub enum WorkPartNeedV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<WorkPartReasonV1>,
     },
+    /// Connect a service in Settings → Connections first: the person has no
+    /// connection for it, and it has one people add ("Linear").
+    Connect { connection: String },
     /// Trying again may work; the reason says what went wrong.
     Retry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,7 +89,9 @@ impl WorkPartNeedV1 {
         let ok = match self {
             Self::SignIn { host } | Self::AllowSite { host } => host_ok(host),
             Self::AllowFolder { path } => super::runtime::validate_file_path(path).is_ok(),
-            Self::UseConnection { connection, .. } => words(connection, 40).is_ok(),
+            Self::UseConnection { connection, .. } | Self::Connect { connection } => {
+                words(connection, 40).is_ok()
+            }
             Self::Retry { host, .. } => host.as_deref().is_none_or(host_ok),
         };
         if ok {

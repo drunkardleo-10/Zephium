@@ -938,6 +938,12 @@ where
                 WorkPartNeedV1::UseConnection { connection, .. } => {
                     if connected(self.run, &connection) {
                         WorkPartNeedV1::UseConnection { connection, reason }
+                    } else if let Some(name) = super::route::brand(None, &connection)
+                        .and_then(|brand| super::route::known_server(&brand))
+                    {
+                        WorkPartNeedV1::Connect {
+                            connection: name.into(),
+                        }
                     } else {
                         WorkPartNeedV1::Retry {
                             host: hosts.first().cloned().filter(|h| public_host(h)),
@@ -995,6 +1001,28 @@ where
                 })
                 .filter(|need| need.validate().is_ok())
                 .or(report.need.take());
+            }
+        }
+        // The website did not do, and the service has a connection people
+        // add that this person has not: connecting it is the fix. A request
+        // that asked for the connection gets it whatever else went wrong.
+        if let Some(name) = super::route::brand(spec.service.as_ref(), &spec.title)
+            .filter(|brand| !connected(self.run, brand))
+            .and_then(|brand| super::route::known_server(&brand))
+        {
+            let asked = self
+                .objective
+                .to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| matches!(word, "mcp" | "connection" | "connector"));
+            if matches!(
+                report.need,
+                Some(WorkPartNeedV1::Retry { .. } | WorkPartNeedV1::UseConnection { .. })
+            ) || (asked && report.need.is_none())
+            {
+                report.need = Some(WorkPartNeedV1::Connect {
+                    connection: name.into(),
+                });
             }
         }
         if report.state == WorkPartStateV1::Stopped
@@ -1393,6 +1421,9 @@ fn need_words(need: &WorkPartNeedV1) -> String {
         WorkPartNeedV1::UseConnection { connection, .. } => {
             format!("the person to choose their {connection} connection instead of its website")
         }
+        WorkPartNeedV1::Connect { connection } => format!(
+            "the person to connect {connection} in Settings: there is no {connection} connection yet"
+        ),
         WorkPartNeedV1::Retry { host, reason } => {
             let site = host.as_deref().unwrap_or("the site");
             match reason {

@@ -1324,6 +1324,9 @@ fn part_words(part: &zephium_core::work::parts::WorkPartFactV1) -> String {
         Some(Need::UseConnection { connection, .. }) => {
             format!("{title} can go through your {connection} connection instead of the website")
         }
+        Some(Need::Connect { connection }) => {
+            format!("{title} can read {connection} directly once you connect it in Settings")
+        }
         Some(Need::Retry { host, reason }) => {
             let site = host.as_deref().unwrap_or("the site");
             match reason {
