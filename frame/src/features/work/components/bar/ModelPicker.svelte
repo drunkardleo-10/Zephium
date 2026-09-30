@@ -43,6 +43,8 @@
   const chosen = $derived(models?.effective.lead ?? null);
   const groups = $derived(pickerGroups(models, "lead", session?.endpoint ?? []));
   const allKeyed = $derived(groups.needsKey.length === 0);
+  /** No model can run yet: the one thing to do is add a key, so the control is that, not a menu. */
+  const keyless = $derived(!!models && groups.ready.length === 0);
 
   async function opened(next: boolean) {
     open = next;
@@ -110,84 +112,94 @@
   </div>
 {/snippet}
 
-<Popover.Root {open} onOpenChange={(next) => void opened(next)}>
-  <Popover.Trigger
-    class="model-trigger"
-    aria-label={current
-      ? m.work_model_trigger({ model: current.display_name })
-      : m.work_model_label()}
-    disabled={!models}
-  >
-    {#if current}
-      <span class="trigger-mark" aria-hidden="true"
-        ><Icon icon={providerMark(current.model.provider)} size={14} strokeWidth={1.6} /></span
+{#if keyless}
+  <button type="button" class="model-trigger add-key" onclick={settings}>
+    <span class="trigger-mark" aria-hidden="true"><Icon icon={Key01Icon} size={14} /></span>
+    <span class="trigger-name">{m.work_model_add_model_key()}</span>
+  </button>
+{:else}<Popover.Root {open} onOpenChange={(next) => void opened(next)}>
+    <Popover.Trigger
+      class="model-trigger"
+      aria-label={current
+        ? m.work_model_trigger({ model: current.display_name })
+        : m.work_model_label()}
+      disabled={!models}
+    >
+      {#if current}
+        <span class="trigger-mark" aria-hidden="true"
+          ><Icon icon={providerMark(current.model.provider)} size={14} strokeWidth={1.6} /></span
+        >
+        <span class="trigger-name">{shortName(current)}</span>
+      {:else}
+        <span class="trigger-name empty">{m.work_model_none()}</span>
+      {/if}
+      <span class="trigger-chevron" aria-hidden="true"
+        ><Icon icon={ArrowDown01Icon} size={11} strokeWidth={2} /></span
       >
-      <span class="trigger-name">{shortName(current)}</span>
-    {:else}
-      <span class="trigger-name empty">{m.work_model_none()}</span>
-    {/if}
-    <span class="trigger-chevron" aria-hidden="true"
-      ><Icon icon={ArrowDown01Icon} size={11} strokeWidth={2} /></span
-    >
-  </Popover.Trigger>
-  <Popover.Portal>
-    <Popover.Content
-      class="ui-menu model-menu"
-      side="top"
-      align="end"
-      sideOffset={10}
-      collisionPadding={12}
-      aria-label={m.work_model_label()}
-      onkeydown={move}
-    >
-      <div class="pane" bind:this={list}>
-        {#each groups.ready as group (group.provider)}
-          <section class="group" aria-label={providerName(group.provider)}>
-            {@render heading(group.provider)}
-            <ul>
-              {#each group.entries as entry (entry.id)}{@render model(entry)}{/each}
+    </Popover.Trigger>
+    <Popover.Portal>
+      <Popover.Content
+        class="ui-menu model-menu"
+        side="top"
+        align="end"
+        sideOffset={10}
+        collisionPadding={12}
+        aria-label={m.work_model_label()}
+        onkeydown={move}
+      >
+        <div class="pane" bind:this={list}>
+          {#each groups.ready as group (group.provider)}
+            <section class="group" aria-label={providerName(group.provider)}>
+              {@render heading(group.provider)}
+              <ul>
+                {#each group.entries as entry (entry.id)}{@render model(entry)}{/each}
+              </ul>
+            </section>
+          {/each}
+          {#if groups.needsKey.length}
+            {#if groups.ready.length}<div class="ui-menu-separator" role="presentation"></div>{/if}
+            <ul aria-label={m.work_model_needs_key()}>
+              {#each groups.needsKey as provider (provider)}
+                <li>
+                  <button
+                    type="button"
+                    class="ui-menu-item keyless"
+                    data-model-row
+                    onclick={settings}
+                  >
+                    <span class="ui-menu-icon" aria-hidden="true"
+                      ><Icon icon={providerMark(provider)} size={15} strokeWidth={1.6} /></span
+                    >
+                    <span class="name">{providerName(provider)}</span>
+                    <span class="hint"
+                      >{keyState(models, provider) === "invalid"
+                        ? m.work_model_key_refused()
+                        : m.work_model_needs_key()}</span
+                    >
+                  </button>
+                </li>
+              {/each}
             </ul>
-          </section>
-        {/each}
-        {#if groups.needsKey.length}
-          {#if groups.ready.length}<div class="ui-menu-separator" role="presentation"></div>{/if}
-          <ul aria-label={m.work_model_needs_key()}>
-            {#each groups.needsKey as provider (provider)}
-              <li>
-                <button
-                  type="button"
-                  class="ui-menu-item keyless"
-                  data-model-row
-                  onclick={settings}
-                >
-                  <span class="ui-menu-icon" aria-hidden="true"
-                    ><Icon icon={providerMark(provider)} size={15} strokeWidth={1.6} /></span
-                  >
-                  <span class="name">{providerName(provider)}</span>
-                  <span class="hint"
-                    >{keyState(models, provider) === "invalid"
-                      ? m.work_model_key_refused()
-                      : m.work_model_needs_key()}</span
-                  >
-                </button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-        <div class="ui-menu-separator" role="presentation"></div>
-        <button type="button" class="ui-menu-item" data-model-row onclick={settings}>
-          <span class="ui-menu-icon" aria-hidden="true"><Icon icon={Key01Icon} size={15} /></span>
-          <span class="name">{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</span>
-        </button>
-      </div>
-      {#if session?.fault?.action === "choose:lead"}<p class="note failure" role="alert">
-          {m.work_model_failed()}
-        </p>{/if}
-    </Popover.Content>
-  </Popover.Portal>
-</Popover.Root>
+          {/if}
+          <div class="ui-menu-separator" role="presentation"></div>
+          <button type="button" class="ui-menu-item" data-model-row onclick={settings}>
+            <span class="ui-menu-icon" aria-hidden="true"><Icon icon={Key01Icon} size={15} /></span>
+            <span class="name">{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</span>
+          </button>
+        </div>
+        {#if session?.fault?.action === "choose:lead"}<p class="note failure" role="alert">
+            {m.work_model_failed()}
+          </p>{/if}
+      </Popover.Content>
+    </Popover.Portal>
+  </Popover.Root>{/if}
 
 <style>
+  /* Calm, not an alarm: the model's place, asking for the key it needs. */
+  .add-key {
+    color: var(--color-label-secondary);
+  }
+
   :global(.model-trigger) {
     display: inline-flex;
     align-items: center;

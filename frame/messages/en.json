@@ -2242,5 +2242,6 @@
   "work_line_working_on": "Working on {parts}",
   "work_part_lead_sites": "{first}, {second} and {count} more",
   "work_part_state_done": "Done",
-  "work_part_state_next": "Up next"
+  "work_part_state_next": "Up next",
+  "work_model_add_model_key": "Add a model key"
 }

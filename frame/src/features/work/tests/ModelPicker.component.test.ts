@@ -67,13 +67,12 @@ test("the menu lists each provider's curated models, the smaller ones too", asyn
   expect(native.more).not.toHaveBeenCalled();
 });
 
-test("without any key the trigger asks for a model and the menu leads to keys", async () => {
+test("without any key the control is one calm way to add a key, straight to Settings", async () => {
   await page.viewport(1200, 800);
   native.read.mockResolvedValue(models({}));
   const onsettings = vi.fn();
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings });
-  await screen.getByRole("button", { name: "Model" }).click();
-  await expect.element(page.getByRole("button", { name: /Anthropic.*Needs a key/u })).toBeVisible();
-  await page.getByRole("button", { name: /Anthropic.*Needs a key/u }).click();
+  await screen.getByRole("button", { name: "Add a model key" }).click();
   expect(onsettings).toHaveBeenCalledTimes(1);
+  expect(page.getByRole("button", { name: /Needs a key/u }).query()).toBeNull();
 });
