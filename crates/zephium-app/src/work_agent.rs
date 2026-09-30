@@ -1738,6 +1738,9 @@ impl Driver {
                             (outcome.status, vec![])
                         };
                         let note = match (status, outcome.note.clone()) {
+                            (WorkStepStatus::Succeeded, Some(note)) if !artifacts.is_empty() => {
+                                format!("{} · {note}", read_note(&artifacts))
+                            }
                             (WorkStepStatus::Succeeded, _) => read_note(&artifacts),
                             (_, Some(note)) => note,
                             (status, None) => self

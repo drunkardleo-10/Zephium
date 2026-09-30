@@ -40,7 +40,11 @@ impl Driver {
             let session = match goal.clone() {
                 Some(goal) => {
                     let view = self.views.contains(url);
-                    if let Some(entry) = crate::work_sites::entry_url(url) {
+                    if let Some(entry) = view
+                        .then(|| crate::work_sites::view_home(url))
+                        .flatten()
+                        .or_else(|| crate::work_sites::entry_url(url))
+                    {
                         *url = entry.to_owned();
                     }
                     if view {

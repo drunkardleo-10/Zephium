@@ -77,6 +77,10 @@ pub trait AgentWorkLocalActionPolicy: Send {
     fn reads_app_view(&self) -> bool {
         false
     }
+    /// The control that opens the next view a daily app's read goes through.
+    fn app_view(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
 
     /// Narrows the model effect vocabulary when the assignment has one effect.
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
@@ -223,6 +227,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .is_some_and(|policy| policy.reads_app_view())
+    }
+    fn app_view(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
+        self.local_actions
+            .as_ref()
+            .and_then(|policy| policy.app_view(observation))
     }
 
     fn allows_baseline_read(&self) -> bool {

@@ -16,7 +16,7 @@ mod projection;
 mod read;
 mod rows;
 mod search;
-pub use apps::{read_app_view, DailyApp};
+pub use apps::{app_view_control, app_views, read_app_view, AppView, DailyApp};
 #[cfg(feature = "probe-harness")]
 pub use capture::capture_app_views;
 pub use capture::{app_view_wire, captured_app_view, AppViewSink};

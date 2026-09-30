@@ -405,10 +405,13 @@ impl MacosWorkComposition {
             request.allow_edits,
             request.entry,
         );
-        let gate = std::sync::Arc::new(if request.view && page_task(&request) {
-            gate.reading_view()
-        } else {
-            gate
+        let gate = std::sync::Arc::new(match &request.step {
+            WorkStepKindV1::Read {
+                url,
+                goal: Some(goal),
+                ..
+            } if request.view => gate.reading_view(url, goal),
+            _ => gate,
         });
         let confirm = request.confirm.clone();
         let invocation = compile_step(
@@ -454,6 +457,12 @@ impl MacosWorkComposition {
             == Some(zephium_app::work_agent::WorkSiteEntry::NotNow)
         {
             run.note = Some("The person said not now to working in their session here".into());
+        }
+        if run.status == WorkAttemptStatus::Succeeded
+            && run.measurements.planner_calls == 0
+            && run.note.is_none()
+        {
+            run.note = gate.view_note();
         }
         if let Some(line) = gate.unconfirmed() {
             run.note = Some(format!(
@@ -668,6 +677,7 @@ impl MacosWorkComposition {
                         | AgentWorkEventKind::DecisionSettled(_)
                         | AgentWorkEventKind::DecisionFallback { .. }
                         | AgentWorkEventKind::RowRead { .. }
+                        | AgentWorkEventKind::AppViewOpened
                         | AgentWorkEventKind::ObservationFacts { .. }
                 ) {
                     if let Some(diagnostic) = diagnostics.model_diagnostic {

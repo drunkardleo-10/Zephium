@@ -106,7 +106,7 @@ const VENDORS: &[(&str, &str, Option<&str>)] = &[
     ("booking.com", "Booking.com", None),
     ("trello.com", "Trello", None),
     ("asana.com", "Asana", Some("https://app.asana.com/")),
-    ("linear.app", "Linear", None),
+    ("linear.app", "Linear", Some("https://linear.app/")),
     (
         "discord.com",
         "Discord",
@@ -169,6 +169,28 @@ const APP_VIEWS: &[(&str, &[&str], &str)] = &[
     ),
     ("github.com", &["/"], "https://github.com/notifications"),
 ];
+
+/// Where a read of a daily app's views starts: the app's own home, which
+/// opens the person's workspace, instead of a view address the model
+/// guessed. A Slack channel or conversation the address names is kept.
+pub fn view_home(url: &str) -> Option<&'static str> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.trim_start_matches("www.");
+    if host == "app.slack.com" || host == "slack.com" || host.ends_with(".slack.com") {
+        let conversation = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.nth(2))
+            .is_some_and(|id| {
+                id.len() >= 8
+                    && matches!(id.as_bytes()[0], b'C' | b'D' | b'G')
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            });
+        return (!conversation).then_some("https://app.slack.com/client");
+    }
+    (host == "linear.app" || host.ends_with(".linear.app")).then_some("https://linear.app/")
+}
 
 /// A bare site's own start page for a page task, when the vendor has one.
 pub fn entry_url(url: &str) -> Option<&'static str> {
@@ -702,6 +724,22 @@ mod tests {
             None
         );
         assert!(is_sensitive("chase.com") && !is_sensitive("slack.com"));
+        for guessed in [
+            "https://app.slack.com/client/T01ABCDEF/unreads",
+            "https://acme.slack.com/unreads",
+            "https://app.slack.com/client/T01ABCDEF/activity-page",
+        ] {
+            assert_eq!(view_home(guessed), Some("https://app.slack.com/client"));
+        }
+        assert_eq!(
+            view_home("https://app.slack.com/client/T01ABCDEF/C07LAUNCH1"),
+            None
+        );
+        assert_eq!(
+            view_home("https://linear.app/team/my-issues"),
+            Some("https://linear.app/")
+        );
+        assert_eq!(view_home("https://mail.google.com/mail/u/0/"), None);
     }
 
     #[test]

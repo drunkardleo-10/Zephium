@@ -324,6 +324,11 @@ pub trait AgentWorkTask: Send {
     fn reads_app_view(&self) -> bool {
         false
     }
+    /// The control that opens the next view a daily app's read goes
+    /// through, pressed by Rust as a read; None when no view is left.
+    fn app_view(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -1026,6 +1031,12 @@ pub struct AgentWorkController {
 
 /// Landmarks an app view read opens whole before it gives up.
 const MAX_APP_LANDMARKS: usize = 4;
+/// Views one app read goes through at most (Activity, DMs, Home).
+const MAX_APP_VIEWS: usize = 3;
+/// A view's list settles once its pane stops changing this long.
+const APP_VIEW_QUIET_MILLIS: u32 = 300;
+/// Virtual lists render their rows a beat after the pane itself.
+const APP_VIEW_RENDER_MILLIS: u64 = 400;
 
 impl AgentWorkController {
     /// Immutable session storage selected in the trusted input, while dormant.
@@ -3371,10 +3382,11 @@ impl AgentWorkController {
         zephium_agentic::DailyApp::of(document.as_url().host_str()?)
     }
 
-    /// Reads an app's view as its records, with no model call: the page's
-    /// look, else each of its landmarks opened whole in turn, until one
-    /// holds records. None when no rows could be read, leaving the page
-    /// planner.
+    /// Reads an app's views as their records, with no model call: the view
+    /// the task opens first (Slack's Activity, Linear's Inbox), each next one
+    /// when a view lists nothing, and in each the page's look, else each of
+    /// its landmarks opened whole in turn. None when no view held records,
+    /// leaving the page planner.
     async fn read_app_rows(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
@@ -3383,9 +3395,66 @@ impl AgentWorkController {
         let Some(schema) = state.extraction_schema.clone() else {
             return Ok(None);
         };
-        let app = Self::daily_app(state);
         state.refresh_account(worker, browser)?;
-        let fresh = Box::pin(Self::observe(state, worker, browser)).await?;
+        let mut look = Box::pin(Self::observe(state, worker, browser)).await?;
+        let mut tried = false;
+        for _ in 0..=MAX_APP_VIEWS {
+            if let Some(target) = state.task.app_view(&look) {
+                look = Box::pin(Self::open_app_view(state, worker, browser, look, target)).await?;
+            } else if tried {
+                return Ok(None);
+            }
+            if let Some(read) =
+                Box::pin(Self::read_app_look(state, worker, browser, &schema, look)).await?
+            {
+                return Ok(Some(read));
+            }
+            tried = true;
+            state.refresh_account(worker, browser)?;
+            look = Box::pin(Self::observe(state, worker, browser)).await?;
+        }
+        Ok(None)
+    }
+
+    /// Presses a view's control as a read and waits for its list: a view
+    /// that renders its rows after the press gets one more look.
+    async fn open_app_view(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        look: SemanticObservation,
+        target: SemanticReferenceId,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let press = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click { target },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(APP_VIEW_QUIET_MILLIS)
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            ),
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        )
+        .map_err(|_| AgentWorkFailure::Contract)?;
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::AppViewOpened)?;
+        let _ = Box::pin(Self::code_owned_read(state, worker, browser, &look, press)).await?;
+        tokio::time::sleep(Duration::from_millis(APP_VIEW_RENDER_MILLIS)).await;
+        state.refresh_account(worker, browser)?;
+        Box::pin(Self::observe(state, worker, browser)).await
+    }
+
+    /// One view's records: its look, else each landmark opened whole.
+    async fn read_app_look(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        schema: &SemanticExtractionSchema,
+        fresh: SemanticObservation,
+    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
+        let app = Self::daily_app(state);
         let landmarks: Vec<SemanticReferenceId> = fresh
             .frames()
             .first()
@@ -3418,7 +3487,7 @@ impl AgentWorkController {
                 .ok_or(AgentWorkFailure::Contract)?
                 .account;
             if let Some(located) =
-                zephium_agentic::read_app_view(&look, account, captured_at, &schema, app)
+                zephium_agentic::read_app_view(&look, account, captured_at, schema, app)
             {
                 // The task judges the look its records come from.
                 state.task_progress(&look)?;
@@ -4989,6 +5058,8 @@ pub enum AgentWorkEventKind {
         /// Why no record could be copied.
         refused: Option<SemanticExtractionError>,
     },
+    /// Rust pressed a daily app's view control to read that view.
+    AppViewOpened,
     /// Closed size facts of one observation a typed read decides on.
     ObservationFacts {
         /// Nodes across every captured frame.

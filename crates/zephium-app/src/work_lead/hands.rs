@@ -608,6 +608,15 @@ where
                 if step.artifacts.is_empty() && !failed {
                     out.push_str("The page gave nothing usable.\n");
                 }
+                if let Some((_, said)) = step
+                    .note
+                    .as_deref()
+                    .filter(|_| !failed)
+                    .and_then(|note| note.split_once(" · "))
+                {
+                    out.push_str(said);
+                    out.push('\n');
+                }
             }
             kind if kind.files() || matches!(kind, WorkStepKindV1::RunCommand { .. }) => {
                 if let Some(record) = step

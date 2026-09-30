@@ -748,6 +748,10 @@ struct GateState {
     consent_pressed: bool,
     /// The task reads a daily app's view as its records.
     view: bool,
+    /// The app's views still to open for the read, in order.
+    views: Vec<zephium_agentic::AppView>,
+    /// The views Rust opened, oldest first.
+    opened: Vec<zephium_agentic::AppView>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -778,10 +782,49 @@ impl SiteGate {
             ..GateState::default()
         }))
     }
-    /// The task only reads what a daily app's view lists.
-    pub(crate) fn reading_view(self) -> Self {
-        self.state().view = true;
+    /// The task only reads what a daily app's views list, going through
+    /// the views its goal asks for.
+    pub(crate) fn reading_view(self, url: &str, goal: &str) -> Self {
+        {
+            let mut state = self.state();
+            state.view = true;
+            state.views = zephium_agentic::ContextNavigationTarget::parse(url)
+                .ok()
+                .and_then(|url| {
+                    url.as_url()
+                        .host_str()
+                        .and_then(zephium_agentic::DailyApp::of)
+                })
+                .map(|app| zephium_agentic::app_views(app, goal).to_vec())
+                .unwrap_or_default();
+        }
         self
+    }
+    /// Which views the read went through, for the helper: nothing new in the
+    /// first ones, the rows from the last.
+    pub(crate) fn view_note(&self) -> Option<String> {
+        let state = self.state();
+        let (last, before) = state.opened.split_last()?;
+        let names = |views: &[zephium_agentic::AppView]| {
+            views
+                .iter()
+                .map(|view| view.name())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        };
+        Some(match (before.is_empty(), last.latest()) {
+            (true, _) => format!("Read from the {} view.", last.name()),
+            (false, true) => format!(
+                "Nothing new in {}: these are the latest in {}.",
+                names(before),
+                last.name()
+            ),
+            (false, false) => format!(
+                "Nothing new in {}; read from {}.",
+                names(before),
+                last.name()
+            ),
+        })
     }
     pub(crate) fn site(&self) -> String {
         self.state().site.clone()
@@ -956,6 +999,18 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
 
     fn reads_app_view(&self) -> bool {
         self.gate.state().view
+    }
+
+    fn app_view(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
+        let mut state = self.gate.state();
+        while !state.views.is_empty() {
+            let view = state.views.remove(0);
+            if let Some(control) = zephium_agentic::app_view_control(observation, view) {
+                state.opened.push(view);
+                return Some(control);
+            }
+        }
+        None
     }
 
     fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {

@@ -67,9 +67,137 @@ impl DailyApp {
     }
 }
 
+/// A view of a daily app that lists what is new for the person, opened by
+/// its own control in the app's rail or sidebar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppView {
+    /// Slack's Activity: mentions, threads and reactions.
+    SlackActivity,
+    /// Slack's DMs: each conversation with its latest message.
+    SlackDms,
+    /// Slack's Home: the open channel's latest messages.
+    SlackHome,
+    /// Linear's Inbox: notifications about the person's issues.
+    LinearInbox,
+    /// Linear's My issues: the issues assigned to the person.
+    LinearMyIssues,
+}
+
+impl AppView {
+    /// The view's own name, as its app shows it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SlackActivity => "Activity",
+            Self::SlackDms => "DMs",
+            Self::SlackHome => "Home",
+            Self::LinearInbox => "Inbox",
+            Self::LinearMyIssues => "My issues",
+        }
+    }
+
+    const fn labels(self) -> &'static [&'static str] {
+        match self {
+            Self::SlackActivity => &["activity"],
+            Self::SlackDms => &["dms", "direct messages"],
+            Self::SlackHome => &["home"],
+            Self::LinearInbox => &["inbox"],
+            Self::LinearMyIssues => &["my issues"],
+        }
+    }
+
+    /// The last view read when the others list nothing: what is there now.
+    pub const fn latest(self) -> bool {
+        matches!(self, Self::SlackHome | Self::LinearMyIssues)
+    }
+}
+
+/// The views a view read goes through, in order, for what its goal asks: a
+/// person's new messages or issues first, then the latest ones. None when
+/// the goal names its own place (a channel), which the page itself shows.
+pub fn app_views(app: DailyApp, goal: &str) -> &'static [AppView] {
+    use AppView::*;
+    let goal = goal.to_ascii_lowercase();
+    let says = |words: &[&str]| words.iter().any(|word| goal.contains(word));
+    match app {
+        DailyApp::Slack if says(&["#", " channel "]) && !says(&["unread", "new", "activity"]) => {
+            &[]
+        }
+        DailyApp::Slack if says(&["dm", "direct message"]) => &[SlackDms, SlackActivity, SlackHome],
+        DailyApp::Slack => &[SlackActivity, SlackDms, SlackHome],
+        DailyApp::Linear
+            if says(&["my issues", "assigned"]) && !says(&["inbox", "notification"]) =>
+        {
+            &[LinearMyIssues, LinearInbox]
+        }
+        DailyApp::Linear => &[LinearInbox, LinearMyIssues],
+        _ => &[],
+    }
+}
+
+/// The control that opens a view: a rail button, sidebar link, tab or
+/// tree row named for it, outside any dialog, that can be clicked.
+pub fn app_view_control(
+    observation: &SemanticObservation,
+    view: AppView,
+) -> Option<SemanticReferenceId> {
+    let frame = observation.frames().first()?;
+    let nodes = frame.nodes();
+    let in_dialog = |index: usize| {
+        let mut cursor = nodes[index].parent().map(usize::from);
+        for _ in 0..nodes.len() {
+            let Some(at) = cursor.filter(|at| *at < nodes.len()) else {
+                return false;
+            };
+            if nodes[at].role() == SemanticRole::Dialog {
+                return true;
+            }
+            cursor = nodes[at].parent().map(usize::from);
+        }
+        false
+    };
+    nodes
+        .iter()
+        .enumerate()
+        .find(|(index, node)| {
+            matches!(
+                node.role(),
+                SemanticRole::Button
+                    | SemanticRole::Link
+                    | SemanticRole::Tab
+                    | SemanticRole::MenuItem
+                    | SemanticRole::Option
+                    | SemanticRole::ListItem
+            ) && node.operations().contains(SemanticOperationClass::Click)
+                && !node.states().contains(SemanticState::Disabled)
+                && node.sensitivity() == SemanticSensitivity::Public
+                && [node.name(), node.text()]
+                    .into_iter()
+                    .flatten()
+                    .any(|words| names_view(words.as_str(), view))
+                && !in_dialog(*index)
+        })
+        .map(|(_, node)| node.reference())
+}
+
+/// "Activity", "Inbox 3", "DMs, 2 unread": a control named for the view.
+fn names_view(words: &str, view: AppView) -> bool {
+    let words = words.trim().to_ascii_lowercase();
+    view.labels().iter().any(|label| {
+        words == *label
+            || words
+                .strip_prefix(label)
+                .is_some_and(|rest| rest.starts_with([' ', ',', '(', '·']))
+                && words.len() <= label.len() + 24
+    })
+}
+
 /// One record the view shows: its root and its text-bearing nodes.
 struct Row {
     nodes: Vec<(SemanticReferenceId, String)>,
+    /// Some node of the row names when it happened.
+    timed: bool,
+    /// Some node of the row names an issue by its key (ENG-142).
+    keyed: bool,
 }
 
 impl Row {
@@ -131,11 +259,30 @@ fn rows(observation: &SemanticObservation, app: Option<DailyApp>) -> Vec<Row> {
                 .flatten()
                 .map(str::to_owned)
         };
-        let row_of = |root: usize| Row {
-            nodes: (root..nodes.len())
+        let row_of = |root: usize| {
+            let members: Vec<usize> = (root..nodes.len())
                 .take_while(|index| *index == root || inside(*index, root))
-                .filter_map(|index| readable(index).map(|text| (nodes[index].reference(), text)))
-                .collect(),
+                .collect();
+            let words = || {
+                members.iter().flat_map(|index| {
+                    let node = &nodes[*index];
+                    [node.name(), node.text()]
+                        .into_iter()
+                        .flatten()
+                        .map(SemanticText::as_str)
+                        .filter(move |_| node.sensitivity() == SemanticSensitivity::Public)
+                })
+            };
+            Row {
+                nodes: members
+                    .iter()
+                    .filter_map(|index| {
+                        readable(*index).map(|text| (nodes[*index].reference(), text))
+                    })
+                    .collect(),
+                timed: words().any(|text| names_a_time(text) || names_a_day(text)),
+                keyed: words().any(names_an_issue),
+            }
         };
         let in_dialog = |index: usize| {
             let mut cursor = parents[index];
@@ -183,6 +330,7 @@ fn rows(observation: &SemanticObservation, app: Option<DailyApp>) -> Vec<Row> {
                 .into_iter()
                 .map(row_of)
                 .filter(|row| row.text().chars().count() >= MIN_ROW_CHARS)
+                .filter(|row| record_of(app, row))
                 .collect();
             if rows.len() < 2 {
                 continue;
@@ -204,6 +352,71 @@ fn rows(observation: &SemanticObservation, app: Option<DailyApp>) -> Vec<Row> {
     }
     rows.truncate(MAX_ROWS);
     rows
+}
+
+/// A row the app shows as a record: a Slack message or activity names when
+/// it happened (a welcome or promo card does not); a Linear row names its
+/// issue's key. Other apps' rows stand as they are.
+fn record_of(app: Option<DailyApp>, row: &Row) -> bool {
+    match app {
+        Some(DailyApp::Slack) => row.timed,
+        Some(DailyApp::Linear) => row.keyed,
+        _ => true,
+    }
+}
+
+/// "Today", "Yesterday", "Sep 28", "Monday", "2h", "5 minutes ago": the
+/// words of a day or an age.
+fn names_a_day(text: &str) -> bool {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    const DAYS: [&str; 7] = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ];
+    let lower = text.to_ascii_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.iter().enumerate().any(|(at, word)| {
+        let next_is_day = words
+            .get(at + 1)
+            .is_some_and(|next| next.len() <= 2 && next.bytes().all(|b| b.is_ascii_digit()));
+        matches!(*word, "today" | "yesterday" | "ago")
+            || (*word == "just" && words.get(at + 1) == Some(&"now"))
+            || DAYS.contains(word)
+            || (MONTHS.iter().any(|month| word.starts_with(month))
+                && word.len() <= 9
+                && next_is_day)
+            || (word.len() >= 2
+                && word.len() <= 3
+                && matches!(word.as_bytes()[word.len() - 1], b'm' | b'h' | b'd' | b'w')
+                && word[..word.len() - 1].bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// "ENG-142", "LIN-7": an issue tracker's key.
+fn names_an_issue(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .any(|word| {
+            let Some((team, number)) = word.split_once('-') else {
+                return false;
+            };
+            (2..=7).contains(&team.len())
+                && team.as_bytes()[0].is_ascii_uppercase()
+                && team
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+                && (1..=6).contains(&number.len())
+                && number.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 /// "10:30", "10am", "3:15 PM", "14.00": the words of an event's time.
@@ -326,7 +539,101 @@ pub fn read_app_view<'a>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::capture::observation_of;
     use super::*;
+
+    fn texts(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(Row::text).collect()
+    }
+
+    #[test]
+    fn slack_reads_messages_and_leaves_welcome_cards() {
+        let page = json!({"v": SEMANTIC_WIRE_VERSION, "c": "complete", "n": [
+            {"k": 1, "r": "document", "n": "general (Channel) - Acme - Slack"},
+            {"k": 2, "p": 0, "r": "button", "n": "Activity", "o": 1},
+            {"k": 3, "p": 0, "r": "list", "n": "Get started"},
+            {"k": 4, "p": 2, "r": "list_item"},
+            {"k": 5, "p": 3, "r": "paragraph", "t": "Add your company handbook to a canvas"},
+            {"k": 6, "p": 2, "r": "list_item"},
+            {"k": 7, "p": 5, "r": "paragraph", "t": "Invite your teammates to collaborate here"},
+            {"k": 8, "p": 2, "r": "list_item"},
+            {"k": 9, "p": 7, "r": "paragraph", "t": "Connect the tools your team already uses daily"},
+            {"k": 10, "p": 0, "r": "list", "n": "general (channel)"},
+            {"k": 11, "p": 9, "r": "list_item"},
+            {"k": 12, "p": 10, "r": "button", "t": "Person A", "o": 1},
+            {"k": 13, "p": 10, "r": "link", "n": "Today at 9:14:02 AM", "t": "9:14 AM", "o": 1},
+            {"k": 14, "p": 10, "r": "paragraph", "t": "Message text one"},
+            {"k": 15, "p": 9, "r": "list_item"},
+            {"k": 16, "p": 14, "r": "button", "t": "Person B", "o": 1},
+            {"k": 17, "p": 14, "r": "link", "n": "Yesterday at 5:48:10 PM", "t": "5:48 PM", "o": 1},
+            {"k": 18, "p": 14, "r": "paragraph", "t": "Message text two"},
+        ]});
+        let look = observation_of("https://app.slack.com/client/T1/C2", &page);
+        let rows = rows(&look, Some(DailyApp::Slack));
+        assert_eq!(
+            texts(&rows),
+            [
+                "Person A · 9:14 AM · Message text one",
+                "Person B · 5:48 PM · Message text two"
+            ]
+        );
+        assert!(app_view_control(&look, AppView::SlackActivity).is_some());
+        assert_eq!(app_view_control(&look, AppView::SlackDms), None);
+    }
+
+    #[test]
+    fn linear_reads_issue_rows_by_their_key() {
+        let page = json!({"v": SEMANTIC_WIRE_VERSION, "c": "complete", "n": [
+            {"k": 1, "r": "document", "n": "My issues"},
+            {"k": 2, "p": 0, "r": "link", "n": "Inbox 3", "o": 1},
+            {"k": 3, "p": 0, "r": "link", "n": "My issues", "o": 1},
+            {"k": 4, "p": 0, "r": "group"},
+            {"k": 5, "p": 3, "r": "link", "t": "ENG-142 Offline sync loses edits after a conflict", "o": 1},
+            {"k": 6, "p": 3, "r": "link", "t": "ENG-151 Settings page flickers on resize", "o": 1},
+            {"k": 7, "p": 3, "r": "link", "t": "Try Linear Asks for your whole team", "o": 1},
+        ]});
+        let look = observation_of("https://linear.app/acme/my-issues/assigned", &page);
+        assert_eq!(texts(&rows(&look, Some(DailyApp::Linear))).len(), 2);
+        assert!(app_view_control(&look, AppView::LinearInbox).is_some());
+    }
+
+    #[test]
+    fn a_goal_chooses_the_views_it_reads_first() {
+        use AppView::*;
+        assert_eq!(
+            app_views(DailyApp::Slack, "What's new in my Slack"),
+            [SlackActivity, SlackDms, SlackHome]
+        );
+        assert_eq!(
+            app_views(DailyApp::Slack, "Unread direct messages")[0],
+            SlackDms
+        );
+        assert!(app_views(DailyApp::Slack, "Summarise #launch today").is_empty());
+        assert_eq!(
+            app_views(DailyApp::Linear, "What's in my Linear")[0],
+            LinearInbox
+        );
+        assert_eq!(
+            app_views(DailyApp::Linear, "Issues assigned to me")[0],
+            LinearMyIssues
+        );
+        assert!(app_views(DailyApp::Gmail, "Unread mail").is_empty());
+        for day in [
+            "Today",
+            "Yesterday at 5:48 PM",
+            "Sep 28",
+            "Monday",
+            "2h",
+            "5 minutes ago",
+        ] {
+            assert!(names_a_day(day), "{day}");
+        }
+        for other in ["Add company handbook", "Say hi", "Home", "Channel 2"] {
+            assert!(!names_a_day(other), "{other}");
+        }
+        assert!(names_an_issue("ENG-142 Offline sync"));
+        assert!(!names_an_issue("Wi-Fi e-mail COVID-19x"));
+    }
 
     #[test]
     fn daily_apps_are_known_by_host_and_events_by_their_time() {
