@@ -94,6 +94,8 @@ mod search_providers;
 mod startup_styles;
 #[cfg(feature = "work-product")]
 mod work_activity;
+#[cfg(feature = "work-integration-qa")]
+mod work_captures;
 mod work_connections;
 mod work_decision;
 #[cfg(feature = "work-development-traces")]

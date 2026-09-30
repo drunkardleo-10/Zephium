@@ -2318,6 +2318,27 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let look = Self::observe_page(state, worker, browser).await?;
+        Self::capture_app_view(state, &look);
+        Ok(look)
+    }
+
+    /// QA builds keep a daily app's views as reader fixtures.
+    fn capture_app_view(state: &WorkState, look: &SemanticObservation) {
+        let Some(browser) = state.native.retained.as_ref() else {
+            return;
+        };
+        let page = browser.binding().document().as_url();
+        if let Some(app) = page.host_str().and_then(zephium_agentic::DailyApp::of) {
+            zephium_agentic::captured_app_view(app, page, look);
+        }
+    }
+
+    async fn observe_page(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
         state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
         if state
             .native
@@ -2606,7 +2627,10 @@ impl AgentWorkController {
             {
                 Ok(initial)
             }
-            Ok(page) => Ok(page),
+            Ok(page) => {
+                Self::capture_app_view(state, &page);
+                Ok(page)
+            }
             Err(AgentWorkFailure::InspectionAnchorLost) => Ok(initial),
             Err(error) => Err(error),
         }
@@ -3432,7 +3456,10 @@ impl AgentWorkController {
                 )
                 .await
             {
-                Ok(look) => look,
+                Ok(look) => {
+                    Self::capture_app_view(state, &look);
+                    look
+                }
                 Err(AgentWorkFailure::InspectionAnchorLost) => base,
                 Err(error) => return Err(error),
             };

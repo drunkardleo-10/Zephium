@@ -33,6 +33,8 @@ pub(crate) fn install(
     use zephium_core::ports::store::Store;
     #[cfg(feature = "work-development-traces")]
     super::work_diagnostics::install(app);
+    #[cfg(feature = "work-integration-qa")]
+    super::work_captures::install(app);
     let ai_enabled = store.app_setting("ai.enabled").as_deref() != Some("false");
     let work_enabled = store.app_setting("work.enabled").as_deref() != Some("false");
     let providers = std::sync::Arc::new(super::work_provider::WorkProviders::new(

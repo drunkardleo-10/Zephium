@@ -53,6 +53,18 @@ impl DailyApp {
             _ => return None,
         })
     }
+
+    /// The app's own lowercase name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Slack => "slack",
+            Self::Gmail => "gmail",
+            Self::Calendar => "calendar",
+            Self::Linear => "linear",
+            Self::Notion => "notion",
+            Self::GitHub => "github",
+        }
+    }
 }
 
 /// One record the view shows: its root and its text-bearing nodes.

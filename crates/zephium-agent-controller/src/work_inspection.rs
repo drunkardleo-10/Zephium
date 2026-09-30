@@ -92,6 +92,7 @@ impl AgentWorkController {
             };
             Self::capture_once(state, worker, browser, request, frame.frame().clone()).await?
         };
+        Self::capture_app_view(state, &current);
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let captured_at = SemanticCaptureInstant::from_millis(

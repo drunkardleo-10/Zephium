@@ -10,12 +10,16 @@ use zephium_core::work::{planning::WorkPlanningError, runtime::WorkExecutionLimi
 use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RESPONSE_BYTES};
 
 mod apps;
+mod capture;
 mod link;
 mod projection;
 mod read;
 mod rows;
 mod search;
 pub use apps::{read_app_view, DailyApp};
+#[cfg(feature = "probe-harness")]
+pub use capture::capture_app_views;
+pub use capture::{app_view_wire, captured_app_view, AppViewSink};
 pub use projection::{
     DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError,

@@ -746,7 +746,7 @@ pub fn encode_semantic_action_runtime_invocation(
     })
 }
 
-const fn semantic_role_wire(role: SemanticRole) -> &'static str {
+pub(crate) const fn semantic_role_wire(role: SemanticRole) -> &'static str {
     match role {
         SemanticRole::Group => "group",
         SemanticRole::Document => "document",
