@@ -2623,6 +2623,14 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             _ => rejected_operation(),
         };
     }
+    // Site protection acts on the frame's focused page state.
+    if matches!(id, PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND) {
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     // Capture belongs to the frame, which decides where the new note opens.
     if id == "note.new" {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
@@ -3372,7 +3380,14 @@ fn tab_menu_popup(
 
 #[tauri::command]
 #[specta::specta]
-fn sidebar_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
+fn sidebar_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    site_protected: Option<bool>,
+    can_hide: bool,
+) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "sidebar_menu_popup") {
         return false;
     }
@@ -3394,7 +3409,7 @@ fn sidebar_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
         return false;
     };
     let keymap = load_keymap();
-    let Ok(menu) = build_sidebar_menu(&app, &keymap) else {
+    let Ok(menu) = build_sidebar_menu(&app, &keymap, site_protected, can_hide) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -3773,6 +3788,9 @@ const SIDEBAR_MENU_COMMAND_IDS: [&str; 4] = [
     SIDEBAR_COMPACT_COMMAND,
 ];
 
+const PROTECTION_SITE_COMMAND: &str = "protection.site";
+const PROTECTION_HIDE_COMMAND: &str = "protection.hide";
+
 const TAB_MENU_ACTION_IDS: [&str; 4] = [
     "tabmenu.reload",
     "tabmenu.copyLink",
@@ -3780,11 +3798,17 @@ const TAB_MENU_ACTION_IDS: [&str; 4] = [
     "tabmenu.close",
 ];
 
+/// `site_protected` is the page's protection standing, absent where site
+/// controls do not apply; the frame owns both actions.
 fn build_sidebar_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
+    site_protected: Option<bool>,
+    can_hide: bool,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, PredefinedMenuItem};
+    use tauri::menu::{
+        CheckMenuItemBuilder, IsMenuItem, Menu, MenuItemBuilder, PredefinedMenuItem,
+    };
 
     let resolved = zephium_core::commands::resolve(overrides);
     let back = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[0])?;
@@ -3793,9 +3817,27 @@ fn build_sidebar_menu(
     let compact = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[3])?;
     let separator = PredefinedMenuItem::separator(handle)?;
 
+    let protection = match site_protected {
+        Some(protected) => Some((
+            PredefinedMenuItem::separator(handle)?,
+            CheckMenuItemBuilder::with_id(PROTECTION_SITE_COMMAND, "Block Ads and Trackers")
+                .checked(protected)
+                .build(handle)?,
+            MenuItemBuilder::with_id(PROTECTION_HIDE_COMMAND, "Hide Elements…")
+                .enabled(can_hide)
+                .build(handle)?,
+        )),
+        None => None,
+    };
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&back, &forward, &reload];
+    if let Some((rule, site, hide)) = &protection {
+        items.extend([rule as &dyn IsMenuItem<tauri::Wry>, site, hide]);
+    }
+    items.extend([&separator as &dyn IsMenuItem<tauri::Wry>, &compact]);
+
     #[cfg(target_os = "macos")]
     {
-        Menu::with_items(handle, &[&back, &forward, &reload, &separator, &compact])
+        Menu::with_items(handle, &items)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -3803,20 +3845,13 @@ fn build_sidebar_menu(
         let minimize = PredefinedMenuItem::minimize(handle, None)?;
         let maximize = PredefinedMenuItem::maximize(handle, None)?;
         let close = PredefinedMenuItem::close_window(handle, None)?;
-        Menu::with_items(
-            handle,
-            &[
-                &back,
-                &forward,
-                &reload,
-                &separator,
-                &compact,
-                &window_separator,
-                &minimize,
-                &maximize,
-                &close,
-            ],
-        )
+        items.extend([
+            &window_separator as &dyn IsMenuItem<tauri::Wry>,
+            &minimize,
+            &maximize,
+            &close,
+        ]);
+        Menu::with_items(handle, &items)
     }
 }
 

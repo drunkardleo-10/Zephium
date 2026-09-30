@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Shield01Icon } from "@hugeicons/core-free-icons";
+  import { SecurityCheckIcon } from "@hugeicons/core-free-icons";
   import { blocker } from "$domain/blocker";
   import { shieldPresentation } from "$domain/blocker";
   import Icon from "$shared/ui/Icon";
@@ -43,7 +43,7 @@
     role="status"
   >
     <span class="flex h-4 w-4 items-center justify-center" class:opacity-40={shield.blocked}
-      ><Icon icon={Shield01Icon} size={14} /></span
+      ><Icon icon={SecurityCheckIcon} size={14} /></span
     >{shield.label}
   </span>
 {:else if shield.visible}
@@ -56,6 +56,6 @@
     role="img"
     aria-label={shield.label}
   >
-    <Icon icon={Shield01Icon} size={14} />
+    <Icon icon={SecurityCheckIcon} size={14} />
   </span>
 {/if}

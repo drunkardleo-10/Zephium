@@ -139,3 +139,14 @@ export function diagnosticLabel(value: string): string {
     .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
     .join(" ");
 }
+
+/** What the native "More" menu shows for the focused page, if anything. */
+export function siteMenuState(status: BlockerStatusView): {
+  siteProtected: boolean | null;
+  canHide: boolean;
+} {
+  const site = status.site;
+  if (!site || status.protection === "unavailable") return { siteProtected: null, canHide: false };
+  const on = status.applied_enabled === true;
+  return { siteProtected: on && !site.paused, canHide: on && site.ready && !site.busy };
+}

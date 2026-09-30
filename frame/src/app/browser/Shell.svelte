@@ -24,7 +24,7 @@
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
   import { blocker } from "$domain/blocker";
-  import { BlockerShield, HidingBar, ProtectionStack } from "$features/blocker";
+  import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
   import { preview } from "$features/settings";
   import { onMount } from "svelte";
@@ -149,6 +149,8 @@
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
       if (command.id === "extensions.manage") void browserPage.open("extensions");
+      if (command.id === "protection.site") void toggleSiteProtection();
+      if (command.id === "protection.hide") void hideElements();
     });
   });
   function selectTab(id: string) {
@@ -206,9 +208,9 @@
         <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
       {/if}
     {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
-          {#snippet extensions()}<ProtectionStack /><ExtensionActions
+          {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
               variant="stack"
-            /><ManageExtensions variant="stack" />{/snippet}
+            />{/snippet}
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
               onSelect={selectTab}

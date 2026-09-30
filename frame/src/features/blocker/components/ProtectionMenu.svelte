@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowRight01Icon, Cancel01Icon, Shield01Icon } from "@hugeicons/core-free-icons";
+  import { ArrowRight01Icon, Cancel01Icon, SecurityCheckIcon } from "@hugeicons/core-free-icons";
   import { blocker, blockerSites, hiding, shieldPresentation } from "$domain/blocker";
   import type { BlockerSiteAction } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
@@ -50,9 +50,7 @@
           ? "Protection needs attention"
           : site?.paused
             ? "Paused on this site"
-            : blockedToday
-              ? `${blockedToday.toLocaleString()} ads and trackers blocked today`
-              : "Blocking ads and trackers",
+            : `${(blockedToday ?? 0).toLocaleString()} blocked today`,
   );
   let active = $derived(status.protection === "active" && !site?.paused);
 
@@ -117,7 +115,7 @@
             : ""}</span
         >
         <span class="standing" class:active class:warning={shield.tone === "warning"}>
-          <Icon icon={Shield01Icon} size={12} />
+          <Icon icon={SecurityCheckIcon} size={12} />
           <span>{standing}</span>
         </span>
       </span>
@@ -222,7 +220,7 @@
     class:warning={shield.tone === "warning"}
     title={shield.label}
     role="img"
-    aria-label={shield.label}><Icon icon={Shield01Icon} size={14} /></span
+    aria-label={shield.label}><Icon icon={SecurityCheckIcon} size={14} /></span
   >
 {/if}
 
