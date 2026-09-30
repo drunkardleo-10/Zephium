@@ -14,7 +14,7 @@ tools: [day_sources, list_tasks, start_part, create, finish]
   - **Gmail**: mail from the last two days that asks something of the person; skip newsletters and notifications.
   - **Slack**: unread direct messages, mentions and threads waiting on them.
   - **Linear**, **GitHub**, **Notion**: what is assigned to them and due or waiting on them.
-- Meanwhile call list_tasks (view today) for their Zephium tasks when day_sources includes them.
+- Meanwhile call list_tasks for their Zephium tasks when day_sources includes them: every open task, overdue and today's first, then upcoming and undated; plan today's and overdue ones, and list the rest only when they fit the day.
 - These parts read the person's own accounts; the app asks them first. Never put their messages' text into a search.
 
 ## Result

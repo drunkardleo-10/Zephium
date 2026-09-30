@@ -77,7 +77,60 @@ const BUILTIN: &[&str] = &[
     include_str!("../../skills/market-map/SKILL.md"),
     include_str!("../../skills/pricing-research/SKILL.md"),
     include_str!("../../skills/investor-list/SKILL.md"),
+    include_str!("../../skills/show-what-you-can-do/SKILL.md"),
 ];
+
+/// Skills that read the person's own apps and day; offered only when the
+/// request is about them.
+const PERSONAL: [&str; 5] = [
+    "plan-my-day",
+    "today-from-my-messages",
+    "inbox-triage",
+    "meeting-prep",
+    "weekly-status",
+];
+
+/// The skills a request is offered: every skill, less the ones that read the
+/// person's own apps when the request is not about their apps or their day.
+/// A workflow the person started keeps its own skill.
+pub fn for_request(skills: Vec<Skill>, request: &str, started: Option<&str>) -> Vec<Skill> {
+    if about_own_apps(request) {
+        return skills;
+    }
+    skills
+        .into_iter()
+        .filter(|skill| !PERSONAL.contains(&skill.name.as_str()) || started == Some(&skill.name))
+        .collect()
+}
+
+/// "Plan my day", "what's new in my Slack", "my inbox", "prep my next meeting".
+fn about_own_apps(request: &str) -> bool {
+    const PHRASES: [&str; 14] = [
+        "my day",
+        "today",
+        "tomorrow",
+        "this week",
+        "my inbox",
+        "my mail",
+        "my email",
+        "my messages",
+        "my calendar",
+        "my meeting",
+        "next meeting",
+        "my tasks",
+        "to do",
+        "unread",
+    ];
+    const APPS: [&str; 10] = [
+        "slack", "gmail", "mail", "inbox", "calendar", "linear", "notion", "github", "standup",
+        "status",
+    ];
+    let request = request.to_lowercase();
+    PHRASES.iter().any(|phrase| request.contains(phrase))
+        || request
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| APPS.contains(&word) || word == "todo" || word == "todos")
+}
 
 pub fn builtins() -> Vec<Skill> {
     BUILTIN
@@ -242,6 +295,36 @@ mod tests {
         ] {
             assert_eq!(parse(text), Err(fault), "{text}");
         }
+    }
+
+    #[test]
+    fn skills_that_read_the_persons_apps_are_offered_only_for_them() {
+        let names = |request: &str, started: Option<&str>| -> Vec<String> {
+            for_request(builtins(), request, started)
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect()
+        };
+        let open = names("Show me the best that you can do", None);
+        assert!(!open.iter().any(|name| name == "plan-my-day"));
+        assert!(open.iter().any(|name| name == "show-what-you-can-do"));
+        for mine in [
+            "Plan my day",
+            "What's new in my Slack?",
+            "Go through my inbox",
+            "Prep my next meeting",
+        ] {
+            assert!(
+                names(mine, None).iter().any(|name| name == "plan-my-day"),
+                "{mine}"
+            );
+        }
+        assert!(names("Hi", Some("plan-my-day"))
+            .iter()
+            .any(|name| name == "plan-my-day"));
+        assert!(!names("Compare Vercel and Hetzner", None)
+            .iter()
+            .any(|name| name == "inbox-triage"));
     }
 
     #[test]

@@ -298,7 +298,11 @@ impl WorkLeadService {
             search,
             &shared,
             lead_hands,
-            skills::load(profile),
+            if continues(&objective) {
+                skills::load(profile)
+            } else {
+                skills::for_request(skills::load(profile), &objective, grant.skill.as_deref())
+            },
             objective,
             context,
             memory,
