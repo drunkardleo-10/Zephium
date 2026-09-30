@@ -269,6 +269,12 @@ impl Shell {
             if !statistics.active() {
                 continue;
             }
+            // Persist already collected totals before relying on a final UI
+            // dispatch. A new-tab query may have drained every native counter.
+            statistics.collect(profile, &self.store, true);
+            if !statistics.counter.1.load(Ordering::Relaxed) {
+                continue;
+            }
             let statistics = statistics.clone();
             let store = self.store.clone();
             let (send, receive) = std::sync::mpsc::sync_channel(1);

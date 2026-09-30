@@ -202,6 +202,9 @@ The existing maintenance cycle collects dirty counters and writes at most once
 per 60 seconds, plus a final shutdown flush. Batches belong to their collection
 day, including across midnight, clock corrections and sleep. Private counts stay
 in memory; browsing-data clearing and profile deletion erase the totals.
+The Quit menu and Cmd+Q enter the coordinated shutdown path so the final flush
+runs before the store closes. Native QA verified saved totals after quitting and
+reopening; Dock Quit and OS termination have not been separately qualified.
 
 `blocker_stats(profile)` returns `today`, `last7Days`, and seven `days` values,
 oldest first. Only the focused profile is queryable. New Tab queries on show,

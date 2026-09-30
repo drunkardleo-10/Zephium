@@ -46,7 +46,8 @@ It must identify as **Zephium Protection QA**, `app.zephium.protection-qa`.
 The QA feature requires an optimized debug build and is refused in release builds; use the
 normal release graph in a separately isolated measurement environment for
 performance qualification. Do not disable that guard to manufacture a QA release.
-New profiles currently default to off; enable from Utilities or Privacy settings.
+Protection defaults to on for new profiles. Verify the existing-profile migration
+also enables it; use Utilities or Privacy settings for the disabled control run.
 
 Three existing Windows engine Clippy findings were observed during cross-check:
 `download_files_windows.rs` redundant boolean conversion and test-module ordering,

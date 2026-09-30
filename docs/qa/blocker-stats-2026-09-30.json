@@ -104,14 +104,16 @@
     "native_qa": [
       "New Tab showed 0 initially, then 1 after one blocked fixture load",
       "Paused reload loaded the ad resource and the count stayed at 1",
-      "Fresh-load waiting and explicit new-profile zero fixed after native QA"
+      "Fresh-load waiting and explicit new-profile zero fixed after native QA",
+      "Quit menu and Cmd+Q now use coordinated shutdown; after Cmd+Q the closed profile database contained 21 and the reopened New Tab displayed 21",
+      "Dock Quit and OS termination have not been separately qualified"
     ]
   },
   "verification": {
     "rust_tests": {
       "app": 336,
       "core": 213,
-      "desktop": 106,
+      "desktop": 107,
       "engine": 206,
       "ipc": 1,
       "store": 224
@@ -119,7 +121,7 @@
     "clippy_all_touched_crates": "passed -D warnings",
     "frame": "check/build/style checks passed; 295 unit tests",
     "windows_engine_cross_check": "passed before generated-cache cleanup; runtime qualification pending",
-    "qa_binary_sha256": "abaab8d51a07db5589addd03d5baf396fbea450da3c6ea28321c6ecd0b37f3b1",
+    "qa_binary_sha256": "576baa610536453eeffb98deeeaf5502dec4505541a68242b3c9191486434ee8",
     "instrumentation_removed": true
   }
 }

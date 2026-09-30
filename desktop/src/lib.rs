@@ -2596,6 +2596,10 @@ fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
 }
 
 fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAdmission {
+    if id == "browser.quit" {
+        app.exit(0);
+        return accepted_ui_operation();
+    }
     if shutdown_started(app) {
         return rejected_operation();
     }
@@ -3647,6 +3651,16 @@ fn build_command_menu_item_enabled(
     builder.build(handle)
 }
 
+fn build_quit_menu_item(
+    handle: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    // Native terminate: bypasses Tauri's ExitRequested path on macOS.
+    // An ordinary menu event reaches the existing draft/store shutdown barrier.
+    tauri::menu::MenuItemBuilder::with_id("browser.quit", "Quit Zephium")
+        .accelerator("CmdOrCtrl+Q")
+        .build(handle)
+}
+
 fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
@@ -3670,7 +3684,7 @@ fn build_menu(
         .hide_others()
         .show_all()
         .separator()
-        .quit()
+        .item(&build_quit_menu_item(handle)?)
         .build()?;
     let file = SubmenuBuilder::new(handle, "File")
         .item(&item("tab.new")?)
@@ -3883,7 +3897,7 @@ fn build_profile_menu(
     let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
         .accelerator("CmdOrCtrl+,")
         .build(handle)?;
-    let quit = PredefinedMenuItem::quit(handle, None)?;
+    let quit = build_quit_menu_item(handle)?;
     Menu::with_items(
         handle,
         &[
@@ -5012,6 +5026,15 @@ mod tests {
             outcome: OperationOutcome::Applied,
             reason: OperationReason::ProfileDeletionCompleted,
         }
+    }
+
+    #[test]
+    fn quit_menus_use_the_coordinated_exit_request() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!source.contains(".quit()"));
+        assert!(!source.contains("PredefinedMenuItem::quit"));
+        assert!(source.contains("if id == \"browser.quit\""));
+        assert!(source.contains("app.exit(0)"));
     }
 
     #[test]
