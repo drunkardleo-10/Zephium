@@ -162,6 +162,30 @@ async fn history(
     }
 }
 
+/// Pages visited in `[since, until)`, newest first, each address once.
+async fn recent_history(
+    handle: &crate::Handle,
+    profile: ProfileId,
+    since: i64,
+    until: i64,
+    limit: u16,
+) -> Result<Vec<WorkHistoryHit>, WorkError> {
+    match call(
+        handle,
+        profile,
+        WorkPersonalRequest::RecentHistory {
+            since,
+            until,
+            limit,
+        },
+    )
+    .await?
+    {
+        WorkPersonalReply::History(hits) => Ok(hits),
+        _ => Err(WorkError::Invalid),
+    }
+}
+
 /// What the lead's prompt says it knows about the person before it recalls
 /// anything: the facts used or kept most recently, one per line, bounded.
 /// `None` when nothing is remembered.

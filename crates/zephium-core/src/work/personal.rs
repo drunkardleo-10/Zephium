@@ -10,6 +10,8 @@ pub const MAX_WORK_MEMORY_CHARS: usize = 280;
 pub const MAX_WORK_MEMORY_PAGE: u16 = 500;
 pub const MAX_WORK_RECALL_QUERY_BYTES: usize = 256;
 pub const MAX_WORK_HISTORY_HITS: u16 = 12;
+/// Pages one look at recent history returns, one per address.
+pub const MAX_WORK_RECENT_HISTORY: u16 = 40;
 
 /// What kind of thing a memory is; the canvas and Settings group by it.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -154,6 +156,13 @@ pub enum WorkPersonalRequest {
     },
     SearchHistory {
         query: String,
+        limit: u16,
+    },
+    /// The pages visited in `[since, until)` (unix seconds), newest first,
+    /// each address once.
+    RecentHistory {
+        since: i64,
+        until: i64,
         limit: u16,
     },
 }
@@ -301,6 +310,13 @@ impl WorkPersonalRequest {
                 }
                 Ok(())
             }
+            Self::RecentHistory {
+                since,
+                until,
+                limit,
+            } => (since < until && *limit > 0 && *limit <= MAX_WORK_RECENT_HISTORY)
+                .then_some(())
+                .ok_or(WorkError::Invalid),
             Self::ForgetAll | Self::Consent { .. } => Ok(()),
         }
     }

@@ -184,3 +184,56 @@ fn history_search_returns_titles_and_addresses_only() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].title, "Flights from Warsaw to San Francisco");
 }
+
+#[test]
+fn recent_history_lists_each_page_of_the_day_once_newest_first() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (earlier, yesterday) = (now - 600, now - 86_400 * 2);
+    hub.profile_conn(1.into())
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT INTO history(url, title, visited_at) VALUES
+             ('https://news.ycombinator.com/', 'Hacker News', {yesterday}),
+             ('https://vercel.com/pricing', 'Pricing', {earlier}),
+             ('https://news.ycombinator.com/', 'Hacker News', {earlier}),
+             ('https://vercel.com/pricing', 'Pricing', {now})"
+        ))
+        .unwrap();
+    let mut recent = |since: i64, until: i64| {
+        let WorkPersonalReply::History(hits) = call(
+            &mut hub,
+            WorkPersonalRequest::RecentHistory {
+                since,
+                until,
+                limit: 10,
+            },
+        )
+        .unwrap() else {
+            panic!()
+        };
+        hits.into_iter().map(|hit| hit.url).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        recent(now - 3600, i64::MAX),
+        [
+            "https://vercel.com/pricing",
+            "https://news.ycombinator.com/"
+        ]
+    );
+    assert_eq!(
+        recent(yesterday - 1, now - 3600),
+        ["https://news.ycombinator.com/"]
+    );
+    assert!(WorkPersonalRequest::RecentHistory {
+        since: now,
+        until: now,
+        limit: 10
+    }
+    .validate()
+    .is_err());
+}

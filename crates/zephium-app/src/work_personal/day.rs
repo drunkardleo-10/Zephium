@@ -287,7 +287,7 @@ pub(crate) async fn day_sources(
         });
     }
     if zephium {
-        sources.push(json!({"name": ZEPHIUM, "read": "list_tasks with view today, then search_notes for today's date or meeting names when a note would help"}));
+        sources.push(json!({"name": ZEPHIUM, "read": "list_tasks (open tasks, overdue and today first), then search_notes for today's date or meeting names when a note would help"}));
     }
     if sources.is_empty() {
         return LeadToolOutcome::ok(
@@ -328,9 +328,47 @@ pub fn local_day() -> String {
     super::tools::day(days * 86_400_000)
 }
 
+/// Unix seconds of local midnight `days_ago` days back (0 is today's).
+pub(super) fn local_midnight(days_ago: u32) -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    #[cfg(unix)]
+    {
+        let at = now as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: localtime_r reads `at` and writes only into `tm`; mktime
+        // reads and normalizes only `tm`.
+        if !unsafe { libc::localtime_r(&at, &mut tm) }.is_null() {
+            tm.tm_hour = 0;
+            tm.tm_min = 0;
+            tm.tm_sec = 0;
+            tm.tm_mday -= days_ago as i32;
+            tm.tm_isdst = -1;
+            let midnight = unsafe { libc::mktime(&mut tm) };
+            if midnight >= 0 {
+                return midnight as i64;
+            }
+        }
+    }
+    now - now.rem_euclid(86_400) - i64::from(days_ago) * 86_400
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn midnights_step_back_by_days() {
+        let today = local_midnight(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(today <= now && now - today < 25 * 3600);
+        let yesterday = local_midnight(1);
+        assert!((82_800..=90_000).contains(&(today - yesterday)));
+    }
 
     #[test]
     fn an_answer_names_its_sources() {

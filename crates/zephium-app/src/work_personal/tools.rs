@@ -139,13 +139,14 @@ impl LeadToolSet for PersonalTools {
             },
             WorkModelTool {
                 name: "search_history".into(),
-                description: "Search pages the person visited in this browser, by words in the title or address, most visited and recent first. Use it to find a page they saw before (\"the flight comparison I read last week\"). Returns title, site, address and last visit; never page content. The person is asked once per work.".into(),
+                description: "The person's history in this browser. With query: pages whose title or address has the words, most visited and recent first (\"the flight comparison I read last week\"). Without query: what they visited when (today unless said), newest first, with the tabs open now, for \"check my history\" or \"what did I look at today\". Returns title, site, address and last visit; never page content. The person is asked once per work.".into(),
                 schema: schema(
                     json!({
                         "query": {"type": "string", "maxLength": 200},
+                        "when": {"type": "string", "enum": ["today", "yesterday", "week"], "description": "Without query: which days."},
                         "why": {"type": "string", "maxLength": MAX_WHY_CHARS, "description": WHY},
                     }),
-                    &["query"],
+                    &[],
                 ),
             },
             WorkModelTool {
@@ -172,13 +173,13 @@ impl LeadToolSet for PersonalTools {
             },
             WorkModelTool {
                 name: "list_tasks".into(),
-                description: "The person's own tasks in Zephium: today's and overdue ones (today) or the coming ones (upcoming), with due date and time, priority, status and list. Use it for their day, their tasks, what is due. Asked under the notes question, once per work.".into(),
+                description: "The person's own open tasks in Zephium, overdue and today's first, then upcoming, then those without a date, each with when (overdue, today, upcoming, no date), due date and time, priority, status and list. Use it for their day, their tasks, what is due. view narrows it to today (with overdue) or upcoming only. Asked under the notes question, once per work.".into(),
                 schema: schema(
                     json!({
-                        "view": {"type": "string", "enum": ["today", "upcoming"]},
+                        "view": {"type": "string", "enum": ["all", "today", "upcoming"]},
                         "why": {"type": "string", "maxLength": MAX_WHY_CHARS, "description": WHY},
                     }),
-                    &["view"],
+                    &[],
                 ),
             },
             WorkModelTool {
@@ -334,7 +335,7 @@ async fn allowed(
 
 async fn search_history(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolOutcome {
     let Some(query) = text_arg(arguments, "query").filter(|q| !q.is_empty()) else {
-        return LeadToolOutcome::error("query: required");
+        return recent_history(context, arguments).await;
     };
     let query = clip(query, 200);
     if let Err(outcome) = allowed(context, WorkContextSourceV1::History, arguments).await {
@@ -362,6 +363,88 @@ async fn search_history(context: LeadToolContext<'_>, arguments: &Value) -> Lead
         })
         .collect();
     LeadToolOutcome::ok(json!({ "pages": pages }).to_string())
+}
+
+/// What the person visited today, yesterday or this week, newest first,
+/// and the tabs open now: "check my history" needs no words to search.
+async fn recent_history(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolOutcome {
+    let (since, until, when) = match text_arg(arguments, "when") {
+        Some("yesterday") => (
+            super::day::local_midnight(1),
+            super::day::local_midnight(0),
+            "yesterday",
+        ),
+        Some("week") => (super::day::local_midnight(6), i64::MAX, "this week"),
+        _ => (super::day::local_midnight(0), i64::MAX, "today"),
+    };
+    if let Err(outcome) = allowed(context, WorkContextSourceV1::History, arguments).await {
+        return outcome;
+    }
+    let Ok(hits) = super::recent_history(
+        context.handle(),
+        context.profile(),
+        since,
+        until,
+        MAX_WORK_RECENT_HISTORY,
+    )
+    .await
+    else {
+        return LeadToolOutcome::error("history is unavailable right now; carry on");
+    };
+    context
+        .input(input(WorkInputKindV1::History, "Your history", None))
+        .await;
+    let receiver = context.handle().window_tabs(context.profile());
+    let tabs: Vec<Value> = tokio::task::spawn_blocking(move || receiver.recv_timeout(super::TIMEOUT))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|tab| {
+            let url = tab.url.as_deref()?;
+            url.starts_with("https://").then(|| {
+                json!({"title": clip(&tab.title, 120), "site": host(url), "url": without_fragment(url)})
+            })
+        })
+        .take(MAX_TABS)
+        .collect();
+    let pages: Vec<Value> = hits
+        .iter()
+        .map(|hit| {
+            json!({
+                "title": clip(&hit.title, 120),
+                "site": host(&hit.url),
+                "url": without_fragment(&hit.url),
+                "visited": clock(hit.last_visit),
+            })
+        })
+        .collect();
+    if pages.is_empty() && tabs.is_empty() {
+        return LeadToolOutcome::ok(format!("No page was visited {when}, and no tab is open."));
+    }
+    LeadToolOutcome::ok(json!({"when": when, "pages": pages, "open_tabs": tabs}).to_string())
+}
+
+/// "2026-09-30 14:02" in local time.
+fn clock(unix_seconds: i64) -> String {
+    #[cfg(unix)]
+    {
+        let at = unix_seconds as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: localtime_r reads `at` and writes only into `tm`.
+        if !unsafe { libc::localtime_r(&at, &mut tm) }.is_null() {
+            return format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                tm.tm_hour,
+                tm.tm_min
+            );
+        }
+    }
+    day(unix_seconds.saturating_mul(1000))
 }
 
 async fn notes(
@@ -468,7 +551,8 @@ async fn list_tasks(context: LeadToolContext<'_>, arguments: &Value) -> LeadTool
     };
     let view = match text_arg(arguments, "view") {
         Some("upcoming") => TaskView::Upcoming,
-        _ => TaskView::Today,
+        Some("today") => TaskView::Today,
+        _ => TaskView::All,
     };
     if let Err(outcome) = allowed(context, WorkContextSourceV1::Notes, arguments).await {
         return outcome;
@@ -507,14 +591,23 @@ async fn list_tasks(context: LeadToolContext<'_>, arguments: &Value) -> LeadTool
     context
         .input(input(WorkInputKindV1::Notes, "Your tasks", None))
         .await;
-    if items.is_empty() {
-        return LeadToolOutcome::ok(format!("No open task is due by {today}."));
-    }
-    let tasks: Vec<Value> = items
+    let open: Vec<_> = items
         .iter()
+        .filter(|task| task.completed != Some(true) && task.status != Some(TaskStatus::Done))
+        .collect();
+    if open.is_empty() {
+        return LeadToolOutcome::ok(match view {
+            TaskView::All => "The person has no open task.".to_owned(),
+            TaskView::Upcoming => format!("No open task is due after {today}."),
+            _ => format!("No open task is due by {today}."),
+        });
+    }
+    let tasks: Vec<Value> = open
+        .into_iter()
         .map(|task| {
             let meta = metadata.iter().find(|m| m.id == task.id);
-            let mut out = json!({"title": clip(&task.title, 160)});
+            let when = task_when(task.due_date.as_deref(), &today);
+            let mut out = json!({"title": clip(&task.title, 160), "when": when});
             if let Some(date) = &task.due_date {
                 out["due"] = json!(match &task.due_time {
                     Some(time) => format!("{date} {time}"),
@@ -547,6 +640,16 @@ async fn list_tasks(context: LeadToolContext<'_>, arguments: &Value) -> LeadTool
         })
         .collect();
     LeadToolOutcome::ok(json!({"today": today, "tasks": tasks}).to_string())
+}
+
+/// Where a task stands against today, as the list orders them.
+fn task_when(due: Option<&str>, today: &str) -> &'static str {
+    match due {
+        None => "no date",
+        Some(date) if date < today => "overdue",
+        Some(date) if date == today => "today",
+        Some(_) => "upcoming",
+    }
 }
 
 async fn list_tabs(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolOutcome {
@@ -603,6 +706,15 @@ mod tests {
                 .count()
                 < 180
         );
+    }
+
+    #[test]
+    fn a_task_is_overdue_due_today_upcoming_or_undated() {
+        let today = "2026-09-30";
+        assert_eq!(task_when(Some("2026-09-28"), today), "overdue");
+        assert_eq!(task_when(Some(today), today), "today");
+        assert_eq!(task_when(Some("2026-10-02"), today), "upcoming");
+        assert_eq!(task_when(None, today), "no date");
     }
 
     #[test]

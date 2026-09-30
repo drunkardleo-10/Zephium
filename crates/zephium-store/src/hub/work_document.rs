@@ -103,6 +103,32 @@ impl Hub {
                     .collect();
                 return Ok(WorkReply::Personal(WorkPersonalReply::History(hits)));
             }
+            if let WorkPersonalRequest::RecentHistory {
+                since,
+                until,
+                limit,
+            } = &request
+            {
+                let mut seen = std::collections::BTreeSet::new();
+                let hits = self
+                    .history_page(
+                        profile,
+                        "",
+                        Some(*since),
+                        None,
+                        super::history::MAX_HISTORY_PAGE,
+                    )
+                    .into_iter()
+                    .filter(|visit| visit.visited_at < *until && seen.insert(visit.url.clone()))
+                    .take(usize::from(*limit))
+                    .map(|visit| WorkHistoryHit {
+                        url: visit.url,
+                        title: visit.title,
+                        last_visit: visit.visited_at,
+                    })
+                    .collect();
+                return Ok(WorkReply::Personal(WorkPersonalReply::History(hits)));
+            }
             let conn = self
                 .profile_conn(profile)
                 .map_err(|_| WorkError::Unavailable)?;

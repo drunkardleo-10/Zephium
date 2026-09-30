@@ -248,7 +248,9 @@ pub(super) fn call(
             .map(WorkPersonalReply::Consent)
             .map_err(|_| WorkError::Unavailable)
         }
-        WorkPersonalRequest::SearchHistory { .. } => Err(WorkError::Invalid),
+        WorkPersonalRequest::SearchHistory { .. } | WorkPersonalRequest::RecentHistory { .. } => {
+            Err(WorkError::Invalid)
+        }
     }
 }
 
