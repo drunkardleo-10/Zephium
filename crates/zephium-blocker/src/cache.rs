@@ -1296,63 +1296,128 @@ fn validate_canonical_webkit_payload(
     payload: &[u8],
     expected_rules: usize,
 ) -> Option<(Arc<str>, usize)> {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use std::io::Write;
+
+    // Validate and compare one rule at a time. Rebuilding the whole rule tree
+    // and another full JSON buffer caused large allocation peaks on warm hits.
+    struct Rules<'a> {
+        payload: &'a [u8],
+        expected: usize,
+    }
+    impl<'de> Visitor<'de> for Rules<'_> {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("canonical WebKit network rules")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<usize, A::Error> {
+            let mut writer = CanonicalComparison {
+                bytes: self.payload,
+                offset: 0,
+            };
+            writer.write_all(b"[").map_err(A::Error::custom)?;
+            let mut count = 0usize;
+            let mut blocking = 0usize;
+            let mut exceptions = false;
+            while let Some(rule) = seq.next_element::<CachedWebKitRule>()? {
+                if count >= self.expected || !valid_cached_webkit_rule(&rule) {
+                    return Err(A::Error::custom("invalid cached rule"));
+                }
+                match rule.action.typ {
+                    CachedWebKitActionType::Block if !exceptions => blocking += 1,
+                    CachedWebKitActionType::Block => {
+                        return Err(A::Error::custom("block after exception"))
+                    }
+                    CachedWebKitActionType::IgnorePreviousRules => exceptions = true,
+                }
+                if count != 0 {
+                    writer.write_all(b",").map_err(A::Error::custom)?;
+                }
+                serde_json::to_writer(&mut writer, &rule).map_err(A::Error::custom)?;
+                count += 1;
+            }
+            writer.write_all(b"]").map_err(A::Error::custom)?;
+            if count != self.expected || blocking == 0 || writer.offset != self.payload.len() {
+                return Err(A::Error::custom("invalid cached rule count or encoding"));
+            }
+            Ok(blocking)
+        }
+    }
+    let mut decoder = serde_json::Deserializer::from_slice(payload);
+    let blocking = serde::Deserializer::deserialize_seq(
+        &mut decoder,
+        Rules {
+            payload,
+            expected: expected_rules,
+        },
+    )
+    .ok()?;
+    decoder.end().ok()?;
+    Some((Arc::from(std::str::from_utf8(payload).ok()?), blocking))
+}
+
+#[cfg(feature = "webkit")]
+struct CanonicalComparison<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+#[cfg(feature = "webkit")]
+impl std::io::Write for CanonicalComparison<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let end = self
+            .offset
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("encoding overflow"))?;
+        if self.bytes.get(self.offset..end) != Some(bytes) {
+            return Err(std::io::Error::other("noncanonical cached encoding"));
+        }
+        self.offset = end;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "webkit")]
+fn valid_cached_webkit_rule(rule: &CachedWebKitRule) -> bool {
     const MAX_URL_FILTER_BYTES: usize = 8 * 1024;
     const MAX_PREDICATES_PER_FIELD: usize = 8 * 1024;
-    let rules: Vec<CachedWebKitRule> = serde_json::from_slice(payload).ok()?;
-    if rules.len() != expected_rules || rules.is_empty() {
-        return None;
+    if rule.action.selector.is_some()
+        || rule.trigger.url_filter.is_empty()
+        || rule.trigger.url_filter.len() > MAX_URL_FILTER_BYTES
+        || !rule.trigger.url_filter.is_ascii()
+        || (rule.trigger.if_domain.is_some() && rule.trigger.unless_domain.is_some())
+        || (rule.trigger.if_top_url.is_some() && rule.trigger.unless_top_url.is_some())
+        || !valid_string_predicates(
+            rule.trigger.if_domain.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            255,
+        )
+        || !valid_string_predicates(
+            rule.trigger.unless_domain.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            255,
+        )
+        || !valid_string_predicates(
+            rule.trigger.if_top_url.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            MAX_URL_FILTER_BYTES,
+        )
+        || !valid_string_predicates(
+            rule.trigger.unless_top_url.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            MAX_URL_FILTER_BYTES,
+        )
+        || !unique_bounded(
+            rule.trigger.resource_type.as_deref(),
+            WebKitResourceType::COUNT,
+        )
+        || (!rule.trigger.load_type.is_empty() && !unique_bounded(Some(&rule.trigger.load_type), 2))
+    {
+        return false;
     }
-    let mut blocking_entries = 0usize;
-    let mut exceptions_started = false;
-    for rule in &rules {
-        if rule.action.selector.is_some()
-            || rule.trigger.url_filter.is_empty()
-            || rule.trigger.url_filter.len() > MAX_URL_FILTER_BYTES
-            || !rule.trigger.url_filter.is_ascii()
-            || (rule.trigger.if_domain.is_some() && rule.trigger.unless_domain.is_some())
-            || (rule.trigger.if_top_url.is_some() && rule.trigger.unless_top_url.is_some())
-            || !valid_string_predicates(
-                rule.trigger.if_domain.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                255,
-            )
-            || !valid_string_predicates(
-                rule.trigger.unless_domain.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                255,
-            )
-            || !valid_string_predicates(
-                rule.trigger.if_top_url.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                MAX_URL_FILTER_BYTES,
-            )
-            || !valid_string_predicates(
-                rule.trigger.unless_top_url.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                MAX_URL_FILTER_BYTES,
-            )
-            || !unique_bounded(
-                rule.trigger.resource_type.as_deref(),
-                WebKitResourceType::COUNT,
-            )
-            || (!rule.trigger.load_type.is_empty()
-                && !unique_bounded(Some(&rule.trigger.load_type), 2))
-        {
-            return None;
-        }
-        match rule.action.typ {
-            CachedWebKitActionType::Block if !exceptions_started => {
-                blocking_entries = blocking_entries.checked_add(1)?;
-            }
-            CachedWebKitActionType::Block => return None,
-            CachedWebKitActionType::IgnorePreviousRules => exceptions_started = true,
-        }
-    }
-    if blocking_entries == 0 || serde_json::to_vec(&rules).ok()?.as_slice() != payload {
-        return None;
-    }
-    let encoded = std::str::from_utf8(payload).ok()?;
-    Some((Arc::from(encoded), blocking_entries))
+    true
 }
 
 #[cfg(feature = "webkit")]

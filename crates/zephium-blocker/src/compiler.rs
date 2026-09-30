@@ -1195,33 +1195,39 @@ fn canonical_webkit_json(
     rules: &[ConvertedRule],
     byte_limit: usize,
 ) -> Result<String, CompileError> {
-    let canonical: Vec<_> = rules
-        .iter()
-        .map(|rule| CanonicalRule {
-            action: CanonicalAction {
-                kind: webkit_action_name(&rule.native.action.typ),
-                selector: rule.native.action.selector.as_deref(),
-            },
-            trigger: CanonicalTrigger {
-                url_filter: &rule.native.trigger.url_filter,
-                url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
-                if_domain: rule.native.trigger.if_domain.as_deref(),
-                unless_domain: rule.native.trigger.unless_domain.as_deref(),
-                resource_type: Some(&rule.resource_types),
-                load_type: rule
-                    .native
-                    .trigger
-                    .load_type
-                    .iter()
-                    .map(webkit_load_name)
-                    .collect(),
-                if_top_url: rule.native.trigger.if_top_url.as_deref(),
-                unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
-            },
-        })
-        .collect();
+    use serde::ser::{SerializeSeq, Serializer};
     let mut output = BoundedJsonWriter::new(byte_limit);
-    if let Err(error) = serde_json::to_writer(&mut output, &canonical) {
+    let result = (|| -> Result<(), serde_json::Error> {
+        let mut serializer = serde_json::Serializer::new(&mut output);
+        let mut sequence = serializer.serialize_seq(Some(rules.len()))?;
+        for rule in rules {
+            let canonical = CanonicalRule {
+                action: CanonicalAction {
+                    kind: webkit_action_name(&rule.native.action.typ),
+                    selector: rule.native.action.selector.as_deref(),
+                },
+                trigger: CanonicalTrigger {
+                    url_filter: &rule.native.trigger.url_filter,
+                    url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
+                    if_domain: rule.native.trigger.if_domain.as_deref(),
+                    unless_domain: rule.native.trigger.unless_domain.as_deref(),
+                    resource_type: Some(&rule.resource_types),
+                    load_type: rule
+                        .native
+                        .trigger
+                        .load_type
+                        .iter()
+                        .map(webkit_load_name)
+                        .collect(),
+                    if_top_url: rule.native.trigger.if_top_url.as_deref(),
+                    unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
+                },
+            };
+            sequence.serialize_element(&canonical)?;
+        }
+        sequence.end()
+    })();
+    if let Err(error) = result {
         if let Some(actual) = output.exceeded_at {
             return Err(CompileError::WebKitJsonTooLarge {
                 actual,
