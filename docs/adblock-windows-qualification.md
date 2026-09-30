@@ -2,11 +2,22 @@
 
 ## Checkout and scope
 
-Continue from branch `adblock-release` after the final local implementation
-commits. Record `git rev-parse HEAD` in the report. Use a separate checkout from
-the Windows extensions agent: both features touch engine construction and native
-callbacks. Do not merge, push, or alter release defaults without the user's
-existing authorization. User QA remains the merge gate.
+Work from `main` (the ad blocker and Windows extensions are merged there) on a
+new branch, for example `feat/windows-protection`. Record `git rev-parse HEAD`
+in the report. Do not merge or push to `main`; the user's QA is the merge gate.
+
+Goal: Windows reaches the macOS experience, and where WebView2 allows, beats it.
+With protection on, ad-heavy pages must load faster and use less memory and CPU
+than with it off; clean pages must stay within noise. The interface is shared
+and already finished on macOS: the Utilities menu's protection section (site
+name, "N blocked today", per-site switch that reloads the page, Hide elements,
+Hidden on this site), the sidebar hiding bar (Undo, Done), the rail's native
+More menu (Block Ads and Trackers, Hide Elements…) and the new tab counter.
+Do not fork the frame; fix Windows behavior underneath it.
+
+Protection defaults to on for every profile. Until this qualification passes,
+the user decides whether Windows ships with it on; report the evidence that
+decision needs.
 
 Implementations are in `platform/windows/content_filter.rs`,
 shared `host/content_styles.rs`, `host/style_worker.rs`,
