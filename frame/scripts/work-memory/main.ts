@@ -115,6 +115,7 @@ function workCall(profile: string, call: { kind: string; request: Record<string,
 }
 
 const unknown = new Set<string>();
+let released = 0;
 const callbacks = new Map<number, (value: unknown) => void>();
 let callbackId = 0;
 async function invoke(cmd: string, args: Record<string, never>): Promise<unknown> {
@@ -155,6 +156,9 @@ async function invoke(cmd: string, args: Record<string, never>): Promise<unknown
     }
     case "note_call":
       return { profile, response: { kind: "error", error: "not_found" } };
+    case "work_release_memory":
+      released += 1;
+      return true;
     case "favicon_probe":
       return true;
     case "media_admit_remote":
@@ -201,6 +205,7 @@ const DRAFT = "01M3CTWDG2AVF2G6YPBVJHJK60";
 let touched = 1_700_000_000_000;
 /** Fresh copies keep their originals' picture addresses: what grows then is not the image cache. */
 const sameUrls = new URLSearchParams(location.search).has("same");
+const noPictures = new URLSearchParams(location.search).has("noimg");
 
 async function load(name: string): Promise<Raw | null> {
   const response = await fetch(`/${name}/scene.json`);
@@ -219,6 +224,7 @@ function copy(raw: Raw, mark: number | null, name: string, sub = 0): Raw {
         );
   const out = JSON.parse(renamed(JSON.stringify(raw))) as Raw;
   const version = mark === null || sameUrls ? "" : `?v=${mark}`;
+  if (noPictures) return out;
   raw.pages.forEach((original, at) => {
     const one = out.pages[at]!;
     frames.set(
@@ -311,6 +317,15 @@ async function build(names: string[], allDay: string[], mark: number | null): Pr
   return ids;
 }
 
+const fixObservers = new URLSearchParams(location.search).has("fixro");
+const watched = new Set<{ targets?: Element[]; disconnect(): void }>();
+function sweepObservers() {
+  for (const observer of watched)
+    if (observer.targets?.every((target) => !target.isConnected)) {
+      observer.disconnect();
+      watched.delete(observer);
+    }
+}
 /** Listeners and observers still attached, by what they are attached to. */
 const attached = new Map<string, number>();
 {
@@ -360,6 +375,13 @@ const attached = new Map<string, number>();
       override observe(...a: unknown[]) {
         if (!this.#on) attached.set(this.#site, (attached.get(this.#site) ?? 0) + 1);
         this.#on = true;
+        if (fixObservers && Observer === "ResizeObserver") {
+          watched.add(this);
+          (this as unknown as { targets?: Element[] }).targets = [
+            ...((this as unknown as { targets?: Element[] }).targets ?? []),
+            a[0] as Element,
+          ];
+        }
         super.observe(...a);
       }
       override disconnect() {
@@ -417,7 +439,16 @@ function detached() {
     const name = `${element.localName}.${[...element.classList].join(".")}`.slice(0, 80);
     byClass.set(name, (byClass.get(name) ?? 0) + 1);
   }
+  const nodes: string[] = [];
+  for (const ref of made) {
+    const element = ref.deref();
+    if (element && !element.isConnected && element.classList.contains("svelte-flow__node"))
+      nodes.push(
+        `${element.getAttribute("data-id")}|${element.querySelector("[class]")?.className}|${element.innerHTML.length}`,
+      );
+  }
   return {
+    nodes: nodes.slice(0, 12),
     alive,
     detached: count,
     top: [...byClass].sort((a, b) => b[1] - a[1]).slice(0, 25),
@@ -485,6 +516,7 @@ async function settle() {
     last = count;
   }
   await wait(800);
+  if (fixObservers) sweepObservers();
 }
 
 /** Allocation pressure until the collector has run: WebKit gives a page no gc(). */
@@ -536,6 +568,7 @@ let previous: string[] = [];
 
 const harness = {
   inPage,
+  released: () => released,
   collect,
   detached,
   unknown: () => [...unknown],
@@ -593,6 +626,10 @@ const harness = {
     await session!.open(id);
     await settle();
     return Math.round(performance.now() - started);
+  },
+  async leave() {
+    await session!.open(DRAFT);
+    await settle();
   },
   async round() {
     for (const id of ids) {
