@@ -18,13 +18,15 @@
     Spline,
     Svg,
     Text,
-    Tooltip,
   } from "layerchart/svg";
   import type { AnyScale } from "layerchart/utils/scales.svelte";
   import { duration, reducedMotion } from "$shared/lib/motion";
   import * as m from "$shared/i18n/messages";
-  import Readout from "./Readout.svelte";
   import Radar from "./Radar.svelte";
+  import ChartContainer from "./ChartContainer.svelte";
+  import ChartLegend from "./ChartLegend.svelte";
+  import ChartTooltip from "./ChartTooltip.svelte";
+  import { colorOf, type ChartConfig } from "./chart-utils";
   import {
     extremes,
     formatValue,
@@ -113,24 +115,35 @@
   const lying = $derived(shape.horizontal);
   const band = $derived(shape.scale === "band");
   const shares = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 0 });
-  const legend = $derived.by(() => {
-    if (spark || spec.kind === "heat" || quiet) return [];
+  const partKey = (index: number) => `p${index}`;
+  /** Every series and part by its key, the colour it is drawn in and the name it is read by. */
+  const config = $derived<ChartConfig>(
+    Object.fromEntries([
+      ...shape.series.map((series) => [series.key, { label: series.label, color: series.color }]),
+      ...shape.parts.map((part) => [partKey(part.index), { label: part.label, color: part.color }]),
+    ]),
+  );
+  const legend = $derived.by((): { keys: string[]; shares: Record<string, string> } => {
+    if (spark || spec.kind === "heat" || quiet) return { keys: [], shares: {} };
     if (round)
       return spec.compact
-        ? []
-        : shape.parts.map((part) => ({
-            name: part.label,
-            color: part.color,
-            share:
-              spec.kind === "donut"
-                ? shape.total
-                  ? shares.format(part.value / shape.total)
-                  : ""
-                : pointText(part.points[0], spec.y),
-          }));
+        ? { keys: [], shares: {} }
+        : {
+            keys: shape.parts.map((part) => partKey(part.index)),
+            shares: Object.fromEntries(
+              shape.parts.map((part) => [
+                partKey(part.index),
+                spec.kind === "donut"
+                  ? shape.total
+                    ? shares.format(part.value / shape.total)
+                    : ""
+                  : pointText(part.points[0], spec.y),
+              ]),
+            ),
+          };
     const rule = spec.compact ? labels.legend : legendRule(spec.series.length, false);
-    if (rule !== "rows") return [];
-    return shape.series.map((series) => ({ name: series.label, color: series.color, share: "" }));
+    if (rule !== "rows") return { keys: [], shares: {} };
+    return { keys: shape.series.map((series) => series.key), shares: {} };
   });
   const table = $derived(
     !spark && !quiet && spec.values !== false && (!spec.compact || labels.legend === "table"),
@@ -177,6 +190,29 @@
   const nameRoom = $derived(
     Math.min(160, Math.max(...shape.rows.map((row) => row.label.length * CHAR), 0) + 12),
   );
+  /** Room right of lying bars for the longest value written after one. */
+  const valueRoom = $derived(
+    Math.max(
+      24,
+      ...shape.rows.flatMap((row) =>
+        row.points.map((point) =>
+          point
+            ? (spec.compact ? shortValue(point, spec.y) : pointText(point, spec.y)).length * CHAR +
+              12
+            : 0,
+        ),
+      ),
+    ),
+  );
+  /** Category names under the plot, thinned evenly so no two ever touch. */
+  function spaced(width: number): (string | number | Date)[] | undefined {
+    if (!band || lying) return indexTicks;
+    const widest = Math.max(...shape.rows.map((row) => category(row.x).length * CHAR), 0) + 10;
+    const every = Math.max(1, Math.ceil((shape.rows.length * widest) / Math.max(1, width)));
+    return every === 1
+      ? undefined
+      : shape.rows.filter((_, index) => index % every === 0).map((row) => row.key);
+  }
   const rowHeight = $derived(compact ? 20 : Math.max(24, 10 + spec.series.length * 12));
   const plotHeight = $derived.by(() => {
     if (tile && height) return height;
@@ -206,22 +242,17 @@
     if (lying)
       return {
         top: compact ? 4 : 4,
-        right: valued || labels.values ? 52 : 8,
+        right: valued || labels.values ? valueRoom : 8,
         bottom: valueAxis ? 22 : 4,
         left: quiet ? 4 : nameRoom,
       };
     const labelled = spec.compact && !quiet && (labels.categories || !!labels.ends);
+    // The value axis reads on the left, as a reader looks for it; a line keeps room at both ends for its dots.
     return {
       top: valued || (spec.compact && labels.values && !quiet) ? 20 : 8,
-      right: valueAxis
-        ? tickRoom + (trend ? 16 : 0)
-        : spec.compact && labels.ends && !quiet
-          ? 36
-          : trend
-            ? 12
-            : 4,
+      right: spec.compact && labels.ends && !quiet ? 36 : trend ? 14 : 4,
       bottom: quiet ? 4 : spec.compact ? (labelled ? 18 : 4) : 24,
-      left: trend ? 12 : 0,
+      left: valueAxis ? tickRoom : trend ? 14 : 0,
     };
   });
 
@@ -343,28 +374,25 @@
 </script>
 
 {#snippet tip()}
-  {#if !quiet}
-    <Tooltip.Root
-      variant="none"
-      portal={false}
-      pointerEvents
-      motion={still ? "none" : "spring"}
-      fadeDuration={still ? 0 : duration("fast")}
-    >
-      {#snippet children({ data })}
-        {@const text = readout(spec, shape, indexOf(data))}
-        {#if text}<Readout readout={text} {onevidence} {glyph} />{/if}
-      {/snippet}
-    </Tooltip.Root>
-  {/if}
+  {#if !quiet}<ChartTooltip
+      read={(data) => readout(spec, shape, indexOf(data))}
+      {still}
+      indicator={trend ? "line" : "dot"}
+      {onevidence}
+      {glyph}
+    />{/if}
 {/snippet}
 
 {#snippet washes()}
   <defs>
     {#each shape.series as series, order (series.key)}
       <linearGradient id={`${uid}-wash-${order}`} x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" style:stop-color={series.color} style:stop-opacity={tile ? 0.5 : 0.36} />
-        <stop offset="100%" style:stop-color={series.color} style:stop-opacity="0.02" />
+        <stop
+          offset="0%"
+          style:stop-color={colorOf(series.key)}
+          style:stop-opacity={tile ? 0.5 : 0.4}
+        />
+        <stop offset="100%" style:stop-color={colorOf(series.key)} style:stop-opacity="0.03" />
       </linearGradient>
     {/each}
   </defs>
@@ -409,7 +437,7 @@
       </p>
     {/if}
     {#if usable}
-      <div class="body" class:beside={round && legend.length > 0}>
+      <ChartContainer {config} class={round && legend.keys.length ? "body beside" : "body"}>
         <div
           class="plot"
           style:block-size={`${plotHeight}px`}
@@ -441,7 +469,7 @@
                               outerRadius={outer}
                               cornerRadius={tile ? 2 : 4}
                               data={slice.data}
-                              fill={(slice.data as Part).color}
+                              fill={colorOf(partKey((slice.data as Part).index))}
                               tooltip={!quiet}
                               class={context.tooltip.data && context.tooltip.data !== slice.data
                                 ? "mark slice dim"
@@ -467,7 +495,7 @@
                           track={{ class: "track" }}
                           motion={tween}
                           data={part}
-                          fill={part.color}
+                          fill={colorOf(partKey(part.index))}
                           tooltip={!quiet}
                           class={context.tooltip.data && context.tooltip.data !== part
                             ? "mark slice dim"
@@ -591,7 +619,7 @@
                           defined={(row: Row) => row.points[order]?.y != null}
                           fill={`url(#${uid}-wash-${order})`}
                           line={{
-                            stroke: series.color,
+                            stroke: colorOf(series.key),
                             class: "mark line",
                             draw,
                           }}
@@ -602,7 +630,7 @@
                           seriesKey={series.key}
                           curve={curveMonotoneX}
                           defined={(row: Row) => row.points[order]?.y != null}
-                          stroke={series.color}
+                          stroke={colorOf(series.key)}
                           {draw}
                           class="mark line"
                         />
@@ -610,7 +638,7 @@
                           <Points
                             seriesKey={series.key}
                             r={3.5}
-                            fill={series.color}
+                            fill={colorOf(series.key)}
                             class={settled ? "mark dot" : "mark dot enter"}
                           />
                         {/if}
@@ -631,7 +659,7 @@
                             : "edge"}
                         radius={radius(context)}
                         stackPadding={shape.layout === "stackDiverging" ? 2 : 0}
-                        fill={series.color}
+                        fill={colorOf(series.key)}
                         motion={tween}
                         class="mark bar"
                       />
@@ -657,7 +685,7 @@
                   {#if !compact}
                     {#if valueAxis}
                       <Axis
-                        placement={lying ? "bottom" : "right"}
+                        placement={lying ? "bottom" : "left"}
                         ticks={shape.ticks}
                         format={label}
                         tickMarks={false}
@@ -666,7 +694,7 @@
                     {/if}
                     <Axis
                       placement={lying ? "left" : "bottom"}
-                      ticks={indexTicks}
+                      ticks={spaced(context.width)}
                       format={category}
                       tickMarks={false}
                       rule={false}
@@ -707,18 +735,12 @@
             </Plot>
           {/if}
         </div>
-        {#if legend.length}
-          <ul class="legend" class:rows={spec.compact} class:list={round}>
-            {#each legend as entry, order (order)}
-              <li>
-                <span class="swatch" style:background={entry.color}></span><span class="name"
-                  >{entry.name}</span
-                >{#if entry.share}<span class="share">{entry.share}</span>{/if}
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
+        {#if legend.keys.length}<ChartLegend
+            keys={legend.keys}
+            shares={legend.shares}
+            layout={round ? "list" : spec.compact ? "rows" : "row"}
+          />{/if}
+      </ChartContainer>
     {:else}<p role="status" class="caption">{m.chart_unavailable()}</p>{/if}
     {#if spec.basis?.trim() && !quiet}<p class="caption basis">{spec.basis}</p>{/if}
     {#if table}
@@ -817,19 +839,12 @@
     line-height: 1.25;
   }
 
-  .body {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    min-inline-size: 0;
-  }
-
-  .round .body,
-  .radar .body {
+  .round :global(.body),
+  .radar :global(.body) {
     align-items: center;
   }
 
-  .body.beside {
+  .chart :global(.body.beside) {
     flex-direction: row;
     gap: 28px;
   }
@@ -846,58 +861,6 @@
     inline-size: 100%;
     block-size: 100%;
     min-block-size: 16px;
-  }
-
-  /* LayerChart draws; the tokens colour it. */
-  .chart :global(.lc-grid-x-rule),
-  .chart :global(.lc-grid-y-rule) {
-    --stroke-color: var(--color-border);
-
-    shape-rendering: crispedges;
-  }
-
-  .chart :global(.zero .lc-rule-x-line),
-  .chart :global(.zero .lc-rule-y-line),
-  .chart :global(.zero.lc-rule-x-line),
-  .chart :global(.zero.lc-rule-y-line) {
-    --stroke-color: var(--color-border-strong);
-  }
-
-  .chart :global(.lc-axis-tick-label),
-  .chart :global(.caption-text) {
-    --fill-color: var(--color-muted);
-
-    font-size: var(--text-caption);
-    font-weight: 400;
-    font-variant-numeric: tabular-nums;
-    stroke: none;
-  }
-
-  .chart :global(.value) {
-    --fill-color: var(--color-label-secondary);
-
-    font-size: var(--text-caption);
-    font-weight: 550;
-    font-variant-numeric: tabular-nums;
-    stroke: none;
-  }
-
-  .chart :global(.lc-highlight-area) {
-    --fill-color: var(--color-fill);
-  }
-
-  .chart :global(.lc-highlight-line) {
-    --stroke-color: var(--color-border-strong);
-
-    stroke-width: 1;
-    stroke-dasharray: none;
-  }
-
-  .chart :global(.lc-highlight-point) {
-    --stroke-color: var(--color-surface);
-
-    stroke-width: 2;
-    filter: none;
   }
 
   .chart :global(.line),
@@ -969,76 +932,6 @@
 
   .chart :global(.enter) {
     animation: arrive var(--motion-base) var(--ease-emphasized) both;
-  }
-
-  .legend {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px 16px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-  }
-
-  /* The card's legend: at most two rows, filled down then across. */
-  .legend.rows {
-    display: grid;
-    grid-auto-columns: minmax(0, max-content);
-    grid-auto-flow: column;
-    grid-template-rows: repeat(2, auto);
-  }
-
-  /* A round chart names its parts beside it, each with its share or value. */
-  .legend.list {
-    display: grid;
-    flex: 1;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 9px 8px;
-    min-inline-size: 0;
-    font-size: var(--text-label);
-  }
-
-  .legend li {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-inline-size: 0;
-  }
-
-  .legend.list li {
-    display: contents;
-  }
-
-  .name {
-    min-inline-size: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .legend.list .name {
-    color: var(--color-label-secondary);
-  }
-
-  .swatch {
-    flex: none;
-    inline-size: 8px;
-    block-size: 8px;
-    border-radius: var(--radius-capsule);
-  }
-
-  .share {
-    color: var(--color-faint);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .legend.list .share {
-    padding-inline-start: 12px;
-    color: var(--color-text);
-    font-weight: 550;
-    text-align: end;
   }
 
   .caption,

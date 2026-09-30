@@ -2,25 +2,28 @@
   import type { Snippet } from "svelte";
   import type { ChartEvidence } from "./chart";
   import type { Readout } from "./layer";
-  /** The tooltip's content: the point, its value, and the sources behind it. */
+
+  /** The tooltip's card, shadcn-svelte's: the point, a row per series with its indicator, and the sources behind it. */
   let {
     readout,
+    indicator = "dot",
     onevidence,
     glyph,
   }: {
     readout: Readout;
+    indicator?: "dot" | "line";
     onevidence?: (reference: ChartEvidence) => void;
     glyph?: Snippet<[ChartEvidence]>;
   } = $props();
 </script>
 
-<div class="tip">
-  <span class="title">{readout.title}</span>
+<div class="chart-tooltip">
+  <span class="label">{readout.title}</span>
   {#each readout.rows as row, index (index)}
     <span class="row">
-      {#if row.name}<span class="swatch" style:background={row.color}></span><span class="name"
-          >{row.name}</span
-        >{/if}<span class="value" class:alone={!row.name}>{row.text}</span>
+      <span class="indicator {indicator}" style:--indicator={row.color}></span>
+      {#if row.name}<span class="name">{row.name}</span>{/if}
+      <span class="value" class:alone={!row.name}>{row.text}</span>
     </span>
   {/each}
   {#if readout.evidence.length}
@@ -44,13 +47,13 @@
 </div>
 
 <style>
-  .tip {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    min-inline-size: 132px;
+  .chart-tooltip {
+    display: grid;
+    gap: 6px;
+    min-inline-size: 128px;
     max-inline-size: 260px;
-    padding: 8px 10px;
+    padding: 7px 10px;
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-control-compact);
     background: var(--color-float);
     box-shadow: var(--shadow-float);
@@ -59,7 +62,7 @@
     line-height: 14px;
   }
 
-  .title {
+  .label {
     font-weight: 600;
     overflow-wrap: anywhere;
   }
@@ -67,13 +70,23 @@
   .row {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
   }
 
-  .swatch {
+  .indicator {
     flex: none;
-    inline-size: 8px;
-    block-size: 8px;
+    background: var(--indicator);
+  }
+
+  .indicator.dot {
+    inline-size: 10px;
+    block-size: 10px;
+    border-radius: var(--radius-swatch);
+  }
+
+  .indicator.line {
+    inline-size: 4px;
+    block-size: 14px;
     border-radius: var(--radius-capsule);
   }
 
@@ -84,14 +97,19 @@
   }
 
   .value {
+    margin-inline-start: auto;
     padding-inline-start: 12px;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    font-weight: 550;
+    font-weight: 500;
   }
 
   .value.alone {
+    margin-inline-start: 0;
     padding: 0;
+    font-family: inherit;
     font-size: var(--text-body);
+    font-weight: 600;
   }
 
   .chips {

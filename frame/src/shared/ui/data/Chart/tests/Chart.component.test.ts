@@ -139,10 +139,10 @@ test("the lift shows every series at the hovered x, and hands a source back", as
   // Known numbers keep their basis line and draw no disclaimer.
   expect(screen.container.textContent).not.toContain("agent knows");
   await expect.poll(() => screen.container.querySelectorAll(".lc-tooltip-rect").length).toBe(2);
-  expect(screen.container.querySelector(".tip")).toBeNull();
+  expect(screen.container.querySelector(".chart-tooltip")).toBeNull();
   hover(screen.container, 0);
-  await expect.poll(() => screen.container.querySelector(".tip")).not.toBeNull();
-  const tip = screen.container.querySelector<HTMLElement>(".tip")!;
+  await expect.poll(() => screen.container.querySelector(".chart-tooltip")).not.toBeNull();
+  const tip = screen.container.querySelector<HTMLElement>(".chart-tooltip")!;
   expect(tip.textContent).toContain("One");
   expect(tip.textContent).toContain("Baseline");
   expect(tip.textContent).toContain("2.5000");
@@ -180,7 +180,7 @@ test("a bars card writes its categories under the bars and each value on top", a
   expect(texts(screen.container, ".lc-axis-tick-label")).toEqual(["Acme", "Bolt", "Core"]);
   expect(texts(screen.container, "text.value")).toEqual(["$3.4K", "$1.2K", "$800"]);
   // One series names itself; the card keeps no legend and no table.
-  expect(screen.container.querySelector(".legend")).toBeNull();
+  expect(screen.container.querySelector(".chart-legend")).toBeNull();
   expect(screen.container.querySelector("details")).toBeNull();
 });
 
@@ -232,7 +232,7 @@ test("a donut card states its largest slice and its share", async () => {
 test("a card with two series keeps a two-row legend; past four, the values table", async () => {
   const { default: Chart } = await loadChart();
   const pair = await render(Chart, { title: "Week", spec: two("bars", { compact: true }) });
-  await expect.poll(() => pair.container.querySelectorAll(".legend.rows li").length).toBe(2);
+  await expect.poll(() => pair.container.querySelectorAll(".chart-legend.rows li").length).toBe(2);
   expect(pair.container.querySelector("details")).toBeNull();
   await pair.unmount();
   const six: ChartSpec = {
@@ -248,7 +248,7 @@ test("a card with two series keeps a two-row legend; past four, the values table
   };
   const many = await render(Chart, { title: "Six", spec: six });
   await expect.poll(() => many.container.querySelectorAll("path.mark.line").length).toBe(6);
-  expect(many.container.querySelector(".legend")).toBeNull();
+  expect(many.container.querySelector(".chart-legend")).toBeNull();
   await many.getByText("Values", { exact: true }).click();
   await expect.element(many.getByRole("columnheader", { name: "S6" })).toBeVisible();
   expect(many.container.querySelectorAll("tbody tr")).toHaveLength(2);

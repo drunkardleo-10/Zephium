@@ -305,6 +305,7 @@
      the values: how tall the thing is, and whether it sits in a column.
      Rows are flatter than controls on purpose — a column of 14px rows reads
      as a stack of pills rather than as a list. */
+  --radius-swatch: 3px; /* a colour key in a chart's legend or tooltip */
   --radius-inset: 8px; /* a glyph plate or keycap inside something else */
   --radius-row: 12px; /* a row in a column, and a field sharing that column */
   --radius-control-compact: 10px; /* a control around 24-26px */
