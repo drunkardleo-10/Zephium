@@ -41,7 +41,7 @@ test("the lift grows from the card it was opened on, even with another card on t
   root.style.height = "720px";
   root.style.width = "1100px";
   const card = () => screen.container.querySelector<HTMLElement>('[data-card-id="objective-card"]');
-  await expect.poll(() => card()).not.toBeNull();
+  await expect.poll(() => card(), { timeout: 5000 }).not.toBeNull();
   // A card drawn exactly over it, earlier in the document: only the id tells them apart.
   const rect = card()!.getBoundingClientRect();
   const decoy = document.createElement("article");

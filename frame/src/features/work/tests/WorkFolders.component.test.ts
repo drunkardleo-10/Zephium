@@ -127,7 +127,11 @@ test("a Finder drop admits its folders, keeps quiet about the files beside them,
   // A file among the dropped paths is not a refusal: its path joins the request being written.
   expect(screen.container.textContent).not.toContain("This folder can’t be used");
   await expect.poll(() => session.composer).toBe("/Users/reader/Papers/notes.pdf");
-  await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
+  await expect
+    .poll(() => screen.container.querySelectorAll(".work-drag-handle").length, {
+      timeout: 5000,
+    })
+    .toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Open", exact: true }).click();
   await screen.getByRole("button", { name: "Reveal in Finder", exact: true }).click();

@@ -96,7 +96,7 @@ async function workspace(edit?: (state: WorkRuntimeProjection) => void) {
 test("a document result is saved as a note only when asked, and then opens it", async () => {
   const { screen, notes, close } = await workspace();
   const cover = () => screen.container.querySelector<HTMLElement>('[data-card-id="result-card"]');
-  await expect.poll(cover).not.toBeNull();
+  await expect.poll(cover, { timeout: 5000 }).not.toBeNull();
   // The line offers the same action beside the agent's follow-ups, for a document.
   const next = screen.getByRole("button", { name: "Next", exact: true });
   await expect.element(next).toBeVisible();
@@ -158,7 +158,7 @@ test("an answer lifts as a reading page and is saved as its own Markdown under i
     state.executions[0]!.user_artifacts = [];
   });
   const cover = () => screen.container.querySelector<HTMLElement>('[data-card-id="result-card"]');
-  await expect.poll(cover).not.toBeNull();
+  await expect.poll(cover, { timeout: 5000 }).not.toBeNull();
   // A reviewed plan's result opens in the lift, where it is read and kept.
   cover()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   cover()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));

@@ -120,6 +120,8 @@ const LOOKS: [string, number][] = [
   ["wednesday", 0],
   ["wednesday", 60],
   ["cando", 0],
+  ["compare", 0],
+  ["compare", 50],
 ];
 
 test.each(
