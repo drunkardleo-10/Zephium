@@ -399,7 +399,19 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
     }
 }
 
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 17] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 18] = [
+    // A file saved in a folder the run asks for as it works: the person
+    // chooses it in the folder panel, and the same run writes the file.
+    LeadScenario {
+        name: "save",
+        requests: &[
+            "Explain how binary search works, in a few sentences and a short Python function",
+            "Write that in a file in my Notes folder",
+        ],
+        answer: "",
+        folder: false,
+        site: None,
+    },
     // A day planned from sources that need no real profile: the person's
     // Zephium tasks, seeded for today; the day's sources are asked once.
     LeadScenario {
@@ -683,6 +695,16 @@ test('tides', () => {});
 }
 
 /// A throwaway repository under the home folder with one failing test.
+/// An empty folder the person picks when the run asks for one.
+fn save_folder() -> Result<std::path::PathBuf, &'static str> {
+    let home = std::env::var_os("HOME").ok_or("home")?;
+    let folder = std::path::PathBuf::from(home)
+        .join("Library/Caches/app.zephium.probe")
+        .join(format!("lead-save-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).map_err(|_| "save_folder")?;
+    Ok(folder)
+}
+
 fn bug_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
@@ -718,6 +740,7 @@ async fn stand_in(
     profile: zephium_core::ids::ProfileId,
     work: zephium_core::work::WorkId,
     answer: &'static str,
+    pick: Option<std::path::PathBuf>,
 ) {
     use zephium_core::work::{runtime::*, *};
     use zephium_ipc::work::*;
@@ -761,6 +784,12 @@ async fn stand_in(
                         "Stop"
                     }
                     .to_owned()
+                } else if let Some(pick) = pick
+                    .as_ref()
+                    .filter(|_| options.first().map(String::as_str) == Some("Choose folder…"))
+                {
+                    // The folder panel's choice goes back as its path.
+                    pick.to_string_lossy().into_owned()
                 } else if let Some(allow) = options.iter().find(|o| o.starts_with("Allow")) {
                     allow.clone()
                 } else if !answer.is_empty() && answer != "Allow" {
@@ -1122,7 +1151,18 @@ pub(super) async fn lead_workflow(
     if scenario.name == "day" {
         seed_tasks(handle, profile).await?;
     }
-    let person = tokio::spawn(stand_in(handle.clone(), profile, work, scenario.answer));
+    let pick = if scenario.name == "save" {
+        Some(save_folder()?)
+    } else {
+        None
+    };
+    let person = tokio::spawn(stand_in(
+        handle.clone(),
+        profile,
+        work,
+        scenario.answer,
+        pick.clone(),
+    ));
     let keys = Arc::new(Mutex::new(keys));
     let callback = handle.callback_handle();
     let service = WorkLeadService::new(handle.clone()).with_diagnostic(|event| {
@@ -1251,6 +1291,23 @@ pub(super) async fn lead_workflow(
         state = Some(projection);
     }
     person.abort();
+    if let Some(pick) = pick {
+        let written = std::fs::read_dir(&pick)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.metadata().is_ok_and(|meta| meta.len() > 0))
+                    .count()
+            })
+            .unwrap_or(0);
+        say(format_args!(
+            "lead-run: scenario=save files_written={written}"
+        ));
+        let _ = std::fs::remove_dir_all(&pick);
+        if written == 0 {
+            failure = failure.or(Some("save_nothing_written"));
+        }
+    }
     if let Some(folder) = folder {
         let fixed = std::fs::read_to_string(folder.join("pricing.py")).unwrap_or_default();
         say(format_args!(
