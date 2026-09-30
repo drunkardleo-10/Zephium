@@ -36,6 +36,18 @@ export const commands = {
 { kind: "refused"; not_a_folder: boolean } | null, null>(__TAURI_INVOKE("work_pick_folder", { expectedProfile })),
 	/**  Reveals an admitted folder, or a file inside one, in Finder. */
 	workRevealPath: (expectedProfile: string, path: string) => typedError<boolean, null>(__TAURI_INVOKE("work_reveal_path", { expectedProfile, path })),
+	/**
+	 *  Opens the folder panel at `start` (or its nearest existing folder) and
+	 *  admits the person's choice.
+	 */
+	workChooseFolder: (expectedProfile: string, start: string) => typedError<
+/**  The canonical path and display name to place as a Folder element. */
+{ kind: "admitted"; path: string; name: string } | 
+/**
+ *  Outside the home folder, protected, or missing (`not_a_folder` false),
+ *  or an existing path that is not a folder.
+ */
+{ kind: "refused"; not_a_folder: boolean } | null, null>(__TAURI_INVOKE("work_choose_folder", { expectedProfile, start })),
 	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
 	workHumanPages: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_pages", { expectedProfile, work }),
 	workHumanPresent: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, region: WorkHumanRegionV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_present", { expectedProfile, work, page, region }),

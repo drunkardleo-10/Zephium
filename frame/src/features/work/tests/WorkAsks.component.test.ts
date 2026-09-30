@@ -75,6 +75,34 @@ test("Confirm approves, allows for the run, or declines through ApproveStep on i
   session.dispose();
 });
 
+test("Choose folder opens the panel at the folder and answers with the folder chosen", async () => {
+  const { session, execution } = sessionWith(f.documentsAsk);
+  const answer = vi.spyOn(session, "answerStep").mockResolvedValue(true);
+  const chooseFolder = vi
+    .fn<(start: string) => Promise<string | null>>()
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce("/Users/crynta/Documents/Notes");
+  const screen = await render(AskCard, {
+    ask: asksOf(execution)[0]!,
+    actions: { ...runActions(session, execution.id), chooseFolder },
+  });
+  await expect.element(screen.getByText("To save binary-search.md there.")).toBeVisible();
+  const choose = screen.getByRole("button", { name: "Choose folder…", exact: true });
+  await choose.click();
+  expect(chooseFolder).toHaveBeenLastCalledWith("/Users/crynta/Documents");
+  expect(answer).not.toHaveBeenCalled();
+  await choose.click();
+  await vi.waitFor(() =>
+    expect(answer).toHaveBeenCalledExactlyOnceWith(
+      execution.id,
+      "ask-documents",
+      "/Users/crynta/Documents/Notes",
+    ),
+  );
+  await screen.unmount();
+  session.dispose();
+});
+
 test("a decision is sent once and a refused one says so without leaving the card", async () => {
   const { session, execution } = sessionWith(f.airbnbBook);
   let settle: (sent: boolean) => void = () => {};

@@ -34,7 +34,7 @@ Honest results
 
 Asking
 - Ask only when the answer changes the outcome. For a big job, ask the one or two things that matter first (dates and budget for a trip) in one ask with options, before starting parts.
-- Never ask whether you may use a site or read a folder; the app asks.
+- Never ask whether you may use a site; the app asks. A folder named in the request is asked for by the app; for any other folder the work needs (Documents to save a file), call ask_folder.
 - Never ask again what the person answered earlier in this work: the context lists their answers.
 
 Safety
@@ -207,6 +207,17 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
                     "options": {"type": "array", "maxItems": 4, "items": {"type": "string", "maxLength": 80}, "description": "2 to 4 answers of a few words."}
                 }),
                 &["question"],
+            ),
+        ),
+        tool(
+            "ask_folder",
+            "Asks the person for a folder on this Mac the work needs and this run cannot use yet (their Documents to save a file in, a project to read); they choose it in the system's folder panel and this same run goes on with it. Call it before the computer part that needs the folder, never instead of doing the work.",
+            object(
+                json!({
+                    "folder": {"type": "string", "description": "The folder as the person named it: Documents, ~/Dev/Lunios or a full path."},
+                    "why": {"type": "string", "maxLength": 160, "description": "One short sentence: To save binary-search.md there."}
+                }),
+                &["folder", "why"],
             ),
         ),
         tool(
@@ -439,6 +450,7 @@ mod tests {
                 "revise",
                 "read_canvas",
                 "ask",
+                "ask_folder",
                 "load_skill",
                 "finish"
             ]

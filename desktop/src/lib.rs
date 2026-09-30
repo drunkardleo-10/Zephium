@@ -100,6 +100,7 @@ mod work_connections;
 mod work_decision;
 #[cfg(feature = "work-development-traces")]
 mod work_diagnostics;
+mod work_folders;
 mod work_models;
 #[cfg(any(feature = "work-product", test))]
 mod work_operations;
@@ -1649,6 +1650,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             media::work_admit_folder,
             media::work_pick_folder,
             media::work_reveal_path,
+            work_folders::work_choose_folder,
             work_product::work_activity,
             work_product::human::work_human_pages,
             work_product::human::work_human_present,

@@ -3,6 +3,19 @@ import { askPart, asksOf, confirmVerb, openAsks } from "../components/asks/asks"
 import * as f from "./ask-fixtures";
 
 describe("asks", () => {
+  test("a folder the run needs is chosen in the panel, with the agent's reason", () => {
+    const [ask] = asksOf(f.runWith([f.documentsAsk]));
+    expect(ask).toMatchObject({
+      kind: "folder",
+      name: "Documents",
+      choose: true,
+      reason: "To save binary-search.md there.",
+      decline: "Not now",
+    });
+    const [named] = asksOf(f.runWith([f.folderAsk]));
+    expect(named).toMatchObject({ kind: "folder", choose: false, reason: null });
+  });
+
   test("a held step reads as a Confirm with the page's own words and the page's frame", () => {
     const [ask] = asksOf(f.runWith([f.airbnbBook]), [f.tripPage]);
     expect(ask).toMatchObject({

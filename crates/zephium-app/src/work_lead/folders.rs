@@ -10,6 +10,9 @@ use super::run::LeadRun;
 
 pub(crate) const ALLOW: &str = "Allow for this work";
 pub(crate) const NOT_NOW: &str = "Not now";
+/// The folder ask's picker option: the person chooses the folder in the
+/// system's own panel, which also lets macOS open it to Zephium.
+pub(crate) const CHOOSE: &str = "Choose folder…";
 /// Paths one request may ask about.
 const MAX_ASKED: usize = 3;
 /// Markers of a project's root, nearest first wins.
@@ -245,6 +248,125 @@ pub(crate) async fn ask_in_place(run: &LeadRun, objective: &str) -> Vec<Named> {
     named
 }
 
+/// The folder a name means: a path as written, `~/…`, or a folder of the
+/// home folder by its name in any case ("my Documents folder").
+pub(crate) fn resolve(named: &str, home: &Path) -> Option<PathBuf> {
+    let named = named.trim().trim_end_matches('/');
+    if let Some(rest) = named.strip_prefix("~/") {
+        return Some(home.join(rest));
+    }
+    if named.starts_with('/') {
+        return Some(PathBuf::from(named));
+    }
+    let word = named
+        .trim_start_matches("my ")
+        .trim_end_matches(" folder")
+        .trim();
+    if word.is_empty() || word.contains('/') {
+        return None;
+    }
+    std::fs::read_dir(home)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(word)
+        })
+        .map(|entry| entry.path())
+}
+
+/// Asks the person for a folder the run needs while it works: "Choose
+/// folder…" opens the system picker at it, and the folder they choose joins
+/// this run's grant at once, under the same policy as a folder given with
+/// the request. Returns the lead's tool result.
+pub(crate) async fn request(run: &LeadRun, named: &str, why: &str) -> (String, bool) {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return ("No home folder on this Mac".into(), true);
+    };
+    let Some(path) = resolve(named, &home) else {
+        return (
+            format!(
+                "{named} is not a folder name or path: name it as ~/Documents or its full path"
+            ),
+            true,
+        );
+    };
+    let written = path.to_string_lossy().into_owned();
+    let folders = run.folders();
+    let known: Vec<String> = folders
+        .current
+        .iter()
+        .chain(&folders.available)
+        .cloned()
+        .collect();
+    if let Some(granted) = inside(&path, &known) {
+        run.grant_folder(&granted);
+        return (format!("{granted} is already open to this run"), false);
+    }
+    let (admitted, _) = crate::work_files::WorkFileGrant::admit(std::slice::from_ref(&written));
+    let folder = admitted
+        .roots()
+        .first()
+        .map_or(written.clone(), |root| root.to_string_lossy().into_owned());
+    if admitted.is_empty() && path.exists() {
+        return (
+            format!("{written} is outside the folders Zephium may use (the home folder itself or private folders): say so in one sentence"),
+            true,
+        );
+    }
+    let why = super::call::clip(why.trim(), 160);
+    let prompt = if why.is_empty() {
+        format!("Allow {}?", name(&folder))
+    } else {
+        format!("Allow {}? {why}", name(&folder))
+    };
+    let answer = run
+        .ask_with(
+            WorkAskPurposeV1::Folder,
+            prompt,
+            vec![CHOOSE.into(), NOT_NOW.into()],
+            None,
+            Some(WorkLocalStepV1 {
+                folder: Some(folder.clone()),
+                ..Default::default()
+            }),
+        )
+        .await;
+    match answer {
+        Ok(Some(answer)) if answer == NOT_NOW => (
+            format!("The person chose not to share {folder}: go on without it and say in one sentence what it would add"),
+            false,
+        ),
+        Ok(Some(answer)) => {
+            let chosen = if answer == ALLOW || answer == CHOOSE {
+                folder
+            } else {
+                answer
+            };
+            let (grant, _) = crate::work_files::WorkFileGrant::admit(std::slice::from_ref(&chosen));
+            match grant.roots().first() {
+                Some(root) => {
+                    let root = root.to_string_lossy().into_owned();
+                    run.grant_folder(&root);
+                    (
+                        format!("The person chose {root}: this run can read it now and propose files in it; start the computer part that needs it"),
+                        false,
+                    )
+                }
+                None => (
+                    format!("{chosen} is outside the folders Zephium may use: say so in one sentence"),
+                    true,
+                ),
+            }
+        }
+        Ok(None) => ("No answer: the run stopped while waiting".into(), true),
+        Err(_) => ("The question could not be recorded".into(), true),
+    }
+}
+
 /// Lines for the lead's context about the folders it may read.
 pub(crate) fn context(run: &LeadRun, named: &[Named]) -> String {
     let folders = run.folders();
@@ -314,6 +436,28 @@ mod tests {
         assert_eq!(folder_for(&project.join("missing"), &base), None);
         assert_eq!(name(&project.to_string_lossy()), "Lunios");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_folder_is_named_by_its_path_or_by_its_name_in_the_home_folder() {
+        let home = std::env::temp_dir().join(format!("zephium-home-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        assert_eq!(
+            resolve("my Documents folder", &home),
+            Some(home.join("Documents"))
+        );
+        assert_eq!(resolve("documents", &home), Some(home.join("Documents")));
+        assert_eq!(
+            resolve("~/Dev/Lunios/", &home),
+            Some(home.join("Dev/Lunios"))
+        );
+        assert_eq!(
+            resolve("/Users/ana/Notes", &home),
+            Some(PathBuf::from("/Users/ana/Notes"))
+        );
+        assert_eq!(resolve("Pictures", &home), None);
+        assert_eq!(resolve("a/b", &home), None);
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

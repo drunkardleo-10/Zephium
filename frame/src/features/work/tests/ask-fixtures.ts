@@ -131,6 +131,18 @@ export const folderAsk = running(
   { local: { folder: "/Users/crynta/Dev/Lunios" } as WorkStepFact["local"] },
 );
 
+/** A folder the run needs as it works, chosen in the system's panel. */
+export const documentsAsk = running(
+  "ask-documents",
+  {
+    kind: "ask",
+    prompt: "Allow Documents? To save binary-search.md there.",
+    options: ["Choose folder…", "Not now"],
+    purpose: "folder",
+  },
+  { local: { folder: "/Users/crynta/Documents" } as WorkStepFact["local"] },
+);
+
 export const budgetAsk = running("ask-budget", {
   kind: "ask",
   prompt: "What's your budget for the stay, for the whole month?",

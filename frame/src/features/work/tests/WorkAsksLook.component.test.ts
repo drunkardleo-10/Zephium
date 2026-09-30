@@ -49,6 +49,7 @@ const noop = {
   answer: async () => true,
   openPage: () => {},
   signedIn: async () => true,
+  chooseFolder: async () => null,
 };
 
 test("every ask, open and decided, on the canvas and in the island, in both themes", async () => {
@@ -65,6 +66,7 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     f.tabsAsk,
     f.githubAsk,
     f.folderAsk,
+    f.documentsAsk,
     f.budgetAsk,
     f.notionTask,
     f.settled(f.decided(f.slackSend, "approved", "succeeded"), { id: "sent" }),
@@ -82,6 +84,9 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     f.settled(f.answered(f.slackEntry, "Always for Slack"), { id: "entry-always" }),
     f.settled(f.answered(f.historyAsk, "Allow"), { id: "history-allowed" }),
     f.settled(f.answered(f.folderAsk, "Allow for this work"), { id: "folder-allowed" }),
+    f.settled(f.answered(f.documentsAsk, "/Users/crynta/Documents/Notes"), {
+      id: "documents-chosen",
+    }),
   ]);
   const asks = asksOf(execution, [f.tripPage], [f.notionWall]);
   const rows = asks.map((ask) => ({ name: `${ask.kind}-${ask.step}`, ask }));

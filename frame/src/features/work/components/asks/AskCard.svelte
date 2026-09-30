@@ -47,6 +47,12 @@
   });
   const decide = (decision: ConfirmDecision) => send(() => actions.confirm(ask.step, decision));
   const answer = (text: string) => send(() => actions.answer(ask.step, text));
+  /** The system's folder panel; closing it leaves the question open, as it was. */
+  async function choose(start: string) {
+    if (sending || !actions.chooseFolder) return;
+    const path = await actions.chooseFolder(start).catch(() => null);
+    if (path) await answer(path);
+  }
 </script>
 
 <div class="ask-card" data-ask={ask.kind} data-step={ask.step}>
@@ -65,7 +71,13 @@
   {:else if ask.kind === "connection"}
     <ConnectionCard {ask} {placement} {busy} onanswer={answer} />
   {:else if ask.kind === "folder"}
-    <FolderCard {ask} {placement} {busy} onanswer={answer} />
+    <FolderCard
+      {ask}
+      {placement}
+      {busy}
+      onanswer={answer}
+      onchoose={actions.chooseFolder ? () => void choose(ask.path) : undefined}
+    />
   {:else if ask.kind === "sign_in"}
     <SignInCard
       {ask}

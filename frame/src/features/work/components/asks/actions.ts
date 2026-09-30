@@ -1,6 +1,6 @@
 import type { WorkSession } from "$domain/work";
 import type { WorkHumanSession } from "$domain/work-human";
-import type { WorkHumanPageV1 } from "$shared/ipc/bindings";
+import { commands, type WorkHumanPageV1 } from "$shared/ipc/bindings";
 import { askPart, asksOf, openAsks } from "./asks";
 
 export type ConfirmDecision = "approve" | "allow_run" | "decline";
@@ -13,6 +13,8 @@ export type AskActions = {
   openPage?(step: string): void;
   /** The person says they signed in: the held page carries on from where it waits. */
   signedIn?(page: WorkHumanPageV1): Promise<boolean>;
+  /** The system's folder panel, opened at a folder: the admitted choice, or null. */
+  chooseFolder?(start: string): Promise<string | null>;
 };
 
 /** The run's own operations: Confirm steps through ApproveStep, questions through AnswerStep. */
@@ -32,6 +34,10 @@ export function runActions(
         ...(decision === "allow_run" ? { for_run: true } : {}),
       }),
     answer: (step, text) => session.answerStep(execution, step, text),
+    chooseFolder: async (start) => {
+      const chosen = await commands.workChooseFolder(session.profile, start).catch(() => null);
+      return chosen?.status === "ok" && chosen.data?.kind === "admitted" ? chosen.data.path : null;
+    },
     ...(openPage ? { openPage } : {}),
     ...(human
       ? {

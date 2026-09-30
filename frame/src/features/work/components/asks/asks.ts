@@ -94,6 +94,10 @@ export type FolderAsk = Base & {
   /** Rust's option words, as they go back: allow first, then not now. */
   allow: string;
   decline: string;
+  /** A folder the run asks for as it works: chosen in the system's panel, the answer is its path. */
+  choose: boolean;
+  /** Why the run needs it, in the agent's words. */
+  reason: string | null;
   answer: string | null;
 };
 
@@ -116,6 +120,7 @@ export const ASK_WORDS = {
   notNow: "Not now",
   alwaysFor: "Always for ",
   web: "Use the website instead",
+  chooseFolder: "Choose folder…",
 } as const;
 
 const CONTEXT_PROMPTS: Record<ContextSource, string> = {
@@ -245,10 +250,16 @@ function connectionOf(base: AskBase, { prompt, options, answer }: Words): Connec
 }
 
 /** "Read Lunios?": the folder rides the step's local fact; its name is the path's last. */
-function folderOf(base: AskBase, step: WorkStepFact, { options, answer }: Words): FolderAsk | null {
+function folderOf(
+  base: AskBase,
+  step: WorkStepFact,
+  { prompt, options, answer }: Words,
+): FolderAsk | null {
   const path = step.local?.folder?.trim();
   if (!path) return null;
-  const name = path.replace(/\/+$/u, "").split("/").at(-1) || path;
+  const name = folderName(path);
+  const choose = options[0] === ASK_WORDS.chooseFolder;
+  const reason = choose ? prompt.replace(/^[^?]*\?\s*/u, "").trim() : "";
   return {
     ...base,
     kind: "folder",
@@ -256,9 +267,14 @@ function folderOf(base: AskBase, step: WorkStepFact, { options, answer }: Words)
     path,
     allow: options[0] ?? ASK_WORDS.allow,
     decline: options[1] ?? ASK_WORDS.notNow,
+    choose,
+    reason: reason || null,
     answer,
   };
 }
+
+/** A folder's own name, the last part of its path: "Documents". */
+export const folderName = (path: string) => path.replace(/\/+$/u, "").split("/").at(-1) || path;
 
 function fromAsk(
   step: WorkStepFact,
