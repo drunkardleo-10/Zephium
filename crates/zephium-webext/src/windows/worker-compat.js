@@ -1,20 +1,30 @@
 // WebView2 creates native tabs but may omit the tabs.create result. Keep native
-// ownership and events; pair pending creates FIFO within this worker instance.
+// ownership and events; match URLs first, then FIFO when URLs are unavailable.
 (() => {
   const tabs = chrome.tabs;
   if (!tabs?.create || !tabs.onCreated) return;
   const create = tabs.create;
   const pending = [];
+  const normalize = value => {
+    if (typeof value !== 'string' || !value) return null;
+    try { return new URL(value, chrome.runtime.getURL('/')).href; } catch { return null; }
+  };
   const onCreated = tab => {
-    const request = pending.find(request => !request.tab);
-    if (request && Number.isInteger(tab?.id)) {
+    if (!Number.isInteger(tab?.id)) return;
+    const url = normalize(tab.pendingUrl || tab.url);
+    const candidates = pending.filter(request => !request.tab);
+    // A known mismatch may be a user-created tab: never return it merely
+    // because it arrived first. FIFO is only for indistinguishable events.
+    const request = (url && candidates.find(request => request.url === url)) ||
+      candidates.find(request => !url || !request.url);
+    if (request) {
       request.tab = tab;
       request.finish();
     }
   };
   tabs.create = function (properties, callback) {
     const promise = new Promise((resolve, reject) => {
-      const request = {tab: null, nativeDone: false, finish: null};
+      const request = {url: normalize(properties?.url), tab: null, nativeDone: false, finish: null};
       const remove = () => {
         clearTimeout(timer);
         const index = pending.indexOf(request);

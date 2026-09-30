@@ -12,12 +12,12 @@ function event() {
 function fixture() {
   const calls = [], timers = new Set();
   const chrome = {
-    runtime: {id: 'a'.repeat(32), onMessage: event(), getURL: path => `chrome-extension://${'a'.repeat(32)}/${path}`},
+    runtime: {id: 'a'.repeat(32), onMessage: event(), getURL: path => `chrome-extension://${'a'.repeat(32)}/${path.replace(/^\/+/, '')}`},
     tabs: {onCreated: event(), create: (properties, callback) => calls.push({properties, callback}),
       get: async id => ({id, url: 'https://example.com/'})},
     action: {onClicked: event(), isEnabled: async () => true, getPopup: async () => ''}
   };
-  vm.runInNewContext(source, {chrome, setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn)});
+  vm.runInNewContext(source, {chrome, URL, setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn)});
   return {chrome, calls, timers};
 }
 
@@ -43,6 +43,35 @@ test('concurrent same-URL creates settle FIFO in promise and callback forms', as
   await Promise.resolve();
   assert.equal(callbackTab.id, 12);
   assert.equal(chrome.tabs.onCreated.listeners.size, 0);
+});
+
+test('a user-created tab is ignored and different URLs settle out of order', async () => {
+  const {chrome, calls, timers} = fixture();
+  const first = chrome.tabs.create({url: 'https://EXAMPLE.com:443'});
+  let callbackTab;
+  chrome.tabs.create({url: 'https://example.org/login'}, tab => callbackTab = tab);
+  calls.forEach(call => call.callback());
+  chrome.tabs.onCreated.emit({id: 90, url: 'https://unrelated.example/'});
+  await Promise.resolve();
+  assert.equal(callbackTab, undefined);
+  assert.equal(timers.size, 2);
+  chrome.tabs.onCreated.emit({id: 12, pendingUrl: 'https://example.org/login', url: 'about:blank'});
+  chrome.tabs.onCreated.emit({id: 11, url: 'https://example.com/'});
+  assert.equal((await first).id, 11);
+  assert.equal(callbackTab.id, 12);
+  assert.equal(timers.size, 0);
+  assert.equal(chrome.tabs.onCreated.listeners.size, 0);
+});
+
+test('relative extension URLs match native absolute URLs before FIFO', async () => {
+  const {chrome, calls} = fixture();
+  const first = chrome.tabs.create({url: 'first.html'});
+  const second = chrome.tabs.create({url: 'second.html'});
+  calls.forEach(call => call.callback());
+  chrome.tabs.onCreated.emit({id: 22, url: chrome.runtime.getURL('second.html')});
+  chrome.tabs.onCreated.emit({id: 21, url: chrome.runtime.getURL('first.html')});
+  assert.equal((await first).id, 21);
+  assert.equal((await second).id, 22);
 });
 
 test('native errors reject promises and expose callback lastError only during callback', async () => {
