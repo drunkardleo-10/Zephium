@@ -24,6 +24,22 @@
     managing = false;
   });
 
+  async function enable() {
+    if (saving) return;
+    saving = true;
+    try {
+      const result = await blocker.setEnabled(true);
+      feedback =
+        result.state === "processed" && ["applied", "no_op"].includes(result.disposition.outcome)
+          ? "Protection enabled."
+          : result.state === "pending"
+            ? "Protection starting… You can keep browsing."
+            : "Could not enable protection. Try again from Privacy settings.";
+    } finally {
+      saving = false;
+    }
+  }
+
   async function change(action: BlockerSiteAction) {
     if (!site || saving) return;
     const context = site.context;
@@ -59,6 +75,15 @@
           : shield.label}</span
       >
     </div>
+    {#if status.desired_enabled !== true}
+      <button
+        type="button"
+        role="menuitem"
+        class="ui-menu-item action"
+        disabled={saving || !status.can_enable || status.preference !== "authoritative"}
+        onclick={() => void enable()}>Enable protection</button
+      >
+    {/if}
     {#if site}
       <p class="site" title={site.context.site}>{site.context.site}</p>
       {#if site.private_session}<p class="hint">For this private session</p>{/if}

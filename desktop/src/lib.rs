@@ -2,6 +2,15 @@
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
 #[cfg(all(
+    feature = "adblock-qa",
+    any(
+        not(debug_assertions),
+        not(any(target_os = "macos", target_os = "windows"))
+    )
+))]
+compile_error!("protection QA requires a macOS or Windows debug build");
+
+#[cfg(all(
     feature = "file-workflows-qa",
     any(
         not(debug_assertions),
