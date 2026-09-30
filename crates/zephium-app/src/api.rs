@@ -383,6 +383,15 @@ pub enum Command {
     /// pending until both the exact durable CAS and native policy generation
     /// settle.
     SetFocusedContentBlockerEnabled(bool),
+    ElementPicker {
+        context: Box<zephium_ipc::BlockerSiteContext>,
+        action: zephium_ipc::BlockerPickerAction,
+        reply: SyncSender<Option<zephium_ipc::BlockerPickerView>>,
+    },
+    ChangeBlockerSite {
+        context: Box<zephium_ipc::BlockerSiteContext>,
+        action: zephium_ipc::BlockerSiteAction,
+    },
     /// Retries the focused profile's exact failed generation without exposing
     /// a profile selector to privileged IPC.
     RetryFocusedContentPolicy {

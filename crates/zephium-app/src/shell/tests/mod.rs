@@ -81,6 +81,28 @@ impl NetworkRequestPolicy for ImmediateNetworkPolicy {
 }
 
 impl BlockerCompiler for ImmediateAllowAllCompiler {
+    fn validate_personal_selector(&self, selector: &str) -> Option<String> {
+        (selector == ".banner").then(|| selector.to_owned())
+    }
+    fn prepare_site_preferences(
+        &self,
+        preferences: &zephium_core::blocker::BlockerSitePreferences,
+    ) -> Option<Arc<zephium_core::blocker::PreparedBlockerSites>> {
+        if preferences
+            .hides()
+            .iter()
+            .any(|h| self.validate_personal_selector(&h.selector).is_none())
+        {
+            return None;
+        }
+        zephium_core::blocker::PreparedBlockerSites::new(
+            preferences.revision(),
+            preferences
+                .paused_sites()
+                .map(|site| (site.clone(), true, Arc::from(""))),
+        )
+    }
+
     fn compile(
         &self,
         _profile: ProfileId,
@@ -271,6 +293,9 @@ type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
+    hold_picker: std::sync::atomic::AtomicBool,
+    held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
     calls: Mutex<Vec<String>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
@@ -425,6 +450,29 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn element_picker(
+        &self,
+        _profile: ProfileId,
+        _id: ItemId,
+        _site: zephium_core::blocker::BlockerSite,
+        _request: zephium_core::blocker::ElementPickerRequest,
+        completion: zephium_core::blocker::ElementPickerCompletion,
+    ) {
+        if self.hold_picker.load(std::sync::atomic::Ordering::Relaxed) {
+            *self.held_picker.lock().unwrap() = Some(completion);
+        } else {
+            completion.finish(self.picker_result.lock().unwrap().clone());
+        }
+    }
+
+    fn set_blocker_site_preferences(
+        &self,
+        _profile: ProfileId,
+        _preferences: Arc<zephium_core::blocker::PreparedBlockerSites>,
+        completion: zephium_core::ports::engine::BlockerSiteCompletion,
+    ) {
+        completion.finish(true);
+    }
     fn runtime_restart_required(&self) -> bool {
         self.runtime_restart_required
             .load(std::sync::atomic::Ordering::Acquire)
@@ -704,6 +752,9 @@ impl Engine for FakeEngine {
     }
 }
 
+type SiteUpdateCallback =
+    Box<dyn FnOnce(zephium_core::ports::store::BlockerSiteUpdateOutcome) + Send>;
+
 #[derive(Default)]
 pub(crate) struct FakeStore {
     saved: Mutex<Option<SessionState>>,
@@ -719,6 +770,10 @@ pub(crate) struct FakeStore {
     load_failed: Mutex<bool>,
     recovery_reason: Mutex<Option<String>>,
     degraded_profiles: Mutex<Vec<ProfileId>>,
+    site_preferences: Mutex<Arc<zephium_core::blocker::BlockerSitePreferences>>,
+    site_store_calls: std::sync::atomic::AtomicUsize,
+    site_updates_held: std::sync::atomic::AtomicBool,
+    site_update_callbacks: Mutex<VecDeque<SiteUpdateCallback>>,
     blocker_configs: Mutex<Option<Vec<ProfileBlockerConfig>>>,
     blocker_update_outcomes: Mutex<VecDeque<BlockerConfigUpdateOutcome>>,
     blocker_load_outcomes: Mutex<VecDeque<BlockerConfigLoadOutcome>>,
@@ -1003,6 +1058,46 @@ impl Store for FakeStore {
             .pop_front()
             .unwrap_or(BlockerConfigLoadOutcome::Failed);
         done(outcome);
+        true
+    }
+    fn load_profile_blocker_sites(
+        &self,
+        _profile: ProfileId,
+        done: Box<dyn FnOnce(zephium_core::ports::store::BlockerSiteLoadOutcome) + Send>,
+    ) -> bool {
+        self.site_store_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        done(zephium_core::ports::store::BlockerSiteLoadOutcome::Loaded(
+            self.site_preferences.lock().unwrap().clone(),
+        ));
+        true
+    }
+    fn update_profile_blocker_sites(
+        &self,
+        _profile: ProfileId,
+        revision: u64,
+        next: Arc<zephium_core::blocker::BlockerSitePreferences>,
+        done: Box<dyn FnOnce(zephium_core::ports::store::BlockerSiteUpdateOutcome) + Send>,
+    ) -> bool {
+        use zephium_core::ports::store::BlockerSiteUpdateOutcome;
+        self.site_store_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut stored = self.site_preferences.lock().unwrap();
+        let result = if stored.revision() == revision {
+            *stored = next.clone();
+            BlockerSiteUpdateOutcome::Updated(next)
+        } else {
+            BlockerSiteUpdateOutcome::Conflict(stored.clone())
+        };
+        drop(stored);
+        if self
+            .site_updates_held
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.site_update_callbacks.lock().unwrap().push_back(done);
+        } else {
+            done(result);
+        }
         true
     }
     fn record_visit(&self, _profile: ProfileId, url: String, title: String) {
@@ -1629,3 +1724,5 @@ mod tabs;
 mod view_lifecycle;
 mod window_layout;
 mod zoom;
+
+mod blocker_sites;

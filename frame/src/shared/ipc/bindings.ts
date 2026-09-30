@@ -85,6 +85,12 @@ export const commands = {
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
+	blockerSiteChange: (context: BlockerSiteContext, action: BlockerSiteAction) => __TAURI_INVOKE<OperationAdmission>("blocker_site_change", { context, action }),
+	blockerPicker: (context: BlockerSiteContext, action: BlockerPickerAction) => typedError<{
+	session: string,
+	active: boolean,
+	selection: BlockerSelectionView | null,
+} | null, null>(__TAURI_INVOKE("blocker_picker", { context, action })),
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
 	blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
 	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
@@ -180,9 +186,18 @@ export const events = {
  *  Stable diagnostics classification. Native/parser text and filter content
  *  never cross the privileged IPC boundary.
  */
-export type BlockerFailure = "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
+export type BlockerFailure = "site_preferences_unavailable" | "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
 
 export type BlockerPhase = "unavailable" | "uninitialized" | "compiling" | "installing" | "ready" | "failed" | "retired";
+
+/**  Host-initiated picker controls, available only to privileged main chrome. */
+export type BlockerPickerAction = { kind: "start" } | { kind: "read"; session: string } | { kind: "preview"; session: string; enabled: boolean } | { kind: "stop"; session: string };
+
+export type BlockerPickerView = {
+	session: string,
+	active: boolean,
+	selection: BlockerSelectionView | null,
+};
 
 /**
  *  Authority of the focused profile's durable blocker preference.
@@ -232,6 +247,32 @@ export type BlockerRuntimeDiagnostics = {
 	evaluation_errors: string,
 };
 
+export type BlockerSelectionView = {
+	identity: string,
+	label: string,
+	count: number,
+	positional: boolean,
+};
+
+export type BlockerSiteAction = { kind: "save_selection"; session: string; selection: string } | { kind: "retry" } | { kind: "pause"; paused: boolean } | { kind: "set_hide_enabled"; id: string; enabled: boolean } | { kind: "remove_hide"; id: string };
+
+/**  Exact privileged site-control context; never accepted from ordinary page IPC. */
+export type BlockerSiteContext = {
+	profile: string,
+	tab: string,
+	site: string,
+	revision: string,
+};
+
+export type BlockerSiteView = {
+	context: BlockerSiteContext,
+	paused: boolean,
+	private_session: boolean,
+	ready: boolean,
+	busy: boolean,
+	hides: PersonalHideView[],
+};
+
 /**
  *  Stable package-refresh failure category. Endpoint, parser, and native
  *  strings are intentionally never forwarded to privileged JavaScript.
@@ -258,13 +299,8 @@ export type BlockerSourceProvenance = "release_bundle" | "tuf_repository";
 
 export type BlockerStatusChanged = BlockerStatusView;
 
-/**
- *  Read-only, focused-profile diagnostics delivered only to privileged main
- *  chrome. It deliberately contains no profile selector, URL, origin, request
- *  metadata, native error string, or filter-list text. Runtime health is
- *  represented only by volatile aggregate counters.
- */
 export type BlockerStatusView = {
+	site: BlockerSiteView | null,
 	projection_revision: string,
 	protection: BlockerProtection,
 	phase: BlockerPhase,
@@ -813,6 +849,12 @@ export type PanelState = {
 	error: boolean,
 	corner_radius: number,
 	position_restorable: boolean,
+};
+
+export type PersonalHideView = {
+	id: string,
+	label: string,
+	enabled: boolean,
 };
 
 export type ProfileKindView = "default" | "named" | "incognito";

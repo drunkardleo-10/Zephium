@@ -754,6 +754,27 @@ impl Handle {
 
     /// Requests the focused profile's revisioned diagnostics without exposing
     /// a caller-selected profile identity.
+    pub fn element_picker(
+        &self,
+        context: zephium_ipc::BlockerSiteContext,
+        action: zephium_ipc::BlockerPickerAction,
+    ) -> Receiver<Option<zephium_ipc::BlockerPickerView>> {
+        let (reply, receiver) = sync_channel(1);
+        let command = Command::ElementPicker {
+            context: Box::new(context),
+            action,
+            reply,
+        };
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(command)
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
     pub fn focused_content_policy_status(&self) -> FocusedContentPolicyStatusRequest {
         let (reply, receiver) = sync_channel(1);
         let command = Command::FocusedContentPolicyStatus { reply };
@@ -832,6 +853,9 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         Command::ContentPolicyStatus { reply, .. } => {
             let _ = reply.send(ContentPolicyStatusQueryOutcome::Unavailable);
         }
+        Command::ElementPicker { reply, .. } => {
+            let _ = reply.try_send(None);
+        }
         Command::FocusedContentPolicyStatus { reply } => {
             let _ = reply.send(BlockerStatusView::unavailable());
         }
@@ -870,6 +894,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }
             | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::ChangeBlockerSite { .. }
             | Command::RetryFocusedContentPolicy { .. }
             | Command::RefreshContentBlockerSources
     )

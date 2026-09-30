@@ -1241,6 +1241,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             page_permission_respond,
             blocker_status,
             blocker_set_enabled,
+            blocker_site_change,
+            blocker_picker,
             blocker_retry,
             blocker_refresh_sources,
             profiles_delete,
@@ -1923,6 +1925,81 @@ fn blocker_set_enabled(
         caller.app_handle(),
         &shell,
         Command::SetFocusedContentBlockerEnabled(enabled),
+    )
+}
+
+static BLOCKER_PICKER_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+#[specta::specta]
+async fn blocker_picker(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    context: zephium_ipc::BlockerSiteContext,
+    action: zephium_ipc::BlockerPickerAction,
+) -> Result<Option<zephium_ipc::BlockerPickerView>, ()> {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_picker")
+        || context.profile.len() > 64
+        || context.tab.len() > 64
+        || context.site.len() > 253
+        || context.revision.len() != 16
+        || match &action {
+            zephium_ipc::BlockerPickerAction::Start => false,
+            zephium_ipc::BlockerPickerAction::Read { session }
+            | zephium_ipc::BlockerPickerAction::Preview { session, .. }
+            | zephium_ipc::BlockerPickerAction::Stop { session } => session.len() != 16,
+        }
+        || BLOCKER_PICKER_QUERY_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return Ok(None);
+    }
+    let _guard = AtomicFlagReset(&BLOCKER_PICKER_QUERY_IN_FLIGHT);
+    let request = shell.element_picker(context, action);
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        request
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten())
+}
+
+#[tauri::command]
+#[specta::specta]
+fn blocker_site_change(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    context: zephium_ipc::BlockerSiteContext,
+    action: zephium_ipc::BlockerSiteAction,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_site_change")
+        || context.profile.len() > 64
+        || context.tab.len() > 64
+        || context.site.len() > 253
+        || context.revision.len() != 16
+        || match &action {
+            zephium_ipc::BlockerSiteAction::SaveSelection { session, selection } => {
+                session.len() != 16 || selection.len() != 64
+            }
+            zephium_ipc::BlockerSiteAction::Pause { .. }
+            | zephium_ipc::BlockerSiteAction::Retry => false,
+            zephium_ipc::BlockerSiteAction::SetHideEnabled { id, .. }
+            | zephium_ipc::BlockerSiteAction::RemoveHide { id } => id.len() != 16,
+        }
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::ChangeBlockerSite {
+            context: Box::new(context),
+            action,
+        },
     )
 }
 

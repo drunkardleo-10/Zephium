@@ -1,6 +1,7 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
 mod blocker;
+mod blocker_sites;
 mod bootstrap;
 mod effects;
 mod engine_events;
@@ -551,6 +552,15 @@ impl Shell {
                     }
                     return;
                 }
+                if let Command::ChangeBlockerSite { context, action } = &command {
+                    if let Some(mut completion) =
+                        self.begin_blocker_site_mutation(operation_id.clone(), context, action)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if matches!(&command, Command::RefreshContentBlockerSources) {
                     if let Some(mut completion) =
                         self.begin_blocker_catalog_refresh(operation_id.clone())
@@ -854,6 +864,7 @@ impl Shell {
             Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }
             | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::ChangeBlockerSite { .. }
             | Command::RetryFocusedContentPolicy { .. }
             | Command::RefreshContentBlockerSources => {}
             Command::ContentPolicyStatus { profile, reply } => {
@@ -864,6 +875,11 @@ impl Shell {
                     .unwrap_or(ContentPolicyStatusQueryOutcome::UnknownProfile);
                 let _ = reply.send(outcome);
             }
+            Command::ElementPicker {
+                context,
+                action,
+                reply,
+            } => self.element_picker(&context, action, reply),
             Command::FocusedContentPolicyStatus { reply } => {
                 self.maintain_blocker_catalog();
                 let _ = reply.send(self.focused_blocker_status_view());
@@ -894,7 +910,10 @@ impl Shell {
                 self.consume_profile_deletion_outcome(profile)
             }
             Command::BlockerReady(profile) => self.consume_blocker_compile_result(profile),
-            Command::BlockerStoreReady(profile) => self.consume_blocker_store_result(profile),
+            Command::BlockerStoreReady(profile) => {
+                self.consume_blocker_store_result(profile);
+                self.consume_blocker_site_result(profile);
+            }
             Command::BlockerPreferenceRetry { profile, token } => {
                 self.on_blocker_preference_reconciliation_retry(profile, token)
             }

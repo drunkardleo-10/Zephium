@@ -62,11 +62,13 @@ impl CompileWakeHandoff {
 pub(super) struct BlockerInbox {
     pub(super) results: HashMap<ProfileId, PendingCompileResult>,
     store_results: HashMap<ProfileId, PendingStoreResult>,
+    pub(super) site_results: HashMap<ProfileId, super::blocker_sites::SiteReplySlot>,
 }
 
 pub(super) type BlockerProfileState = ProfileContentPolicyState;
 
 pub(super) struct BlockerProfile {
+    pub(super) sites: super::blocker_sites::SitePreferencesState,
     pub(super) config: ProfileBlockerConfig,
     pub(super) state: BlockerProfileState,
     pub(super) held_effects: VecDeque<Effect>,
@@ -227,7 +229,7 @@ struct CatalogAuthority {
 pub(super) struct BlockerCoordinator {
     pub(super) profiles: HashMap<ProfileId, BlockerProfile>,
     pub(super) inbox: BlockerResultInbox,
-    service: SharedBlocker,
+    pub(super) service: SharedBlocker,
     catalog: BlockerCatalogSnapshot,
     catalog_authority: CatalogAuthority,
     next_generation: Option<u64>,
@@ -298,7 +300,7 @@ impl BlockerCoordinator {
         ContentPolicyGeneration::new(raw)
     }
 
-    fn allocate_store_token(&mut self) -> Option<u64> {
+    pub(super) fn allocate_store_token(&mut self) -> Option<u64> {
         let token = self.next_store_token?;
         if token == u64::MAX {
             self.next_store_token = None;
@@ -447,6 +449,7 @@ impl BlockerCoordinator {
             self.profiles.insert(
                 config.profile,
                 BlockerProfile {
+                    sites: Default::default(),
                     config,
                     state: BlockerProfileState::Uninitialized,
                     held_effects: VecDeque::new(),
@@ -478,6 +481,7 @@ impl BlockerCoordinator {
         self.profiles.insert(
             profile,
             BlockerProfile {
+                sites: super::blocker_sites::SitePreferencesState::fresh(),
                 config: ProfileBlockerConfig {
                     profile,
                     revision: BlockerConfigRevision::INITIAL,
@@ -911,6 +915,7 @@ impl BlockerCoordinator {
 
     pub(super) fn retire_profile(&mut self, profile: ProfileId) {
         if let Some(entry) = self.profiles.get_mut(&profile) {
+            entry.sites = Default::default();
             entry.held_effects.clear();
             entry.applied_config = None;
             entry.pending_coverage = None;
@@ -932,6 +937,7 @@ impl BlockerCoordinator {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             inbox.results.remove(&profile);
             inbox.store_results.remove(&profile);
+            inbox.site_results.remove(&profile);
         }
         let inbox = self.inbox.clone();
         let retirement = self.service.retire_profile(
@@ -1037,21 +1043,21 @@ impl Shell {
     }
 
     pub(super) fn focused_blocker_status_view(&self) -> BlockerStatusView {
-        blocker_status_view(
+        let mut view = blocker_status_view(
             self.focused_blocker_status(),
             self.focused_runtime_policy_diagnostics(),
             self.next_projection_revision(),
-        )
+        );
+        view.site = self.focused_blocker_site_view().map(Box::new);
+        view
     }
 
     pub(super) fn project_blocker_status(&self) {
         let status = self.focused_blocker_status();
         if self.blocker.should_project(status) {
-            (self.emit)(Projection::BlockerStatus(blocker_status_view(
-                status,
-                self.focused_runtime_policy_diagnostics(),
-                self.next_projection_revision(),
-            )));
+            (self.emit)(Projection::BlockerStatus(
+                self.focused_blocker_status_view(),
+            ));
         }
     }
 
@@ -1426,6 +1432,7 @@ impl Shell {
     }
 
     pub(super) fn start_blocker_profile(&mut self, profile: ProfileId) -> bool {
+        self.ensure_blocker_site_preferences(profile);
         let accepted = self.blocker.start_uninitialized(
             profile,
             self.self_queue.as_ref().map(|queue| CallbackHandle {
@@ -1453,6 +1460,10 @@ impl Shell {
             .retry_failed(profile, failed_generation, callback)
         {
             BlockerRetry::Scheduled => {
+                if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
+                    entry.sites.failed = false;
+                }
+                self.ensure_blocker_site_preferences(profile);
                 self.project_blocker_status();
                 // Preserve the same synchronous-completion contract as
                 // startup: a deterministic compiler cannot strand its result
@@ -2125,6 +2136,7 @@ impl Shell {
         profile: ProfileId,
         reason: OperationReason,
     ) {
+        self.finish_blocker_site_operation(profile, OperationOutcome::Rejected, reason);
         self.finish_blocker_operation(profile, OperationOutcome::Rejected, reason);
         if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
             entry.preference = BlockerPreferenceAuthority::Unavailable;
@@ -2142,6 +2154,14 @@ impl Shell {
     }
 
     pub(super) fn finish_pending_blocker_operations_for_shutdown(&mut self) {
+        let profiles: Vec<_> = self.blocker.profiles.keys().copied().collect();
+        for profile in profiles {
+            self.finish_blocker_site_operation(
+                profile,
+                OperationOutcome::Deferred,
+                OperationReason::StoreOutcomeUnknown,
+            );
+        }
         let pending: Vec<_> = self
             .blocker
             .profiles
@@ -2182,9 +2202,32 @@ impl Shell {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inbox.results.clear();
         inbox.store_results.clear();
+        inbox.site_results.clear();
     }
 
     pub(super) fn consume_blocker_compile_result(&mut self, profile: ProfileId) {
+        if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
+            if entry.desired_config.enabled && !entry.sites.native_ready {
+                if entry.sites.failed {
+                    if let BlockerProfileState::Compiling {
+                        desired,
+                        retained,
+                        retries_remaining,
+                    } = entry.state
+                    {
+                        entry.state = BlockerCoordinator::failed_state(
+                            desired,
+                            retained,
+                            ContentPolicyFailure::SitePreferencesUnavailable,
+                            retries_remaining,
+                        );
+                    }
+                    self.finish_terminal_blocker_native_operation(profile);
+                    self.project_blocker_status();
+                }
+                return;
+            }
+        }
         let Some(result) = self.blocker.take_compile_result(profile) else {
             return;
         };
@@ -2317,6 +2360,18 @@ impl Shell {
     }
 
     pub(super) fn drain_blocker_inbox(&mut self) {
+        let site_profiles: Vec<_> = self
+            .blocker
+            .inbox
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .site_results
+            .keys()
+            .copied()
+            .collect();
+        for profile in site_profiles {
+            self.consume_blocker_site_result(profile);
+        }
         for profile in self.blocker.pending_result_profiles() {
             self.consume_blocker_compile_result(profile);
         }
@@ -3267,6 +3322,9 @@ fn format_manifest_sha256(digest: [u8; 32]) -> String {
 
 fn blocker_failure_view(failure: ContentPolicyFailure) -> BlockerFailure {
     match failure {
+        ContentPolicyFailure::SitePreferencesUnavailable => {
+            BlockerFailure::SitePreferencesUnavailable
+        }
         ContentPolicyFailure::GenerationExhausted => BlockerFailure::GenerationExhausted,
         ContentPolicyFailure::CompilerDispatchRejected => BlockerFailure::CompilerDispatchRejected,
         ContentPolicyFailure::CompilerUnavailable => BlockerFailure::CompilerUnavailable,
