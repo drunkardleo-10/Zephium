@@ -9,6 +9,13 @@ type Kept = { bitmap: Promise<ImageBitmap | null>; bytes: number };
 const kept = new Map<string, Kept>();
 let held = 0;
 
+/**
+ * Drawn in memory, not on the GPU: an accelerated canvas is a compositing
+ * layer of its own, and one on the canvas turns the whole transformed canvas
+ * into a layer with a backing store the size of everything on it.
+ */
+const SOFT: CanvasRenderingContext2DSettings = { willReadFrequently: true };
+
 /** Lets go of a canvas's pixels now rather than whenever the collector gets to it. */
 function drop(canvas: HTMLCanvasElement) {
   canvas.width = 0;
@@ -27,7 +34,7 @@ async function shrink(url: string, width: number): Promise<ImageBitmap | null> {
     scratch = document.createElement("canvas");
     scratch.width = Math.max(1, Math.round(image.naturalWidth * scale));
     scratch.height = Math.max(1, Math.round(image.naturalHeight * scale));
-    const context = scratch.getContext("2d");
+    const context = scratch.getContext("2d", SOFT);
     if (!context) return null;
     context.imageSmoothingQuality = "high";
     context.drawImage(image, 0, 0, scratch.width, scratch.height);
@@ -91,7 +98,7 @@ export function thumbnail(canvas: HTMLCanvasElement, frame: Thumb) {
       try {
         canvas.width = bitmap.width;
         canvas.height = bitmap.height;
-        canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+        canvas.getContext("2d", SOFT)?.drawImage(bitmap, 0, 0);
       } catch {
         // A copy let go before it was drawn: the window keeps its sheet.
       }

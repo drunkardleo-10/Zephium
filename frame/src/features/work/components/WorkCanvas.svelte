@@ -67,6 +67,7 @@
   import * as m from "$shared/i18n/messages";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
+  import { layerRelease } from "../lib/workspace/layers";
   let {
     items,
     links,
@@ -185,6 +186,23 @@
   let canvasWidth = $state(0);
   let canvasHeight = $state(0);
   let host = $state<HTMLDivElement>();
+  let layers: ReturnType<typeof layerRelease> | undefined;
+  $effect(() => {
+    const root = host;
+    if (!root) return;
+    const release = layerRelease(root);
+    layers = release;
+    return () => {
+      release.destroy();
+      if (layers === release) layers = undefined;
+    };
+  });
+  // Whatever arrives, leaves or settles on the canvas moves: the layer is let go once it is still.
+  $effect(() => {
+    void nodes;
+    void edges;
+    untrack(() => layers?.moved());
+  });
   const nodeFor = (id: string) => nodes.find((node) => node.id === id);
   function center(id: string) {
     const node = nodeFor(id);
