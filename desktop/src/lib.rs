@@ -2292,15 +2292,9 @@ fn extension_action_invoke(
     else {
         return rejected_extension_action("action-revision");
     };
-    let Ok(inner_size) = caller.inner_size() else {
-        return rejected_extension_action("window-size");
-    };
-    let Ok(scale_factor) = caller.scale_factor() else {
-        return rejected_extension_action("window-scale");
-    };
-    if !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return rejected_extension_action("window-scale-value");
-    }
+    // On macOS the chrome webview shrinks to the sidebar beside a web page, so
+    // its own size is not the window's; the anchor must fit the window.
+    let window = platform::imp::content_size(&caller).unwrap_or_else(|| inner_logical(&caller));
     // DOMRect is relative to the positioned privileged chrome WebView, while
     // the native popup parent is the window content view. Apply the same
     // generation-checked chrome origin used by drag/menu coordinates; never
@@ -2316,8 +2310,8 @@ fn extension_action_invoke(
         window_anchor_y,
         anchor_width,
         anchor_height,
-        f64::from(inner_size.width) / scale_factor,
-        f64::from(inner_size.height) / scale_factor,
+        window.width,
+        window.height,
     ) else {
         return rejected_extension_action("window-anchor-bounds");
     };
