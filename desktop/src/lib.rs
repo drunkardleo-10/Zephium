@@ -52,6 +52,8 @@ mod privileged_runtime_windows;
 mod resource_close;
 mod search_providers;
 mod webext;
+#[cfg(all(target_os = "windows", feature = "webext-qa"))]
+mod webext_qa;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -3961,6 +3963,8 @@ pub fn run() {
                 shutdown.prepare_hard_exit_watchdog()?;
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
+                #[cfg(all(target_os = "windows", feature = "webext-qa"))]
+                let data_dir = webext_qa::data_dir(data_dir)?;
                 #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
                 foreground_rendering_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;

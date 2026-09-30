@@ -1,4 +1,5 @@
-param([switch]$Build, [switch]$Release)
+param([switch]$Build, [switch]$Release,
+    [ValidatePattern('^[a-zA-Z0-9-]{1,48}$')][string]$Session)
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $qaDir = Join-Path $repo 'target\webext-qa'
@@ -34,7 +35,9 @@ if (-not (Test-Path -LiteralPath $qaExe)) { throw 'Run this script with -Build f
 if ((Get-Item -LiteralPath $qaExe).VersionInfo.ProductName -ne 'Zephium Extensions QA') {
     throw 'Refusing a binary without the QA identity.'
 }
-$process = Start-Process -FilePath $qaExe -WorkingDirectory $repo -WindowStyle Normal -PassThru -RedirectStandardOutput (Join-Path $qaDir 'stdout.log') -RedirectStandardError (Join-Path $qaDir 'stderr.log')
+$launch = @{FilePath=$qaExe;WorkingDirectory=$repo;WindowStyle='Normal';PassThru=$true;RedirectStandardOutput=(Join-Path $qaDir 'stdout.log');RedirectStandardError=(Join-Path $qaDir 'stderr.log')}
+if ($Session) { $launch.ArgumentList = @("--webext-qa-session=$Session") }
+$process = Start-Process @launch
 $processHandle = $process.Handle
 Start-Sleep -Seconds 2
 if ($process.HasExited) {
@@ -42,4 +45,5 @@ if ($process.HasExited) {
     throw "QA exited during startup (code $($process.ExitCode))."
 }
 Write-Output "Started Zephium Extensions QA (PID $($process.Id))."
-Write-Output 'Data: %APPDATA%\app.zephium.webext-qa'
+if ($Session) { Write-Output "Data: %APPDATA%\app.zephium.webext-qa\qa-sessions\session-$Session" }
+else { Write-Output 'Data: %APPDATA%\app.zephium.webext-qa' }
