@@ -3959,6 +3959,10 @@ export type WorkPageV1 = {
 	url: string,
 	live: boolean,
 	frame: WorkPageFrameV1 | null,
+	/**  The part that reads it; none when the lead reads it itself. */
+	part?: WorkPartId | null,
+	/**  The page's public title once it was read; never a signed-in page's. */
+	title?: string | null,
 };
 
 /**

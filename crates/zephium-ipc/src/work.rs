@@ -587,6 +587,12 @@ pub struct WorkPageV1 {
     pub url: String,
     pub live: bool,
     pub frame: Option<WorkPageFrameV1>,
+    /// The part that reads it; none when the lead reads it itself.
+    #[specta(optional)]
+    pub part: Option<WorkPartId>,
+    /// The page's public title once it was read; never a signed-in page's.
+    #[specta(optional)]
+    pub title: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(deny_unknown_fields)]

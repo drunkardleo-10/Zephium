@@ -630,8 +630,14 @@ impl WorkAttemptProbe {
         frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
     ) {
         if let Ok(mut pages) = self.pages.lock() {
+            // A long run keeps every live page: the oldest settled one
+            // makes room, its last frame already kept by the host.
             if pages.len() >= 16 && !pages.contains_key(&step) {
-                return;
+                let Some(settled) = pages.values().find(|page| !page.live).map(|page| page.step)
+                else {
+                    return;
+                };
+                pages.remove(&settled);
             }
             pages.insert(
                 step,

@@ -59,9 +59,33 @@ impl WorkActivity {
         };
         observers.retain(|_, observer| observer.is_alive());
         for observer in observers.values() {
-            let opened = observer.pages();
+            let mut opened = observer.pages();
             if opened.is_empty() {
                 continue;
+            }
+            // A page a long run let go keeps its last frame until it is stored.
+            if let (Some((_, known)), Ok(persisted)) =
+                (pages.get(&observer.attempt()), self.persisted.lock())
+            {
+                let dropped: Vec<WorkPageFrame> = known
+                    .iter()
+                    .filter(|page| {
+                        !opened.iter().any(|open| open.step == page.step)
+                            && page.frame.as_ref().is_some_and(|frame| {
+                                !persisted.contains(&(
+                                    observer.attempt(),
+                                    page.step,
+                                    frame.generation,
+                                ))
+                            })
+                    })
+                    .cloned()
+                    .map(|page| WorkPageFrame {
+                        live: false,
+                        ..page
+                    })
+                    .collect();
+                opened.extend(dropped);
             }
             if pages.len() >= MAX_PAGE_ATTEMPTS && !pages.contains_key(&observer.attempt()) {
                 let oldest = pages.keys().next().copied();
@@ -89,6 +113,8 @@ impl WorkActivity {
                         width: frame.width,
                         height: frame.height,
                     }),
+                    part: None,
+                    title: None,
                 })
             })
             .collect();
@@ -111,7 +137,10 @@ impl WorkActivity {
                 width: record.width,
                 height: record.height,
             }),
+            part: None,
+            title: None,
         }));
+        owned(state, &mut live);
         live
     }
     /// Writes the last frame of every settled page once, then remembers it.
@@ -201,6 +230,27 @@ impl WorkActivity {
                 .any(|record| record.attempt == attempt && record.step == step)
         })?;
         frames.read(*profile, attempt, step).map(Arc::new)
+    }
+}
+
+/// Each page's reader and title, from its step: the part it works for, or
+/// none for the lead's own read.
+fn owned(state: &WorkRuntimeProjection, pages: &mut [WorkPageV1]) {
+    for page in pages {
+        let Some(step) = state
+            .executions
+            .iter()
+            .find(|execution| execution.id == page.execution)
+            .and_then(|execution| execution.steps.iter().find(|step| step.id == page.step))
+        else {
+            continue;
+        };
+        page.part = step.part;
+        page.title = step
+            .local
+            .as_ref()
+            .and_then(|local| local.page_title.clone())
+            .filter(|_| step.account.is_none());
     }
 }
 
