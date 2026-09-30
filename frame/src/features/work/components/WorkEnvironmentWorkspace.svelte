@@ -468,6 +468,9 @@
         return;
       case "use_connection":
         return again(m.work_need_use_request({ service: need.target, part: part.title }));
+      case "connect":
+        void commands.runCommand(`settings.connections.${encodeURIComponent(need.target)}`);
+        return;
       case "retry":
         return again();
     }

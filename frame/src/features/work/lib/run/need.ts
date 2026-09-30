@@ -74,6 +74,11 @@ export function needWords(
           : m.work_need_connection({ service: need.target }),
         action: m.work_need_use({ service: need.target }),
       };
+    case "connect":
+      return {
+        text: m.work_need_connect({ service: need.target }),
+        action: m.work_need_connect_action({ service: need.target }),
+      };
     case "retry":
       return { text: said(need.target, need.reason), action: m.work_need_again() };
   }

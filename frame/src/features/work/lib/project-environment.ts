@@ -631,6 +631,8 @@ function needView(need: NonNullable<RunPart["need"]>, host?: string): PartNeed {
         ...(need.reason ? { reason: need.reason } : {}),
         ...(host ? { site: siteName(host) } : {}),
       };
+    case "connect":
+      return { kind: need.kind, target: need.connection };
     case "retry": {
       const site = need.host ?? host;
       return {

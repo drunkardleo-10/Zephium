@@ -2244,5 +2244,7 @@
   "work_part_state_done": "Done",
   "work_part_state_next": "Up next",
   "work_model_add_model_key": "Add a model key",
-  "work_open_in_tasks": "Open in Tasks"
+  "work_open_in_tasks": "Open in Tasks",
+  "work_need_connect": "Connect {service} to read it directly",
+  "work_need_connect_action": "Connect {service}"
 }
