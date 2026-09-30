@@ -18,6 +18,7 @@ mod lead_smoke;
 #[cfg(target_os = "macos")]
 mod work_actor;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_app_editors;
 mod work_app_views;
 #[cfg(target_os = "macos")]
 mod work_application;

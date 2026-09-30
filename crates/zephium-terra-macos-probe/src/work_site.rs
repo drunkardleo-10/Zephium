@@ -109,6 +109,15 @@ enum Check {
     /// Six daily apps' main views (Slack, Gmail, Calendar, Linear, Notion,
     /// GitHub) read as records with no model call.
     Views,
+    /// A message typed into a rich composer and sent with Enter, after the
+    /// person approves it: the channel receives exactly that text.
+    SlackWrite,
+    /// The same message sent with Enter from the composer, not its button.
+    SlackEnter,
+    /// A new issue from a dialog of rich editors and a pointer-down picker.
+    LinearWrite,
+    /// A line added to a page of blocks that saves as it is typed.
+    NotionWrite,
 }
 /// Freeze leaves a lost page's debt, which the probe's exit reports as an
 /// unclean shutdown; it runs on its own.
@@ -164,6 +173,16 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("heavy") => vec![Check::Heavy],
         Some("apps") => vec![Check::Apps],
         Some("views") => vec![Check::Views],
+        Some("slackwrite") => vec![Check::SlackWrite],
+        Some("slackenter") => vec![Check::SlackEnter],
+        Some("linearwrite") => vec![Check::LinearWrite],
+        Some("notionwrite") => vec![Check::NotionWrite],
+        Some("writes") => vec![
+            Check::SlackWrite,
+            Check::SlackEnter,
+            Check::LinearWrite,
+            Check::NotionWrite,
+        ],
         _ => return Err(super::ProbeFailure::Authority),
     };
     let _ = CHECKS.set(checks);
@@ -289,6 +308,20 @@ impl Sites {
                 hits.iter()
                     .filter(|hit| hit.site == site && hit.path.starts_with(path))
                     .map(|hit| (hit.post, hit.cookie.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// What a replica's commits posted under a path, in order.
+    fn written(&self, path: &str) -> Vec<String> {
+        self.hits
+            .lock()
+            .map(|hits| {
+                hits.iter()
+                    .filter(|hit| {
+                        hit.site == Site::Account && hit.post && hit.path.starts_with(path)
+                    })
+                    .filter_map(|hit| super::work_app_editors::posted(&hit.path))
                     .collect()
             })
             .unwrap_or_default()
@@ -505,6 +538,11 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             "200 OK",
             String::new(),
             page("Sign in", "<h1>Sign in to your account</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>"),
+        ),
+        (Site::Account, _, path) if super::work_app_editors::editor(path).is_some() => (
+            "200 OK",
+            String::new(),
+            super::work_app_editors::page(path).unwrap_or_default(),
         ),
         (Site::Account, _, path) if super::work_app_views::view(path).is_some() => (
             "200 OK",
@@ -1507,6 +1545,107 @@ pub(super) async fn workflow(
                             WorkStepStatus::Succeeded,
                         )
                     && run.confirmed.first().is_some_and(|h| h.contains("#design"))
+            }
+            Check::SlackWrite | Check::SlackEnter => {
+                let before = context.sites.written("/edit/slack/send").len();
+                let goal = if check == Check::SlackEnter {
+                    "Type 'On my way, ten minutes out' in the message box and press Enter to send it"
+                } else {
+                    "Post the message 'On my way, ten minutes out' in this channel"
+                };
+                let run = context
+                    .run_deciding(
+                        "Tell #design I'm on my way",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            if check == Check::SlackEnter {
+                                "/edit/slack-enter"
+                            } else {
+                                "/edit/slack"
+                            },
+                            goal,
+                        )]],
+                        vec![(true, false)],
+                    )
+                    .await?;
+                let sent = context.sites.written("/edit/slack/send");
+                let sent = &sent[before.min(sent.len())..];
+                let held = confirms(&run);
+                line(format!(
+                    "check=slackwrite sent={} exact={} confirms={held:?} pages=[{}]",
+                    sent.len(),
+                    sent.first()
+                        .is_some_and(|t| t == "On my way, ten minutes out"),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                sent.len() == 1
+                    && sent[0] == "On my way, ten minutes out"
+                    && held.first()
+                        == Some(&(
+                            Some(WorkConfirmDecisionV1::Approved),
+                            WorkStepStatus::Succeeded,
+                        ))
+            }
+            Check::LinearWrite => {
+                let before = context.sites.written("/edit/linear/issue").len();
+                let run = context
+                    .run_deciding(
+                        "File the login bug in Linear",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/edit/linear",
+                            "Create a new issue in the Engineering team titled 'Login fails on Safari' with the description 'Users on Safari 18 see a blank page after sign-in'",
+                        )]],
+                        vec![(true, false)],
+                    )
+                    .await?;
+                let made = context.sites.written("/edit/linear/issue");
+                let made = &made[before.min(made.len())..];
+                let expected = "Login fails on Safari|Users on Safari 18 see a blank page after sign-in|Engineering";
+                line(format!(
+                    "check=linearwrite created={} exact={} parts={:?} confirms={:?} pages=[{}]",
+                    made.len(),
+                    made.first().is_some_and(|t| t == expected),
+                    made.first()
+                        .map(|t| t.split('|').map(|p| !p.is_empty()).collect::<Vec<_>>()),
+                    confirms(&run),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                made.len() == 1 && made[0] == expected
+            }
+            Check::NotionWrite => {
+                let before = context.sites.written("/edit/notion/save").len();
+                let run = context
+                    .run_deciding(
+                        "Add the launch date to my notes page",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/edit/notion",
+                            "Add a line 'Launch moves to 14 October' to this page",
+                        )]],
+                        vec![(true, true)],
+                    )
+                    .await?;
+                let saved = context.sites.written("/edit/notion/save");
+                let saved = &saved[before.min(saved.len())..];
+                line(format!(
+                    "check=notionwrite saves={} exact={} confirms={:?} pages=[{}]",
+                    saved.len(),
+                    saved
+                        .last()
+                        .is_some_and(|t| t.contains("Launch moves to 14 October")),
+                    confirms(&run),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                saved
+                    .last()
+                    .is_some_and(|t| t.contains("Launch moves to 14 October"))
             }
             Check::Changed => {
                 let before = context.sites.posts();
