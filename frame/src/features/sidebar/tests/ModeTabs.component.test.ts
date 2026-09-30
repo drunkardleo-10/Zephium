@@ -46,17 +46,16 @@ test("re-selecting the side already showing asks native for nothing", async () =
   expect(native.run).not.toHaveBeenCalled();
 });
 
-test("the rail names the environment in a word and opens the other beneath it", async () => {
+test("the rail's switch marks where you are and goes to the other in one click", async () => {
   await surface.init();
   const screen = await render(ModeTabs, { compact: true });
-  const current = screen.getByRole("button", { name: "Browse", exact: true });
-  await expect.element(current).toHaveAttribute("aria-expanded", "false");
-  await current.click();
-  await expect.element(current).toHaveAttribute("aria-expanded", "true");
-  await screen.getByRole("button", { name: "Work", exact: true }).click();
+  const browse = screen.getByRole("button", { name: "Browse", exact: true });
+  const work = screen.getByRole("button", { name: "Work", exact: true });
+  await expect.element(browse).toHaveAttribute("aria-pressed", "true");
+  await work.click();
   expect(native.run).toHaveBeenCalledWith("browser.work");
+  // The thumb moves only once native has moved there.
+  await expect.element(work).toHaveAttribute("aria-pressed", "false");
   emitNativeEvent("uiCommand", "browser.work");
-  await expect
-    .element(screen.getByRole("button", { name: "Work", exact: true }).first())
-    .toHaveAttribute("aria-expanded", "false");
+  await expect.element(work).toHaveAttribute("aria-pressed", "true");
 });
