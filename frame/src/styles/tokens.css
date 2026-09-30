@@ -260,6 +260,24 @@
   --color-agent-eye: #15151d;
   --color-agent-ground: rgb(0 0 0 / 0.5);
 
+  /* The lead's looks: a two-tone body per figure, so the lead never reads as a
+     helper. The visor is dark glass in both themes; the eyes are lit. */
+  --color-lead-orb: #8e9bff;
+  --color-lead-orb-to: #c98bff;
+  --color-lead-drop: #62c8ff;
+  --color-lead-drop-to: #5b7dff;
+  --color-lead-prism: #ff8f6b;
+  --color-lead-prism-to: #ffc76b;
+  --color-lead-gem: #4fdcaa;
+  --color-lead-gem-to: #59b8ff;
+  --color-lead-egg: #ff8fbd;
+  --color-lead-egg-to: #a88cff;
+  --color-lead-pearl: #eef0ff;
+  --color-lead-pearl-to: #a9bcff;
+  --color-visor: #10111b;
+  --color-visor-rim: rgb(255 255 255 / 0.22);
+  --color-eye-lit: #f4fbff;
+
   /* The dots of a working indicator: the text's own tone, brighter in front. */
   --color-dots: var(--color-text);
 
@@ -627,6 +645,18 @@
   --color-agent-connection: #a795ee;
   --color-agent-deep: #2b2a4a;
   --color-agent-ground: rgb(24 24 48 / 0.2);
+  --color-lead-orb: #7584f5;
+  --color-lead-orb-to: #b673f2;
+  --color-lead-drop: #45b2f0;
+  --color-lead-drop-to: #4a68ee;
+  --color-lead-prism: #f27a55;
+  --color-lead-prism-to: #f2b54c;
+  --color-lead-gem: #34c492;
+  --color-lead-gem-to: #3fa1ec;
+  --color-lead-egg: #f278a8;
+  --color-lead-egg-to: #9277f0;
+  --color-lead-pearl: #e6e9fb;
+  --color-lead-pearl-to: #93a8f5;
   --chart-1: #5d8fcc;
   --chart-2: #a6531e;
   --chart-3: #449d7a;

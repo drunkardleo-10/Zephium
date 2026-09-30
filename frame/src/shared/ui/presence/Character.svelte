@@ -13,7 +13,7 @@
 
 <script lang="ts">
   import { untrack } from "svelte";
-  import { characterMask, type CharacterKind } from "./shapes";
+  import { characterMask, leadLookHere, type CharacterKind, type LeadLook } from "./shapes";
   import { watchStill } from "./still";
 
   let {
@@ -22,6 +22,7 @@
     size = 20,
     label,
     grounded = false,
+    look,
   }: {
     kind?: CharacterKind;
     mood?: Mood;
@@ -30,10 +31,14 @@
     label?: string;
     /** Standing on the canvas: a soft contact shadow under it. */
     grounded?: boolean;
+    /** The lead's figure; without it, the one the enclosing work gave its lead. */
+    look?: LeadLook;
   } = $props();
 
+  const given = leadLookHere();
+  const figure = $derived<LeadLook>(look ?? given?.() ?? "pearl");
   const live = $derived(LIVE.has(mood));
-  const mask = $derived(characterMask(kind));
+  const mask = $derived(characterMask(kind, figure));
   let host = $state<HTMLElement>();
   let still = $state(true);
   /** Expressions change behind a blink, never on arrival; a finish cheers only when seen happening. */
@@ -62,6 +67,7 @@
   class:fine={size >= 28}
   class:turned
   class:cheer
+  data-look={kind === "lead" ? figure : undefined}
   data-still={live && still ? "" : undefined}
   bind:this={host}
   style:--size="{size}px"
@@ -72,20 +78,28 @@
   {#if grounded}<span class="ground"></span>{/if}
   <span class="pose">
     <span class="figure">
+      {#if kind === "lead"}<span class="orbit back"><i></i></span>{/if}
       <span class="body" style:mask-image={mask}></span>
-      <span class="face">
-        {#key mood}<span class="eyes"><i class="eye"></i><i class="eye"></i></span>{/key}
+      <span class="visor">
+        <span class="face">
+          {#key mood}<span class="eyes"><i class="eye"></i><i class="eye"></i></span>{/key}
+        </span>
       </span>
+      {#if kind === "lead"}<span class="orbit front"><i></i></span>{/if}
     </span>
   </span>
 </span>
 
 <style>
   .character {
-    --hue: var(--color-agent-lead);
-    --eye-w: 0.088em;
-    --eye-h: 0.15em;
-    --eye-gap: 0.13em;
+    --hue: var(--color-agent-browser);
+    --hue-to: var(--hue);
+    --visor-w: 0.56em;
+    --visor-h: 0.25em;
+    --visor-y: 47%;
+    --eye-w: 0.078em;
+    --eye-h: 0.128em;
+    --eye-gap: 0.11em;
     --blink-delay: 1.2s;
 
     position: relative;
@@ -99,36 +113,72 @@
   }
 
   .browser {
-    --hue: var(--color-agent-browser);
     --blink-delay: 2.3s;
   }
 
   .research {
     --hue: var(--color-agent-research);
     --blink-delay: 0.4s;
+    --visor-w: 0.56em;
   }
 
   .computer {
     --hue: var(--color-agent-computer);
     --blink-delay: 3.1s;
-    --eye-w: 0.1em;
-    --eye-h: 0.12em;
+    --visor-w: 0.66em;
+    --visor-y: 49%;
   }
 
   .connection {
     --hue: var(--color-agent-connection);
     --blink-delay: 1.7s;
+    --visor-w: 0.5em;
+    --visor-y: 49%;
   }
 
+  /* The lead: a two-tone figure from its family, with an orbit round it. */
   .lead {
-    --eye-w: 0.094em;
-    --eye-h: 0.16em;
+    --hue: var(--color-lead-pearl);
+    --hue-to: var(--color-lead-pearl-to);
+    --visor-w: 0.62em;
+    --visor-y: 48%;
+  }
+
+  [data-look="orb"] {
+    --hue: var(--color-lead-orb);
+    --hue-to: var(--color-lead-orb-to);
+  }
+
+  [data-look="drop"] {
+    --hue: var(--color-lead-drop);
+    --hue-to: var(--color-lead-drop-to);
+    --visor-w: 0.56em;
+    --visor-y: 62%;
+  }
+
+  [data-look="prism"] {
+    --hue: var(--color-lead-prism);
+    --hue-to: var(--color-lead-prism-to);
+    --visor-w: 0.5em;
+    --visor-y: 64%;
+  }
+
+  [data-look="gem"] {
+    --hue: var(--color-lead-gem);
+    --hue-to: var(--color-lead-gem-to);
+    --visor-w: 0.54em;
+    --visor-y: 50%;
+  }
+
+  [data-look="egg"] {
+    --hue: var(--color-lead-egg);
+    --hue-to: var(--color-lead-egg-to);
+    --visor-y: 55%;
   }
 
   .pose,
   .figure,
-  .body,
-  .face {
+  .body {
     position: absolute;
     inset: 0;
   }
@@ -137,59 +187,67 @@
     transition: transform var(--motion-slow) var(--ease-spring);
   }
 
-  /* Lit from the upper left: a soft highlight, the hue's body falling into its
-     own deep tone, and the light the ground throws back along the lower rim. */
+  /* Lit from the upper left: a soft highlight, the hue running into its second
+     tone, and the light the ground throws back along the lower rim. */
   .body {
     background:
       radial-gradient(
-        30% 22% at 35% 24%,
-        color-mix(in oklab, var(--color-agent-light) 82%, transparent),
+        28% 20% at 34% 22%,
+        color-mix(in oklab, var(--color-agent-light) 80%, transparent),
         transparent
       ),
       radial-gradient(
-        64% 34% at 52% 96%,
+        64% 34% at 52% 98%,
         color-mix(
           in oklab,
-          color-mix(in oklab, var(--hue) 60%, var(--color-agent-light)) 70%,
+          color-mix(in oklab, var(--hue-to) 55%, var(--color-agent-light)) 70%,
           transparent
         ),
         transparent
       ),
-      radial-gradient(
-        118% 118% at 32% 24%,
-        color-mix(in oklab, var(--hue) 58%, var(--color-agent-light)) 0%,
-        var(--hue) 40%,
-        color-mix(in oklab, var(--hue) 52%, var(--color-agent-deep)) 94%
+      linear-gradient(
+        150deg,
+        color-mix(in oklab, var(--hue) 62%, var(--color-agent-light)) 0%,
+        var(--hue) 34%,
+        var(--hue-to) 72%,
+        color-mix(in oklab, var(--hue-to) 55%, var(--color-agent-deep)) 100%
       );
     mask-size: 100% 100%;
     mask-repeat: no-repeat;
   }
 
-  /* The lead is a pearl: the same light, with a cool sheen turning round its lower side. */
-  .lead .body {
-    border-radius: 50%;
+  /* Dark glass across the face, a line of light along its top, the eyes lit inside it. */
+  .visor {
+    position: absolute;
+    inset-block-start: var(--visor-y);
+    inset-inline-start: 50%;
+    inline-size: var(--visor-w);
+    block-size: var(--visor-h);
+    overflow: hidden;
+    border: max(0.5px, 0.018em) solid var(--color-visor-rim);
+    border-radius: var(--radius-capsule);
     background:
-      radial-gradient(
-        30% 22% at 35% 24%,
-        color-mix(in oklab, var(--color-agent-light) 92%, transparent),
-        transparent
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--color-agent-light) 16%, transparent) 0%,
+        transparent 38%
       ),
       radial-gradient(
-        70% 52% at 74% 80%,
-        color-mix(in oklab, var(--color-agent-lead-sheen) 72%, transparent),
-        transparent
-      ),
-      radial-gradient(
-        118% 118% at 32% 24%,
-        var(--color-agent-light) 0%,
-        var(--hue) 38%,
-        color-mix(in oklab, var(--hue) 50%, var(--color-agent-deep)) 96%
+        70% 90% at 50% 60%,
+        color-mix(in oklab, var(--hue) 34%, var(--color-visor)),
+        var(--color-visor)
       );
+    translate: -50% -50%;
+  }
+
+  .face {
+    position: absolute;
+    inset: 0;
   }
 
   .eyes {
     position: absolute;
-    inset-block-start: 45%;
+    inset-block-start: 52%;
     inset-inline-start: 50%;
     display: flex;
     gap: var(--eye-gap);
@@ -205,11 +263,48 @@
     inline-size: var(--eye-w);
     block-size: var(--eye-h);
     border-radius: var(--radius-capsule);
-    background: var(--color-agent-eye);
+    background: var(--color-eye-lit);
   }
 
   .computer .eye {
-    border-radius: 0.025em;
+    border-radius: 0.02em;
+  }
+
+  /* Past a small size the eyes carry a halo of their own hue. */
+  .fine .eye {
+    background: radial-gradient(
+      closest-side,
+      var(--color-eye-lit) 62%,
+      color-mix(in oklab, var(--hue) 70%, var(--color-eye-lit))
+    );
+  }
+
+  /* The lead's orbit: a thin ring tipped toward the viewer, half behind the
+     figure and half in front of it. */
+  .orbit {
+    position: absolute;
+    inset-inline: -12%;
+    inset-block-start: 52%;
+    block-size: 26%;
+    rotate: -16deg;
+    translate: 0 -30%;
+  }
+
+  .orbit i {
+    position: absolute;
+    inset: 0;
+    border: max(0.75px, 0.03em) solid
+      color-mix(in oklab, var(--hue-to) 55%, var(--color-agent-light));
+    border-radius: 50%;
+    opacity: 0.85;
+  }
+
+  .orbit.front {
+    clip-path: inset(50% 0 0 0);
+  }
+
+  .orbit.back i {
+    opacity: 0.4;
   }
 
   /* Waiting on you: eyes a little wider, on you, the head tilted. */
@@ -218,33 +313,40 @@
   }
 
   .waiting .eye {
-    block-size: calc(var(--eye-h) * 1.14);
-    inline-size: calc(var(--eye-w) * 1.1);
+    block-size: calc(var(--eye-h) * 1.2);
+    inline-size: calc(var(--eye-w) * 1.15);
   }
 
-  /* Done: content, eyes closed in two small arcs. */
+  /* Working: narrowed, focused. */
+  .working .eye {
+    block-size: calc(var(--eye-h) * 0.62);
+  }
+
+  /* Done: content, eyes closed in two small lit arcs. */
   .done .eye {
-    inline-size: calc(var(--eye-w) * 1.7);
-    block-size: calc(var(--eye-w) * 0.95);
-    border: 0.028em solid var(--color-agent-eye);
+    inline-size: calc(var(--eye-w) * 1.9);
+    block-size: calc(var(--eye-w) * 1.05);
+    border: max(0.6px, 0.024em) solid var(--color-eye-lit);
     border-block-end: 0;
     border-radius: 50% 50% 0 0 / 100% 100% 0 0;
     background: transparent;
   }
 
-  /* Stopped: eyes at rest in two short lines, the head lowered, the colour gone quiet. */
+  /* Stopped: eyes at rest in two short dim lines, the head lowered, the colour gone quiet. */
   .stopped .pose {
     transform: translateY(0.03em) rotate(7deg);
   }
 
   .stopped .eye {
-    inline-size: calc(var(--eye-w) * 1.5);
-    block-size: 0.026em;
+    inline-size: calc(var(--eye-w) * 1.6);
+    block-size: max(0.6px, 0.022em);
+    opacity: 0.55;
   }
 
-  .stopped .body {
-    filter: saturate(0.3);
-    opacity: 0.78;
+  .stopped .body,
+  .stopped .orbit {
+    filter: saturate(0.25);
+    opacity: 0.75;
   }
 
   .ground {
@@ -254,21 +356,6 @@
     block-size: 18%;
     border-radius: 50%;
     background: radial-gradient(closest-side, var(--color-agent-ground), transparent);
-  }
-
-  .fine .eye::after {
-    content: "";
-    display: block;
-    inline-size: 38%;
-    block-size: 24%;
-    margin: 14% 0 0 44%;
-    border-radius: 50%;
-    background: color-mix(in oklab, var(--color-agent-light) 70%, transparent);
-  }
-
-  .fine.done .eye::after,
-  .fine.stopped .eye::after {
-    content: none;
   }
 
   /* Only a live character moves: a slow float, a glance, a blink. Waiting asks
@@ -311,10 +398,6 @@
 
   .searching .face {
     animation: search 3.6s var(--ease-out) infinite;
-  }
-
-  .working .face {
-    transform: translate(0.028em, 0.022em);
   }
 
   .cheer .figure {
@@ -362,53 +445,53 @@
   @keyframes ponder {
     0%,
     100% {
-      transform: translate(0.034em, -0.03em);
+      transform: translate(0.05em, -0.02em);
     }
 
     34%,
     46% {
-      transform: translate(-0.03em, -0.036em);
+      transform: translate(-0.05em, -0.02em);
     }
 
     62%,
     84% {
-      transform: translate(0.034em, -0.03em);
+      transform: translate(0.05em, -0.02em);
     }
   }
 
   @keyframes read {
     0% {
-      transform: translate(-0.04em, 0.024em);
+      transform: translate(-0.07em, 0.01em);
     }
 
     82% {
-      transform: translate(0.04em, 0.024em);
+      transform: translate(0.07em, 0.01em);
     }
 
     100% {
-      transform: translate(-0.04em, 0.024em);
+      transform: translate(-0.07em, 0.01em);
     }
   }
 
   @keyframes search {
     0%,
     20% {
-      transform: translate(-0.046em, -0.004em);
+      transform: translate(-0.08em, 0);
     }
 
     26%,
     48% {
-      transform: translate(0.046em, -0.004em);
+      transform: translate(0.08em, 0);
     }
 
     54%,
     70% {
-      transform: translate(0.01em, -0.03em);
+      transform: translate(0.01em, -0.02em);
     }
 
     76%,
     100% {
-      transform: translate(-0.046em, -0.004em);
+      transform: translate(-0.08em, 0);
     }
   }
 

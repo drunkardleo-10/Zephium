@@ -76,7 +76,7 @@
 <span class="window" class:live>
   <span class="bar">
     <span class="mark"
-      >{#if live}<Orb kind="reading" size={14} />{:else}<HostGlyph
+      >{#if live}<Orb size={14} />{:else}<HostGlyph
           {host}
           {url}
           size={14}

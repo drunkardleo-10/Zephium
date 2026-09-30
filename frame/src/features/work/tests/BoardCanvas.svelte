@@ -1,5 +1,6 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
+  import { provideLeadLook } from "$shared/ui/presence";
   import WorkCanvas from "../components/WorkCanvas.svelte";
   import {
     clearOfBands,
@@ -39,6 +40,7 @@
     viewport?: { x: number; y: number; zoom: number };
     asked?: string[];
   } = $props();
+  provideLeadLook(() => scene.snapshot.id);
   const measured = new SvelteMap<string, number>();
   let open = $state<string | null>(null);
   const recorded = () => scene.pages;

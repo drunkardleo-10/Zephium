@@ -7,7 +7,7 @@ import PresenceSheet from "./PresenceSheet.svelte";
 const shots = "../../../../../../target/work-presence";
 
 test("the characters and the working indicators, in both themes", async () => {
-  await page.viewport(1100, 1180);
+  await page.viewport(1400, 1800);
   const screen = await render(PresenceSheet);
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;

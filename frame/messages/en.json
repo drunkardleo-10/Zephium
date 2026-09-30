@@ -2234,5 +2234,7 @@
   "work_computer_agent_worked_short": "Worked on it",
   "work_computer_agent_starting": "Starting",
   "work_computer_agent_editing": "Editing {file}",
-  "work_computer_agent_running": "Running {command}"
+  "work_computer_agent_running": "Running {command}",
+  "work_line_searching_for": "Searching {what}",
+  "work_line_working_on": "Working on {parts}"
 }

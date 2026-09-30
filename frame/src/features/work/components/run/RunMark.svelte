@@ -11,7 +11,7 @@
   }: { state?: "live" | "waiting" | "done" | "stopped" | "idle"; size?: number } = $props();
 </script>
 
-{#if mark === "live"}<Orb kind="working" {size} />{:else}<svg
+{#if mark === "live"}<Orb {size} />{:else}<svg
     class="run-mark {mark}"
     width={size}
     height={size}

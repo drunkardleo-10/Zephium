@@ -1,9 +1,3 @@
-<script lang="ts" module>
-  /** When this document first saw each run live, so the clock survives the line being redrawn. */
-  const seen: Record<string, number> = {};
-  const order: string[] = [];
-</script>
-
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
@@ -17,7 +11,7 @@
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
-  import { Character, Orb, type Mood, type OrbKind } from "$shared/ui/presence";
+  import { Character, Orb, Shimmer, type Mood } from "$shared/ui/presence";
   import HostGlyph, { siteMark } from "./cards/HostGlyph.svelte";
   import Icon from "$shared/ui/Icon";
   import {
@@ -312,38 +306,53 @@
             ? ("stopped" as const)
             : ("idle" as const),
   );
-  /** What the lead is doing, as its face and its indicator show it. */
-  const doing = $derived.by((): { mood: Mood; orb: OrbKind } => {
+  /** What the lead is doing, as its face shows it. */
+  const doing = $derived.by((): Mood => {
     if (fileState)
       return (execution?.steps ?? []).some(
         (step) =>
           step.status === "running" &&
           (step.kind.kind === "write_file" || step.kind.kind === "edit_file"),
       )
-        ? { mood: "working", orb: "working" }
-        : { mood: "reading", orb: "reading" };
+        ? "working"
+        : "reading";
     switch (activity) {
       case "searching":
-        return { mood: "searching", orb: "searching" };
+        return "searching";
       case "reading":
-        return { mood: "reading", orb: "reading" };
+        return "reading";
       case "interacting":
-        return { mood: "working", orb: "working" };
-      case "planning":
-      case "delegating":
-      case "finishing":
-        return { mood: "thinking", orb: "planning" };
       case "producing_artifact":
-        return { mood: "working", orb: "planning" };
+        return "working";
       default:
-        return { mood: "thinking", orb: "thinking" };
+        return "thinking";
     }
   });
+  const lower = (text: string) => text.charAt(0).toLocaleLowerCase() + text.slice(1);
+  /**
+   * While it works the line says one thing: what the one helper at work is
+   * doing, which helpers are at work, or what the lead itself is doing.
+   */
+  const liveWords = $derived.by(() => {
+    if (fileState || working.length === 0) return headline;
+    if (working.length > 1)
+      return m.work_line_working_on({
+        parts: new Intl.ListFormat(undefined, { type: "conjunction" }).format(
+          working.map((part) => part.title),
+        ),
+      });
+    const [part] = working;
+    if (part!.helper === "research") return m.work_line_searching_for({ what: lower(part!.title) });
+    if (part!.host) return m.work_line_reading({ host: part!.host });
+    return part!.now || part!.title;
+  });
+  /** At work: the indicator and one shimmering line stand where the lead's face is. */
+  const thinking = $derived(mark === "live" && !waiting);
   const face = $derived<Mood>(
     mark === "waiting"
       ? "waiting"
       : mark === "live"
-        ? doing.mood
+        ? doing
         : mark === "done"
           ? "done"
           : mark === "stopped"
@@ -358,30 +367,6 @@
     computer: "working",
     connection: "working",
   };
-  /** How long the run has been going, by this window's clock: a second hand only while it runs. */
-  let now = $state(Date.now());
-  const since = $derived.by(() => {
-    const id = execution?.id;
-    if (!live || !id) return null;
-    const known = seen[id];
-    if (known !== undefined) return known;
-    const first = Date.now();
-    order.push(id);
-    if (order.length > 64) delete seen[order.shift()!];
-    seen[id] = first;
-    return first;
-  });
-  $effect(() => {
-    if (since === null) return;
-    now = Date.now();
-    const tick = setInterval(() => (now = Date.now()), 1000);
-    return () => clearInterval(tick);
-  });
-  const elapsed = $derived.by(() => {
-    if (since === null) return "";
-    const seconds = Math.max(0, Math.floor((now - since) / 1000));
-    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-  });
   const signInWall = $derived(waiting?.reason === "sign_in" && !!onsignin);
   const followups = $derived(settled && newest ? session.followups.slice(0, 3) : []);
   const writeupOffer = $derived(settled && newest ? writeup : undefined);
@@ -592,13 +577,18 @@
         <button
           type="button"
           class="avatar"
+          class:working={thinking}
           aria-expanded={panel === "agents"}
           aria-label={m.work_line_agents()}
           onclick={() => (want = want === "agents" ? null : "agents")}
         >
-          <Character kind="lead" mood={face} size={22} label={m.work_agent_line()} />
+          {#if thinking}<Orb size={20} label={m.work_agent_line()} />{:else}<Character
+              kind="lead"
+              mood={face}
+              size={22}
+              label={m.work_agent_line()}
+            />{/if}
         </button>
-        {#if mark === "live" && !waiting}<Orb kind={doing.orb} size={14} />{/if}
         <div class="state">
           {#if waiting}
             <button
@@ -632,12 +622,15 @@
                     aria-hidden="true"><Icon icon={ArrowDown01Icon} size={12} /></span
                   ></button
                 >
+              {:else if thinking}
+                <span class="words"
+                  ><span class="text" bind:this={words}><Shimmer text={liveWords} /></span></span
+                >
               {:else}
                 <span class="words"><span class="text" bind:this={words}>{headline}</span></span>
               {/if}
             {/key}
           {/if}
-          {#if elapsed && !waiting}<span class="elapsed">{elapsed}</span>{/if}
           {#if live && preview}<span class="draft">{preview}</span>{/if}
         </div>
         <div class="controls">
@@ -693,21 +686,6 @@
                   );
               }}>{m.work_line_approve()}</button
             >
-          {/if}
-          {#if live && working.length}
-            <button
-              type="button"
-              class="helpers"
-              aria-expanded={panel === "agents"}
-              aria-label={m.work_line_agents()}
-              onclick={() => (want = want === "agents" ? null : "agents")}
-            >
-              {#each working.slice(0, 4) as part (part.id)}<span class="helper"
-                  ><Character kind={helperOf(part)} size={18} /></span
-                >{/each}{#if working.length > 4}<span class="more-helpers"
-                  >+{working.length - 4}</span
-                >{/if}
-            </button>
           {/if}
           {#if live}
             <button
@@ -940,12 +918,6 @@
     text-decoration: none;
   }
 
-  .elapsed {
-    flex: none;
-    color: var(--color-faint);
-    font-variant-numeric: tabular-nums;
-  }
-
   .draft {
     min-inline-size: 0;
     overflow: hidden;
@@ -1151,47 +1123,6 @@
     font-size: var(--text-label);
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  /* The helpers at work, shoulder to shoulder: the way into their list. */
-  .helpers {
-    display: flex;
-    align-items: center;
-    block-size: 26px;
-    padding: 0 6px 0 8px;
-    border: 0;
-    border-radius: var(--radius-capsule);
-    background: transparent;
-    color: var(--color-muted);
-    font: inherit;
-    font-size: var(--text-caption);
-    font-variant-numeric: tabular-nums;
-    cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-out);
-  }
-
-  .helpers:hover,
-  .helpers[aria-expanded="true"] {
-    background: var(--color-control-hover);
-  }
-
-  .helpers:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-  }
-
-  .helper {
-    display: grid;
-    place-items: center;
-    margin-inline-start: -5px;
-  }
-
-  .helper:first-child {
-    margin-inline-start: 0;
-  }
-
-  .more-helpers {
-    margin-inline-start: 5px;
   }
 
   form {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack, onMount, setContext } from "svelte";
+  import { provideLeadLook } from "$shared/ui/presence/shapes";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
   import { commandId, workSession, type WorkSession } from "$domain/work";
@@ -718,6 +719,7 @@
     }
   }
   const snapshot = $derived(session.snapshot);
+  provideLeadLook(() => session.snapshot?.id);
   const baseItems = $derived(
     snapshot
       ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media)

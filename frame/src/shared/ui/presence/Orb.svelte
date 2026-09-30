@@ -1,19 +1,17 @@
 <script lang="ts">
-  import { orbKeyframes, orbStrip, type OrbKind } from "./orb";
+  import { orbKeyframes, orbStrip } from "./orb";
   import { watchStill } from "./still";
 
   let {
-    kind = "thinking",
     size = 16,
     label,
   }: {
-    kind?: OrbKind;
     size?: number;
     /** Said to assistive technology; without it the orb is decoration beside its words. */
     label?: string;
   } = $props();
 
-  const strip = $derived(orbStrip(kind, size));
+  const strip = $derived(orbStrip(size));
   let host = $state<HTMLElement>();
   let film = $state<HTMLElement>();
 
@@ -21,16 +19,16 @@
     const element = film;
     const watched = host;
     if (!element || !watched) return;
-    const { frames, fps, loops } = strip;
+    const { frames, fps } = strip;
     const run = element.animate(orbKeyframes(frames, size), {
       duration: (frames / fps) * 1000,
-      iterations: loops,
+      iterations: Infinity,
       easing: "linear",
     });
     run.pause();
     const stop = watchStill(watched, (still) => {
       if (still) run.pause();
-      else if (run.playState !== "finished") run.play();
+      else run.play();
     });
     return () => {
       stop();

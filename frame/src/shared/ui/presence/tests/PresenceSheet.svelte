@@ -1,11 +1,11 @@
 <script lang="ts">
   import Character, { type Mood } from "../Character.svelte";
   import Orb from "../Orb.svelte";
-  import type { CharacterKind } from "../shapes";
-  import type { OrbKind } from "../orb";
+  import Shimmer from "../Shimmer.svelte";
+  import type { CharacterKind, LeadLook } from "../shapes";
 
-  const kinds: CharacterKind[] = ["lead", "browser", "research", "computer", "connection"];
-  const names = ["Lead", "Browser", "Research", "Computer", "Connection"];
+  const helpers: CharacterKind[] = ["browser", "research", "computer", "connection"];
+  const looks: LeadLook[] = ["pearl", "orb", "drop", "prism", "gem", "egg"];
   const moods: Mood[] = [
     "rest",
     "thinking",
@@ -16,50 +16,49 @@
     "done",
     "stopped",
   ];
-  const orbs: [OrbKind, string][] = [
-    ["thinking", "Thinking"],
-    ["searching", "Searching the web"],
-    ["reading", "Reading airbnb.com"],
-    ["planning", "Planning the trip"],
-    ["working", "Working"],
-    ["waiting", "Waiting for you"],
-  ];
+  const lines = ["Thinking", "Searching flights", "Reading airbnb.com", "Waiting for you"];
 </script>
 
 <div class="sheet">
   <div class="grid" style:--columns={moods.length}>
     <span></span>
     {#each moods as mood (mood)}<span class="head">{mood}</span>{/each}
-    {#each kinds as kind, index (kind)}
-      <span class="name">{names[index]}</span>
+    {#each looks as look (look)}
+      <span class="name">Lead · {look}</span>
+      {#each moods as mood (mood)}<span class="cell"
+          ><Character kind="lead" {look} {mood} size={56} /></span
+        >{/each}
+    {/each}
+    {#each helpers as kind (kind)}
+      <span class="name">{kind}</span>
       {#each moods as mood (mood)}<span class="cell"><Character {kind} {mood} size={56} /></span
         >{/each}
     {/each}
   </div>
   <div class="sizes">
-    {#each [14, 16, 20, 24, 32] as size (size)}
+    {#each [14, 18, 22, 28] as size (size)}
       <div class="row">
-        {#each kinds as kind (kind)}<Character {kind} mood="thinking" {size} />{/each}
+        {#each looks as look (look)}<Character kind="lead" {look} mood="thinking" {size} />{/each}
+        {#each helpers as kind (kind)}<Character {kind} mood="thinking" {size} />{/each}
         <span class="caption">{size}px</span>
       </div>
     {/each}
-    <div class="row">
-      {#each kinds as kind (kind)}<Character {kind} mood="working" size={32} grounded />{/each}
-      <span class="caption">grounded</span>
-    </div>
   </div>
   <div class="orbs">
-    {#each orbs as [kind, words] (kind)}
-      <div class="pill"><Orb {kind} size={20} /><span>{words}</span></div>
+    {#each lines as words (words)}
+      <div class="pill"><Orb size={18} /><Shimmer text={words} /></div>
     {/each}
+  </div>
+  <div class="orbs zoom">
+    {#each lines.slice(0, 2) as words (words)}
+      <div class="pill"><Orb size={18} /><Shimmer text={words} /></div>
+    {/each}
+    <Character kind="lead" look="orb" mood="thinking" size={18} />
+    <Character kind="browser" mood="reading" size={18} />
+    <Character kind="lead" look="prism" mood="done" size={18} />
   </div>
   <div class="orbs large">
-    {#each orbs as [kind] (kind)}<Orb {kind} size={64} />{/each}
-  </div>
-  <div class="orbs">
-    {#each orbs as [kind, words] (kind)}
-      <div class="line"><Orb {kind} size={14} /><span>{words}</span></div>
-    {/each}
+    {#each [14, 18, 24, 48, 96] as size (size)}<Orb {size} />{/each}
   </div>
 </div>
 
@@ -76,13 +75,14 @@
 
   .grid {
     display: grid;
-    grid-template-columns: 96px repeat(var(--columns), 88px);
+    grid-template-columns: 110px repeat(var(--columns), 84px);
     align-items: center;
-    row-gap: 18px;
+    row-gap: 14px;
   }
 
   .head,
-  .caption {
+  .caption,
+  .name {
     color: var(--color-faint);
   }
 
@@ -100,13 +100,18 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
   }
 
   .orbs {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 14px;
+  }
+
+  .zoom {
+    zoom: 3;
   }
 
   .large {
@@ -116,20 +121,12 @@
   .pill {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 9px;
     block-size: 36px;
     padding: 0 16px 0 10px;
     border-radius: var(--radius-capsule);
     background: var(--color-menu);
     box-shadow: var(--shadow-menu);
     font-size: var(--text-body);
-  }
-
-  .line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-inline-size: 150px;
-    color: var(--color-muted);
   }
 </style>
