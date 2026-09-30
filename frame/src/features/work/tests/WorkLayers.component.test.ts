@@ -48,3 +48,23 @@ test("the canvas lets its layer go once motion settles, never while a helper sti
   expect(released()).toBe(2);
   root.remove();
 });
+
+test("a person at the canvas holds its layer, and it goes once they leave it be or the window hides", async () => {
+  const { root, released } = canvas();
+  const viewport = root.querySelector<HTMLElement>(".svelte-flow__viewport")!;
+  const release = layerRelease(root);
+  root.dispatchEvent(new PointerEvent("pointermove", { bubbles: true }));
+  expect(viewport.style.willChange).toBe("transform");
+  release.moved();
+  await wait(400);
+  // Held: nothing lets it go while the person may pan.
+  expect(released()).toBe(0);
+  Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(viewport.style.willChange).toBe("");
+  await wait(400);
+  expect(released()).toBe(1);
+  Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+  release.destroy();
+  root.remove();
+});

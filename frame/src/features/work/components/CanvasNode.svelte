@@ -87,7 +87,8 @@
    * part opens from its own name and needs none.
    */
   const viewport = useViewport();
-  const scale = $derived(Math.max(0.5, Math.min(1, viewport.current.zoom)));
+  // Only a selected card follows the zoom: the rest never re-render as the view moves.
+  const scale = $derived(selected ? Math.max(0.5, Math.min(1, viewport.current.zoom)) : 1);
   const tooled = $derived(
     type !== "head" &&
       type !== "trail" &&
