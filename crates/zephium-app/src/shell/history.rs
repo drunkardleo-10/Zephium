@@ -47,6 +47,9 @@ impl Shell {
             });
             return;
         }
+        if matches!(call, HistoryCall::Clear { .. }) {
+            self.reset_blocker_statistics(expected_profile);
+        }
         let Some(reads) = &self.store_reads else {
             done.finish(HistoryResponse::Error {
                 error: HistoryError::Unavailable,

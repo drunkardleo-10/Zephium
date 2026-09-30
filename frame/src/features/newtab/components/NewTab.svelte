@@ -27,6 +27,37 @@
     personalize?: boolean;
     showClock?: boolean;
   } = $props();
+  let blockedToday = $state<number | null>(null);
+  let statisticsRequest = 0;
+  async function refreshStatistics(profile: string) {
+    const request = ++statisticsRequest;
+    try {
+      const result = await commands.blockerStats(profile);
+      if (request === statisticsRequest && tabs.profile()?.id === profile) {
+        blockedToday = result.status === "ok" ? (result.data?.today ?? null) : null;
+      }
+    } catch {
+      if (request === statisticsRequest) blockedToday = null;
+    }
+  }
+  $effect(() => {
+    void tabs.activeId();
+    const profile = tabs.profile()?.id;
+    blockedToday = null;
+    if (profile) void refreshStatistics(profile);
+    return () => {
+      statisticsRequest++;
+    };
+  });
+  onMount(() => {
+    const visible = () => {
+      const profile = tabs.profile()?.id;
+      if (!document.hidden && profile) void refreshStatistics(profile);
+    };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
+  });
+
   let input = $state<HTMLInputElement>();
   let now = $state(new Date());
   let firstName = $derived((tabs.profile()?.name ?? "").trim().split(/\s+/u)[0] ?? "");
@@ -102,6 +133,9 @@
   {#if showClock}<div class="newtab-clock">
       <time datetime={now.toISOString()}>{clock}</time><span>{date}</span>
     </div>{/if}
+  {#if blockedToday !== null}<p class="newtab-protection">
+      {blockedToday.toLocaleString()} ads and trackers blocked today
+    </p>{/if}
   <div class="newtab-search">
     {#if search}{@render search()}{:else}<SearchField
         size="page"
@@ -144,3 +178,11 @@
     />
   </div>
 </section>
+
+<style>
+  .newtab-protection {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+  }
+</style>

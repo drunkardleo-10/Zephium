@@ -757,6 +757,9 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    pub(crate) statistics:
+        Mutex<std::collections::HashMap<ProfileId, zephium_core::blocker::BlockerStatistics>>,
+    pub(crate) statistics_writes: std::sync::atomic::AtomicUsize,
     saved: Mutex<Option<SessionState>>,
     events: Mutex<Vec<&'static str>>,
     flush_result: Mutex<Option<bool>>,
@@ -1168,6 +1171,33 @@ impl Store for FakeStore {
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
     }
 
+    fn load_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<zephium_core::blocker::BlockerStatistics>) + Send>,
+    ) -> bool {
+        done(Some(
+            self.statistics
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        ));
+        true
+    }
+    fn save_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        statistics: zephium_core::blocker::BlockerStatistics,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) -> bool {
+        self.statistics_writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.statistics.lock().unwrap().insert(profile, statistics);
+        done(true);
+        true
+    }
     fn clear_history(&self, _profile: ProfileId, since: Option<i64>) -> u32 {
         let mut visits = self.recorded_visits.lock().unwrap();
         let before = visits.len();

@@ -1084,7 +1084,9 @@ fn command_is_critical(command: &Command) -> bool {
 fn command_is_observational_query(command: &Command) -> bool {
     matches!(
         command,
-        Command::ContentPolicyStatus { .. } | Command::FocusedContentPolicyStatus { .. }
+        Command::ContentPolicyStatus { .. }
+            | Command::FocusedContentPolicyStatus { .. }
+            | Command::BlockerStatistics { .. }
     )
 }
 

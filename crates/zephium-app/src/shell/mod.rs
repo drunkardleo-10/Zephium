@@ -2,6 +2,7 @@
 
 mod blocker;
 mod blocker_sites;
+mod blocker_statistics;
 mod bootstrap;
 mod effects;
 mod engine_events;
@@ -201,6 +202,7 @@ pub struct Shell {
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
     blocker: blocker::BlockerCoordinator,
+    blocker_statistics: std::collections::HashMap<ProfileId, blocker_statistics::Statistics>,
     #[cfg(feature = "agentic-browser")]
     agent_lifecycle: AgentLifecycleOwner,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
@@ -406,6 +408,7 @@ impl Shell {
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
+            blocker_statistics: std::collections::HashMap::new(),
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
             #[cfg(feature = "work-execution")]
@@ -880,6 +883,9 @@ impl Shell {
                 action,
                 reply,
             } => self.element_picker(&context, action, reply),
+            Command::BlockerStatistics { profile, reply } => {
+                self.query_blocker_statistics(profile, reply)
+            }
             Command::FocusedContentPolicyStatus { reply } => {
                 self.maintain_blocker_catalog();
                 let _ = reply.send(self.focused_blocker_status_view());
@@ -942,6 +948,7 @@ impl Shell {
                         return;
                     }
                 }
+                self.maintain_blocker_statistics();
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
                 self.drive_blocker_preference_reconciliations();
@@ -1053,6 +1060,7 @@ impl Shell {
         if !pre_store_coordination_clean {
             crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
         }
+        terminal_clean &= self.flush_blocker_statistics_until(deadline);
         let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.shutdown_until(deadline)
         })) {

@@ -1249,6 +1249,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
             blocker_status,
+            blocker_stats,
             blocker_set_enabled,
             blocker_site_change,
             blocker_picker,
@@ -1893,6 +1894,40 @@ fn tabs_bootstrap(caller: WebviewWindow, shell: State<'_, Handle>) {
         return;
     }
     shell.dispatch(Command::Bootstrap);
+}
+
+static BLOCKER_STATS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+#[specta::specta]
+async fn blocker_stats(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    profile: String,
+) -> Result<Option<zephium_ipc::BlockerStatsView>, ()> {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_stats") {
+        return Ok(None);
+    }
+    let Some(profile) = zephium_core::ids::ProfileId::parse(&profile) else {
+        return Ok(None);
+    };
+    if BLOCKER_STATS_QUERY_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let _guard = AtomicFlagReset(&BLOCKER_STATS_QUERY_IN_FLIGHT);
+    let request = shell.blocker_statistics(profile);
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        request
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten())
 }
 
 #[tauri::command]

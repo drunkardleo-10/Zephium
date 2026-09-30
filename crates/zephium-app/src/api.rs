@@ -409,6 +409,10 @@ pub enum Command {
     /// Read-only privileged-chrome reconciliation query. The actor chooses the
     /// focused profile and assigns the projection revision; IPC callers cannot
     /// enumerate or select another profile.
+    BlockerStatistics {
+        profile: ProfileId,
+        reply: SyncSender<Option<zephium_ipc::BlockerStatsView>>,
+    },
     FocusedContentPolicyStatus {
         reply: SyncSender<BlockerStatusView>,
     },

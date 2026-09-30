@@ -18,6 +18,7 @@ work-execution-probe = ["work-execution", "zephium-agent-controller/probe-harnes
 macos-page-permission-prompts = []
 
 [dependencies]
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 zephium-agentic = { workspace = true, optional = true }
 zephium-agent-controller = { workspace = true, optional = true, features = ["provider-transport"] }
 zephium-agent-runtime = { workspace = true, optional = true }

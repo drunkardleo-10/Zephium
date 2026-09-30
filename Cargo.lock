@@ -6489,6 +6489,7 @@ name = "zephium-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "tempfile",
  "url",
  "zephium-agent-controller",

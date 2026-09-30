@@ -985,3 +985,14 @@ mod blocker_status_tests {
         assert_eq!(status.retries_remaining, 0);
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerStatsView {
+    #[specta(type = f64)]
+    pub today: u64,
+    #[serde(rename = "last7Days")]
+    #[specta(type = f64)]
+    pub last_seven_days: u64,
+    #[specta(type = Vec<f64>)]
+    pub days: [u64; 7],
+}
