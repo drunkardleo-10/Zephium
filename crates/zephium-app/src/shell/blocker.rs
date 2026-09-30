@@ -2,7 +2,7 @@
 
 use super::*;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 
 use zephium_core::blocker::{
@@ -240,6 +240,7 @@ pub(super) struct BlockerCoordinator {
     compiler_terminal: bool,
     catalog_initialized: bool,
     last_projected_status: Cell<Option<FocusedBlockerStatus>>,
+    last_projected_site: RefCell<Option<zephium_ipc::BlockerSiteView>>,
 }
 
 impl BlockerCoordinator {
@@ -264,6 +265,7 @@ impl BlockerCoordinator {
             compiler_terminal: true,
             catalog_initialized: false,
             last_projected_status: Cell::new(None),
+            last_projected_site: RefCell::new(None),
         }
     }
 
@@ -409,11 +411,17 @@ impl BlockerCoordinator {
         })
     }
 
-    fn should_project(&self, status: FocusedBlockerStatus) -> bool {
-        if self.last_projected_status.get() == Some(status) {
+    fn should_project(
+        &self,
+        status: FocusedBlockerStatus,
+        site: &Option<zephium_ipc::BlockerSiteView>,
+    ) -> bool {
+        let mut previous_site = self.last_projected_site.borrow_mut();
+        if self.last_projected_status.get() == Some(status) && *previous_site == *site {
             return false;
         }
         self.last_projected_status.set(Some(status));
+        previous_site.clone_from(site);
         true
     }
 
@@ -1046,10 +1054,15 @@ impl Shell {
 
     pub(super) fn project_blocker_status(&self) {
         let status = self.focused_blocker_status();
-        if self.blocker.should_project(status) {
-            (self.emit)(Projection::BlockerStatus(
-                self.focused_blocker_status_view(),
-            ));
+        let site = self.focused_blocker_site_view();
+        if self.blocker.should_project(status, &site) {
+            let mut view = blocker_status_view(
+                status,
+                self.focused_runtime_policy_diagnostics(),
+                self.next_projection_revision(),
+            );
+            view.site = site.map(Box::new);
+            (self.emit)(Projection::BlockerStatus(view));
         }
     }
 

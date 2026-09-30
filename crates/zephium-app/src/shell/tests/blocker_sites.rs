@@ -275,3 +275,64 @@ fn same_site_navigation_during_picker_read_does_not_save_a_stale_document_select
     );
     assert!(store.site_preferences.lock().unwrap().hides().is_empty());
 }
+
+#[test]
+fn site_status_follows_navigation_when_profile_protection_is_unchanged() {
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let output = statuses.clone();
+    let mut shell = Shell::new_with_failure(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::BlockerStatus(status) = projection {
+                output.lock().unwrap().push(status);
+            }
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    visit(&mut shell, "https://first.example/");
+    assert_eq!(
+        statuses
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .site
+            .as_ref()
+            .unwrap()
+            .context
+            .site,
+        "first.example"
+    );
+    visit(&mut shell, "https://second.example/");
+    assert_eq!(
+        statuses
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .site
+            .as_ref()
+            .unwrap()
+            .context
+            .site,
+        "second.example"
+    );
+    let before = statuses.lock().unwrap().len();
+    shell.project_blocker_status();
+    shell.project_blocker_status();
+    assert_eq!(
+        statuses.lock().unwrap().len(),
+        before,
+        "identical projections stay deduplicated"
+    );
+    shell.handle(Command::Open);
+    assert!(
+        statuses.lock().unwrap().last().unwrap().site.is_none(),
+        "new-tab page must clear old site controls"
+    );
+}

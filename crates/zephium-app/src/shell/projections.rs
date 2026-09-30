@@ -348,6 +348,13 @@ impl Shell {
     }
 
     pub(super) fn project_tab(&self, id: ItemId) {
+        if self
+            .windows
+            .focused()
+            .is_some_and(|window| window.active == Some(id))
+        {
+            self.project_blocker_status();
+        }
         let profile = self.profile_of_item(id);
         if let Some(tab) = self.items.tab(id) {
             let projection = self.generic_tab_view(id, tab, profile);
