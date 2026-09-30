@@ -2343,6 +2343,7 @@ async fn agent_workflow(
             .collect(),
         accounts: Vec::new(),
         private: false,
+        skill: None,
     };
     let search = OpenAiPublicSearch::try_new(
         transport.clone(),

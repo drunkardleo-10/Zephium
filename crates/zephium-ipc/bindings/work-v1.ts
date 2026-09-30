@@ -244,6 +244,11 @@ export type WorkAgentGrantV1_Deserialize = {
 	 *  the current object kinds. Absent for the earlier runtime.
 	 */
 	lead?: WorkModelRef | null,
+	/**
+	 *  The workflow the person started the run from: the lead begins with
+	 *  this skill loaded. A name it does not know is ignored.
+	 */
+	skill?: string | null,
 };
 
 export type WorkAgentGrantV1_Serialize = {
@@ -269,6 +274,11 @@ export type WorkAgentGrantV1_Serialize = {
 	 *  the current object kinds. Absent for the earlier runtime.
 	 */
 	lead?: WorkModelRef | null,
+	/**
+	 *  The workflow the person started the run from: the lead begins with
+	 *  this skill loaded. A name it does not know is ignored.
+	 */
+	skill?: string | null,
 };
 
 export type WorkApprovalRequestV1 = {

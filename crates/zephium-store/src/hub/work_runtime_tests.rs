@@ -789,6 +789,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         folders: vec![],
         accounts: Vec::new(),
         private: false,
+        skill: None,
     };
     let limits = WorkExecutionLimits {
         model_tokens: 600_000,
@@ -1489,6 +1490,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
             wire: WorkModelWire::OpenAiResponses,
             model: "gpt-6".into(),
         }),
+        skill: None,
     };
     let limits = WorkExecutionLimits {
         model_tokens: 1_000_000,

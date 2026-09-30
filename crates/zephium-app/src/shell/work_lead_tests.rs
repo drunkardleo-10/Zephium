@@ -359,6 +359,7 @@ fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
                 accounts: vec![],
                 private: false,
                 lead: None,
+                skill: None,
             },
             limits: WorkExecutionLimits {
                 model_tokens: 1_000_000,

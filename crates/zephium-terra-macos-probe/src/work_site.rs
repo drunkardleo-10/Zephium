@@ -896,6 +896,7 @@ impl Context<'_> {
                                 folders: vec![],
                                 accounts: vec![],
                                 private,
+                                skill: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 1_000_000,
@@ -1035,6 +1036,7 @@ impl Context<'_> {
                                 folders: vec![],
                                 accounts: vec![],
                                 private: false,
+                                skill: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 1_000_000,

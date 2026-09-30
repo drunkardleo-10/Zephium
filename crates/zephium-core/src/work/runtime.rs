@@ -211,6 +211,10 @@ pub struct WorkAgentGrantV1 {
     /// the current object kinds. Absent for the earlier runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead: Option<super::model::WorkModelRef>,
+    /// The workflow the person started the run from: the lead begins with
+    /// this skill loaded. A name it does not know is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 impl WorkAgentGrantV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -230,6 +234,16 @@ impl WorkAgentGrantV1 {
                 .any(|folder| validate_file_path(folder).is_err())
         {
             return Err(WorkError::Invalid);
+        }
+        if let Some(skill) = &self.skill {
+            if skill.is_empty()
+                || skill.len() > 64
+                || !skill
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err(WorkError::Invalid);
+            }
         }
         if let Some(lead) = &self.lead {
             validate_text(&lead.model, 128)?;

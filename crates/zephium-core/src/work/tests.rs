@@ -659,6 +659,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         folders: vec![],
         accounts: Vec::new(),
         private: false,
+        skill: None,
     };
     assert!(WorkAgentGrantV1 {
         max_turns: 0,
@@ -1388,12 +1389,20 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         folders: folders.into_iter().map(String::from).collect(),
         accounts: Vec::new(),
         private: false,
+        skill: None,
     };
     assert!(grant(vec!["/Users/me/Documents/project"])
         .validate()
         .is_ok());
     assert!(grant(vec!["Documents/project"]).validate().is_err());
     assert!(grant(vec!["/a"; 9]).validate().is_err());
+    for (skill, valid) in [("trip-planning", true), ("Trip planning", false), ("", false)] {
+        let started = WorkAgentGrantV1 {
+            skill: Some(skill.into()),
+            ..grant(vec![])
+        };
+        assert_eq!(started.validate().is_ok(), valid, "{skill}");
+    }
     assert!(disclosure
         .resolve(output(false))
         .unwrap()
@@ -2027,6 +2036,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         folders: vec![],
         accounts: vec![mail.clone()],
         private: false,
+        skill: None,
     };
     grant.validate().unwrap();
     for accounts in [

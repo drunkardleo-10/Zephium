@@ -202,9 +202,23 @@ where
     pub(crate) async fn drive(&self) -> Result<WorkAttemptStatus, WorkError> {
         let system = self.system();
         let tools = self.tools();
-        let mut messages = vec![WorkModelMessage::User(vec![WorkModelPart::Text(
-            self.context.clone(),
-        )])];
+        let mut context = self.context.clone();
+        if let Some(name) = self
+            .run
+            .grant
+            .skill
+            .as_deref()
+            .filter(|name| self.skills.iter().any(|skill| skill.name == *name))
+        {
+            let (body, refused) = self.load_skill(&serde_json::json!({ "name": name })).await;
+            if !refused {
+                context.push_str(&format!(
+                    "\n\nThe person started this from the {} workflow, whose skill is loaded; follow it:\n{body}",
+                    skill_label(name)
+                ));
+            }
+        }
+        let mut messages = vec![WorkModelMessage::User(vec![WorkModelPart::Text(context)])];
         let mut idle = 0u8;
         let mut stuck = 0u8;
         let mut failed_calls = 0u8;

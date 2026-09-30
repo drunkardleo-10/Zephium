@@ -21,6 +21,7 @@ const GRANT: WorkAgentGrantV1 = WorkAgentGrantV1 {
     folders: vec![],
     accounts: Vec::new(),
     private: false,
+    skill: None,
 };
 
 fn begin(work: WorkId, expected: WorkRevision, timeout_seconds: u32) -> WorkCommandV1 {

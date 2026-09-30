@@ -331,6 +331,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
             wire: WorkModelWire::AnthropicMessages,
             model: "claude-sonnet-5".into(),
         }),
+        skill: None,
     };
     grant.validate().unwrap();
     assert!(WorkAgentGrantV1 {
