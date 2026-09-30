@@ -7,6 +7,8 @@ declare module "vitest" {
 }
 type StyleApi = {
   inspect(): { token: string; url: string };
+  inspectEncoded(): string;
+  reuseSubscription(token: string, url: string, generation: string, fingerprint: string): boolean;
   subscription(
     token: string,
     url: string,
@@ -105,4 +107,22 @@ test("pause removes subscription rules and stale updates cannot re-enable them",
   ).toBe(false);
   expect(update(3, true)).toBe(true);
   await expect.poll(() => display("#late")).toBe("none");
+});
+
+test("unchanged subscription reuses its sheet and rejects removed sheets or stale generations", async () => {
+  const { win, update, api, token, url, display } = await fixture();
+  expect(update(1, true)).toBe(true);
+  await expect.poll(() => display(".ad")).toBe("none");
+  const sheet = win.document.adoptedStyleSheets[0];
+  expect(JSON.parse(api.inspectEncoded()).subscription).toBe("a".repeat(64));
+  expect(api.reuseSubscription(token, url, "0000000000000002", "a".repeat(64))).toBe(true);
+  expect(win.document.adoptedStyleSheets[0]).toBe(sheet);
+  expect(api.reuseSubscription(token, url, "0000000000000001", "a".repeat(64))).toBe(false);
+  expect(api.reuseSubscription(token, url, "invalid", "a".repeat(64))).toBe(false);
+  expect(api.reuseSubscription(token, url, "0000000000000003", "b".repeat(64))).toBe(false);
+  win.document.adoptedStyleSheets = [];
+  expect(JSON.parse(api.inspectEncoded()).subscription).toBeNull();
+  expect(api.reuseSubscription(token, url, "0000000000000003", "a".repeat(64))).toBe(false);
+  expect(update(3, true)).toBe(true);
+  await expect.poll(() => display(".ad")).toBe("none");
 });

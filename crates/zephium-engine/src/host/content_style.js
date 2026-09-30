@@ -85,6 +85,19 @@
     if (document.documentElement) generic.roots.set(document.documentElement, true);
     scheduleGeneric();
   }
+  function subscriptionFingerprint() {
+    const old = slots.get("subscription");
+    if (!old) return null;
+    return getSheets().includes(old.sheet) || (!generic && old.sheet.cssRules.length === 0) ? old.fingerprint : null;
+  }
+  function reuseSubscription(expectedToken, expectedUrl, generation, fingerprint) {
+    if (!matches(expectedToken, expectedUrl) || !/^[0-9a-f]{16}$/.test(generation) ||
+        subscriptionFingerprint() !== fingerprint) return false;
+    const old = slots.get("subscription");
+    if (generation < old.generation) return false;
+    old.generation = generation;
+    return true;
+  }
   function setSubscription(expectedToken, expectedUrl, generation, fingerprint, css, indexJson, exceptionJson) {
     if (!matches(expectedToken, expectedUrl) || typeof indexJson !== "string" || indexJson.length > 1048576 ||
         typeof exceptionJson !== "string" || exceptionJson.length > 1048576) return false;
@@ -345,9 +358,11 @@
     inspectEncoded: () => {
       if (location.href.length > 32768) return null;
       const result = create(null); result.token = token; result.url = location.href;
+      result.subscription = subscriptionFingerprint();
       return stringify(result);
     },
     subscription: setSubscription,
+    reuseSubscription,
     apply: setStyle,
     startPicker,
     beginEncoded: session => {

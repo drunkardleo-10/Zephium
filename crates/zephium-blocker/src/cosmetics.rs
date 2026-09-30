@@ -1,7 +1,7 @@
 //! Bounded static CSS policy. No scriptlets, replacement code or DOM scanning.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use adblock::filters::cosmetic::{CosmeticFilter, CosmeticFilterMask};
 use adblock::{Engine, FilterSet};
@@ -76,6 +76,20 @@ pub struct CosmeticPolicy {
     selective: Engine,
     generic_index: Arc<str>,
     fallback_generic: Vec<Rule>,
+}
+
+// Retain no policy by ourselves. Native profiles own the live public policy;
+// this single weak slot lets later profiles recover that same instance even
+// after the temporary network JSON envelope has been released.
+static LIVE_POLICY: Mutex<Weak<CosmeticPolicy>> = Mutex::new(Weak::new());
+
+fn reuse_live_policy(bytes: &[u8]) -> Option<Arc<CosmeticPolicy>> {
+    let policy = LIVE_POLICY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .upgrade()?;
+    // Exact validated bytes, not a caller-supplied digest or profile identity.
+    (policy.encoded.as_ref() == bytes).then_some(policy)
 }
 
 impl std::fmt::Debug for CosmeticPolicy {
@@ -163,6 +177,9 @@ impl CosmeticPolicy {
     pub fn decode(bytes: &[u8]) -> Result<Arc<Self>, CosmeticError> {
         if bytes.len() > MAX_POLICY_BYTES {
             return Err(CosmeticError::ResourceLimit);
+        }
+        if let Some(policy) = reuse_live_policy(bytes) {
+            return Ok(policy);
         }
         let data: Data = serde_json::from_slice(bytes).map_err(|_| CosmeticError::InvalidPolicy)?;
         if serde_json::to_vec(&data).map_err(|_| CosmeticError::InvalidPolicy)? != bytes {
@@ -339,14 +356,16 @@ impl CosmeticPolicy {
         if encoded.len() > MAX_POLICY_BYTES {
             return Err(CosmeticError::ResourceLimit);
         }
-        Ok(Arc::new(Self {
+        let policy = Arc::new(Self {
             report: data.report,
             fingerprint: Sha256::digest(&encoded).into(),
             encoded: encoded.into(),
             selective,
             generic_index,
             fallback_generic,
-        }))
+        });
+        *LIVE_POLICY.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(&policy);
+        Ok(policy)
     }
 }
 

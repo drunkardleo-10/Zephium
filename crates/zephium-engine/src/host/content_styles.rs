@@ -74,6 +74,7 @@ struct StyleState {
     pending_key: Option<StyleKey>,
     applied_key: Option<StyleKey>,
     dirty: bool,
+    force_full: bool,
     in_flight: usize,
 }
 
@@ -87,6 +88,8 @@ struct Delivery {
     state: Arc<DocumentStyleState>,
     sequence: u64,
     charged_bytes: usize,
+    reuse: bool,
+    force_full: bool,
     key: StyleKey,
     navigation: NavigationEpochTracker,
     permit: EventPermit,
@@ -109,6 +112,7 @@ impl Drop for Delivery {
 struct DocumentIdentity {
     token: String,
     url: String,
+    subscription: Option<String>,
 }
 
 impl EngineHost {
@@ -253,8 +257,11 @@ impl EngineHost {
             status.dirty = false;
             status.in_flight += 1;
         }
+        let force_full = state.lock().force_full;
         let delivery = Delivery {
             state,
+            reuse: false,
+            force_full,
             sequence,
             charged_bytes: 0,
             key,
@@ -307,25 +314,66 @@ impl EngineHost {
             return;
         };
         worker.submit(move || {
-            if !delivery.navigation.matches_committed_snapshot(delivery.key.epoch, &delivery.key.url) { return None; }
-            let plan = match delivery.provider.as_ref().map(|p| p.document_plan(&delivery.key.url)).transpose() {
+            if !delivery
+                .navigation
+                .matches_committed_snapshot(delivery.key.epoch, &delivery.key.url)
+            {
+                return None;
+            }
+            let plan = match delivery
+                .provider
+                .as_ref()
+                .map(|p| p.document_plan(&delivery.key.url))
+                .transpose()
+            {
                 Ok(Some(plan)) => plan,
-                Ok(None) => zephium_core::blocker::DocumentStylePlan { css: Arc::from(""), generic_index: Arc::from("[]"), exceptions: Arc::from("[]") },
+                Ok(None) => zephium_core::blocker::DocumentStylePlan {
+                    css: Arc::from(""),
+                    generic_index: Arc::from("[]"),
+                    exceptions: Arc::from("[]"),
+                },
                 Err(_) => return None,
             };
-            let fingerprint = { let mut hash=Sha256::new(); for text in [&plan.css,&plan.generic_index,&plan.exceptions] {hash.update((text.len() as u64).to_le_bytes());hash.update(text.as_bytes());} format!("{:x}",hash.finalize()) };
-            let arguments = serde_json::json!([
-                identity.token, delivery.key.url, format!("{:016x}", delivery.sequence),
-                fingerprint,
-                plan.css.as_ref(), plan.generic_index.as_ref(), plan.exceptions.as_ref(),
-                css_digest(&delivery.personal), delivery.personal.as_ref()
-            ]);
-            let script = format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s=a.subscription(p[0],p[1],p[2],p[3],p[4],p[5],p[6]);const u=a.apply('personal',p[0],p[1],p[2],p[7],p[8]);return s===true&&u===true;}})({arguments})");
-            if script.len() > 4 * 1024 * 1024 { return None; }
+            let fingerprint = {
+                let mut hash = Sha256::new();
+                for text in [&plan.css, &plan.generic_index, &plan.exceptions] {
+                    hash.update((text.len() as u64).to_le_bytes());
+                    hash.update(text.as_bytes());
+                }
+                format!("{:x}", hash.finalize())
+            };
+            // The renderer reports only an identity. Native still computes the
+            // exact URL-dependent plan, including generichide exceptions. A
+            // same-document navigation or personal edit can then reuse the
+            // installed subscription without encoding/copying its whole index.
+            delivery.reuse =
+                !delivery.force_full && identity.subscription.as_ref() == Some(&fingerprint);
+            let script = document_style_script(
+                &identity,
+                delivery.sequence,
+                &fingerprint,
+                &plan,
+                &delivery.personal,
+                delivery.reuse,
+            );
+            if script.len() > 4 * 1024 * 1024 {
+                return None;
+            }
             let charge = script.len().saturating_mul(3);
-            if DELIVERY_BYTES.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|v|v.checked_add(charge).filter(|v|*v<=MAX_DELIVERY_BYTES)).is_err(){return None;}
+            if DELIVERY_BYTES
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    v.checked_add(charge).filter(|v| *v <= MAX_DELIVERY_BYTES)
+                })
+                .is_err()
+            {
+                return None;
+            }
             delivery.charged_bytes = charge;
-            Some(Box::new(move || { let _ = with_document_style(id, move |host| host.deliver_document_styles(id, delivery, script)); }))
+            Some(Box::new(move || {
+                let _ = with_document_style(id, move |host| {
+                    host.deliver_document_styles(id, delivery, script)
+                });
+            }))
         });
     }
 
@@ -373,6 +421,14 @@ impl EngineHost {
                         .matches_committed_snapshot(delivery.key.epoch, &delivery.key.url)
                 {
                     state.applied_key = Some(delivery.key.clone());
+                    state.force_full = false;
+                }
+                if result != "true" && delivery.reuse {
+                    // The page may have removed the sheet between inspection
+                    // and delivery. Retry once with bytes, never a reuse loop.
+                    state.force_full = true;
+                    state.applied_key = None;
+                    state.dirty = true;
                 }
                 std::mem::take(&mut state.dirty)
             };
@@ -382,6 +438,37 @@ impl EngineHost {
             }
         });
     }
+}
+
+fn document_style_script(
+    identity: &DocumentIdentity,
+    sequence: u64,
+    fingerprint: &str,
+    plan: &zephium_core::blocker::DocumentStylePlan,
+    personal: &str,
+    reuse: bool,
+) -> String {
+    let arguments = serde_json::json!([
+        identity.token,
+        identity.url,
+        format!("{sequence:016x}"),
+        fingerprint,
+        if reuse { "" } else { plan.css.as_ref() },
+        if reuse {
+            ""
+        } else {
+            plan.generic_index.as_ref()
+        },
+        if reuse { "" } else { plan.exceptions.as_ref() },
+        css_digest(personal),
+        personal,
+    ]);
+    let subscription = if reuse {
+        "a.reuseSubscription(p[0],p[1],p[2],p[3])"
+    } else {
+        "a.subscription(p[0],p[1],p[2],p[3],p[4],p[5],p[6])"
+    };
+    format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s={subscription};const u=a.apply('personal',p[0],p[1],p[2],p[7],p[8]);return s===true&&u===true;}})({arguments})")
 }
 
 fn css_digest(css: &str) -> String {
@@ -396,11 +483,61 @@ fn css_digest(css: &str) -> String {
 fn decode_identity(text: &str) -> Option<DocumentIdentity> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let object = value.as_object()?;
-    if object.len() != 2 {
+    if object.len() != 3 {
         return None;
     }
     Some(DocumentIdentity {
         token: object.get("token")?.as_str()?.to_owned(),
         url: object.get("url")?.as_str()?.to_owned(),
+        subscription: match object.get("subscription")? {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value)
+                if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                Some(value.clone())
+            }
+            _ => return None,
+        },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reuse_does_not_encode_the_subscription_payload() {
+        let plan = zephium_core::blocker::DocumentStylePlan {
+            css: Arc::from(".site-ad{display:none!important}"),
+            generic_index: Arc::from("x".repeat(487_107)),
+            exceptions: Arc::from("[]"),
+        };
+        let identity = DocumentIdentity {
+            token: "a".repeat(32),
+            url: "https://example.com/next".into(),
+            subscription: None,
+        };
+        let fingerprint = "b".repeat(64);
+        let full = document_style_script(&identity, 1, &fingerprint, &plan, "", false);
+        let reuse = document_style_script(
+            &identity,
+            2,
+            &fingerprint,
+            &plan,
+            ".personal{display:none!important}",
+            true,
+        );
+        assert!(full.len() > 487_107);
+        assert!(reuse.len() < 1024);
+        assert!(!reuse.contains(".site-ad"));
+        assert!(reuse.contains(".personal"));
+        assert!(reuse.contains("reuseSubscription"));
+    }
+    #[test]
+    fn subscription_identity_is_bounded_and_nullable() {
+        assert!(decode_identity(r#"{"token":"x","url":"y","subscription":null}"#).is_some());
+        assert!(decode_identity(r#"{"token":"x","url":"y","subscription":"fake"}"#).is_none());
+        assert!(
+            decode_identity(r#"{"token":"x","url":"y","subscription":null,"extra":1}"#).is_none()
+        );
+    }
 }
