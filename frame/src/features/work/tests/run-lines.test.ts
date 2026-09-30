@@ -2,39 +2,40 @@ import { expect, test } from "vitest";
 import { branch, merge, roundedPath } from "../lib/run/lines";
 import { registrableSite, siteKey, siteName } from "../lib/run/site";
 
-test("parallel parts branch from one point, up and down alike", () => {
+test("parallel parts fork from one branch point, up and down alike, never over each other", () => {
   const start = { x: 326, y: 200 };
-  const routes = branch(start, [
+  const routes = branch(start, 368, [
     { x: 410, y: 32 },
     { x: 410, y: 200 },
     { x: 410, y: 368 },
+    { x: 410, y: 520 },
   ]);
-  for (const route of routes) expect(route[0]).toEqual(start);
   expect(routes[1]).toEqual([start, { x: 410, y: 200 }]);
-  // A branch leaves and lands level: a curve whose handles lie on its two ends' lines.
-  expect(roundedPath(routes[0]!)).toBe("M 326,200 C 368,200 368,32 410,32");
-  expect(roundedPath(routes[2]!)).toBe("M 326,200 C 368,200 368,368 410,368");
+  // The level line holds the stub; the sides leave it an elbow before the trunk.
+  expect(routes[0]).toEqual([
+    { x: 356, y: 200 },
+    { x: 368, y: 200 },
+    { x: 368, y: 32 },
+    { x: 410, y: 32 },
+  ]);
+  expect(routes[2]![0]).toEqual({ x: 356, y: 200 });
+  // A later line on a side takes the trunk where the one before turned away.
+  expect(routes[3]![0]).toEqual({ x: 368, y: 356 });
 });
 
-test("lines into one end run level to the collector, then curve in", () => {
+test("lines into one end run level to the collector and join a trunk into it", () => {
   const routes = merge(
     [
       { x: 900, y: 32 },
       { x: 700, y: 200 },
     ],
-    900,
+    960,
     { x: 1018, y: 116 },
   );
-  expect(routes[0]).toEqual([
-    { x: 900, y: 32 },
-    { x: 1018, y: 116 },
-  ]);
-  expect(routes[1]).toEqual([
-    { x: 700, y: 200 },
-    { x: 900, y: 200 },
-    { x: 1018, y: 116 },
-  ]);
-  expect(roundedPath(routes[1]!)).toBe("M 700,200 L 900,200 C 959,200 959,116 1018,116");
+  expect(routes[0]!.at(0)).toEqual({ x: 900, y: 32 });
+  expect(routes[0]!.at(-1)).toEqual({ x: 1018, y: 116 });
+  expect(routes[1]!.at(0)).toEqual({ x: 700, y: 200 });
+  expect(routes[1]!.at(1)).toEqual({ x: 960, y: 200 });
 });
 
 test("elbows turn on a 12 px radius", () => {

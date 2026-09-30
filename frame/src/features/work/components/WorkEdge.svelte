@@ -94,50 +94,47 @@
       : curve(sourceX, sourceY, `${sourcePosition}`, targetX, targetY, `${targetPosition}`),
   );
   let line = $state<SVGPathElement>();
-  let pulse = $state<HTMLElement>();
-  const carrying = $derived(!!data?.live && tone === "flow");
+  let flow = $state<HTMLElement>();
+  const carrying = $derived(!!data?.live && tone === "flow" && !!points);
+  /** A dash and its gap: the work flows by this much each beat. */
+  const PERIOD = 9;
   /**
-   * A line at work carries a pulse of light from its start to its end: one
-   * element moved by transform along points sampled from the path, so it runs
-   * on the compositor. It holds still off screen, while the window is hidden
-   * and under reduced motion, and is gone once the part is done.
+   * A line at work carries fine dashes flowing from its start to its end.
+   * Each straight stretch (its elbows left clear) is a window over a strip
+   * of dashes that slides by one period, forever: transform only, on the
+   * compositor. It holds still off screen, hidden, or under reduced motion.
    */
-  $effect(() => {
-    const element = pulse;
-    const d = path;
-    if (!element || !carrying) return;
-    const probe = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    probe.setAttribute("d", d);
-    const length = probe.getTotalLength();
-    if (length < 24) return;
-    const steps = Math.max(8, Math.min(48, Math.round(length / 16)));
-    const travel = 0.72;
-    const keys: { offset: number; transform: string; opacity: number }[] = [];
-    for (let index = 0; index <= steps; index++) {
-      const at = (index / steps) * length;
-      const point = probe.getPointAtLength(at);
-      const ahead = probe.getPointAtLength(Math.min(length, at + 1));
-      const behind = probe.getPointAtLength(Math.max(0, at - 1));
-      const angle = (Math.atan2(ahead.y - behind.y, ahead.x - behind.x) * 180) / Math.PI;
-      const edge = index === 0 || index === steps;
-      keys.push({
-        offset: (index / steps) * travel,
-        transform: `translate(${point.x}px, ${point.y}px) rotate(${angle}deg)`,
-        opacity: edge ? 0 : 1,
+  const stretches = $derived.by(() => {
+    if (!carrying || !points) return [];
+    const list = points.filter(
+      (point, index) =>
+        index === 0 || point.x !== points[index - 1]!.x || point.y !== points[index - 1]!.y,
+    );
+    const out: { x: number; y: number; length: number; angle: number }[] = [];
+    for (let index = 1; index < list.length; index++) {
+      const a = list[index - 1]!;
+      const b = list[index]!;
+      const length = Math.hypot(b.x - a.x, b.y - a.y);
+      const lead = index > 1 ? Math.min(12, length / 2) : 0;
+      const tail = index < list.length - 1 ? Math.min(12, length / 2) : 0;
+      const shown = length - lead - tail;
+      if (shown < PERIOD * 2) continue;
+      const ux = (b.x - a.x) / length;
+      const uy = (b.y - a.y) / length;
+      out.push({
+        x: a.x + ux * lead,
+        y: a.y + uy * lead,
+        length: shown,
+        angle: (Math.atan2(uy, ux) * 180) / Math.PI,
       });
     }
-    keys.push({ offset: 1, transform: keys.at(-1)!.transform, opacity: 0 });
-    const run = element.animate(keys, {
-      duration: Math.min(2600, Math.max(1100, length * 3.2)) / travel,
-      iterations: Infinity,
-      easing: "linear",
-    });
-    run.pause();
-    const stop = watchStill(element, (still) => (still ? run.pause() : run.play()));
-    return () => {
-      stop();
-      run.cancel();
-    };
+    return out;
+  });
+  let still = $state(true);
+  $effect(() => {
+    const element = flow;
+    if (!element) return;
+    return watchStill(element, (next) => (still = next));
   });
   // A line whose part just began draws itself in from where it leaves.
   onMount(() => {
@@ -165,8 +162,20 @@
   stroke-dasharray={tone === "relation" ? undefined : "1"}
   fill="none"
 />
-{#if carrying}<ViewportPortal target="back"
-    ><span class="pulse" bind:this={pulse} aria-hidden="true"></span></ViewportPortal
+{#if stretches.length}<ViewportPortal target="back"
+    ><span
+      class="flow"
+      bind:this={flow}
+      data-still={still ? "" : undefined}
+      style:--period="{PERIOD}px"
+      aria-hidden="true"
+      >{#each stretches as stretch, index (index)}<span
+          class="stretch"
+          style:inline-size="{stretch.length}px"
+          style:transform="translate({stretch.x}px, {stretch.y}px) rotate({stretch.angle}deg)"
+          ><span class="dashes"></span></span
+        >{/each}</span
+    ></ViewportPortal
   >{/if}
 
 <style>
@@ -195,24 +204,43 @@
     stroke: color-mix(in oklab, var(--color-soft-sky) 55%, var(--color-border-strong));
   }
 
-  /* The light a line at work carries: a short comet, its head brightest. */
-  .pulse {
+  /* The work a line carries: fine dashes flowing along each straight stretch. */
+  .flow {
     position: absolute;
     inset-block-start: 0;
     inset-inline-start: 0;
-    inline-size: 44px;
-    block-size: 3px;
-    margin: -1.5px 0 0 -44px;
-    border-radius: var(--radius-capsule);
-    background: linear-gradient(
-      90deg,
-      transparent,
-      color-mix(in oklab, var(--color-soft-sky) 80%, transparent) 70%,
-      color-mix(in oklab, var(--color-soft-sky) 45%, var(--color-agent-light))
-    );
-    opacity: 0;
-    transform-origin: 100% 50%;
     pointer-events: none;
+  }
+
+  .stretch {
+    position: absolute;
+    inset-block-start: -1px;
+    inset-inline-start: 0;
+    block-size: 2px;
+    overflow: hidden;
+    transform-origin: 0 50%;
+  }
+
+  .dashes {
+    position: absolute;
+    inset-block: 0;
+    inset-inline: calc(var(--period) * -1) 0;
+    background: repeating-linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--color-soft-sky) 85%, var(--color-agent-light)) 0 3px,
+      transparent 3px var(--period)
+    );
+    animation: flow 480ms linear infinite;
+  }
+
+  .flow[data-still] .dashes {
+    animation-play-state: paused;
+  }
+
+  @keyframes flow {
+    to {
+      transform: translateX(var(--period));
+    }
   }
 
   /* A tie lit by a focused card comes and goes with the pointer. */

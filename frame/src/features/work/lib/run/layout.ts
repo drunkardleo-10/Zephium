@@ -14,7 +14,7 @@ export const RUN = {
   inputs: 200,
   request: 320,
   gutter: 48,
-  /** From the request to its parts: room for the branches to curve. */
+  /** From the request to its parts: the fork's trunk stands halfway. */
   fork: 96,
   /** Between part rows: room for each helper's line over its part. */
   rowGap: 48,
@@ -161,7 +161,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     }
     inputsBottom = y;
     const into = { x: -RUN.air, y: spine };
-    merge(ends, Math.max(...ends.map((end) => end.x)), into).forEach((points, index) => {
+    merge(ends, -RUN.gutter / 2, into).forEach((points, index) => {
       const input = inputs[index]!;
       const rect = rects[input.id]!;
       lines.push({
@@ -198,7 +198,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   // A request's line branches to the head of every row; each row's end merges into the result.
   const start = { x: RUN.request + RUN.air, y: spine };
   const partEnds = labels.map((y) => ({ x: partsX - RUN.air, y }));
-  branch(start, partEnds).forEach((points, index) => {
+  branch(start, RUN.request + RUN.fork / 2, partEnds).forEach((points, index) => {
     const row = run.rows[index]!;
     lines.push({
       id: `line:${row.part.id}`,
@@ -217,7 +217,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     const to = { x: -RUN.air, y: spine - result.y };
     const feeding = rowEnds.filter((entry) => entry.row.feeds);
     const ends = feeding.map((entry) => entry.end);
-    merge(ends, Math.max(...ends.map((end) => end.x)), into).forEach((points, index) => {
+    merge(ends, resultX - RUN.feed / 2, into).forEach((points, index) => {
       const entry = feeding[index]!;
       lines.push({
         id: `feed:${entry.row.part.id}`,
