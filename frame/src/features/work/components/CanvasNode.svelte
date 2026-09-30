@@ -82,19 +82,18 @@
   /** A page held for a person opens the takeover, never a copy in Browse. */
   const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
   /**
-   * The toolbar stands on its object at the canvas's scale (never larger than
-   * at 100%); a part opens from its own name and needs none, and far out,
-   * where it could not be read, there is none.
+   * The toolbar stands on its object at the canvas's scale, never larger than
+   * at 100% and never smaller than half, where it could no longer be read; a
+   * part opens from its own name and needs none.
    */
   const viewport = useViewport();
-  const scale = $derived(Math.min(1, viewport.current.zoom));
+  const scale = $derived(Math.max(0.5, Math.min(1, viewport.current.zoom)));
   const tooled = $derived(
     type !== "head" &&
       type !== "trail" &&
       type !== "part" &&
       type !== "input" &&
-      (type !== "block" || opens) &&
-      scale >= 0.45,
+      (type !== "block" || opens),
   );
 </script>
 
