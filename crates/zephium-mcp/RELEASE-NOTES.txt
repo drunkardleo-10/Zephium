@@ -1,0 +1,183 @@
+Zephium connections / BYOK handoff — 2026-09-30
+
+Worktree: /Users/crynta/Dev/Zephium-connections
+Branch: work-connections. The lead merges this branch; do not rebase it.
+
+INTEGRATION CONTRACTS
+
+commands.workModelsReady(expectedProfile) returns WorkModelsReadyV1:
+  { version: 1, profile: string, ready: boolean,
+    missing_roles: WorkModelRole[], fault: WorkModelsFaultV1 | null }
+missing_roles is [] when ready, otherwise ["lead"]. Decision stays internal.
+Readiness means a lead model is configured with an available, non-refused key;
+it does not promise billing, quota or network availability. Explicit choices
+are preserved when their key becomes invalid or is removed.
+
+frame/src/domain/ai/catalog.ts retains pickerGroups(models, role, endpoint)
+  -> { ready: { provider, entries: WorkModelEntry[] }[], needsKey: provider[] }
+The WorkModelEntry shape is unchanged. Curated entries precede provider-listed
+entries; Cloud is excluded. Settings has an explicit More models action.
+Provider status adds optional fault. Existing key states remain unchanged:
+missing / set / valid / invalid. Only wrong-key failures invalidate a key.
+
+WorkCliRowV1 adds optional path. WorkServerOutcomeV1 adds "cancelled".
+Existing connection row/tool shapes are unchanged. Exhaustive consumers of
+WorkServerOutcomeV1 must handle the new cancelled case.
+
+commands.workPreviewConnection(profile, draft) connects, lists tools, and
+returns WorkServerCheckV1 without saving configuration or real vault items.
+OAuth drafts use memory tokens until Save. Save requires the same successful
+draft within five minutes; editing the draft requires another check. Enable
+and disable alone do not require a new check. Held secrets are never forwarded
+to a changed endpoint/command. Removal clears all server vault accounts.
+
+BROWSER OWNER INTEGRATION STILL REQUIRED
+
+Listen on the privileged window for CustomEvent("zephium:connection-sign-in").
+Payload for started / finished:
+  { version: 1, phase, profile, id, request_id }
+Payload for open_requested also includes operation_id from OpenUrl admission.
+
+1. On open_requested, associate that operation with the actual new tab;
+   remember the Settings destination and activate the authorization tab.
+   Buffer an operation result if it arrives before this event.
+2. On finished, close only the associated authorization tab and restore the
+   remembered Settings destination. This fires after success, failure,
+   cancellation or timeout. Do not infer success from this event: the command
+   result supplies the final connected/tools or retry state.
+3. If the person closes that tab first, call
+   commands.workCancelConnectionSignIn(profile, id, request_id).
+   Only the matching request can be cancelled; ignore late events for old
+   requests. The flow has a five-minute total timeout and drops its listener.
+4. Resume notification may dispatch CustomEvent("zephium:connections-resume")
+   to the privileged window. Settings already coalesces online events and
+   detects a timer gap after wake. This subscription exists while Connections
+   is mounted. A global background reconnect service outside Settings is not
+   added by this branch. Work's existing connection-on-use path is retained.
+
+No browser/tab owner files or canvas files were changed. Native tab focus and
+closing are not complete until this hook is integrated.
+
+VISIBLE STATES
+
+AI: no-key guidance, provider key links and password field; Key accepted on
+successful free listing; wrong key; billing/quota; rate limit; provider down;
+offline; Keychain failure; unsupported model/request. Billing or outages do
+not turn an accepted key invalid. A real Work call updates the provider row.
+Lead/page/light defaults fill only empty roles. Page/light can fall back to a
+lead-capable model. Capability notes identify vision, search and curated fast
+models. Account navigation/search/deep links and Cloud UI are hidden; code stays.
+
+Connections: checking; connected tool count; needs sign-in; cancelled sign-in;
+command not found; timeout; failed with Retry; disabled. Unsaved drafts preview
+tool names before Save. CLI rows show version/path, sign-in status, or Not
+installed with an install link.
+
+AUTOMATED COVERAGE
+
+Provider acceptance tests use local HTTP mocks and assert GET requests;
+401/403, billing/quota, rate limit, 5xx and malformed replies are distinct.
+App tests use a memory key vault and cover role preservation, defaults,
+readiness, transient faults and stale call results after replacing a key.
+MCP tests cover callback CSRF state, cancellation/timeout listener release,
+refresh-token rotation/failure, and a local TickTick-style server's tool list,
+call and reconnect. Store tests inject a vault for rollback/removal checks.
+Settings components cover accepted/refused/offline/billing keys, hidden Cloud,
+draft preview, cancellation and CLI detection/install. A fake-clock session
+test covers one recovery per network/wake event and disposal cleanup.
+
+NATIVE QA AFTER MERGE (use the lead's normal QA install)
+
+1. Fresh profile, no key: open AI, follow a provider link, paste a key; confirm
+   no inference request is made, Key accepted appears and empty roles fill.
+   Choose a different lead, add another key and confirm the choice stays.
+2. Make a real Work call with revoked credentials: the corresponding key row
+   becomes invalid. Repeat with insufficient credits, rate limit and offline
+   conditions: each reason appears without invalidating an accepted key.
+3. Add Notion with OAuth. Confirm the authorization tab becomes active. Finish
+   sign-in: confirm only that tab closes, Settings returns, and the tool count
+   appears. Verify the loopback port refuses connections after completion.
+4. Repeat and close the authorization tab; confirm Sign-in cancelled and a
+   working retry. Repeat and wait five minutes; confirm the same cleanup and
+   cancelled state. A late redirect must not complete a newer attempt.
+5. Check an expired refreshable token: refresh succeeds without a new tab and
+   the rotated token persists. Revoke refresh access: row says Needs sign-in.
+6. Add a URL and a stdio command: see listed tool names before Save. Use an
+   invalid URL/command and confirm no saved server or vault secret appears.
+   Edit a URL and confirm old credentials are not sent to its new destination.
+7. Remove bearer, OAuth and secret-env servers. Confirm all items for each
+   app.zephium.connection.<profile>.<server> service disappear, including old
+   env names. Simulate vault refusal and confirm a retry remains available.
+8. With Connections open, disconnect/reconnect network and sleep/wake the Mac.
+   Confirm one reconnect sweep and fresh tool counts. Confirm no repeated
+   retries while offline. Test the native resume event after tab-hook merge.
+9. Verify detected CLI path/version, a signed-out CLI's guidance, and a missing
+   CLI's Install link. Check Account search and direct navigation stay hidden.
+
+CATALOG AUDIT
+
+Added builtins (USD per 1M input / cached input / output tokens):
+  gpt-6.1-sol   2 / 0.10 / 10
+    https://developers.openai.com/api/docs/models/gpt-6.1-sol
+  gpt-5.6-terra 2 / 0.20 / 12
+    https://developers.openai.com/api/docs/models/gpt-5.6-terra
+Both: 1,050,000 context, 128,000 maximum output. GPT-6 Terra was not confirmed
+and was not added. No builtin IDs were removed: the existing curated IDs are
+current. OpenAI lead default is gpt-6-astra; page/light default to gpt-6-luna.
+
+Current Anthropic IDs were already present: claude-opus-5-5,
+claude-sonnet-5-5, claude-haiku-4-5-20251001, claude-fable-5-1.
+  https://platform.claude.com/docs/en/models/overview
+  https://platform.claude.com/docs/en/about-claude/pricing
+
+Provider-list filtering now excludes explicit deprecated/retired metadata and
+verified retired/deprecated families/snapshots. Exact filters are in
+provider_transport/lead/listing.rs, beside their official sources:
+  https://developers.openai.com/api/docs/deprecations
+  https://platform.claude.com/docs/en/about-claude/model-deprecations
+  https://ai.google.dev/gemini-api/docs/deprecations
+Gemini 2.5 Pro is retained; an earliest retirement date is not treated as proof
+of retirement. Gemini 3.8 Flash's current introductory price is scheduled to
+change on 2027-01-01; re-audit then:
+  https://ai.google.dev/gemini-api/docs/pricing
+
+FINAL VERIFICATION
+
+Passed in this worktree:
+- cargo test -p zephium-agentic --features provider-transport,probe-harness --lib
+  922 passed.
+- cargo test -p zephium-app --features work-execution --lib: 447 passed.
+- Additional work-execution,work-runtime app suite: 574 passed, 5 existing
+  ignored tests. One initial concurrent run failed an unrelated search-history
+  timing assertion; the full rerun with --test-threads=4 passed.
+- cargo test -p zephium-mcp: 4 passed.
+- Additional MCP http,keychain,fixture suite: 9 unit, 4 local HTTP and 1 stdio
+  tests passed. Every new secret-storage test uses an injected memory vault.
+- cargo test -p zephium-desktop --lib: 129 passed, 2 existing ignored tests.
+  This also regenerates the frame bindings. The requested export_work example
+  was run; its generated work-v1.ts had no content change.
+- Strict cargo clippy --all-targets -- -D warnings for agentic, app, MCP,
+  desktop and IPC together, with provider-transport,probe-harness,
+  work-execution,work-runtime,http,keychain,fixture features: passed.
+- pnpm -C frame run check: passed; 600 unit tests, no type errors/warnings.
+- pnpm -C frame exec vitest run --project component src/features/settings:
+  18 passed in 9 files.
+- pnpm -C frame build, pnpm -C frame run check:styles, and
+  cargo xtask check-frame-styles: passed. 97 emitted CSS files checked.
+
+Seven measured JS budget updates were explicitly approved by the owner:
+ConnectionPart 118000; ConnectionsPage 312300; Page 171200; Project 167600;
+WorkResultInspector 270200; WorkStart 117000; diagram-worker 179600 bytes.
+CSS limits were unchanged. The new IPC wrappers are in the shared native
+commands chunk; validation and recovery also add to the Connections graph.
+
+Component screenshots are under target/work-models and target/work-connections
+in this worktree. Light/dark images cover the provider list, key editor,
+server states, URL editor and command editor. No Tauri application executable
+was built or launched, and no real Keychain item was read by a test/example.
+Native focus, tab closing and wake behavior remain for the lead's QA install.
+
+Implementation commits:
+7b803969 feat(models): Preserve key verdicts and seed stable BYOK defaults
+739c8ddf feat(connections): Validate drafts and bound OAuth sign-in lifetimes
+aacf2591 feat(settings): Show BYOK and recoverable connection states
