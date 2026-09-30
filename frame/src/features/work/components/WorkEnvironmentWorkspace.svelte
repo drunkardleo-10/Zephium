@@ -1027,6 +1027,8 @@
     ...requests.links,
   ]);
   const organizing = new SvelteSet<string>();
+  /** A run whose placing was refused, by the revision it was refused at: tried again only after a change. */
+  const stalled: Record<string, string> = {};
   // Planned placements render new elements where organize intends them before
   // their saved placement lands, so a canvas checkpoint never persists the
   // fallback grid over them.
@@ -1057,6 +1059,7 @@
       if (!projection) continue;
       const execution = pendingOrganize(current, projection);
       if (!execution || organizing.has(execution.id)) continue;
+      if (stalled[execution.id] === current.revision) continue;
       organizing.add(execution.id);
       const stage = stages.find((stage) => stage.executions.includes(execution.id));
       const place =
@@ -1064,7 +1067,12 @@
       // What a run places lands on its request's board; the anchor is only a record.
       const anchor = place ? { x: place.x, y: place.y } : { x: 80, y: 120 };
       void untrack(() =>
-        organize(projection, execution, anchor).finally(() => organizing.delete(execution.id)),
+        organize(projection, execution, anchor)
+          .then((through) => {
+            if (through) delete stalled[execution.id];
+            else stalled[execution.id] = session.snapshot?.revision ?? current.revision;
+          })
+          .finally(() => organizing.delete(execution.id)),
       );
     }
   });
@@ -1072,10 +1080,11 @@
     projection: WorkRuntimeProjection,
     execution: WorkExecutionFact,
     anchor: { x: number; y: number },
-  ) {
-    if (!session.snapshot) return;
+  ): Promise<boolean> {
+    if (!session.snapshot) return true;
     const plan = organizeExecution(projection, execution, anchor, session.snapshot);
-    if (!plan.adds.length || !(await session.flushView())) return;
+    if (!plan.adds.length) return true;
+    if (!(await session.flushView())) return false;
     planned = {
       ...planned,
       ...Object.fromEntries(
@@ -1084,10 +1093,11 @@
     };
     for (const add of plan.adds) {
       if (session.snapshot && elementFor(session.snapshot, add.reference)) continue;
-      if (!(await session.edit({ kind: "add", reference: add.reference, area: null }))) return;
+      if (!(await session.edit({ kind: "add", reference: add.reference, area: null })))
+        return false;
     }
     const latest = session.snapshot;
-    if (!latest) return;
+    if (!latest) return false;
     for (const relation of plan.relations) {
       const from = elementFor(latest, relation.from);
       const to = elementFor(latest, relation.to);
@@ -1107,10 +1117,10 @@
           relation: relation.kind,
         }))
       )
-        return;
+        return false;
     }
     const placed = session.snapshot;
-    if (!placed) return;
+    if (!placed) return false;
     const placements = plan.adds.flatMap((add) => {
       const element = elementFor(placed, add.reference);
       return element
@@ -1134,6 +1144,7 @@
       ],
     });
     void pictureQueue.run();
+    return true;
   }
   const pictureQueue = new PictureQueue({
     session: () => session,
