@@ -103,6 +103,9 @@ pub enum BlockerCatalogPhase {
 pub enum BlockerCatalogProvenance {
     ReleaseBundle,
     TufRepository,
+    /// Source bytes obtained from fixed official HTTPS publisher endpoints;
+    /// this is transport/server trust, not publisher signatures.
+    OfficialHttps,
 }
 
 /// Small, immutable catalog status consumed by the authoritative shell actor.

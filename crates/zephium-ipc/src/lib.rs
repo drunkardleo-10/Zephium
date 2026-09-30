@@ -680,6 +680,7 @@ pub enum BlockerSourcePhase {
 pub enum BlockerSourceProvenance {
     ReleaseBundle,
     TufRepository,
+    OfficialHttps,
 }
 
 /// Stable package-refresh failure category. Endpoint, parser, and native

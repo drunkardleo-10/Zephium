@@ -295,7 +295,7 @@ export type BlockerSourceIdentities = {
 export type BlockerSourcePhase = "not_configured" | "durable_activation_unsupported" | "storage_unavailable" | "clock_unsafe" | "idle" | "fresh" | "stale" | "refreshing" | "failed" | "shutdown";
 
 /**  Authority which admitted the displayed filter package. */
-export type BlockerSourceProvenance = "release_bundle" | "tuf_repository";
+export type BlockerSourceProvenance = "release_bundle" | "tuf_repository" | "official_https";
 
 export type BlockerStatusChanged = BlockerStatusView;
 

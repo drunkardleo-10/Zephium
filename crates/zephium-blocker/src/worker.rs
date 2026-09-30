@@ -310,7 +310,7 @@ struct CatalogReplacement {
 struct CatalogPreparation {
     identity: [u8; 32],
     catalog: PolicyCatalog,
-    done: Box<dyn FnOnce(CatalogPreparationOutcome) + Send>,
+    done: Box<dyn FnOnce(Result<Arc<ContentRules>, BlockerCompileFailure>) + Send>,
 }
 
 struct CatalogActivation {
@@ -528,6 +528,26 @@ impl WorkerBlocker {
         identity: [u8; 32],
         catalog: PolicyCatalog,
         done: Box<dyn FnOnce(CatalogPreparationOutcome) + Send>,
+    ) -> CatalogReplacementDispatch {
+        self.prepare_catalog_rules(
+            identity,
+            catalog,
+            Box::new(move |result| {
+                done(match result {
+                    Ok(_) => CatalogPreparationOutcome::Prepared,
+                    Err(failure) => CatalogPreparationOutcome::Failed(failure),
+                });
+            }),
+        )
+    }
+
+    /// Prepares the exact candidate and transfers bounded artifact ownership
+    /// for native preflight, without changing the current source authority.
+    pub fn prepare_catalog_rules(
+        &self,
+        identity: [u8; 32],
+        catalog: PolicyCatalog,
+        done: Box<dyn FnOnce(Result<Arc<ContentRules>, BlockerCompileFailure>) + Send>,
     ) -> CatalogReplacementDispatch {
         let mut state = self
             .admission
@@ -988,14 +1008,12 @@ fn run_worker(
                 let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     candidate.resolve(compiler, &mut persistent)
                 })) {
-                    Ok(BlockerCompileOutcome::Compiled(_)) => {
+                    Ok(BlockerCompileOutcome::Compiled(rules)) => {
                         prepared = Some((preparation.identity, candidate));
-                        CatalogPreparationOutcome::Prepared
+                        Ok(rules)
                     }
-                    Ok(BlockerCompileOutcome::Failed(failure)) => {
-                        CatalogPreparationOutcome::Failed(failure)
-                    }
-                    Err(_) => CatalogPreparationOutcome::Failed(BlockerCompileFailure::Internal),
+                    Ok(BlockerCompileOutcome::Failed(failure)) => Err(failure),
+                    Err(_) => Err(BlockerCompileFailure::Internal),
                 };
                 admission
                     .state
@@ -2940,7 +2958,7 @@ mod tests {
         let source = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("candidate").unwrap(),
             SourceFormat::Standard,
-            Arc::from("||ads.zephium.invalid^$script"),
+            Arc::from("||ads.zephium.invalid^$script\n##.candidate-ad"),
         )])
         .unwrap();
         let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2956,17 +2974,24 @@ mod tests {
         let identity = [12; 32];
         let (prepared_tx, prepared_rx) = mpsc::sync_channel(1);
         assert_eq!(
-            worker.prepare_catalog(
+            worker.prepare_catalog_rules(
                 identity,
                 candidate,
                 Box::new(move |outcome| prepared_tx.send(outcome).unwrap()),
             ),
             CatalogReplacementDispatch::Scheduled
         );
-        assert_eq!(
-            prepared_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
-            CatalogPreparationOutcome::Prepared
+        let preflight = prepared_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(preflight.payload(), zephium_core::blocker::ContentRulesPayload::Declarative { encoded, .. } if !encoded.is_empty())
         );
+        assert!(preflight.cosmetics().is_some());
+        assert!(preflight.native_cosmetics().is_some());
+        drop(preflight);
+
         assert_eq!(loads.load(Ordering::Relaxed), 1);
 
         let (stale_tx, stale_rx) = mpsc::sync_channel(1);

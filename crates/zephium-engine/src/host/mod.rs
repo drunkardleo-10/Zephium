@@ -431,6 +431,13 @@ pub(crate) struct EngineHost {
     // relax this binding and therefore cannot resurrect a UDF in private mode.
     profile_persistence_classes: HashMap<ProfileId, ProfilePersistenceClass>,
     content_policies: HashMap<ProfileId, ProfileContentPolicy>,
+    #[cfg(not(target_os = "windows"))]
+    content_rule_preflight: Option<(
+        [u8; 32],
+        zephium_core::ports::engine::ContentRuleValidationCompletion,
+    )>,
+    #[cfg(not(target_os = "windows"))]
+    preflight_cache_digest: Option<[u8; 32]>,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
     picker: Option<Arc<element_picker::PickerSession>>,
     next_picker: u64,

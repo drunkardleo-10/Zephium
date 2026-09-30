@@ -409,6 +409,10 @@ pub(crate) fn install(
             partitions: HashMap::new(),
             profile_persistence_classes: HashMap::new(),
             content_policies: HashMap::new(),
+            #[cfg(not(target_os = "windows"))]
+            content_rule_preflight: None,
+            #[cfg(not(target_os = "windows"))]
+            preflight_cache_digest: None,
             blocker_sites: HashMap::new(),
             picker: None,
             next_picker: 0,

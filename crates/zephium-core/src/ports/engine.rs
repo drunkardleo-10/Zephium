@@ -551,7 +551,46 @@ impl Drop for BlockerSiteCompletion {
     }
 }
 
+/// Native candidate admission does not install profile or view policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentRuleValidationOutcome {
+    Valid,
+    /// Dispatch/queue/lifecycle refusal is retryable, not a bad list verdict.
+    Unavailable,
+    Rejected(crate::blocker::ContentRuleApplyFailure),
+}
+
+/// Exactly-once native preflight completion; dropped work remains unavailable.
+pub struct ContentRuleValidationCompletion(
+    Option<Box<dyn FnOnce(ContentRuleValidationOutcome) + Send>>,
+);
+impl ContentRuleValidationCompletion {
+    pub fn new(done: impl FnOnce(ContentRuleValidationOutcome) + Send + 'static) -> Self {
+        Self(Some(Box::new(done)))
+    }
+    pub fn finish(mut self, outcome: ContentRuleValidationOutcome) {
+        if let Some(done) = self.0.take() {
+            done(outcome);
+        }
+    }
+}
+impl Drop for ContentRuleValidationCompletion {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(ContentRuleValidationOutcome::Unavailable);
+        }
+    }
+}
+
 pub trait Engine {
+    fn validate_content_rules(
+        &self,
+        _rules: Arc<ContentRules>,
+        completion: ContentRuleValidationCompletion,
+    ) {
+        completion.finish(ContentRuleValidationOutcome::Unavailable);
+    }
+
     fn element_picker(
         &self,
         _profile: ProfileId,

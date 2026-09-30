@@ -21,7 +21,22 @@ const RELEASE_SEED_EASYLIST: &[u8] = include_bytes!("../../assets/blocker-seed/v
 const RELEASE_SEED_EASYPRIVACY: &[u8] =
     include_bytes!("../../assets/blocker-seed/v1/easyprivacy.txt.gz");
 
-pub(crate) fn start(data_dir: &Path) -> std::io::Result<Arc<ManagedBlocker>> {
+pub(crate) fn start_with_updates(
+    data_dir: &Path,
+    validate: zephium_blocker_service::NativeRuleValidator,
+) -> std::io::Result<Arc<ManagedBlocker>> {
+    let artifact_cache = CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    ManagedBlocker::with_official_updates(
+        bundled_release_seed()?,
+        artifact_cache,
+        data_dir.join("blocker-official-v1"),
+        validate,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn start_seed_only(data_dir: &Path) -> std::io::Result<Arc<ManagedBlocker>> {
     let artifact_cache = CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     ManagedBlocker::with_release_seed(bundled_release_seed()?, artifact_cache)
@@ -108,7 +123,7 @@ mod tests {
     #[test]
     fn release_seed_is_authoritative_but_not_network_refreshable() {
         let root = tempfile::tempdir().unwrap();
-        let service = start(root.path()).unwrap();
+        let service = start_seed_only(root.path()).unwrap();
         let snapshot = service.maintain();
 
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
@@ -137,7 +152,7 @@ mod tests {
     #[test]
     fn exact_production_release_seed_materializes_through_the_worker() {
         let root = tempfile::tempdir().unwrap();
-        let service = start(root.path()).unwrap();
+        let service = start_seed_only(root.path()).unwrap();
         let (completed, completion) = std::sync::mpsc::sync_channel(1);
 
         assert_eq!(

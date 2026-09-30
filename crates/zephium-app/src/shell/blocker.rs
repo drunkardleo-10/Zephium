@@ -222,7 +222,7 @@ struct CatalogCompileAttempt {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CatalogAuthority {
     current: Option<CatalogPackageIdentity>,
-    highest_signed: Option<CatalogPackageIdentity>,
+    high_water: Option<CatalogPackageIdentity>,
     installed: Option<CatalogInstalledIdentity>,
 }
 
@@ -2791,16 +2791,16 @@ impl CatalogAuthority {
         }
         Some(Self {
             current,
-            highest_signed: newest_catalog_identity(current, candidate),
+            high_water: newest_catalog_identity(current, candidate),
             installed,
         })
     }
 
     /// Admits only monotonic, exact package authority.
     ///
-    /// A rejected candidate may leave the durable signed high-water ahead of
+    /// A rejected candidate may leave the durable catalog high-water ahead of
     /// current. The unchanged current is therefore allowed to remain below
-    /// `highest_signed`, but any newly observed current or candidate must
+    /// `high_water`, but any newly observed current or candidate must
     /// match that high-water exactly or advance it.
     fn advance(
         self,
@@ -2841,25 +2841,30 @@ impl CatalogAuthority {
             }
             _ => {}
         }
-        if self.current == next_current
+        let verified_official = next_current
+            .is_some_and(|identity| identity.provenance == BlockerCatalogProvenance::OfficialHttps)
+            && observed.source_material_epoch > previous.source_material_epoch;
+        if !verified_official
+            && self.current == next_current
             && previous.package_stale == Some(true)
             && observed.package_stale == Some(false)
         {
             return None;
         }
-        if self.current == next_current
+        if !verified_official
+            && self.current == next_current
             && previous.source_refresh_due
             && !observed.source_refresh_due
         {
             return None;
         }
 
-        let mut highest_signed = self.highest_signed;
+        let mut high_water = self.high_water;
         if next_current != self.current {
-            admit_signed_identity(&mut highest_signed, next_current?)?;
+            admit_catalog_identity(&mut high_water, next_current?)?;
         }
         if let Some(candidate) = next_candidate {
-            admit_signed_identity(&mut highest_signed, candidate)?;
+            admit_catalog_identity(&mut high_water, candidate)?;
         }
 
         match (self.installed, next_installed) {
@@ -2888,13 +2893,13 @@ impl CatalogAuthority {
 
         Some(Self {
             current: next_current,
-            highest_signed,
+            high_water,
             installed: next_installed,
         })
     }
 }
 
-fn admit_signed_identity(
+fn admit_catalog_identity(
     highest: &mut Option<CatalogPackageIdentity>,
     observed: CatalogPackageIdentity,
 ) -> Option<()> {
@@ -3056,8 +3061,10 @@ pub(super) fn catalog_snapshot_valid(catalog: BlockerCatalogSnapshot) -> bool {
     if provenances.into_iter().flatten().any(|provenance| {
         matches!(
             (catalog.refresh_supported, provenance),
-            (false, BlockerCatalogProvenance::TufRepository)
-                | (true, BlockerCatalogProvenance::ReleaseBundle)
+            (
+                false,
+                BlockerCatalogProvenance::TufRepository | BlockerCatalogProvenance::OfficialHttps
+            )
         )
     }) {
         return false;
@@ -3177,7 +3184,6 @@ pub(super) fn catalog_snapshot_valid(catalog: BlockerCatalogSnapshot) -> bool {
 
 fn catalog_has_compiler_policy(catalog: BlockerCatalogSnapshot) -> bool {
     !catalog.enabled_policy_terminal
-        && !catalog.activation_pending
         && !catalog.source_material_repair_pending
         && !catalog.source_material_repair_retry_pending
         && catalog.package_revision.is_some()
@@ -3307,6 +3313,7 @@ const fn source_provenance_view(provenance: BlockerCatalogProvenance) -> Blocker
     match provenance {
         BlockerCatalogProvenance::ReleaseBundle => BlockerSourceProvenance::ReleaseBundle,
         BlockerCatalogProvenance::TufRepository => BlockerSourceProvenance::TufRepository,
+        BlockerCatalogProvenance::OfficialHttps => BlockerSourceProvenance::OfficialHttps,
     }
 }
 

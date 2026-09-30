@@ -1517,6 +1517,16 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn validate_content_rules(
+        &self,
+        rules: Arc<ContentRules>,
+        completion: zephium_core::ports::engine::ContentRuleValidationCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.validate_content_rules(rules, completion));
+        });
+    }
+
     fn element_picker(
         &self,
         profile: ProfileId,

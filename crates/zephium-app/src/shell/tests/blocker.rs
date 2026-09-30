@@ -2822,3 +2822,60 @@ fn compiler_shutdown_failure_is_terminal_and_does_not_skip_native_teardown() {
     );
     assert_eq!(order.lock().unwrap().as_slice(), &["engine", "blocker"]);
 }
+
+#[test]
+fn official_https_freshness_needs_exact_verified_material_and_preserves_signed_expiry_rules() {
+    use zephium_core::ports::blocker::BlockerCatalogProvenance;
+    let mut stale = catalog_revision(10, 10);
+    stale.package_provenance = Some(BlockerCatalogProvenance::OfficialHttps);
+    stale.installed_provenance = Some(BlockerCatalogProvenance::OfficialHttps);
+    stale.phase = BlockerCatalogPhase::Stale;
+    stale.package_stale = Some(true);
+    stale.source_refresh_due = true;
+    let (mut shell, compiler) = shell_with_initial_catalog(stale);
+    shell.handle(Command::Bootstrap);
+    let mut checked = stale;
+    checked.revision += 1;
+    checked.phase = BlockerCatalogPhase::Fresh;
+    checked.package_stale = Some(false);
+    checked.source_refresh_due = false;
+    checked.source_material_epoch = 1;
+    compiler.set_catalog(checked);
+    shell.maintain_blocker_catalog();
+    assert_eq!(
+        shell.focused_blocker_status_view().source_phase,
+        BlockerSourcePhase::Fresh
+    );
+    assert!(shell.focused_blocker_status_view().can_enable);
+    let (mut unverified, compiler) = shell_with_initial_catalog(stale);
+    unverified.handle(Command::Bootstrap);
+    checked.source_material_epoch = 0;
+    compiler.set_catalog(checked);
+    unverified.maintain_blocker_catalog();
+    assert_eq!(
+        unverified.focused_blocker_status_view().source_failure,
+        Some(BlockerSourceFailure::Rollback)
+    );
+    stale.package_provenance = Some(BlockerCatalogProvenance::TufRepository);
+    stale.installed_provenance = Some(BlockerCatalogProvenance::TufRepository);
+    let (mut signed, compiler) = shell_with_initial_catalog(stale);
+    signed.handle(Command::Bootstrap);
+    checked.package_provenance = stale.package_provenance;
+    checked.installed_provenance = stale.installed_provenance;
+    checked.source_material_epoch = 1;
+    compiler.set_catalog(checked);
+    signed.maintain_blocker_catalog();
+    assert_eq!(
+        signed.focused_blocker_status_view().source_failure,
+        Some(BlockerSourceFailure::Rollback)
+    );
+}
+
+#[test]
+fn pending_source_candidate_does_not_withhold_the_working_compiler_catalog() {
+    let mut catalog = catalog_revision(10, 10);
+    set_catalog_candidate(&mut catalog, 11);
+    let (mut shell, _) = shell_with_initial_catalog(catalog);
+    shell.handle(Command::Bootstrap);
+    assert!(shell.focused_blocker_status_view().can_enable);
+}

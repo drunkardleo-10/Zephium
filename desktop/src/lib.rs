@@ -4451,11 +4451,13 @@ pub fn run() {
             });
 
             let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
-            // The managed service owns the release-authenticated seed,
-            // compiled cache, and—once provisioned—the independently
-            // authenticated source updater. Startup fails rather than
-            // silently substituting an empty catalog.
-            let blocker = blocker_service::start(&data_dir).map_err(|error| {
+            // Official source candidates must pass the same native compiler
+            // as profile policies before becoming the durable current lists.
+            let native_validation:zephium_blocker_service::NativeRuleValidator={
+                let engine=engine.clone();
+                Arc::new(move |rules,done|zephium_core::ports::engine::Engine::validate_content_rules(engine.as_ref(),rules,done))
+            };
+            let blocker = blocker_service::start_with_updates(&data_dir,native_validation).map_err(|error| {
                 std::io::Error::other(format!(
                     "failed to start managed content-policy service: {error}"
                 ))
@@ -5492,7 +5494,7 @@ mod tests {
     #[test]
     fn pre_shell_blocker_owner_reaps_the_real_managed_compiler() {
         let root = tempfile::tempdir().unwrap();
-        let blocker = super::blocker_service::start(root.path()).unwrap();
+        let blocker = super::blocker_service::start_seed_only(root.path()).unwrap();
         let owner = super::StartupBlocker::default();
         assert!(owner.install(blocker.clone()));
 
@@ -5889,7 +5891,7 @@ mod tests {
             .find("if !startup_store.transfer_to(&store)")
             .expect("exact Store ownership transfer");
         let blocker_start = setup
-            .find("let blocker = blocker_service::start(&data_dir)")
+            .find("let blocker = blocker_service::start_with_updates(&data_dir")
             .expect("managed blocker construction");
         let startup_blocker_owner = setup
             .find("if !startup_blocker.install(blocker.clone())")

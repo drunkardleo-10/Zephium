@@ -61,7 +61,7 @@ zephium-work-composition = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-store.workspace = true
 zephium-notes.workspace = true
-zephium-blocker-service.workspace = true
+zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true
 window-vibrancy = "=0.8.0"
 serde.workspace = true
