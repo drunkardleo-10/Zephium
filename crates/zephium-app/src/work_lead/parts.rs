@@ -588,7 +588,8 @@ where
                                 ))
                             }
                             Ok(mut kind) => {
-                                let view = tool_call.arguments.get("view").and_then(Value::as_bool) == Some(true);
+                                let view = tool_call.arguments.get("view").and_then(Value::as_bool) == Some(true)
+                                    || reads_app(&kind);
                                 if let (true, WorkStepKindV1::Read { goal: Some(_), collection, .. }) = (view, &mut kind) {
                                     *collection = None;
                                 }
@@ -601,11 +602,7 @@ where
                                         .get("mine")
                                         .and_then(Value::as_bool)
                                         .unwrap_or(false),
-                                    view: tool_call
-                                        .arguments
-                                        .get("view")
-                                        .and_then(Value::as_bool)
-                                        .unwrap_or(false),
+                                    view,
                                 })
                             }
                             Err(fault) => results[index] = Some(answer(fault, true)),
@@ -839,11 +836,12 @@ where
                         })
                 })
             });
+        let objective = self.objective.to_lowercase();
         let asked_for = self.run.accepted_connection(&offer.yes)
-            || self
-                .objective
-                .to_lowercase()
-                .contains(&offer.yes.to_lowercase());
+            || objective.contains(&offer.yes.to_lowercase())
+            || objective
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| matches!(word, "mcp" | "connection" | "connector"));
         let answer = match earlier {
             _ if asked_for => Some(offer.yes.clone()),
             Some(answer) => Some(answer),
@@ -862,7 +860,12 @@ where
                 .ok()
                 .flatten(),
         };
-        answer.as_deref() == Some(offer.yes.as_str())
+        let accepted = answer.as_deref() == Some(offer.yes.as_str());
+        // The connection helper asks under the same words: it takes this answer.
+        if accepted {
+            self.run.accept_connection(&offer.yes);
+        }
+        accepted
     }
 
     /// The need a part that could not do its job shows on its row, with the
@@ -933,7 +936,14 @@ where
                     reason,
                 },
                 WorkPartNeedV1::UseConnection { connection, .. } => {
-                    WorkPartNeedV1::UseConnection { connection, reason }
+                    if connected(self.run, &connection) {
+                        WorkPartNeedV1::UseConnection { connection, reason }
+                    } else {
+                        WorkPartNeedV1::Retry {
+                            host: hosts.first().cloned().filter(|h| public_host(h)),
+                            reason,
+                        }
+                    }
                 }
                 other => other,
             };
@@ -1031,6 +1041,57 @@ fn add(a: WorkUsage, b: WorkUsage) -> WorkUsage {
 }
 
 /// A helper's page, search or file call as the step it becomes.
+/// Whether the person has the connection a need names: gh, or an enabled
+/// server of theirs by its name or id.
+fn connected(run: &super::run::LeadRun, connection: &str) -> bool {
+    let Some(brand) = super::route::brand(None, connection) else {
+        return false;
+    };
+    let servers = crate::work_connections::store::shared()
+        .and_then(|store| store.servers(&run.profile.to_string()).ok())
+        .unwrap_or_default();
+    super::route::offer(
+        &brand,
+        crate::work_connections::helper::shared().gh_ready(),
+        &servers,
+    )
+    .is_some()
+}
+
+/// A page task that only reads one of the person's daily apps (what is new
+/// in Slack, the Linear inbox): it is read from the app's own views first,
+/// with no model call, whatever the helper set. A goal that asks to send,
+/// post or change something is a task, not a read; a sentence that forbids
+/// it ("do not change anything") asks nothing.
+fn reads_app(kind: &WorkStepKindV1) -> bool {
+    const ACTS: [&str; 22] = [
+        "send", "post", "reply", "write", "create", "draft", "comment", "assign", "archive",
+        "delete", "remove", "invite", "schedule", "book", "update", "move", "mark", "react",
+        "forward", "edit", "submit", "fill",
+    ];
+    const NOT: [&str; 5] = ["do not", "don't", "never", "without", "no "];
+    let WorkStepKindV1::Read {
+        url,
+        goal: Some(goal),
+        ..
+    } = kind
+    else {
+        return false;
+    };
+    let app = url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().and_then(zephium_agentic::DailyApp::of));
+    if app.is_none() {
+        return false;
+    }
+    let goal = goal.to_lowercase();
+    !goal
+        .split(['.', ';', '\n', '!'])
+        .filter(|sentence| !NOT.iter().any(|not| sentence.contains(not)))
+        .flat_map(|sentence| sentence.split(|c: char| !c.is_alphanumeric()))
+        .any(|word| ACTS.contains(&word))
+}
+
 pub(crate) fn step_request(
     name: &str,
     args: &Value,
@@ -1470,6 +1531,39 @@ mod tests {
             .columns
             .iter()
             .all(|c| c.required == (c.name == "url")));
+    }
+
+    #[test]
+    fn a_goal_that_only_reads_a_daily_app_is_a_view_read() {
+        let browse = |url: &str, goal: &str| WorkStepKindV1::Read {
+            url: url.into(),
+            collection: None,
+            goal: Some(goal.into()),
+        };
+        for goal in [
+            "Find unread and waiting Slack messages",
+            "Read the user's Slack view as it is. Do not send, post or change anything.",
+            "Review the person's assigned issues; don't edit or create anything",
+        ] {
+            assert!(
+                reads_app(&browse("https://app.slack.com/client", goal)),
+                "{goal}"
+            );
+        }
+        assert!(!reads_app(&browse(
+            "https://app.slack.com/client",
+            "Reply to Ana's thread"
+        )));
+        assert!(!reads_app(&browse(
+            "https://linear.app/",
+            "Create an issue for the crash"
+        )));
+        assert!(!reads_app(&browse("https://www.airbnb.com/", "Find stays")));
+        assert!(!reads_app(&WorkStepKindV1::Read {
+            url: "https://app.slack.com/client".into(),
+            collection: None,
+            goal: None,
+        }));
     }
 
     #[test]

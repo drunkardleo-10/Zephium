@@ -48,6 +48,14 @@ impl AgentWorkController {
         if !scope.admits(target) {
             return scope.is_site_session().then_some(Reason::OutsideScope);
         }
+        // An in-page anchor ("Skip to content") or any address the session's
+        // own document policy would refuse at dispatch is refused here, where
+        // the model can choose again, instead of ending the page natively.
+        if scope.is_site_session()
+            && !zephium_agentic::WorkBrowserDocumentPolicy::SiteSession.admits_request(target)
+        {
+            return Some(Reason::OutsideScope);
+        }
         let observed = observation
             .frames()
             .iter()

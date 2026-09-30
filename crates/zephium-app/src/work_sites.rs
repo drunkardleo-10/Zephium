@@ -85,7 +85,8 @@ pub const SENSITIVE_SITES: &[&str] = &[
 /// People's names for common sites and where their signed-in app starts.
 const VENDORS: &[(&str, &str, Option<&str>)] = &[
     ("slack.com", "Slack", Some("https://app.slack.com/client")),
-    ("notion.so", "Notion", Some("https://www.notion.so/")),
+    ("notion.so", "Notion", None),
+    ("notion.com", "Notion", Some("https://app.notion.com/")),
     ("google.com", "Google", None),
     ("github.com", "GitHub", None),
     (
@@ -240,6 +241,8 @@ pub fn personal_page(url: &str) -> bool {
         "outlook.office.com",
         "linear.app",
         "app.slack.com",
+        "notion.so",
+        "app.notion.com",
     ];
     if APPS.contains(&host.as_str()) {
         return true;
@@ -751,6 +754,7 @@ mod tests {
             "https://linear.app/team/my-issues",
             "https://github.com/notifications",
             "https://www.notion.so/",
+            "https://app.notion.com/",
         ] {
             assert!(personal_page(personal), "{personal}");
         }

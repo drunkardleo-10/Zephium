@@ -1,0 +1,88 @@
+{
+"app": "linear",
+"url": "https://linear.app/",
+"snapshot": {
+"c": "scope_boundary",
+"n": [
+{
+"b": {
+"h": 800,
+"w": 1280,
+"x": 0,
+"y": 0
+},
+"k": 1,
+"r": "document"
+},
+{
+"k": 2,
+"n": "Page title",
+"p": 0,
+"r": "paragraph",
+"t": "New chat"
+},
+{
+"b": {
+"h": 1,
+"w": 1,
+"x": -1,
+"y": -1
+},
+"k": 3,
+"n": "Skip to content",
+"o": 9,
+"p": 0,
+"r": "link",
+"u": "https://linear.app/acme/agent#skip-nav"
+},
+{
+"b": {
+"h": 800,
+"w": 244,
+"x": 0,
+"y": 0
+},
+"k": 4,
+"lm": "navigation",
+"p": 0,
+"r": "landmark"
+},
+{
+"b": {
+"h": 756,
+"w": 1028,
+"x": 244,
+"y": 8
+},
+"k": 5,
+"lm": "main",
+"p": 0,
+"r": "landmark"
+},
+{
+"b": {
+"h": 1,
+"w": 1,
+"x": -1,
+"y": 799
+},
+"k": 6,
+"p": 0,
+"r": "status"
+},
+{
+"b": {
+"h": 20,
+"w": 62,
+"x": 731,
+"y": 426
+},
+"k": 7,
+"p": 0,
+"r": "paragraph",
+"t": "Loading…"
+}
+],
+"v": 1
+}
+}

@@ -2261,6 +2261,9 @@ const SITE_LOAD_POLL: Duration = Duration::from_secs(2);
 /// person does not count against it.
 const PAGE_TASK_ACTIVE: Duration = Duration::from_secs(480);
 const PAGE_TASK_CALLS: u8 = 40;
+/// A daily app's view read is Rust's own; the page planner, when it is
+/// needed at all, gets a few calls to reach a view, not a wander.
+const VIEW_TASK_CALLS: u8 = 8;
 /// A public page read looks, extracts and ends: a few inspections at most.
 const PUBLIC_READ_CALLS: u8 = 6;
 const PAGE_TASK_ACTIONS: u64 = 60;
@@ -2466,7 +2469,9 @@ fn compile_step(
                 },
                 None => PublicReadWorkAccount::Anonymous,
             },
-            if task {
+            if task && request.view {
+                VIEW_TASK_CALLS
+            } else if task {
                 PAGE_TASK_CALLS
             } else if signed_in.is_some() {
                 16

@@ -11,7 +11,7 @@ const SERVICES: [(&str, &str, &str); 8] = [
     ("github", "GitHub", "github.com"),
     ("gmail", "Gmail", "mail.google.com"),
     ("calendar", "Google Calendar", "calendar.google.com"),
-    ("notion", "Notion", "www.notion.so"),
+    ("notion", "Notion", "app.notion.com"),
     ("linear", "Linear", "linear.app"),
     ("figma", "Figma", "www.figma.com"),
     ("discord", "Discord", "discord.com"),

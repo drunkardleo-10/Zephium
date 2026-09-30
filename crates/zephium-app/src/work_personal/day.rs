@@ -47,7 +47,7 @@ pub(crate) const APPS: [DayApp; 6] = [
     DayApp {
         key: "notion",
         name: "Notion",
-        host: "www.notion.so",
+        host: "app.notion.com",
         read: "pages and tasks assigned to the person or changed for them since yesterday",
     },
     DayApp {

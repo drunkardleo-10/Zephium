@@ -1589,6 +1589,23 @@ fn startup_loading_signal_distinguishes_skeletons_from_usable_progress_pages() {
                     false,
                 ),
                 ([vec![progress; 3], vec![disabled; 3]].concat(), true),
+                // An app still booting says so and shows next to nothing.
+                (
+                    vec![
+                        serde_json::json!({"r":"paragraph", "n":"Page title", "t":"New chat"}),
+                        serde_json::json!({"r":"link", "n":"Skip to content", "o":1}),
+                        serde_json::json!({"r":"paragraph", "t":"Loading…"}),
+                    ],
+                    true,
+                ),
+                (
+                    [
+                        vec![serde_json::json!({"r":"paragraph", "t":"Loading…"})],
+                        vec![serde_json::json!({"r":"button", "n":"Open", "o":1}); 20],
+                    ]
+                    .concat(),
+                    false,
+                ),
             ] {
                 let mut nodes = vec![serde_json::json!({"k":1,"r":"document","o":16})];
                 for (index, node) in children.iter_mut().enumerate() {

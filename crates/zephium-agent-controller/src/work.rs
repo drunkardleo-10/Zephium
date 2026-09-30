@@ -99,7 +99,32 @@ fn has_dominant_loading_placeholders(observation: &SemanticObservation) -> bool 
             controls += 1;
         }
     }
-    placeholders >= 3 && placeholders > controls
+    (placeholders >= 3 && placeholders > controls) || says_loading(observation)
+}
+
+/// A page with next to nothing on it yet but its own "Loading…": an app
+/// still booting, not a page to judge.
+fn says_loading(observation: &SemanticObservation) -> bool {
+    let nodes = || {
+        observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+    };
+    nodes().count() <= 16
+        && nodes().any(|node| {
+            [node.name(), node.text()]
+                .into_iter()
+                .flatten()
+                .map(|words| {
+                    words
+                        .as_str()
+                        .trim()
+                        .trim_end_matches(['…', '.'])
+                        .to_ascii_lowercase()
+                })
+                .any(|words| words == "loading" || words == "loading your workspace")
+        })
 }
 
 fn finish_initial_readiness_wait(
@@ -3399,15 +3424,24 @@ impl AgentWorkController {
         let mut look = Box::pin(Self::observe(state, worker, browser)).await?;
         let mut tried = false;
         for _ in 0..=MAX_APP_VIEWS {
-            if let Some(target) = state.task.app_view(&look) {
-                look = Box::pin(Self::open_app_view(state, worker, browser, look, target)).await?;
-            } else if tried {
-                return Ok(None);
-            }
-            if let Some(read) =
-                Box::pin(Self::read_app_look(state, worker, browser, &schema, look)).await?
+            let last = match state.task.app_view(&look) {
+                Some(target) => {
+                    look =
+                        Box::pin(Self::open_app_view(state, worker, browser, look, target)).await?;
+                    false
+                }
+                // No view is left: the one shown answers, empty or not.
+                None => tried,
+            };
+            if let Some(read) = Box::pin(Self::read_app_look(
+                state, worker, browser, &schema, look, last,
+            ))
+            .await?
             {
                 return Ok(Some(read));
+            }
+            if last {
+                return Ok(None);
             }
             tried = true;
             state.refresh_account(worker, browser)?;
@@ -3446,18 +3480,21 @@ impl AgentWorkController {
         Box::pin(Self::observe(state, worker, browser)).await
     }
 
-    /// One view's records: its look, else each landmark opened whole.
+    /// One view's records: its look, else each landmark opened whole. The
+    /// last view is read as it stands, its empty-state line an answer.
     async fn read_app_look(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
         schema: &SemanticExtractionSchema,
         fresh: SemanticObservation,
+        last: bool,
     ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
         let app = Self::daily_app(state);
         let landmarks: Vec<SemanticReferenceId> = fresh
             .frames()
             .first()
+            .filter(|_| !last)
             .map(|frame| {
                 frame
                     .nodes()
@@ -3487,7 +3524,7 @@ impl AgentWorkController {
                 .ok_or(AgentWorkFailure::Contract)?
                 .account;
             if let Some(located) =
-                zephium_agentic::read_app_view(&look, account, captured_at, schema, app)
+                zephium_agentic::read_app_view(&look, account, captured_at, schema, app, last)
             {
                 // The task judges the look its records come from.
                 state.task_progress(&look)?;

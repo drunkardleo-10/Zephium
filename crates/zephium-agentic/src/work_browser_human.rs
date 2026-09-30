@@ -53,7 +53,7 @@ fn shared_sign_in(host: &str, domain: &[u8]) -> bool {
 /// skyscanner.net and skyscanner.pl, amazon.com and amazon.de. A closed
 /// list, matched on the whole label before an ICANN suffix, never a
 /// substring.
-const BRAND_FAMILIES: [&str; 22] = [
+const BRAND_FAMILIES: [&str; 23] = [
     "airbnb",
     "amazon",
     "agoda",
@@ -66,6 +66,7 @@ const BRAND_FAMILIES: [&str; 22] = [
     "kayak",
     "lego",
     "momondo",
+    "notion",
     "opodo",
     "rakuten",
     "skyscanner",

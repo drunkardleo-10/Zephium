@@ -32,7 +32,7 @@ pub enum DailyApp {
     Calendar,
     /// linear.app
     Linear,
-    /// notion.so
+    /// app.notion.com, notion.so
     Notion,
     /// github.com
     GitHub,
@@ -49,7 +49,7 @@ impl DailyApp {
             "calendar.google.com" => Self::Calendar,
             "github.com" => Self::GitHub,
             _ if on("linear.app") => Self::Linear,
-            _ if on("notion.so") => Self::Notion,
+            _ if on("notion.so") || on("notion.com") => Self::Notion,
             _ => return None,
         })
     }
@@ -440,15 +440,73 @@ fn names_a_time(text: &str) -> bool {
     })
 }
 
+/// Words an app shows when a view has nothing in it.
+const EMPTY_VIEW: [&str; 14] = [
+    "all caught up",
+    "caught up",
+    "nothing new",
+    "nothing here",
+    "nothing to see",
+    "no new",
+    "no unread",
+    "no issues",
+    "no notifications",
+    "no messages",
+    "no results",
+    "inbox zero",
+    "quiet for now",
+    "you have no",
+];
+
+/// The one line a view shows when it lists nothing ("All caught up"), as a
+/// record of its own, so an empty view is an answer.
+fn empty_view(observation: &SemanticObservation) -> Option<Row> {
+    let frame = observation.frames().first()?;
+    let nodes = frame.nodes();
+    nodes.iter().enumerate().find_map(|(index, node)| {
+        if node.sensitivity() != SemanticSensitivity::Public
+            || !matches!(
+                node.role(),
+                SemanticRole::ListItem
+                    | SemanticRole::Paragraph
+                    | SemanticRole::Heading
+                    | SemanticRole::Status
+                    | SemanticRole::Group
+            )
+            || document_metadata(node)
+        {
+            return None;
+        }
+        let mut cursor = node.parent().map(usize::from);
+        while let Some(at) = cursor.filter(|at| *at < index) {
+            if nodes[at].role() == SemanticRole::Dialog {
+                return None;
+            }
+            cursor = nodes[at].parent().map(usize::from);
+        }
+        let text = copied_text(node)?;
+        let lower = text.to_ascii_lowercase();
+        (text.len() <= ROW_BYTES && EMPTY_VIEW.iter().any(|words| lower.contains(words))).then(
+            || Row {
+                nodes: vec![(node.reference(), text.to_owned())],
+                timed: false,
+                keyed: false,
+            },
+        )
+    })
+}
+
 /// The view's records as a findings read: each row's words, cited to its own
-/// nodes. None when the task reads into columns, or the view shows no
-/// records.
+/// nodes. The last view a read goes through answers with its empty-state
+/// line when it lists nothing. None when the task reads into columns, or the
+/// view shows no records.
 pub fn read_app_view<'a>(
     observation: &'a SemanticObservation,
     account: AgentContextAccountBinding,
     captured_at: SemanticCaptureInstant,
     schema: &SemanticExtractionSchema,
     app: Option<DailyApp>,
+    last: bool,
 ) -> Option<DecisionLocatedRead<'a>> {
     let projection = ReadProjection::for_schema(schema)?;
     let [field] = projection.columns.as_slice() else {
@@ -460,7 +518,10 @@ pub fn read_app_view<'a>(
     {
         return None;
     }
-    let rows = rows(observation, app);
+    let mut rows = rows(observation, app);
+    if rows.is_empty() && last {
+        rows.extend(empty_view(observation));
+    }
     if rows.is_empty() {
         return None;
     }
@@ -544,6 +605,84 @@ mod tests {
 
     fn texts(rows: &[Row]) -> Vec<String> {
         rows.iter().map(Row::text).collect()
+    }
+
+    /// A real app view the QA build captured, names and words replaced.
+    fn captured(fixture: &str) -> SemanticObservation {
+        let record: Value = serde_json::from_str(fixture).unwrap();
+        observation_of(record["url"].as_str().unwrap(), &record["snapshot"])
+    }
+
+    #[test]
+    fn a_real_slack_channel_reads_its_messages_under_its_welcome_card() {
+        let look = captured(include_str!("fixtures/slack-channel.json"));
+        let rows = rows(&look, Some(DailyApp::Slack));
+        let read = texts(&rows);
+        assert_eq!(read.len(), 3, "{read:?}");
+        assert!(read[0].contains("joined #general"), "{read:?}");
+        assert!(read[1].contains("Message text one"), "{read:?}");
+        assert!(read[2].contains("Message text two"), "{read:?}");
+        assert!(!read.iter().any(|row| row.contains("handbook")), "{read:?}");
+        for view in [
+            AppView::SlackActivity,
+            AppView::SlackDms,
+            AppView::SlackHome,
+        ] {
+            assert!(app_view_control(&look, view).is_some(), "{view:?}");
+        }
+    }
+
+    fn read(look: &SemanticObservation, last: bool) -> Option<usize> {
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(7).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let account = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::from_raw(14),
+            look.request().context(),
+            AgentAccountScope::Anonymous,
+            AgentPolicyInstant::from_millis(100),
+        );
+        read_app_view(
+            look,
+            account,
+            SemanticCaptureInstant::from_millis(200),
+            &schema,
+            Some(DailyApp::Slack),
+            last,
+        )
+        .map(|located| located.rows_read())
+    }
+
+    #[test]
+    fn a_real_empty_slack_activity_is_all_caught_up_only_when_it_is_the_last_view() {
+        let look = captured(include_str!("fixtures/slack-activity.json"));
+        assert!(rows(&look, Some(DailyApp::Slack)).is_empty());
+        let empty = empty_view(&look).expect("the empty state");
+        assert!(
+            empty.text().starts_with("All caught up"),
+            "{}",
+            empty.text()
+        );
+        assert_eq!(read(&look, false), None);
+        assert_eq!(read(&look, true), Some(1));
+        let channel = captured(include_str!("fixtures/slack-channel.json"));
+        assert_eq!(read(&channel, false), Some(3));
+    }
+
+    #[test]
+    fn a_real_linear_home_opens_its_inbox_and_my_issues_from_the_sidebar() {
+        let look = captured(include_str!("fixtures/linear-home.json"));
+        assert!(rows(&look, Some(DailyApp::Linear)).is_empty());
+        for view in [AppView::LinearInbox, AppView::LinearMyIssues] {
+            assert!(app_view_control(&look, view).is_some(), "{view:?}");
+        }
+        let booting = captured(include_str!("fixtures/linear-loading.json"));
+        assert_eq!(app_view_control(&booting, AppView::LinearInbox), None);
     }
 
     #[test]
@@ -640,6 +779,7 @@ mod tests {
         assert_eq!(DailyApp::of("app.slack.com"), Some(DailyApp::Slack));
         assert_eq!(DailyApp::of("acme.linear.app"), Some(DailyApp::Linear));
         assert_eq!(DailyApp::of("www.notion.so"), Some(DailyApp::Notion));
+        assert_eq!(DailyApp::of("app.notion.com"), Some(DailyApp::Notion));
         assert_eq!(DailyApp::of("slack.com"), None);
         for event in [
             "10:30 – 11:00, Standup",

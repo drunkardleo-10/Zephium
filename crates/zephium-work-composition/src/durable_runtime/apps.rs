@@ -10,7 +10,7 @@ pub(super) fn note(host: &str) -> Option<&'static str> {
         "mail.google.com" => GMAIL,
         "calendar.google.com" => CALENDAR,
         _ if site("linear.app") => LINEAR,
-        _ if site("notion.so") => NOTION,
+        _ if site("notion.so") || site("notion.com") => NOTION,
         "github.com" => GITHUB,
         _ => return None,
     })

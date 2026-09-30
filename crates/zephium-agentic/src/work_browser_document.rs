@@ -267,5 +267,14 @@ mod tests {
         ));
         assert!(!policy
             .admits_request(&ContextNavigationTarget::parse("http://example.test/").unwrap()));
+        // An in-page anchor is never a navigation request of a session.
+        assert!(!policy.admits_request(
+            &ContextNavigationTarget::parse("https://linear.app/acme/agent#skip-nav").unwrap()
+        ));
+        // Notion's workspace moved from notion.so to app.notion.com.
+        assert!(policy.admits_final_document(
+            &ContextNavigationTarget::parse("https://www.notion.so/").unwrap(),
+            &ContextNavigationTarget::parse("https://app.notion.com/acme").unwrap()
+        ));
     }
 }
