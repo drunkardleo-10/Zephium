@@ -14,6 +14,8 @@ mod compiler;
 mod limits;
 mod report;
 mod rules;
+#[cfg(feature = "webkit")]
+mod webkit;
 mod worker;
 
 pub use cache::{CompiledArtifactCacheConfig, CompiledArtifactCacheConfigError};

@@ -2642,7 +2642,7 @@ mod tests {
         let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("maintained").unwrap(),
             SourceFormat::Standard,
-            Arc::from("||ads.zephium.invalid^$script"),
+            Arc::from("||ads.zephium.invalid^"),
         )])
         .unwrap();
 

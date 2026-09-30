@@ -24,6 +24,8 @@ use crate::compiler::prepare_and_validate_runtime_engine;
 #[cfg(feature = "runtime")]
 use crate::rules::CachedRuntimeRules;
 use crate::rules::CompiledRules;
+#[cfg(feature = "webkit")]
+use crate::webkit::ResourceType as WebKitResourceType;
 use crate::{
     CompileLimits, CompileTarget, ADBLOCK_ENGINE_VERSION, POLICY_FORMAT_VERSION,
     WEBKIT_ARTIFACT_FORMAT_VERSION,
@@ -1207,28 +1209,13 @@ struct CachedWebKitTrigger {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unless_domain: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    resource_type: Option<Vec<CachedWebKitResourceType>>,
+    resource_type: Option<Vec<WebKitResourceType>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     load_type: Vec<CachedWebKitLoadType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     if_top_url: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unless_top_url: Option<Vec<String>>,
-}
-
-#[cfg(feature = "webkit")]
-#[derive(Clone, Copy, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum CachedWebKitResourceType {
-    Document,
-    Image,
-    StyleSheet,
-    Script,
-    Font,
-    Raw,
-    SvgDocument,
-    Media,
-    Popup,
 }
 
 #[cfg(feature = "webkit")]
@@ -1279,7 +1266,10 @@ fn validate_canonical_webkit_payload(
                 MAX_PREDICATES_PER_FIELD,
                 MAX_URL_FILTER_BYTES,
             )
-            || !unique_bounded(rule.trigger.resource_type.as_deref(), 9)
+            || !unique_bounded(
+                rule.trigger.resource_type.as_deref(),
+                WebKitResourceType::COUNT,
+            )
             || (!rule.trigger.load_type.is_empty()
                 && !unique_bounded(Some(&rule.trigger.load_type), 2))
         {

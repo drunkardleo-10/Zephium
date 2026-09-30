@@ -35,6 +35,8 @@ use crate::report::{webkit_counts, WebKitCoverage};
 use crate::rules::{ArtifactDigest, WebKitRules};
 use crate::rules::{CompiledRules, PolicyDigest};
 #[cfg(feature = "webkit")]
+use crate::webkit::ResourceType as WebKitResourceType;
+#[cfg(feature = "webkit")]
 use crate::WEBKIT_ARTIFACT_FORMAT_VERSION;
 use crate::{ADBLOCK_ENGINE_VERSION, POLICY_FORMAT_VERSION};
 
@@ -1119,7 +1121,7 @@ struct CanonicalRule<'a> {
 #[cfg(feature = "webkit")]
 struct ConvertedRule {
     native: CbRule,
-    resource_types: Vec<&'static str>,
+    resource_types: Vec<WebKitResourceType>,
 }
 
 #[cfg(feature = "webkit")]
@@ -1143,7 +1145,7 @@ struct CanonicalTrigger<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     unless_domain: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    resource_type: Option<&'a [&'static str]>,
+    resource_type: Option<&'a [WebKitResourceType]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     load_type: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1215,73 +1217,11 @@ const fn webkit_load_name(load: &CbLoadType) -> &'static str {
 }
 
 #[cfg(feature = "webkit")]
-fn webkit_resource_types(mask: NetworkFilterMask) -> (Vec<&'static str>, bool) {
-    let mut resources = Vec::with_capacity(14);
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_DOCUMENT,
-        "top-document",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_SUBDOCUMENT,
-        "child-document",
-    );
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_IMAGE, "image");
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_MEDIA, "media");
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_OBJECT,
-        "svg-document",
-    );
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_OTHER, "other");
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_PING, "ping");
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_SCRIPT,
-        "script",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_STYLESHEET,
-        "style-sheet",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_WEBSOCKET,
-        "websocket",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_XMLHTTPREQUEST,
-        "fetch",
-    );
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_FONT, "font");
-    resources.sort_unstable();
-    resources.dedup();
+fn webkit_resource_types(mask: NetworkFilterMask) -> (Vec<WebKitResourceType>, bool) {
     (
-        resources,
+        WebKitResourceType::for_mask(mask),
         mask.intersects(NetworkFilterMask::FROM_OBJECT | NetworkFilterMask::FROM_OTHER),
     )
-}
-
-#[cfg(feature = "webkit")]
-fn push_resource_if(
-    resources: &mut Vec<&'static str>,
-    mask: NetworkFilterMask,
-    flag: NetworkFilterMask,
-    name: &'static str,
-) {
-    if mask.contains(flag) && !resources.contains(&name) {
-        resources.push(name);
-    }
 }
 
 #[cfg(feature = "webkit")]

@@ -6404,6 +6404,7 @@ name = "zephium-blocker"
 version = "0.1.0"
 dependencies = [
  "adblock",
+ "flate2",
  "idna",
  "proptest",
  "rustix",

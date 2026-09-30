@@ -20,6 +20,7 @@ sha2 = "=0.10.9"
 thiserror.workspace = true
 
 [dev-dependencies]
+flate2 = "=1.1.9"
 proptest.workspace = true
 tempfile.workspace = true
 
