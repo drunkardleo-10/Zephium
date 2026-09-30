@@ -35,13 +35,20 @@
   // Work gives the window to its canvas: the column is always the rail there.
   let inWork = $derived(browserPage.currentPage() === "work");
   let railPage = $derived(taskPage || inWork);
-  // Entering Work gives the column back to the rail: a panel open in Browse closes.
-  let wasWork: boolean | undefined;
+  // Work keeps the column as its compact rail, always: a panel open in Browse
+  // closes on the way in, and a tool asked for while in Work opens over its
+  // canvas instead of beside it.
+  let settledInWork = false;
   $effect(() => {
-    const now = inWork;
+    const tool = tools.activeTool();
+    const work = inWork;
     untrack(() => {
-      if (now && wasWork === false && tools.activeTool() !== null) tools.close();
-      wasWork = now;
+      if (work && tool !== null) {
+        tools.close();
+        if (settledInWork)
+          window.dispatchEvent(new CustomEvent("zephium:work-tool", { detail: tool }));
+      }
+      settledInWork = work;
     });
   });
   // Settings takes the column for its own navigation. Tasks and Notes are part

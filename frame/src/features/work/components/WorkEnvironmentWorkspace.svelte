@@ -40,6 +40,7 @@
     StickyNote03Icon,
     Cursor01Icon,
     HandIcon,
+    CheckListIcon,
   } from "../lib/icons";
   import WorkBar from "./bar/WorkBar.svelte";
   import { centreSize, picksSheet } from "./objects/centre";
@@ -47,6 +48,7 @@
   import { ASK_WORDS, asksOf, exchangeOf, openAsks, registrableSite } from "./asks/asks";
   import BarTool from "./bar/BarTool.svelte";
   import NotePanel from "./bar/NotePanel.svelte";
+  import TasksPanel from "./bar/TasksPanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
   import AccountButton from "./top/AccountButton.svelte";
   import WorksMenu from "./top/WorksMenu.svelte";
@@ -93,7 +95,7 @@
     fileEvidence,
     viewPlacements,
   } from "../lib/project-environment";
-  import { canvasProbe } from "../lib/canvas-context";
+  import { canvasOpenTasks, canvasProbe } from "../lib/canvas-context";
   import { environmentRequests, requestDress, runFolders } from "../lib/project-environment-thread";
   import { artifactView } from "../lib/project-work";
   import RunView from "./board/RunView.svelte";
@@ -670,7 +672,16 @@
     }
   }
   /** The bar's one open panel: a tool's, or the field's own attach. */
-  let panel = $state<"note" | "tabs" | "media" | "attach" | null>(null);
+  let panel = $state<"note" | "tabs" | "media" | "attach" | "tasks" | null>(null);
+  setContext(canvasOpenTasks, () => openPanel("tasks", true));
+  /** Work keeps its rail compact: a tool asked for from the app's menus opens here instead. */
+  function toolAsked(event: Event) {
+    if ((event as CustomEvent<string>).detail === "tasks") openPanel("tasks", true);
+  }
+  $effect(() => {
+    window.addEventListener("zephium:work-tool", toolAsked);
+    return () => window.removeEventListener("zephium:work-tool", toolAsked);
+  });
   let attachKind = $state<AttachKind>("tabs");
   let objectivePending = $state(false);
   let composerElement = $state<HTMLElement>();
@@ -1707,6 +1718,7 @@
     if (key === "v" || key === "h") setPointerTool(key === "v" ? "select" : "hand");
     else if (key === "n") openPanel("note", true);
     else if (key === "a") openPanel("media", true);
+    else if (key === "t") openPanel("tasks", true);
     else if (key === "/" && aiEnabled)
       composerElement?.querySelector<HTMLElement>("textarea")?.focus();
     else return;
@@ -2061,6 +2073,16 @@
           }}
           onpick={(id) => void placeNote(id)}
         />{/if}{/snippet}</BarTool
+  >
+  <BarTool
+    icon={CheckListIcon}
+    label={m.panel_tasks()}
+    keys={["T"]}
+    disabled={!snapshot}
+    wide
+    open={panel === "tasks"}
+    onopenchange={(open) => openPanel("tasks", open)}
+    >{#snippet content()}<TasksPanel profile={session.profile} />{/snippet}</BarTool
   >
   <BarTool
     icon={PlusSignIcon}

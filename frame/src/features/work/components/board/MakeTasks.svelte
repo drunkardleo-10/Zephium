@@ -2,18 +2,19 @@
   import { getContext } from "svelte";
   import { workTasksKey, type WorkTasks } from "../../lib/work-tasks";
   import * as m from "$shared/i18n/messages";
-  import { commands } from "$shared/ipc/bindings";
+  import { canvasOpenTasks } from "../../lib/canvas-context";
   let { id }: { id: string } = $props();
   const tasks = getContext<WorkTasks | undefined>(workTasksKey);
   const state = $derived(tasks?.state(id) ?? "none");
+  const openTasks = getContext<(() => void) | undefined>(canvasOpenTasks);
 </script>
 
 <!-- Once made, the steps are the tasks: they show their own ticks, and the way to them is one quiet link. -->
-{#if state === "made"}<button
-    type="button"
-    class="open nodrag nopan"
-    onclick={() => void commands.runCommand("tool.tasks")}>{m.work_open_in_tasks()}</button
-  >{:else if state !== "none"}<button
+{#if state === "made"}{#if openTasks}<button
+      type="button"
+      class="open nodrag nopan"
+      onclick={() => openTasks?.()}>{m.work_open_in_tasks()}</button
+    >{/if}{:else if state !== "none"}<button
     type="button"
     class="make nodrag nopan"
     disabled={state !== "ready"}

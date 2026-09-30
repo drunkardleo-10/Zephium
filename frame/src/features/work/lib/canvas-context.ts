@@ -8,6 +8,8 @@ export const canvasEvidence = Symbol("canvas-evidence");
 export const canvasFocusResult = Symbol("canvas-focus-result");
 export const canvasOpen = Symbol("canvas-open");
 export const canvasOpenLink = Symbol("canvas-open-link");
+/** Opens the person's tasks over the canvas. */
+export const canvasOpenTasks = Symbol("canvas-open-tasks");
 export const canvasAreas = Symbol("canvas-areas");
 /** The admitted picture of each subject, by merge key, for compare columns. */
 export const canvasPictures = Symbol("canvas-pictures");
