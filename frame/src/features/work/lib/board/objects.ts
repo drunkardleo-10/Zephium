@@ -457,6 +457,112 @@ export function pictureKey(url: string): string {
   }
 }
 
+const nameKey = (name: string) =>
+  name
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+/** Each thing the run pictured, by its name: the first candidate the canvas admitted for it. */
+function namedPictures(
+  execution: WorkExecutionFact,
+  fetched: ReadonlyMap<string, Picture>,
+): Map<string, Picture> {
+  const named = new Map<string, Picture>();
+  const add = (name: string, candidates: readonly string[] | null | undefined) => {
+    const picture = (candidates ?? [])
+      .map((candidate) => fetched.get(pictureKey(candidate)))
+      .find((found) => !!found);
+    if (picture && !named.has(nameKey(name))) named.set(nameKey(name), picture);
+  };
+  for (const artifact of execution.artifacts) {
+    const data = artifact.data;
+    if (data.kind === "comparison_matrix")
+      for (const subject of data.subjects) add(subject.name, subject.image_candidates);
+    else if (data.kind === "picks")
+      for (const item of data.items) add(item.name, item.image_candidates);
+  }
+  return named;
+}
+
+const IMAGE = /\.(png|jpe?g|webp|gif|avif)(\?|$)|image|photo|picture/iu;
+
+/**
+ * A table of things the run pictured is shown as their cards, each with its
+ * photo, price and a few facts, the way a stay or a product reads: never a
+ * grid of rows beside a separate stack of the same things' photos.
+ */
+function pictured(
+  base: Omit<PicksView, "kind" | "facet" | "items">,
+  data: Extract<WorkArtifactV1["data"], { kind: "sheet" }>,
+  named: ReadonlyMap<string, Picture>,
+): PicksView | null {
+  if (!named.size || data.rows.length < 2 || data.rows.length > 8) return null;
+  const name = data.columns.findIndex((column) => column.kind === "text");
+  if (name < 0) return null;
+  const pictures = data.rows.map((row) => named.get(nameKey(row.cells[name] ?? "")));
+  if (pictures.filter(Boolean).length * 2 < data.rows.length) return null;
+  const money = data.columns.findIndex((column) => column.kind === "money");
+  const link = data.columns.findIndex(
+    (column, index) =>
+      column.kind === "link" &&
+      !IMAGE.test(column.label) &&
+      !data.rows.some((row) => IMAGE.test(row.cells[index] ?? "")),
+  );
+  const facts = data.columns.flatMap((column, index) =>
+    index === name || index === money || column.kind === "link" ? [] : [{ column, index }],
+  );
+  const format = (value: string, currency?: string | null) => {
+    const amount = Number(value.replace(/[^0-9.-]/gu, ""));
+    if (!value.trim() || !Number.isFinite(amount)) return value;
+    return currency
+      ? new Intl.NumberFormat(undefined, { style: "currency", currency }).format(amount)
+      : amount.toLocaleString();
+  };
+  return {
+    ...base,
+    kind: "picks",
+    facet: "product",
+    items: data.rows.map((row, index): PickView => {
+      const at = pictures[index];
+      const src = at ? mediaUrl(at.profile, at.digest) : null;
+      const price = money >= 0 ? row.cells[money]?.trim() : "";
+      const amount = Number(price?.replace(/[^0-9.-]/gu, ""));
+      return {
+        name: row.cells[name] ?? "",
+        ...(src ? { picture: { src } } : {}),
+        ...(row.entity?.logo_host ? { logo: row.entity.logo_host } : {}),
+        ...(link >= 0 && row.cells[link] ? { url: row.cells[link] } : {}),
+        ...(price
+          ? {
+              price: {
+                display: format(price, data.columns[money]?.currency),
+                ...(Number.isFinite(amount) ? { amount } : {}),
+                ...(data.columns[money]?.currency
+                  ? { currency: data.columns[money]!.currency! }
+                  : {}),
+              },
+            }
+          : {}),
+        facts: facts.slice(0, 3).flatMap(({ column, index: at }) => {
+          const value = row.cells[at]?.trim();
+          return value
+            ? [
+                {
+                  label: column.label,
+                  value: column.kind === "number" ? format(value) : value,
+                  kind: "text" as const,
+                },
+              ]
+            : [];
+        }),
+        tags: [],
+        recommended: false,
+      };
+    }),
+  };
+}
+
 function leadView(
   id: string,
   artifact: WorkArtifactV1,
@@ -589,23 +695,25 @@ function leadView(
         })),
       };
     case "sheet":
-      return {
-        ...base,
-        kind: "sheet",
-        columns: data.columns.map((column) => ({
-          label: column.label,
-          kind: column.kind,
-          ...(column.unit ? { unit: column.unit } : {}),
-          ...(column.currency ? { currency: column.currency } : {}),
-          ...(column.best ? { best: column.best } : {}),
-        })),
-        rows: data.rows.map((row) => ({
-          cells: row.cells,
-          ...(row.entity?.logo_host ? { entity: { logo: row.entity.logo_host } } : {}),
-          ...cited(row.source),
-        })),
-        ...(data.note ? { note: data.note } : {}),
-      };
+      return (
+        pictured(base, data, namedPictures(execution, fetched)) ?? {
+          ...base,
+          kind: "sheet",
+          columns: data.columns.map((column) => ({
+            label: column.label,
+            kind: column.kind,
+            ...(column.unit ? { unit: column.unit } : {}),
+            ...(column.currency ? { currency: column.currency } : {}),
+            ...(column.best ? { best: column.best } : {}),
+          })),
+          rows: data.rows.map((row) => ({
+            cells: row.cells,
+            ...(row.entity?.logo_host ? { entity: { logo: row.entity.logo_host } } : {}),
+            ...cited(row.source),
+          })),
+          ...(data.note ? { note: data.note } : {}),
+        }
+      );
     case "plot": {
       const spec: ChartSpec = {
         ...styleSpec(data.style),

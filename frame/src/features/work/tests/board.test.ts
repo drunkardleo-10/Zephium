@@ -84,7 +84,7 @@ describe("board layout", () => {
     }
   });
 
-  test("the hero leads at the board's width, a group stands together, supporting blocks trail", () => {
+  test("the hero leads at no more than it wants, a group stands together, supporting blocks trail", () => {
     const block = (id: string, emphasis: Emphasis, width: number, group?: string): LayoutBlock => ({
       id,
       kind: "table",
@@ -99,7 +99,7 @@ describe("board layout", () => {
       block("diagram", "hero", 900),
       block("table", "primary", 520, "pair"),
     ]);
-    expect(layout.at.diagram).toMatchObject({ x: 0, y: 0, width: layout.width });
+    expect(layout.at.diagram).toMatchObject({ x: 0, y: 0, width: Math.min(layout.width, 1000) });
     expect(layout.at.chart!.y).toBe(layout.at.table!.y);
     expect(layout.at.aside!.y).toBeGreaterThan(layout.at.table!.y);
     // A row shares its height, so the surfaces end together.

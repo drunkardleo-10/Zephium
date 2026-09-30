@@ -61,10 +61,14 @@ export function objectWidth(view: ObjectView): Range {
       // A few named things compared stand as columns under a column of measures.
       if (versus(view)) {
         const facing = 44 + 148 + view.rows.length * 212;
-        return { min: Math.min(facing, 640), ideal: facing, max: Math.max(facing, 1120) };
+        return { min: Math.min(facing, 640), ideal: facing, max: facing };
       }
-      const ideal = view.columns.reduce((sum, column) => sum + COLUMN[column.kind], 40);
-      return { min: Math.min(ideal, 480), ideal: Math.min(ideal, 1120), max: 1120 };
+      // A table stands at its content's width, never stretched to what stands near it.
+      const ideal = Math.min(
+        view.columns.reduce((sum, column) => sum + COLUMN[column.kind], 40),
+        1120,
+      );
+      return { min: Math.min(ideal, 480), ideal, max: ideal };
     }
     case "plot":
       return { min: 360, ideal: 520, max: 680 };

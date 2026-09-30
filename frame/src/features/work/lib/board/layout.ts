@@ -131,8 +131,11 @@ export function boardLayout(
   const at: Record<string, Rect> = {};
   let y = 0;
   for (const row of pack(laid, width, open)) {
+    // An open block takes the board's width; a spanning one its own row, at no more than it wants.
     const whole = row.length === 1 && (row[0]!.id === open || spans(row[0]!));
-    const sizes = whole ? [width] : widths(row, width);
+    const sizes = whole
+      ? [row[0]!.id === open ? width : Math.min(width, Math.max(row[0]!.width.max, BOARD.min))]
+      : widths(row, width);
     const heights = row.map((block, index) => Math.max(1, Math.ceil(block.height(sizes[index]!))));
     // A row's blocks share its height, so their surfaces end together.
     const tallest = Math.max(...heights);
