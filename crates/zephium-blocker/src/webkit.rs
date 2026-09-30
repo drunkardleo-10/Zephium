@@ -20,7 +20,7 @@ pub(crate) enum ResourceType {
 }
 
 impl ResourceType {
-    // Canonical lexical order is part of artifact format 3. Derive the
+    // Canonical lexical order is part of the artifact format. Derive the
     // decoder's cardinality bound from this same mapping, never a second
     // platform vocabulary that can drift independently.
     const MAPPING: [(NetworkFilterMask, Self); 12] = [
@@ -45,5 +45,94 @@ impl ResourceType {
             .iter()
             .filter_map(|(flag, resource)| mask.contains(*flag).then_some(*resource))
             .collect()
+    }
+}
+
+/// WebKit supplies parsed, canonical network URLs: even an input consisting
+/// only of an HTTP(S)/WS(S) authority has a trailing `/`. For the converter's
+/// strict hostname-only pattern the match cannot cross that authority slash,
+/// so its end-of-URL alternative is unreachable. Removing the optional `.*`
+/// tail avoids a very large native DFA while retaining the existing prefix,
+/// separator, scope, resource-type and exception behavior.
+///
+/// Do not apply this to paths, wildcards, full regexes, or explicit right
+/// anchors: their meaningful end-of-URL branch must remain intact.
+pub(crate) fn simplify_canonical_host_boundary(pattern: &str) -> Option<String> {
+    const PREFIX: &str = r"^[^:]+:(//)?([^/]+\.)?";
+    const SUFFIX: &str = "([^A-Za-z0-9_.%-].*)?$";
+    let host = pattern.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+    let mut labels = 0;
+    for label in host.split(r"\.") {
+        if label.is_empty()
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return None;
+        }
+        labels += 1;
+    }
+    if labels < 2 {
+        return None;
+    }
+    Some(format!("{PREFIX}{host}[^A-Za-z0-9_.%-]"))
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    #[test]
+    fn only_literal_hostname_boundaries_are_rewritten() {
+        let old = r"^[^:]+:(//)?([^/]+\.)?ads\.example([^A-Za-z0-9_.%-].*)?$";
+        assert_eq!(
+            simplify_canonical_host_boundary(old).as_deref(),
+            Some(r"^[^:]+:(//)?([^/]+\.)?ads\.example[^A-Za-z0-9_.%-]")
+        );
+        for pattern in [
+            r"^[^:]+:(//)?([^/]+\.)?ads\.example/path([^A-Za-z0-9_.%-].*)?$",
+            r"^[^:]+:(//)?([^/]+\.)?ads.*\.example([^A-Za-z0-9_.%-].*)?$",
+            r"^[^:]+:(//)?([^/]+\.)?ads\.example([^A-Za-z0-9_.%-])?$",
+            r"/ad([^A-Za-z0-9_.%-].*)?$",
+            r"^[^:]+:(//)?([^/]+\.)?localhost([^A-Za-z0-9_.%-].*)?$",
+        ] {
+            assert_eq!(simplify_canonical_host_boundary(pattern), None, "{pattern}");
+        }
+    }
+    #[test]
+    fn rewrite_preserves_matching_for_canonical_network_url_variants() {
+        let original = r"^[^:]+:(//)?([^/]+\.)?ads\.example([^A-Za-z0-9_.%-].*)?$";
+        let optimized = simplify_canonical_host_boundary(original).unwrap();
+        let old = regex::Regex::new(original).unwrap();
+        let new = regex::Regex::new(&optimized).unwrap();
+        for scheme in ["http", "https", "ws", "wss"] {
+            for authority in [
+                "ads.example",
+                "sub.ads.example",
+                "ads.example.evil",
+                "safe.example",
+                "u:p@ads.example",
+                "ads.example@safe.example",
+                "ads.example:8080",
+                "ads.example.",
+            ] {
+                for tail in [
+                    "",
+                    "/",
+                    "?q=ads.example",
+                    "#fragment",
+                    "/path",
+                    "/path@other.example",
+                    "/ads.example",
+                ] {
+                    let input = format!("{scheme}://{authority}{tail}");
+                    let url = url::Url::parse(&input).unwrap();
+                    assert_eq!(
+                        old.is_match(url.as_str()),
+                        new.is_match(url.as_str()),
+                        "{input} -> {url}"
+                    );
+                }
+            }
+        }
     }
 }

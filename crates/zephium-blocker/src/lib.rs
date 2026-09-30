@@ -49,7 +49,7 @@ pub use zephium_core::ports::blocker::BlockerCompileFailure;
 pub const POLICY_FORMAT_VERSION: u32 = 5;
 
 /// Exact canonical WebKit JSON schema owned by Zephium.
-pub const WEBKIT_ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub use zephium_core::blocker::WEBKIT_ARTIFACT_FORMAT_VERSION;
 
 /// Exact `adblock-rust` version compiled into this crate.
 pub const ADBLOCK_ENGINE_VERSION: &str = "0.13.2";

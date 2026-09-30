@@ -437,7 +437,7 @@ native compilation work:
   apply the bounded namespace garbage collection described above.
 
 Policy and artifact digests include explicit format versions (currently
-policy format 4 and WebKit artifact format 3). Coverage travels with the
+policy format 5 and WebKit artifact format 4). Coverage travels with the
 artifact as source, accepted, rejected, platform-omitted, and aggregate plus
 resource/source-kind/attribution approximation counts, together with the
 structural native blocking-entry count. Core admission checks that accepted

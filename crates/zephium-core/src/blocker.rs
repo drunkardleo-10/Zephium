@@ -150,10 +150,13 @@ impl fmt::Debug for ContentRuleDigest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeclarativeArtifactDigest([u8; 32]);
 
+/// Shared compiler/consumer identity version for native WebKit JSON.
+pub const WEBKIT_ARTIFACT_FORMAT_VERSION: u32 = 4;
+
 impl DeclarativeArtifactDigest {
     fn for_encoded(format: DeclarativeRuleFormat, encoded: &str) -> Self {
         let format_version = match format {
-            DeclarativeRuleFormat::WebKitContentBlockerV1 => 3_u32,
+            DeclarativeRuleFormat::WebKitContentBlockerV1 => WEBKIT_ARTIFACT_FORMAT_VERSION,
         };
         let mut digest = Sha256::new();
         digest.update(b"zephium-webkit-content-rules");
@@ -660,7 +663,7 @@ pub enum ContentRuleApplyFailure {
 ///
 /// The application keeps this distinct from the current native generation: a
 /// failed replacement may still retain a prior known-good policy, while an
-/// initial failure has no policy and must continue holding first navigation.
+/// initial failure may leave browsing under the explicit provisional policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentPolicyFailure {
     SitePreferencesUnavailable,

@@ -1027,7 +1027,14 @@ fn compile_webkit(
             }
             let equivalent = webkit_equivalent_without_resource_semantics(filter)
                 .map_err(|_| CompileError::UpstreamInvariant)?;
-            let native_rules: Vec<_> = equivalent.into_iter().collect();
+            let mut native_rules: Vec<_> = equivalent.into_iter().collect();
+            for native in &mut native_rules {
+                if let Some(pattern) =
+                    crate::webkit::simplify_canonical_host_boundary(&native.trigger.url_filter)
+                {
+                    native.trigger.url_filter = pattern;
+                }
+            }
             if native_rules.is_empty() {
                 return Err(CompileError::UpstreamInvariant);
             }
