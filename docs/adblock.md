@@ -189,6 +189,25 @@ display rules. It preserves original inline values and restores only values the
 browser still owns. This explicit-edit/initial-DOM path is capped at 1,000
 matched elements and does not turn subscription CSS into a page scan.
 
+## Blocking statistics
+
+Profiles retain seven local calendar-day buckets containing counts only. macOS
+uses the optional `_webView:contentRuleListWithIdentifier:performedAction:forURL:`
+SPI and `blockedLoad`, advertised only while an owned subscription counter is
+installed. No request URL is copied. The SPI's [declared availability](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKNavigationDelegatePrivate.h)
+is macOS 10.15; the runtime getter is also checked. Windows increments its profile
+atomic only after a blocking response is successfully installed.
+
+The existing maintenance cycle collects dirty counters and writes at most once
+per 60 seconds, plus a final shutdown flush. Batches belong to their collection
+day, including across midnight, clock corrections and sleep. Private counts stay
+in memory; browsing-data clearing and profile deletion erase the totals.
+
+`blocker_stats(profile)` returns `today`, `last7Days`, and seven `days` values,
+oldest first. Only the focused profile is queryable. New Tab queries on show,
+tab changes, calendar-day changes and visibility restoration; statistics add no polling timer or event
+stream. Unavailable statistics produce an error, never an invented zero.
+
 ## Budgets and evidence
 
 | Resource | Ceiling |

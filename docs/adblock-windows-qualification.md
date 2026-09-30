@@ -117,3 +117,14 @@ conservative. Do not infer full filter-list parity from an ad-test score.
 Finish with exact SHA, commands/results, fixture and real-page observations,
 resource tables, concrete remaining limitations and any follow-up commits. Keep
 source changes focused and leave merge to the user's QA decision.
+
+## Blocking statistics follow-up
+
+The new-tab query is `blocker_stats(profile)`: `today`, `last7Days`, and seven
+oldest-to-newest daily counts. The Windows adapter increments the owning profile
+counter only after `WebResourceRequested` successfully installs a blocking
+response. Verify real blocked requests, allow/failed-response paths, site pause,
+profile isolation, private teardown, clear-history reset, and restart persistence.
+Repeat the optimized Yahoo counting-on/off and ten-static-tab five-minute idle
+comparison on Windows. macOS measurements and their limitations are recorded in
+`docs/qa/blocker-stats-2026-09-30.json`; they are not Windows runtime proof.
