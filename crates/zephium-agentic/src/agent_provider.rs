@@ -102,11 +102,12 @@ pub const MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES: usize = 96;
 pub const MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS: u32 = 2_000;
 
 /// Fixed isolated-runtime actions supported by the retained snapshot-verifying
-/// controller and desktop adapters. Keyboard input remains excluded.
-pub const AGENT_BROWSER_SNAPSHOT_ACTION_KINDS: [crate::SemanticActionKind; 4] = [
+/// controller and desktop adapters.
+pub const AGENT_BROWSER_SNAPSHOT_ACTION_KINDS: [crate::SemanticActionKind; 5] = [
     crate::SemanticActionKind::Click,
     crate::SemanticActionKind::Fill,
     crate::SemanticActionKind::Select,
+    crate::SemanticActionKind::Press,
     crate::SemanticActionKind::Scroll,
 ];
 /// Maximum bytes in one provider-attested service-tier identity.

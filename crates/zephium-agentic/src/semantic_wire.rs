@@ -229,7 +229,8 @@ pub fn decode_semantic_snapshot(
                 }
                 use crate::SemanticFillSupport::*;
                 let consistent = match fill_support {
-                    Some(Supported) => child_count <= 128 && child_kinds & 6 == 0,
+                    // A rich editor's paragraphs are element children.
+                    Some(Supported) => child_count <= 128 && child_kinds & 4 == 0,
                     Some(EditableAncestor) => editable_parent,
                     Some(ChildLimit) => child_count == 129,
                     Some(ElementChild) => child_kinds & 2 != 0,
@@ -1196,6 +1197,10 @@ mod tests {
             (json!([1, 2, true]), 5, 0),
             (json!([2, 3, true]), 5, 0),
             (json!([129, 1, false]), 6, 0),
+            // A rich editor's paragraphs: element children the fill replaces
+            // through the browser's editing.
+            (json!([1, 2, false]), 1, 2),
+            (json!([3, 3, true]), 1, 2),
         ] {
             let snapshot = decode_semantic_snapshot(
                 decode_context(),
@@ -1223,9 +1228,8 @@ mod tests {
             .is_err());
         }
         for shape in [
-            json!([1, 2, true]),
-            json!([1, 2, false]),
             json!([1, 4, false]),
+            json!([1, 6, false]),
             json!([129, 1, false]),
         ] {
             assert!(
@@ -1234,7 +1238,7 @@ mod tests {
                     &payload(json!([{"k":1,"r":"textbox","fs":1,"o":2,"es":shape}]))
                 )
                 .is_err(),
-                "structure cannot promote rich targets to Fill"
+                "structure cannot promote other children or an unbounded host to Fill"
             );
         }
     }
@@ -1254,7 +1258,7 @@ mod tests {
         for node in [
             json!({"k":1,"r":"combobox","fs":2,"o":11}),
             json!({"k":1,"r":"combobox","fs":1,"o":13}),
-            json!({"k":1,"r":"combobox","fs":1,"o":11,"es":[1,2,false]}),
+            json!({"k":1,"r":"combobox","fs":1,"o":11,"es":[1,4,false]}),
         ] {
             assert!(decode_semantic_snapshot(decode_context(), &payload(json!([node]))).is_err());
         }

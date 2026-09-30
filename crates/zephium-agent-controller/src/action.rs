@@ -134,6 +134,19 @@ impl AgentBrowserActionProposal {
         let AgentBrowserToolProposal::Act(actions) = turn.proposal() else {
             return Err(AgentBrowserActionError::Tool);
         };
+        #[cfg(feature = "probe-harness")]
+        for action in actions.actions() {
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "browser-act: kind={:?} effect={:?} verification={:?} wait={:?}\n",
+                    action.intent().kind(),
+                    action.effect(),
+                    action.verification(),
+                    action.wait()
+                ),
+            );
+        }
         if actions.actions().len() != 1 {
             return Err(AgentBrowserActionError::ActionCount);
         }

@@ -60,7 +60,7 @@ pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// windows, keyword discovery, independent page-dialog samples, bounded fill
 /// diagnostics, covered-target centring and the page's structured-data facts,
 /// with an explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 144 * 1024;
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 160 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -88,8 +88,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x99, 0x76, 0xb6, 0x0b, 0x1e, 0x55, 0x84, 0x75, 0xe2, 0x5e, 0x90, 0x76, 0x73, 0x1a, 0x7e, 0x10,
-    0x88, 0x3a, 0x2b, 0x82, 0x00, 0x7b, 0x6b, 0x44, 0x6e, 0x79, 0x18, 0xc5, 0xb4, 0x54, 0x38, 0x1c,
+    0x8b, 0x3f, 0xa6, 0x60, 0x80, 0x00, 0x8d, 0xcf, 0x49, 0xf3, 0x43, 0xc6, 0x1c, 0x31, 0x31, 0xea,
+    0x01, 0xca, 0x64, 0x56, 0x24, 0xa5, 0x90, 0x4e, 0xb9, 0xc5, 0xf8, 0x82, 0xd6, 0x36, 0x1c, 0xc6,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -712,6 +712,7 @@ pub fn encode_semantic_action_runtime_invocation(
         target_descriptor: request.target_runtime_descriptor(),
         option_descriptor,
         page_dialog_opened: request.page_dialog_opened(),
+        press: request.press_key().map(press_key_wire),
         scroll: request
             .scroll_recipe()
             .map(|(direction, amount)| {
@@ -778,6 +779,26 @@ pub(crate) const fn semantic_role_wire(role: SemanticRole) -> &'static str {
         SemanticRole::Progress => "progress",
         SemanticRole::Status => "status",
         SemanticRole::FrameBoundary => "frame_boundary",
+    }
+}
+
+const fn press_key_wire(key: crate::SemanticPressKey) -> &'static str {
+    use crate::SemanticPressKey as K;
+    match key {
+        K::Enter => "enter",
+        K::Escape => "escape",
+        K::Space => "space",
+        K::Tab => "tab",
+        K::ArrowUp => "arrow_up",
+        K::ArrowDown => "arrow_down",
+        K::ArrowLeft => "arrow_left",
+        K::ArrowRight => "arrow_right",
+        K::Home => "home",
+        K::End => "end",
+        K::PageUp => "page_up",
+        K::PageDown => "page_down",
+        K::Backspace => "backspace",
+        K::Delete => "delete",
     }
 }
 
@@ -1268,6 +1289,8 @@ struct RuntimeBudgetWire {
 struct SemanticActionRuntimeInvocationWire<'a> {
     #[serde(rename = "sc", skip_serializing_if = "Option::is_none")]
     scroll: Option<[&'static str; 2]>,
+    #[serde(rename = "pk", skip_serializing_if = "Option::is_none")]
+    press: Option<&'static str>,
     #[serde(rename = "u", skip_serializing_if = "std::ops::Not::not")]
     page_dialog_opened: bool,
     #[serde(rename = "v")]
@@ -2069,6 +2092,7 @@ mod tests {
         let descriptor =
             crate::SemanticActionRuntimeDescriptor::maximum_text_wire_witness(name, prior_value);
         let wire = SemanticActionRuntimeInvocationWire {
+            press: None,
             version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
             operation: "action_execute",
             attempt: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
@@ -2117,6 +2141,7 @@ mod tests {
                             name, prior,
                         );
                     let wire = SemanticActionRuntimeInvocationWire {
+                        press: None,
                         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
                         operation: "action_execute",
                         attempt: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,

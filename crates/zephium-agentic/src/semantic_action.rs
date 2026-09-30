@@ -2192,6 +2192,8 @@ fn revalidate_node<'a>(
         return Err(SemanticActionRevalidationError::TargetDisabled);
     }
     if !stable_action_states_match(bound.states, node.states()) {
+        #[cfg(feature = "probe-harness")]
+        crate::probe_evidence_path::trace(format_args!("action-revalidation: changed=states"));
         return Err(SemanticActionRevalidationError::TargetChanged);
     }
     if operation.is_some_and(|operation| !node.operations().contains(operation)) {
@@ -2209,6 +2211,12 @@ fn revalidate_node<'a>(
         .map(crate::SemanticNode::key)
         .map(SemanticNodeKey::get);
     if structural_digest(node, parent_key) != bound.structural_digest {
+        #[cfg(feature = "probe-harness")]
+        crate::probe_evidence_path::trace(format_args!(
+            "action-revalidation: changed=structure role={:?} operations={}",
+            node.role(),
+            node.operations().bits()
+        ));
         return Err(SemanticActionRevalidationError::TargetChanged);
     }
     Ok((index, node))

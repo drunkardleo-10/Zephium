@@ -109,6 +109,21 @@ const documentElementFromPoint = Document.prototype.elementFromPoint;
 const getComputedStyleFixed = globalThis.getComputedStyle;
 const htmlElementClick =
 typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
+const htmlElementFocus =
+typeof HTMLElement === "function" ? HTMLElement.prototype.focus : null;
+const documentExecCommand = Document.prototype.execCommand;
+const documentGetSelection = Document.prototype.getSelection;
+const documentCreateRange = Document.prototype.createRange;
+const rangeSelectNodeContents = typeof Range === "function" ? Range.prototype.selectNodeContents : null;
+const rangeSetStart = typeof Range === "function" ? Range.prototype.setStart : null;
+const rangeSetEnd = typeof Range === "function" ? Range.prototype.setEnd : null;
+const selectionRemoveAllRanges = typeof Selection === "function" ? Selection.prototype.removeAllRanges : null;
+const selectionAddRange = typeof Selection === "function" ? Selection.prototype.addRange : null;
+const nativeKeyboardEvent = globalThis.KeyboardEvent;
+const formRequestSubmit =
+typeof HTMLFormElement === "function" ? HTMLFormElement.prototype.requestSubmit : null;
+const nativeMouseEvent = globalThis.MouseEvent;
+const nativePointerEvent = globalThis.PointerEvent;
 const nativePromise = Promise;
 const fixedAnimationFrame = globalThis.requestAnimationFrame;
 const fixedCancelAnimationFrame = globalThis.cancelAnimationFrame;
@@ -119,6 +134,7 @@ const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
 const inputValueSetter = setter(HTMLInputElement.prototype, "value");
 const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
 const nodeTextSetter = setter(Node.prototype, "textContent");
+const nodeTextGetter = getter(Node.prototype, "textContent");
 const editableGetter = getter(HTMLElement.prototype, "isContentEditable");
 const promiseResolve = Promise.resolve;
 const promiseThen = Promise.prototype.then;
@@ -311,6 +327,10 @@ if (!arrayIsArray(request.sc) || request.sc.length !== 2 ||
 !["line", "half_page", "page", "into_view"].includes(request.sc[1])) return null;
 } else if (objectHasOwn(request, "sc")) return null;
 if (objectHasOwn(request, "u")) actionKeys.push("u");
+if (request.k === "press") {
+if (typeof request.pk !== "string" || PRESS_KEYS[request.pk] === undefined) return null;
+actionKeys.push("pk");
+} else if (objectHasOwn(request, "pk")) return null;
 if (!hasExactKeys(request, actionKeys) ||
 (objectHasOwn(request, "u") && (request.u !== true || request.k !== "click"))) {
 return null;
@@ -802,12 +822,13 @@ const editableStructure = editable ? [] : null;
 const editableWitness = editable ? { context: null, empty: true } : null;
 const editableSupport = editable ? editableHostSupport(node, editableStructure, editableWitness) : 2;
 const plainTextEditable = editableSupport === 1;
+const richText = editable && editableSupport === 7 && richTextShape(node);
 const explicit = explicitRole(node);
 if (explicit !== null) {
 if (explicit.suppressed === true) return null;
-return { role: explicit.role, landmark: explicit.landmark, tag, inputType, contentEditable: editable, plainTextEditable, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
+return { role: explicit.role, landmark: explicit.landmark, tag, inputType, contentEditable: editable, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
 }
-if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
+if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
 if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
 return tag === "fieldset" || tag === "details"
 ? { role: "group", tag, inputType }
@@ -1832,6 +1853,9 @@ wire.v = { k: "ordinal", value: boundedOrdinal(raw) };
 if (credentialField(element, descriptor, wire.n || "")) {
 wire.v = { k: "redacted" };
 setSensitivity(record, "secret");
+} else if (descriptor.richText === true || descriptor.plainTextEditable === true) {
+addValue(record, richValue(element), state);
+record.sink = null;
 } else if (descriptor.plainTextEditable && descriptor.editableEmpty) {
 addValue(record, "", state);
 } else if (descriptor.contentEditable !== true) {
@@ -2608,6 +2632,14 @@ expected.a === actual.a && expected.r === actual.r && expected.o === actual.o &&
 expected.s === actual.s && expected.n === actual.n && valueMatches
 );
 }
+function descriptorMatchesRichValue(expected, actual, value) {
+if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+return (
+expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+expected.n === actual.n && actual.vo === 0 && !actual.vb && actual.vk === 1 &&
+plainWords(actual.vt) === plainWords(value)
+);
+}
 function descriptorMatchesSelectedValue(expected, actual, desired) {
 if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
 return (
@@ -2681,6 +2713,67 @@ if (length > 128) return 6;
 return firstUnsupported || 1;
 } catch (_) { return 9; }
 }
+const RICH_TEXT_TAGS = ["p", "div", "br", "span", "b", "strong", "i", "em", "u", "s", "code",
+"a", "ul", "ol", "li", "blockquote", "pre", "h1", "h2", "h3", "font", "mark", "sub", "sup"];
+function richTextShape(host) {
+try {
+const stack = [{ node: host, depth: 0 }];
+let seen = 0;
+while (stack.length !== 0) {
+const { node, depth } = stack.pop();
+const children = read(nodeChildNodesGetter, node);
+const length = listLength(children);
+for (let index = 0; index < length; index += 1) {
+const child = listItem(children, index);
+const kind = nodeType(child);
+if ((seen += 1) > 512) return false;
+if (kind === 3 || kind === 8) continue;
+if (kind !== 1 || depth >= 8 || !RICH_TEXT_TAGS.includes(tagName(child))) return false;
+stack.push({ node: child, depth: depth + 1 });
+}
+}
+return true;
+} catch (_) { return false; }
+}
+const RICH_TEXT_BLOCKS = ["p", "div", "li", "blockquote", "pre", "h1", "h2", "h3", "ul", "ol"];
+function richValue(host) {
+const lines = [""];
+const stack = [{ node: host, depth: 0, index: 0 }];
+let seen = 0;
+while (stack.length !== 0 && seen < 2048) {
+const frame = stack[stack.length - 1];
+const children = read(nodeChildNodesGetter, frame.node);
+if (frame.index >= listLength(children)) {
+stack.pop();
+if (stack.length !== 0 && RICH_TEXT_BLOCKS.includes(tagName(frame.node)) && lines[lines.length - 1] !== "") lines.push("");
+continue;
+}
+const child = listItem(children, frame.index);
+frame.index += 1;
+seen += 1;
+const kind = nodeType(child);
+if (kind === 3) {
+const text = read(characterDataGetter, child);
+if (typeof text === "string") lines[lines.length - 1] += text.replace(/\u00a0/g, " ");
+} else if (kind === 1) {
+const tag = tagName(child);
+if (tag === "br") {
+lines.push("");
+} else if (frame.depth < 8) {
+if (RICH_TEXT_BLOCKS.includes(tag) && lines[lines.length - 1] !== "") lines.push("");
+stack.push({ node: child, depth: frame.depth + 1, index: 0 });
+}
+}
+}
+while (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+const value = lines.join("\n");
+return plainWords(value) === "" ? "" : value;
+}
+function plainWords(value) {
+return typeof value === "string"
+? apply(stringTrim, value.replace(/[\s\u00a0]+/g, " "), [])
+: null;
+}
 function textFillRole(role) {
 return role === "textbox" || role === "searchbox" || role === "combobox";
 }
@@ -2696,11 +2789,56 @@ return 1;
 }
 if (descriptor.tag === "textarea" && descriptor.role !== "searchbox") return 2;
 if (descriptor.contentEditable === true && descriptor.plainTextEditable === true) return 3;
+if (descriptor.contentEditable === true && descriptor.richText === true) return 4;
 return 0;
+}
+function runRichFill(target, value, revalidate) {
+if ([htmlElementFocus, documentExecCommand, documentGetSelection, documentCreateRange,
+rangeSelectNodeContents, selectionRemoveAllRanges, selectionAddRange].some(call => typeof call !== "function")) {
+return "unsupported_interaction";
+}
+try {
+if (!revalidate()) return "target_changed";
+apply(htmlElementFocus, target, []);
+const selection = apply(documentGetSelection, document, []);
+const range = apply(documentCreateRange, document, []);
+apply(rangeSelectNodeContents, range, [target]);
+const children = read(nodeChildNodesGetter, target);
+const first = listLength(children) === 0 ? null : listItem(children, 0);
+const last = listLength(children) === 0 ? null : listItem(children, listLength(children) - 1);
+if (first !== null && nodeType(first) === 1 && nodeType(last) === 1 &&
+typeof rangeSetStart === "function" && typeof rangeSetEnd === "function") {
+apply(rangeSetStart, range, [first, 0]);
+apply(rangeSetEnd, range, [last, listLength(read(nodeChildNodesGetter, last))]);
+}
+apply(selectionRemoveAllRanges, selection, []);
+apply(selectionAddRange, selection, [range]);
+} catch (_) { return "unsupported_interaction"; }
+try {
+const lines = apply(stringSplit, value, ["\n"]);
+if (value === "") {
+apply(documentExecCommand, document, ["delete", false, null]);
+}
+for (let index = 0; index < lines.length; index += 1) {
+if (index > 0) apply(documentExecCommand, document, ["insertParagraph", false, null]);
+if (lines[index] !== "" && apply(documentExecCommand, document, ["insertText", false, lines[index]]) !== true) {
+return index === 0 ? "unsupported_interaction" : "applied_unverified_mutation";
+}
+}
+} catch (_) { return "applied_unverified_mutation"; }
+return "ok";
 }
 function runFixedFill(target, descriptor, request) {
 const value = request.z;
 const kind = fillControlKind(descriptor, value);
+if (kind === 3 || kind === 4) {
+if (!validActionText(value)) return "unsupported_interaction";
+return runRichFill(target, value, () =>
+resolveKeyAtGeneration(request.t, request.g) === target &&
+read(nodeConnectedGetter, target) === true &&
+!disabledState(target, false) &&
+descriptorMatches(request.f, runtimeDescriptor(target, request.g)));
+}
 const valueSetter = kind === 1 ? inputValueSetter :
 kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
 if (valueSetter === null || typeof nativeInputEvent !== "function" ||
@@ -2940,6 +3078,7 @@ if (!arrayIsArray(before)) return actionFault(before);
 pendingDialogSample = {a: request.a, i: request.i, g: request.g, before};
 }
 try {
+pointerDown(target, point);
 apply(htmlElementClick, target, []);
 } catch (_) {
 pendingDialogSample = null;
@@ -2967,7 +3106,9 @@ finalDescriptor.role === "password" || fillControlKind(finalDescriptor, request.
 return actionFault("applied_unverified_postcondition");
 }
 const filledDescriptor = runtimeDescriptor(target, request.g);
-if (!descriptorMatchesFilledValue(request.f, filledDescriptor, request.z)) {
+const rich = fillControlKind(finalDescriptor, request.z) >= 3;
+if (rich ? !descriptorMatchesRichValue(request.f, filledDescriptor, request.z)
+: !descriptorMatchesFilledValue(request.f, filledDescriptor, request.z)) {
 return actionFault("applied_unverified_postcondition");
 }
 return encodeActionEvidence(
@@ -3012,9 +3153,55 @@ viewport,
 point,
 delta
 );
+} else if (request.k === "press") {
+const key = PRESS_KEYS[request.pk];
+if (key === undefined || typeof nativeKeyboardEvent !== "function" || typeof htmlElementFocus !== "function") {
+return actionFault("unsupported_interaction");
+}
+try {
+if (target !== document) apply(htmlElementFocus, target, []);
+const init = { key: key[0], code: key[1], keyCode: key[2], which: key[2], bubbles: true, cancelable: true, composed: true };
+const down = new nativeKeyboardEvent("keydown", init);
+const handled = apply(fixedDispatchEvent, target, [down]) !== true;
+if (key[0] === "Enter" || key[0] === " ") {
+apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keypress", init)]);
+}
+apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keyup", init)]);
+if (!handled && key[0] === "Enter" && descriptor.tag === "input") {
+const form = read(inputFormGetter, target);
+if (form !== null && form !== undefined && typeof formRequestSubmit === "function") {
+apply(formRequestSubmit, form, []);
+}
+}
+} catch (_) {
+return actionFault("applied_unverified_postcondition");
+}
+return finishActionRendering(encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta));
 } else {
 return actionFault("unsupported_interaction");
 }
+}
+const PRESS_KEYS = {
+enter: ["Enter", "Enter", 13], escape: ["Escape", "Escape", 27], space: [" ", "Space", 32],
+tab: ["Tab", "Tab", 9], arrow_up: ["ArrowUp", "ArrowUp", 38], arrow_down: ["ArrowDown", "ArrowDown", 40],
+arrow_left: ["ArrowLeft", "ArrowLeft", 37], arrow_right: ["ArrowRight", "ArrowRight", 39],
+home: ["Home", "Home", 36], end: ["End", "End", 35], page_up: ["PageUp", "PageUp", 33],
+page_down: ["PageDown", "PageDown", 34], backspace: ["Backspace", "Backspace", 8], delete: ["Delete", "Delete", 46]
+};
+function pointerDown(target, point) {
+if (typeof nativeMouseEvent !== "function") return;
+const init = { bubbles: true, cancelable: true, composed: true, clientX: point.x, clientY: point.y,
+button: 0, buttons: 1, view: globalThis };
+const pointer = typeof nativePointerEvent === "function";
+const pointerInit = { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true };
+if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent("pointerdown", pointerInit)]);
+apply(fixedDispatchEvent, target, [new nativeMouseEvent("mousedown", init)]);
+if (typeof htmlElementFocus === "function" && read(nodeConnectedGetter, target) === true) {
+apply(htmlElementFocus, target, [{ preventScroll: true }]);
+}
+const up = { ...init, buttons: 0 };
+if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent("pointerup", { ...pointerInit, buttons: 0 })]);
+apply(fixedDispatchEvent, target, [new nativeMouseEvent("mouseup", up)]);
 }
 function focusedModalRoot() {
 for (const focused of focusedElements()) {

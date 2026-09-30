@@ -5709,6 +5709,7 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
             {
                 "click" => string_enum(&["read", "local_write"]),
                 "fill" | "select" => string_enum(&["local_write"]),
+                "press" => string_enum(&["read", "local_write"]),
                 "scroll" => string_enum(&["read"]),
                 // Refuse the whole tool profile if a future schema adds an
                 // action whose effect contract has not been reviewed here.
@@ -5717,7 +5718,7 @@ static NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolD
         }
         tools.push(BrowserToolDefinition {
             kind: AgentBrowserToolKind::Act,
-            description: "Propose one current-ref Click, Fill, Select or Scroll with verification of its intended outcome. Fill and Select require local_write, including editing a search field. Click uses read for exploration or opening a dialog, local_write for reversible local changes. Only these effects are available; autosaved external changes are outside this profile. Trusted host assessment still decides permission. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Both are followed by fresh inspection. Scroll uses read and immediate settlement with scroll_position_changed verification. Use amount=into_view on an observed disclosure with ops=scroll to bring it into view (direction is ignored for this amount); this never clicks or expands it. Inspect fresh state before clicking. Other amounts move a scroll container by line, half_page or page. Prefer page for exploring a long document; use line for fine adjustments. To move through the page use its document ref; snapshot(initial) restores that ref when a scoped view omits it. Scroll a nested list or region only when its own contents are the intended destination. Native dialogs, navigation and keyboard effects are unavailable through act. Navigate through the separate navigate tool when authorized.",
+            description: "Propose one current-ref Click, Fill, Select, Press or Scroll with verification of its intended outcome. Fill and Select require local_write, including editing a search field. Click uses read for exploration or opening a dialog, local_write for reversible local changes. Only these effects are available; autosaved external changes are outside this profile. Trusted host assessment still decides permission. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Both are followed by fresh inspection. Scroll uses read and immediate settlement with scroll_position_changed verification. Use amount=into_view on an observed disclosure with ops=scroll to bring it into view (direction is ignored for this amount); this never clicks or expands it. Inspect fresh state before clicking. Other amounts move a scroll container by line, half_page or page. Prefer page for exploring a long document; use line for fine adjustments. To move through the page use its document ref; snapshot(initial) restores that ref when a scoped view omits it. Scroll a nested list or region only when its own contents are the intended destination. Press sends one key to a control, with read for Enter in a search field or Escape on a popup and local_write for keys that edit. Native dialogs and navigation are unavailable through act. Navigate through the separate navigate tool when authorized.",
             parameters: action,
         });
         tools.push(BrowserToolDefinition {
@@ -5766,12 +5767,13 @@ static SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinit
                     ],
                     "fill" => &["local_write", "external_write"],
                     "select" => &["local_write"],
+                    "press" => &["read", "local_write", "external_write", "communication"],
                     "scroll" => &["read"],
                     _ => return Vec::new(),
                 };
                 variant["properties"]["effect"] = string_enum(effects);
             }
-            tool.description = "Propose one current-ref Click, Fill, Select or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person before it runs. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings an observed disclosure into view. Keyboard effects are unavailable through act. Follow shown links with the navigate tool.";
+            tool.description = "Propose one current-ref Click, Fill, Select, Press or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person before it runs. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings an observed disclosure into view. Press sends one key to a control: Enter in a message box sends what it holds (communication; fill the box first, and never type the key into the text), Enter in a search field searches (read), Escape closes a popup or menu (read), arrow keys move in a list or picker. Rich editors (a message composer, an issue description, a page's blocks) are filled like any text box: fill replaces their text. Follow shown links with the navigate tool.";
         }
         tools
     });
@@ -7397,13 +7399,14 @@ mod tests {
                     .iter()
                     .map(|action| action["properties"]["kind"]["enum"][0].as_str().unwrap())
                     .collect::<BTreeSet<_>>(),
-                BTreeSet::from(["click", "fill", "select", "scroll"])
+                BTreeSet::from(["click", "fill", "select", "press", "scroll"])
             );
             for variant in variants {
                 let properties = &variant["properties"];
                 let expected_effects = match properties["kind"]["enum"][0].as_str().unwrap() {
                     "click" => json!(["read", "local_write"]),
                     "fill" | "select" => json!(["local_write"]),
+                    "press" => json!(["read", "local_write"]),
                     "scroll" => json!(["read"]),
                     _ => unreachable!("checked action kinds"),
                 };
@@ -7478,6 +7481,7 @@ mod tests {
                     "fill" => "target_value_matches_input",
                     "select" => "target_selection_matches_option",
                     "scroll" => "scroll_position_changed",
+                    "press" => continue,
                     _ => unreachable!("asserted retained action vocabulary"),
                 };
                 assert_eq!(
@@ -7835,7 +7839,7 @@ mod tests {
             let actions = &act.parameters["properties"]["actions"];
             assert_eq!(actions["maxItems"], 1);
             let variants = actions["items"]["anyOf"].as_array().expect("actions");
-            assert_eq!(variants.len(), 4);
+            assert_eq!(variants.len(), 5);
             for action in variants {
                 assert_eq!(
                     action["properties"]["settle_millis"]["minimum"],

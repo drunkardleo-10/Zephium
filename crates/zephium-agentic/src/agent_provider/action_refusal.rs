@@ -323,7 +323,7 @@ impl AgentProviderActionRefusal {
             ),
             SemanticActionBindingError::Unverified => (
                 "outcome_not_observed",
-                "The action ran, but the page no longer showed its target afterwards, so its outcome was not verified: a dismissed notice or a control that left the page. The observation you hold is stale. Request snapshot(initial) to see the page as it is now, then continue from that; do not repeat this action.",
+                "The action ran, but its declared outcome was not seen afterwards: the control may have left the page (a dismissed notice, a menu item that closed its menu) or the page did not change as declared. The observation you hold is stale. Request snapshot(initial) to see the page as it is now and continue from what it shows; do not repeat this action unchanged.",
             ),
             SemanticActionBindingError::TargetCovered => (
                 "target_covered",
