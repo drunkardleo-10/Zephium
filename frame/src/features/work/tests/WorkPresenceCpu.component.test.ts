@@ -55,7 +55,7 @@ test.skipIf(!hold)(
         ),
       ),
     );
-    console.log(
+    console.warn(
       `LIVE ${Date.now()} animations=${live.length} properties=${[...properties].join(",")}`,
     );
     for (const property of properties) expect(["transform", "opacity"]).toContain(property);
