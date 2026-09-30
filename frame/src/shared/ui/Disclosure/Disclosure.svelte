@@ -10,6 +10,7 @@
     align = "start",
     triggerClass = "",
     panelClass = "",
+    onopen,
   }: {
     label: string;
     trigger: Snippet;
@@ -19,6 +20,7 @@
     align?: "start" | "end";
     triggerClass?: string;
     panelClass?: string;
+    onopen?: () => void;
   } = $props();
 
   let open = $state(false);
@@ -30,6 +32,7 @@
 
   function show() {
     open = true;
+    onopen?.();
     if (!menu) return;
     // A menu opened from the keyboard should already have a target; opened
     // by pointer it should not steal the cursor's place in the list.
@@ -123,7 +126,12 @@
     onclick={(event) => {
       // Choosing from a menu closes it. Owning that here keeps every caller
       // from having to remember, and from needing a handle on this state.
-      if (menu && (event.target as Element | null)?.closest('[role="menuitem"]')) dismiss(true);
+      if (
+        menu &&
+        !(event.target as Element | null)?.closest("[data-keep-open]") &&
+        (event.target as Element | null)?.closest('[role="menuitem"]')
+      )
+        dismiss(true);
     }}
     aria-label={label}
     data-align={align}

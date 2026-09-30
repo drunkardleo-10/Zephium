@@ -14,6 +14,7 @@ const SOURCE_UNAVAILABLE_PHASES = new Set<BlockerStatusView["source_phase"]>([
 ]);
 export function initialBlockerStatus(): BlockerStatusView {
   return {
+    site: null,
     projection_revision: BLOCKER_ZERO_REVISION,
     protection: "unavailable",
     phase: "unavailable",

@@ -23,6 +23,7 @@
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
+  import { blocker } from "$domain/blocker";
   import { BlockerShield } from "$features/blocker";
 
   import { preview } from "$features/settings";
@@ -138,6 +139,7 @@
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
 
+  let protectionMenuActivated = $state(0);
   let handledCommand = 0;
   $effect(() => {
     const command = ui.uiCommand();
@@ -181,8 +183,13 @@
         <div class="sidebar-head"><ModeTabs /></div>
         <AddressField {compact}>
           {#snippet trailing()}
-            <UtilityTray>
-              <BlockerShield labelled />
+            <UtilityTray
+              onopen={() => {
+                protectionMenuActivated += 1;
+                void blocker.refresh();
+              }}
+            >
+              <BlockerShield labelled activated={protectionMenuActivated} />
               <ExtensionActions />
               <ManageExtensions />
             </UtilityTray>

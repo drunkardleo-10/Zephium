@@ -46,10 +46,19 @@ Whether cosmetics share an artifact with network rules or use their own artifact
 is a measured decision; preserve network exception semantics and avoid rebuilding
 the network artifact for personal edits.
 
-Maintain a bounded, separately identified personal-hide list per profile. Prove
-live addition/removal and undo in an existing document before assuming native
-attachment provides immediate preview. Use a narrow temporary preview if needed;
+Maintain bounded personal-hide policy separately from subscription rules. Native
+probes on macOS 26.6.2 found that attaching a list after load does not apply its
+cosmetics to that document, and removing a preloaded list does not undo its CSS.
+Personal rules therefore use browser-owned constructed stylesheets, which the
+same probe successfully applied and removed under `style-src 'none'` and
+`script-src 'none'` without changing CSP. Use this for live preview and undo;
 do not build a general procedural filtering runtime for this release.
+
+Native probes also showed that `if-domain` and frame-URL predicates on child
+document loads use the initiating context, not the destination child's scope.
+The native cosmetic emitter is explicitly top-document-only. Child document
+cosmetics must use the exact document lookup and the bounded stylesheet adapter;
+they must not inherit the top-level site's selectors or cosmetic exceptions.
 
 Select the subscription registrations per view using the native top-level site
 and Rust-owned pause state. Remove only Zephium-owned registrations. Re-evaluate
@@ -107,7 +116,8 @@ frame or claim universal pre-paint injection. If an API cannot address a case,
 record the actual limitation and an explicit reload requirement instead of
 silently claiming live coverage.
 
-Use native CSS matching for dynamic elements. Disconnect the bootstrap observer
+Use constructed stylesheets and native CSS matching for dynamic elements. Test
+support and CSP behavior on the actual admitted WebView2 runtime. Disconnect the bootstrap observer
 as soon as a root exists. No continuous DOM scans, polling, or page repair loop.
 Windows page-world styles are page-mutable; they are not a privileged isolation
 boundary or a guarantee against hostile page removal.
@@ -199,5 +209,40 @@ The user has authorized implementation; merge remains gated on their QA.
 - [WebKit: native content blocking](https://webkit.org/blog/3476/content-blockers-first-look/)
 - [Current implementation and its existing claims](adblock.md)
 
-These native APIs establish implementation candidates. Minimum-runtime behavior,
-cross-frame timing and live cosmetic changes still require the stated probes.
+These native APIs establish implementation candidates. Windows minimum-runtime
+behavior, cross-frame timing and live cosmetic changes still require the stated
+probes. Do not enable the unrelated, unqualified Windows CDP userscript probe as
+a shortcut for this adapter.
+
+## Current local evidence
+
+- Native macOS 26.6.2 grouped top-document cosmetic artifact: 2,019,933
+  bytes, 3.569 seconds cold compilation, successful native admission. This is
+  separate from the still-unoptimized network artifact.
+- Current constructed-sheet helper passed a real WKWebView test under
+  restrictive CSP: apply and undo succeed, stale token/generation and conflicting
+  identity are rejected, unrelated page sheets remain present.
+- Site-control persistence, reconciliation, exact tab/site/revision admission,
+  private memory-only routing, and navigation during selection-save have actor
+  regression coverage. Picker preview/cancel and late-start cancellation have
+  WebKit component interaction coverage. These are not full-browser QA.
+- Native child-frame cosmetics and native subscription-sidecar installation are
+  still outstanding. Current live style delivery covers the top document.
+- Direct HTTPS acquisition and native-validated candidate activation remain
+  outstanding; the product is still composed with its embedded release seed.
+- Picker cleanup has a single two-minute expiry while open, plus navigation,
+  explicit cancel, Escape and UI context teardown; it creates no idle polling.
+
+### UI graph budget review
+
+The site menu and picker are lazy after the first Quick-menu opening. A clean
+HEAD snapshot built successfully before the changes (browser 294,245 bytes JS;
+WebExtensionManager's complete static graph 422,559 bytes). Loading the new
+controls eagerly raised both graphs by 6,920 bytes; the lazy implementation
+reduces the browser addition to 1,284 bytes (295,529 total). The manager shares
+that browser chunk, so its measured complete graph is 423,843 bytes although
+its own feature is unchanged. Its JS allowance is deliberately adjusted from
+423,000 to 425,000 for these typed IPC/menu-entry additions, after this comparison;
+the browser and panel limits remain unchanged. The new lazy ProtectionMenu graph
+measures 302,972 JS / 90,190 CSS bytes, with 310,000 / 93,000 limits. This is a
+bundle-size review, not a claim about runtime RAM or navigation latency.
