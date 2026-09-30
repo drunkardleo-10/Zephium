@@ -441,7 +441,10 @@ export class WorkSession {
    * The routine loop: sending the objective runs the agent in the person's
    * own sessions; a site it has not worked on yet asks first, on the canvas.
    */
-  async run(context: WorkContextSelectionV1 | null = null, options: { private?: boolean } = {}) {
+  async run(
+    context: WorkContextSelectionV1 | null = null,
+    options: { private?: boolean; skill?: string | null } = {},
+  ) {
     if (!this.projection || this.pending || this.operations.busy(this.projection.work.id)) return;
     // What an earlier launch left running is acknowledged first: sending the
     // next request moves on from it, and the work cannot run while it stands.
@@ -463,6 +466,7 @@ export class WorkSession {
             ...AGENT_GRANT,
             ...(this.folders.length ? { folders: this.folders } : {}),
             ...(options.private ? { private: true } : {}),
+            ...(options.skill ? { skill: options.skill } : {}),
           },
           limits: AGENT_LIMITS,
         },

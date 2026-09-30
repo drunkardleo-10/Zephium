@@ -24,6 +24,7 @@
    */
   let {
     value = $bindable(""),
+    onskill,
     field,
     works = [],
     profile,
@@ -32,6 +33,8 @@
   }: {
     /** The ask bar's text. */
     value?: string;
+    /** The skill of the workflow whose request still leads the bar, for the run to load first. */
+    onskill?: (skill: string | null) => void;
     /** The ask bar, whose field takes the focus. */
     field?: HTMLElement;
     works?: readonly RecentWork[];
@@ -53,6 +56,7 @@
   const active = $derived(
     picked && lower(value).startsWith(lower(picked.request())) ? picked : null,
   );
+  $effect(() => onskill?.(active?.skill ?? null));
   /**
    * What the person already wrote, which becomes the next workflow's input:
    * their own words, or another workflow's input of the same kind.

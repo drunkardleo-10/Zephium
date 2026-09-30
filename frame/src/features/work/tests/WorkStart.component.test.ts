@@ -26,8 +26,10 @@ test("a tap writes the workflow's request into the ask bar and asks for its one 
     .toBeVisible();
   await expect.element(page.getByText("For you")).not.toBeInTheDocument();
 
+  const skill = () => document.querySelector<HTMLElement>("[data-skill]")?.dataset.skill;
   await page.getByRole("button", { name: /Map a project/u }).click();
   expect(field().value).toBe("Map the architecture of ");
+  await expect.poll(skill).toBe("map-a-project");
   expect(document.activeElement).toBe(field());
   await expect
     .element(page.getByText("Type the project's path, or choose its folder."))
@@ -48,6 +50,7 @@ test("a tap writes the workflow's request into the ask bar and asks for its one 
   await expect
     .element(page.getByText("Press Return to start, or add what matters first."))
     .not.toBeInTheDocument();
+  await expect.poll(skill).toBe("");
 });
 
 test("words already in the bar become the workflow's input", async () => {

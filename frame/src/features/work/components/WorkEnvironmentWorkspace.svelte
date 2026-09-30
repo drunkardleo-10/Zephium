@@ -1753,6 +1753,8 @@
     }
     await createObjective();
   }
+  /** The workflow a start tile put in the ask bar, loaded first by the run it sends. */
+  let startSkill = $state<string | null>(null);
   async function createObjective() {
     if (!session.composer.trim() || objectivePending || busy) return;
     const current = workSession(session.profile);
@@ -1833,7 +1835,9 @@
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
       openTabs = false;
-      await current.run(submission.context, { private: privateRun });
+      const skill = startSkill;
+      startSkill = null;
+      await current.run(submission.context, { private: privateRun, skill });
     } finally {
       objectivePending = false;
     }
@@ -2261,6 +2265,7 @@
               retryLabel={m.surface_retry()}
               >{#snippet children(Start)}<Start
                   bind:value={session.composer}
+                  onskill={(skill: string | null) => (startSkill = skill)}
                   field={composerElement}
                   works={session.works}
                   profile={session.profile}

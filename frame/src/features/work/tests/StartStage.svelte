@@ -7,12 +7,20 @@
     $props();
   let bar = $state<HTMLElement>();
   let height = $state(0);
+  let skill = $state<string | null>(null);
 </script>
 
 <!-- A new work as the Work screen holds it: the empty canvas, the start screen over it, the ask bar on its bottom edge. -->
-<div class="stage">
+<div class="stage" data-skill={skill ?? ""}>
   <div class="canvas">
-    <WorkStart bind:value field={bar} {works} profile="p" inset={height} />
+    <WorkStart
+      bind:value
+      onskill={(next) => (skill = next)}
+      field={bar}
+      {works}
+      profile="p"
+      inset={height}
+    />
     <div class="dock" bind:clientHeight={height}>
       <WorkBar bind:ref={bar} bind:value placeholder="Ask for anything" onsubmit={() => {}} />
     </div>
