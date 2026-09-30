@@ -76,6 +76,11 @@ Use a release build and the same resident tabs, package versions, permissions
 and active page. Separate initial loading, steady use and idle. Restarting can
 leave tabs unloaded and reduce memory without a code improvement.
 
+For each condition, restart QA, load and reload every fixed tab in the same
+order, and leave the same page active. Allow at least two minutes to settle
+before recording. Keep the laptop plugged in, awake and unlocked with its lid
+open; temporarily extend display/sleep timeouts past the run and restore them
+afterward. Do not compile, run native labs or use QA during the capture.
 Close the popup, leave QA untouched, and use the PID printed by the launcher:
 
 ```powershell
@@ -88,6 +93,14 @@ private memory, summed working sets, process count and CPU as percent of one cor
 Divide CPU by logical processor count for whole-machine percent. Working sets
 double-count shared pages; short-lived processes can undercount sampled CPU.
 Interrupted/user-active samples are observations, not controlled idle qualification.
+Check for at least 21 samples over ten minutes and no gap longer than 45 seconds. Use
+sampler `6cc490ed` or newer: earlier versions rounded fractional CPU deltas in
+Windows PowerShell or could include unrelated processes after parent PID reuse.
+Its regression check runs without querying real processes:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File desktop\measure-webext-qa.test.ps1
+```
 
 Record cold/warm startup and fixed simple/complex public-page loads, then repeat
 install/remove and popup open/close cycles. Allow caches and workers to settle

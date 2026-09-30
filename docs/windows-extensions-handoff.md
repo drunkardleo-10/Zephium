@@ -86,13 +86,9 @@ Tall → Short resizing, Esc dismissal, and the page's `window.close()` button i
 the optimized QA build (`6dd04c4e`). Tall content keeps normal Chromium scrolling
 at the height limit. This does not replace the four real-extension/scaling checks.
 Named QA sessions preserve ordinary Win32 path spelling after canonical
-containment checks. The initial QA helper passed verbatim `\\?\` paths to the
-extension loader: Grammarly failed with `0x80004005`. The lab reproduced failure
-when canonicalizing the exact directory that had just loaded through an ordinary
-path (`target/webext-path-probe/fresh-025335` and `canonical-025513`). The fix is
-QA-only; ordinary product paths and profile integrity checks are unchanged.
-The rebuilt `01751efa` QA app successfully loaded all three benchmark packages
-in that same session after the fix.
+containment checks; WebView2 rejected Grammarly's verbatim `\\?\` path in the
+lab. The rebuilt `01751efa` QA app loads all three benchmark packages with the
+startup gate and profile integrity checks intact.
 
 ## Performance evidence and decisions
 
@@ -112,32 +108,45 @@ order: MDN JavaScript (`developer.mozilla.org/en-US/docs/Web/JavaScript`),
 Wikipedia Rust (`en.wikipedia.org/wiki/Rust_(programming_language)`),
 `github.com/rust-lang/rust`, `www.rust-lang.org`, then active
 `news.ycombinator.com`. The manager tab and all popups were closed. No build,
-native lab or debugger ran during sampling.
+native lab or debugger ran during sampling. Both conditions use sampler
+`6cc490ed`: fractional CPU seconds remain floating-point, and child creation
+times reject stale parent IDs reused by unrelated processes. The old sampler's
+CPU claims are withdrawn. Sleep/lock, user-navigation and contaminated runs
+are excluded; only the final awake pair is retained below.
 
-| Condition | End private MiB | End processes | Mean CPU, one core | End interval CPU |
+| Condition | End private MiB | End processes | Mean CPU, one core | Mean CPU, whole machine |
 | --- | ---: | ---: | ---: | ---: |
-| Extensions disabled, 600 seconds | 1003.17 | 24 | 0.167% | 0% |
-| Bitwarden + Dark Reader + Grammarly enabled | Pending | Pending | Pending | Pending |
+| Extensions disabled, 600 seconds | 1023.80 | 24 | 0.117% | 0.029% |
+| Bitwarden + Dark Reader + Grammarly enabled, 600 seconds | 1397.05 | 27 | 0.711% | 0.178% |
 
-Baseline: 21 samples, largest gap 30.34 seconds, private memory range
-993.31–1035.34 MiB. CPU is interval-weighted; the mean is about 0.042% of this
-four-thread machine. An earlier run was interrupted by owner navigation and
-excluded; the app was restarted and all five tabs reloaded for this replacement.
-At completion the accessibility tree still reported Hacker News, but screenshots
-were black and native window activation failed twice. Display/foreground state
-during the idle interval was not instrumented. The second condition is pending
-owner wake/unlock; this is **not yet a completed A/B or a battery-life result**.
-Raw baseline: `target/webext-qa-resources/20260930-033455-controlled-off-retry`;
+Baseline: 22 samples over 600.02 seconds, largest gap 30.28 seconds, private
+memory range 1023.66–1026.70 MiB. CPU is interval-weighted; whole-machine values
+divide the one-core percentage by four. The desktop was unlocked at both
+endpoints; Hacker News and the same five tabs were verified after capture.
+Raw baseline: `target/webext-qa-resources/20260930-111252-awake-off-qualified`;
 retained samples: [baseline CSV](windows-extension-memory-20260930-off.csv).
+
+Enabled: 21 samples over 600.32 seconds, largest gap 30.28 seconds, private
+memory range 1392.02–1449.63 MiB. Both process counts stayed constant. Final
+60-second mean whole-machine CPU was 0.029% off and 0.074% on. The endpoint
+difference is **373.25 MiB and three processes** for this workload. The desktop
+was unlocked and the five tabs unchanged at the enabled endpoint too.
+Raw enabled run: `target/webext-qa-resources/20260930-112921-awake-on-qualified`;
+retained samples: [enabled CSV](windows-extension-memory-20260930-on.csv).
 
 Installed versions for both conditions are Bitwarden **2026.9.2**, Dark Reader
 **4.9.133**, and Grammarly **14.1333.0**, without account sign-ins. All are
 disabled in the completed baseline; the popup fixture stays disabled in both.
-Use the same executable, window size, page order and All sites access for the
-second run. These live public pages and caches can vary between runs; results
-describe this workload, not a universal memory ceiling or optimization saving.
+Both conditions use the same executable, maximized window, page order and
+All sites access, with a restart and at least two minutes of settling after
+reloading the pages. The final pair ran disabled first, then enabled. The disabled
+condition had extra settling while fixing the sampler; this is not a precisely
+matched time-since-navigation experiment. Display/sleep timeouts were extended
+for the capture. These live public pages and caches can vary between runs;
+results describe this workload, not a universal memory ceiling, optimization
+saving, leak qualification or battery-life result.
 
-### Earlier measurements
+### Targeted performance checks
 
 - Twenty steady action refreshes per extension fell from 20 icon fetches,
   decodes and worker requests to **one each**. Three-extension runs fell from
@@ -154,19 +163,6 @@ describe this workload, not a universal memory ceiling or optimization saving.
   412.4 MiB at 60–80 seconds. The reduction did not reproduce against the second
   normal run. Hidden managers retain the best-effort low-memory hint without
   suspension, but **no RAM saving is attributed to it**.
-- A two-minute release QA observation had 25 processes, 846.0–848.6 MiB private
-  memory and zero sampled CPU in four intervals. Evidence:
-  `target/webext-qa-resources/20260929-201044-optimized-release`. The earlier
-  debug session was roughly 1 GiB, but tab residency differed after restart.
-  That is not a controlled memory-saving comparison, battery-life result, or
-  memory upper bound.
-- Final ten-minute observation: 25 processes, 992.1–1040.4 MiB private memory,
-  ending at 992.1 MiB; time-weighted CPU 3.83% of one core (about 0.96% of this
-  four-thread machine). All 21 samples were contiguous (largest gap 30.36 s).
-  The owner reported browsing with extensions disabled during this run, so it
-  is **not an extension-idle qualification** or a comparable baseline. No Rust
-  build/native lab ran during sampling. Evidence:
-  `target/webext-qa-resources/20260929-220426-final-review-observational`.
 
 The shared-management-view trial remains a design decision:
 
@@ -202,9 +198,9 @@ shared sample was replaced by `20260928-225018`.
   cross-profile acceptance and a real permission-escalating update. Fixture
   storage preservation does not qualify every extension's migration. Full disk
   removal residue and the full extension catalog remain unqualified.
-- Qualify sustained idle, repeated install/remove cycles, realistic page loads
-  and cold/warm startup with fixed tabs/packages and release binaries.
-  The fixed-tab extensions-on ten-minute sample above is still pending.
+- Extend the completed ten-minute idle comparison with repeated install/remove
+  cycles, realistic page loads and cold/warm startup using fixed tabs/packages
+  and release binaries. Longer runs are needed for leak qualification.
   Battery savings require a controlled power measurement. A single Task Manager
   screenshot, or lower memory after lazy restoration, is insufficient evidence.
 - Requalify the store selector when its markup changes and native paths when
@@ -220,6 +216,8 @@ desktop configuration integration **8**. Worker/action-host/popup-sizing JavaScr
 emitted frontend style checks passed.
 The follow-up QA path tests both passed, including path-spelling preservation;
 strict desktop clippy passed again after that fix.
+The PowerShell sampler regression passes for recursive descendants, reused
+parent IDs and fractional CPU deltas; it uses synthetic process queries.
 
 Frontend type/lint/style/format/dependency checks passed. The initial concurrent
 frontend unit run hit two five-second timeouts while Rust compiled; the complete
