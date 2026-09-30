@@ -118,6 +118,7 @@ const LOOKS: [string, number][] = [
   ["lego5", 0],
   ["lego5", 50],
   ["wednesday", 0],
+  ["wednesday", 60],
   ["cando", 0],
 ];
 

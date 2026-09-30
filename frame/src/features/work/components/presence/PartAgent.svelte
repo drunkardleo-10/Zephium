@@ -26,9 +26,7 @@
           : DOING[part.helper]
         : part.state === "done"
           ? "done"
-          : part.state === "planned"
-            ? "rest"
-            : "stopped",
+          : "rest",
   );
   const said = $derived(
     part.state === "waiting"
@@ -37,18 +35,17 @@
         ? part.now || (part.helper === "research" ? m.work_line_searching() : m.work_env_working())
         : part.state === "done"
           ? m.work_part_state_done()
-          : part.state === "planned"
-            ? m.work_part_state_next()
-            : part.state === "failed"
-              ? m.work_part_state_failed()
-              : m.work_part_state_stopped(),
+          : m.work_part_state_next(),
   );
 </script>
 
-<span class="part-agent {part.state}" title={said}>
-  <span class="face"><Character kind={part.helper} {mood} size={16} /></span>
-  <span class="said"><Shimmer text={said} running={working} /></span>
-</span>
+<!-- A part that could not finish says so once, in its own row, with its one remedy: no second voice here. -->
+{#if part.state !== "failed" && part.state !== "stopped"}
+  <span class="part-agent {part.state}" title={said}>
+    <span class="face"><Character kind={part.helper} {mood} size={16} /></span>
+    <span class="said"><Shimmer text={said} running={working} /></span>
+  </span>
+{/if}
 
 <style>
   .part-agent {
@@ -88,7 +85,6 @@
   }
 
   .done .said,
-  .stopped .said,
   .planned .said {
     color: var(--color-faint);
   }

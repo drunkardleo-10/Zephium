@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { Handle, Position, NodeResizer, NodeToolbar, type NodeProps } from "@xyflow/svelte";
+  import {
+    Handle,
+    Position,
+    NodeResizer,
+    NodeToolbar,
+    useViewport,
+    type NodeProps,
+  } from "@xyflow/svelte";
   import { getContext, onMount, tick } from "svelte";
   import Icon from "$shared/ui/Icon";
   import type { WorkItemNode } from "../lib/canvas-model";
@@ -74,6 +81,21 @@
   const opens = $derived(type === "block" && OPENS.has(data.block?.data.kind ?? ""));
   /** A page held for a person opens the takeover, never a copy in Browse. */
   const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
+  /**
+   * The toolbar stands on its object at the canvas's scale (never larger than
+   * at 100%); a part opens from its own name and needs none, and far out,
+   * where it could not be read, there is none.
+   */
+  const viewport = useViewport();
+  const scale = $derived(Math.min(1, viewport.current.zoom));
+  const tooled = $derived(
+    type !== "head" &&
+      type !== "trail" &&
+      type !== "part" &&
+      type !== "input" &&
+      (type !== "block" || opens) &&
+      scale >= 0.45,
+  );
 </script>
 
 <Handle
@@ -94,12 +116,8 @@
   lineClass="work-resize-line"
   handleClass="work-resize-handle"
 />
-<NodeToolbar
-  isVisible={selected && type !== "head" && type !== "trail" && (type !== "block" || opens)}
-  position={Position.Top}
-  offset={10}
->
-  <div class="bar" role="toolbar" aria-label={data.title}>
+<NodeToolbar isVisible={selected && tooled} position={Position.Top} offset={10 * scale}>
+  <div class="bar" role="toolbar" aria-label={data.title} style:--scale={scale}>
     <button type="button" onclick={() => (waiting ? action(id, "help") : open(id))}>
       <Icon icon={ArrowUpRight01Icon} size={14} />{waiting
         ? m.work_human_help()
@@ -227,6 +245,8 @@
   }
 
   .bar {
+    transform: scale(var(--scale, 1));
+    transform-origin: 50% 100%;
     display: flex;
     align-items: center;
     gap: 2px;

@@ -533,14 +533,14 @@ export function environmentStages(
       }));
       const drawn = runSources(runs, recorded);
       const sourcesId = `sources:${draft.card}`;
-      const sources =
-        drawn.rows.length || drawn.unread.length
-          ? {
-              id: sourcesId,
-              width: SOURCES,
-              height: measured.get(measureKey(sourcesId, SOURCES, false)) ?? sourcesHeight(drawn),
-            }
-          : undefined;
+      // Sources hold what a run drew on; a block that would only report a failure is not drawn.
+      const sources = drawn.rows.length
+        ? {
+            id: sourcesId,
+            width: SOURCES,
+            height: measured.get(measureKey(sourcesId, SOURCES, false)) ?? sourcesHeight(drawn),
+          }
+        : undefined;
       const lane = placeRun(top, {
         request: requestPart,
         ...(sources ? { sources } : {}),
