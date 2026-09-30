@@ -1396,7 +1396,11 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         .is_ok());
     assert!(grant(vec!["Documents/project"]).validate().is_err());
     assert!(grant(vec!["/a"; 9]).validate().is_err());
-    for (skill, valid) in [("trip-planning", true), ("Trip planning", false), ("", false)] {
+    for (skill, valid) in [
+        ("trip-planning", true),
+        ("Trip planning", false),
+        ("", false),
+    ] {
         let started = WorkAgentGrantV1 {
             skill: Some(skill.into()),
             ..grant(vec![])
