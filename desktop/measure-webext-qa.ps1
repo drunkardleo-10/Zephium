@@ -37,7 +37,9 @@ while ($true) {
         if ($null -eq $process) { continue }
         $key = "$processId/$($process.StartTime.Ticks)"
         $cpu = $process.TotalProcessorTime.TotalSeconds
-        if ($previous.ContainsKey($key)) { $cpuDelta += [Math]::Max(0, $cpu - $previous[$key]) }
+        # Windows PowerShell selects the integer overload for Max(0, double),
+        # rounding subsecond CPU deltas away. Keep both arguments explicitly double.
+        if ($previous.ContainsKey($key)) { $cpuDelta += [Math]::Max([double]0, [double]($cpu - $previous[$key])) }
         $current[$key] = $cpu
         $privateBytes += $process.PrivateMemorySize64
         $workingSet += $process.WorkingSet64
