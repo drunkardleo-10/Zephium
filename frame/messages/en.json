@@ -2266,5 +2266,7 @@
   "connections_preview": "Check connection",
   "connections_preview_tools": "Connected · {count} tools. Save to make them available to Work.",
   "connections_preview_failed": "Couldn’t connect and list tools. Check the address, command, or credentials, then retry.",
-  "ai_role_page_byok_desc": "Reads and works on pages. Models with vision can also inspect images."
+  "ai_role_page_byok_desc": "Reads and works on pages. Models with vision can also inspect images.",
+  "work_context_chip_one": "1 selected",
+  "work_context_chip": "{count} selected"
 }

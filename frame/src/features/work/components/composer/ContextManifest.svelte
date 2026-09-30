@@ -66,6 +66,12 @@
       ? preview.disclosure.items.filter((item) => !item.implicit).length
       : selection.items.length,
   );
+  /** What the selection is, said in full to assistive technology and on hover. */
+  const said = $derived.by(() => {
+    if (failure) return failure;
+    if (preview.kind === "pending") return m.work_context_preparing();
+    return count === 1 ? m.work_context_using_one() : m.work_context_using({ count });
+  });
   const failure = $derived.by(() => {
     if (preview.kind !== "refused") return null;
     switch (preview.error) {
@@ -79,45 +85,57 @@
   });
 </script>
 
+<!-- A compact chip in the field: what goes with the ask, opened above it, never a line of its own. -->
 <div class="context-manifest" class:review={requiresReview} class:failed={!!failure}>
   <button
     type="button"
     class="summary"
     aria-expanded={open}
+    aria-label={said}
+    title={requiresReview ? `${said}. ${m.work_context_review_note()}` : said}
     onclick={() => (open = !open)}
     disabled={preview.kind !== "admitted"}
   >
     <Icon icon={Link04Icon} size={13} />
-    <span
-      >{failure ??
-        (preview.kind === "pending"
-          ? m.work_context_preparing()
-          : count === 1
-            ? m.work_context_using_one()
-            : m.work_context_using({ count }))}</span
+    <span class="count"
+      >{failure
+        ? failure
+        : count === 1
+          ? m.work_context_chip_one()
+          : m.work_context_chip({ count })}</span
     >
     {#if preview.kind === "admitted"}<span class="chevron" class:open
         ><Icon icon={ArrowDown01Icon} size={12} /></span
       >{/if}
   </button>
-  {#if requiresReview}<p class="note">{m.work_context_review_note()}</p>{/if}
   {#if open && preview.kind === "admitted"}
-    <div class="details"><ContextManifestList disclosure={preview.disclosure} compact /></div>
+    <div class="details">
+      {#if requiresReview}<p class="note">{m.work_context_review_note()}</p>{/if}
+      <ContextManifestList disclosure={preview.disclosure} compact />
+    </div>
   {/if}
 </div>
 
 <style>
   .context-manifest {
-    display: grid;
-    gap: 4px;
-    inline-size: 100%;
+    position: relative;
+    display: inline-flex;
+    flex: none;
+  }
+
+  .count {
+    max-inline-size: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .summary {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 2px 8px 2px 6px;
+    block-size: 26px;
+    padding: 0 10px 0 8px;
     border: 0;
     border-radius: var(--radius-capsule);
     background: var(--color-fill);
@@ -151,14 +169,23 @@
   }
 
   .note {
-    margin: 0;
+    margin: 0 0 6px;
     color: var(--color-warning);
     font-size: 11.5px;
   }
 
+  /* Opened above the field, over the canvas: the bar never grows for it. */
   .details {
-    padding: 6px 8px;
+    position: absolute;
+    inset-block-end: calc(100% + 10px);
+    inset-inline-start: 0;
+    z-index: 10;
+    inline-size: 320px;
+    max-block-size: 280px;
+    overflow: auto;
+    padding: 8px 10px;
     border-radius: var(--radius-row);
-    background: var(--color-fill);
+    background: var(--color-float);
+    box-shadow: var(--shadow-menu);
   }
 </style>

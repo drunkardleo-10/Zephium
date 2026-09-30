@@ -61,8 +61,10 @@ test("the manifest previews exactly what Rust admitted and flags private context
     .toBeVisible();
   expect(native.preview).toHaveBeenCalledExactlyOnceWith("p", "public_read", selection);
   await expect.poll(() => onreview.mock.lastCall?.[0]).toBe(true);
-  await expect.element(screen.getByText(/Includes private objects/)).toBeVisible();
+  // A compact chip in the field; opened, it says what goes and why it needs review.
+  await expect.element(screen.getByText("2 selected", { exact: true })).toBeVisible();
   await screen.getByRole("button", { name: /Using 2 selected objects/ }).click();
+  await expect.element(screen.getByText(/Includes private objects/)).toBeVisible();
   await expect.element(screen.getByText("Keyboard notes")).toBeVisible();
   await expect.element(screen.getByText("Keyboard comparison")).toBeVisible();
   await expect.element(screen.getByText("shortened")).toBeVisible();

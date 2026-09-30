@@ -158,15 +158,17 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
     .toEqual({ kind: "decide", element: "00000000000000000000000004", choice: "Chosen" });
   await expect.poll(() => session.snapshot?.decisions?.length ?? 0).toBe(1);
   await expect.element(screen.getByText("Decided", { exact: true })).toBeVisible();
+  // The selection rides with the ask only once the person asks: a chip in the field.
+  expect(screen.container.querySelector(".context-manifest")).toBeNull();
+  await screen.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect
+    .element(screen.getByRole("textbox", { name: "What do you want to do?" }))
+    .toHaveFocus();
   await expect
     .element(screen.getByRole("button", { name: /Using the selected object/ }))
     .toBeVisible();
   await screen.getByRole("button", { name: /Using the selected object/ }).click();
   await expect.element(screen.getByText("Decision", { exact: true }).first()).toBeVisible();
-  await screen.getByRole("button", { name: "Ask", exact: true }).click();
-  await expect
-    .element(screen.getByRole("textbox", { name: "What do you want to do?" }))
-    .toHaveFocus();
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Unchoose", exact: true }).click();
   await expect

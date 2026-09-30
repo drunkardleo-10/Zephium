@@ -139,11 +139,11 @@
         submit();
       }}
     >
-      {#if context}<div class="context">{@render context()}</div>{/if}
       <div class="row">
         {#if attach}<div class="side lead" inert={!engaged}>
             <div class="side-inner">{@render attach()}</div>
           </div>{/if}
+        {#if context && engaged}<div class="context">{@render context()}</div>{/if}
         <label class="sr-only" for={id}>{placeholder}</label>
         <textarea
           {id}
@@ -278,11 +278,13 @@
     padding-inline-start: 0;
   }
 
+  /* What goes with the ask, as chips at the head of the field. */
   .context {
     display: flex;
-    flex-wrap: wrap;
+    flex: none;
+    align-items: center;
+    align-self: center;
     gap: 6px;
-    padding: 4px 4px 0;
   }
 
   .row {
