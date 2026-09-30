@@ -288,6 +288,46 @@ fn region_index(node: &SemanticNode, snapshot: &SemanticSnapshot) -> usize {
         .map_or(0, |(index, _)| index)
 }
 
+/// A message box ("Message to design", "Reply…", "Write a comment"): it
+/// sends on Enter or its button, never as it is typed.
+fn composer(node: &SemanticNode) -> bool {
+    names_any(
+        &label(node),
+        &[
+            "message",
+            "reply",
+            "comment",
+            "write a",
+            "chat",
+            "napisz",
+            "wiadomość",
+        ],
+    )
+}
+
+/// A dialog the person drafts something in (a new issue, a new page): it
+/// holds a text field, and its own button creates what was drafted.
+fn draft_dialog(node: &SemanticNode, snapshot: &SemanticSnapshot) -> Option<usize> {
+    let (index, _) =
+        ancestors(node, snapshot).find(|(_, ancestor)| ancestor.role() == SemanticRole::Dialog)?;
+    let region = subtree(snapshot, index);
+    let drafts = region
+        .iter()
+        .any(|part| matches!(part.role(), SemanticRole::Textbox | SemanticRole::Combobox));
+    let creates = region
+        .iter()
+        .any(|part| part.role() == SemanticRole::Button && creates(&label(part)));
+    (drafts && creates).then_some(index)
+}
+
+/// "Create issue", "Add task", "Save page": the control that makes it.
+fn creates(text: &str) -> bool {
+    let text = words(text);
+    ["create", "add", "save", "submit", "publish", "post", "send"]
+        .iter()
+        .any(|word| text.starts_with(&format!(" {word} ")))
+}
+
 fn dialog_commits(node: &SemanticNode, snapshot: &SemanticSnapshot) -> Option<Consequence> {
     let (index, _) =
         ancestors(node, snapshot).find(|(_, ancestor)| ancestor.role() == SemanticRole::Dialog)?;
@@ -350,6 +390,12 @@ pub(crate) fn classify(
                 SiteEffect::Read
             } else if node.role() == SemanticRole::Button && pays(node, snapshot) {
                 SiteEffect::Commit(Consequence::Purchase)
+            } else if node.role() == SemanticRole::Button
+                && creates(&text)
+                && draft_dialog(node, snapshot).is_some()
+            {
+                // Creating what the dialog drafted puts it in the workspace.
+                SiteEffect::Commit(commits.unwrap_or(Consequence::Save))
             } else if let Some(consequence) = commits.or_else(|| dialog_commits(node, snapshot)) {
                 SiteEffect::Commit(consequence)
             } else if node.activation() == Some(SemanticActivation::Submit) {
@@ -369,6 +415,8 @@ pub(crate) fn classify(
                 && !ancestors(node, snapshot)
                     .any(|(_, a)| a.landmark_kind() == Some(SemanticLandmarkKind::Form))
                 && !composer_has_send(snapshot)
+                && !composer(node)
+                && draft_dialog(node, snapshot).is_none()
             {
                 // A document that saves as it is typed commits on the first key.
                 SiteEffect::Commit(Consequence::Edit)
@@ -1328,6 +1376,52 @@ mod tests {
                 Some(SemanticPressKey::Enter)
             ),
             SiteEffect::Read
+        );
+    }
+
+    #[test]
+    fn rich_editors_draft_until_their_own_control_commits() {
+        // Slack's composer with its Send button out of the observation, and
+        // Linear's new-issue dialog of rich editors with its Create button.
+        let apps = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"textbox","n":"Message to design","o":11,"fs":1,"es":[1,2,false]}),
+            json!({"k":3,"p":0,"r":"button","n":"Create new issue","o":1,"ak":1}),
+            json!({"k":4,"p":0,"r":"dialog","n":"New issue"}),
+            json!({"k":5,"p":3,"r":"textbox","n":"Issue title","o":11,"fs":1,"es":[1,2,false]}),
+            json!({"k":6,"p":3,"r":"textbox","n":"Add description…","o":11,"fs":1,"es":[1,2,false]}),
+            json!({"k":7,"p":3,"r":"button","n":"Team: Backlog","o":1,"ak":1}),
+            json!({"k":8,"p":3,"r":"button","n":"Create issue","o":1,"ak":1}),
+            json!({"k":9,"p":0,"r":"textbox","n":"Block 1","o":11,"fs":1,"es":[1,2,false]}),
+        ]);
+        assert_eq!(
+            effect(&apps, 2, SemanticActionKind::Fill),
+            SiteEffect::Draft
+        );
+        assert_eq!(
+            effect(&apps, 3, SemanticActionKind::Click),
+            SiteEffect::Draft
+        );
+        assert_eq!(
+            effect(&apps, 5, SemanticActionKind::Fill),
+            SiteEffect::Draft
+        );
+        assert_eq!(
+            effect(&apps, 6, SemanticActionKind::Fill),
+            SiteEffect::Draft
+        );
+        assert_eq!(
+            effect(&apps, 7, SemanticActionKind::Click),
+            SiteEffect::Draft
+        );
+        assert_eq!(
+            effect(&apps, 8, SemanticActionKind::Click),
+            SiteEffect::Commit(Consequence::Save)
+        );
+        // A page of blocks still saves as it is typed.
+        assert_eq!(
+            effect(&apps, 9, SemanticActionKind::Fill),
+            SiteEffect::Commit(Consequence::Edit)
         );
     }
 
