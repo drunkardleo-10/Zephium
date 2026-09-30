@@ -2,8 +2,6 @@
   import { getContext } from "svelte";
   import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
   import { serviceKey, serviceMark } from "$domain/connections";
-  import Orb from "$shared/ui/presence/Orb.svelte";
-  import Shimmer from "$shared/ui/presence/Shimmer.svelte";
   import Icon from "$shared/ui/Icon";
   import Cancel01Icon from "@hugeicons/core-free-icons/Cancel01Icon";
   import CheckListIcon from "@hugeicons/core-free-icons/CheckListIcon";
@@ -80,18 +78,14 @@
           title={call.url ?? call.text}
         >
           <span class="glyph"
-            >{#if call.state === "running"}<Orb
-                size={13}
-              />{:else if call.state === "declined" || call.state === "failed"}<Icon
+            >{#if call.state === "declined" || call.state === "failed"}<Icon
                 icon={Cancel01Icon}
                 size={11}
                 strokeWidth={2}
               />{:else}<Icon icon={glyph(call.text)} size={13} strokeWidth={1.6} />{/if}</span
           >
           <span class="text"
-            >{#if call.state === "running"}<span class="what"><Shimmer text={call.text} /></span
-              >{:else}<span class="what">{call.text}</span>{/if}{#if call.detail}<span
-                class="detail"
+            ><span class="what">{call.text}</span>{#if call.detail}<span class="detail"
                 >{#each spans(call.detail) as piece, index (index)}{#if piece.code}<code
                       >{piece.text}</code
                     >{:else}{piece.text}{/if}{/each}</span

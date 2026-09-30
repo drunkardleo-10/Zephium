@@ -2238,7 +2238,6 @@
   "work_computer_agent_starting": "Starting",
   "work_computer_agent_editing": "Editing {file}",
   "work_computer_agent_running": "Running {command}",
-  "work_line_searching_for": "Searching {what}",
   "work_line_working_on": "Working on {parts}",
   "work_part_lead_sites": "{first}, {second} and {count} more",
   "work_part_state_done": "Done",

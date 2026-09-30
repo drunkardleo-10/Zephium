@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { Character, Shimmer, type Mood } from "$shared/ui/presence";
+  import { Character, type Mood } from "$shared/ui/presence";
   import type { PartView } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
 
   /**
-   * The helper that owns a part, standing at the part's top-right with one
-   * line of what it does now: at work the line shimmers, done it rests.
+   * The helper that owns a part, at the part's top-right, away from the
+   * part's own mark: its face and one word for what it does now.
    */
   let { part }: { part: Pick<PartView, "helper" | "state" | "now" | "summary"> } = $props();
 
@@ -28,11 +28,21 @@
           ? "done"
           : "rest",
   );
+  const word = (now: string | undefined) => {
+    if (!now) return m.work_line_thinking();
+    if (now.startsWith(m.work_line_searching())) return m.work_line_searching();
+    if (now.startsWith(m.work_part_reading())) return m.work_part_reading();
+    return part.helper === "research"
+      ? m.work_line_searching()
+      : part.helper === "browser" || part.helper === "lead"
+        ? m.work_part_reading()
+        : m.work_env_working();
+  };
   const said = $derived(
     part.state === "waiting"
       ? m.work_line_waiting_for_you()
       : working
-        ? part.now || (part.helper === "research" ? m.work_line_searching() : m.work_env_working())
+        ? word(part.now)
         : part.state === "done"
           ? m.work_part_state_done()
           : m.work_part_state_next(),
@@ -43,7 +53,7 @@
 {#if part.state !== "failed" && part.state !== "stopped"}
   <span class="part-agent {part.state}" title={said}>
     <span class="face"><Character kind={part.helper} {mood} size={16} /></span>
-    <span class="said"><Shimmer text={said} running={working} /></span>
+    <span class="said">{said}</span>
   </span>
 {/if}
 

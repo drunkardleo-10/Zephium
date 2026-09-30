@@ -328,24 +328,20 @@
         return "thinking";
     }
   });
-  const lower = (text: string) => text.charAt(0).toLocaleLowerCase() + text.slice(1);
   /**
-   * While it works the line says one thing: what the one helper at work is
-   * doing, which helpers are at work, or what the lead itself is doing.
+   * While it works the line says what the lead does: what it reads or thinks
+   * itself, or which parts it is coordinating. Each helper says its own on
+   * the canvas.
    */
-  const liveWords = $derived.by(() => {
-    if (fileState || working.length === 0) return headline;
-    if (working.length > 1)
-      return m.work_line_working_on({
-        parts: new Intl.ListFormat(undefined, { type: "conjunction" }).format(
-          working.map((part) => part.title),
-        ),
-      });
-    const [part] = working;
-    if (part!.helper === "research") return m.work_line_searching_for({ what: lower(part!.title) });
-    if (part!.host) return m.work_line_reading({ host: part!.host });
-    return part!.now || part!.title;
-  });
+  const liveWords = $derived(
+    fileState || working.length === 0
+      ? headline
+      : m.work_line_working_on({
+          parts: new Intl.ListFormat(undefined, { type: "conjunction" }).format(
+            working.map((part) => part.title),
+          ),
+        }),
+  );
   /** At work: the indicator and one shimmering line stand where the lead's face is. */
   const thinking = $derived(mark === "live" && !waiting);
   const face = $derived<Mood>(
