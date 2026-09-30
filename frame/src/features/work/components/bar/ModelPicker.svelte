@@ -43,8 +43,26 @@
   const chosen = $derived(models?.effective.lead ?? null);
   const groups = $derived(pickerGroups(models, "lead", session?.endpoint ?? []));
   const allKeyed = $derived(groups.needsKey.length === 0);
+  /**
+   * Whether a run could start: the lead needs a model with a working key. Asked
+   * again whenever the models change, so a key added in Settings lands here.
+   */
+  let leadMissing = $state(false);
+  $effect(() => {
+    void models;
+    let current = true;
+    void Promise.resolve()
+      .then(() => commands.workModelsReady(profile))
+      .then((readiness) => {
+        if (current) leadMissing = !readiness.ready && readiness.missing_roles.includes("lead");
+      })
+      .catch(() => {
+        if (current) leadMissing = false;
+      });
+    return () => (current = false);
+  });
   /** No model can run yet: the one thing to do is add a key, so the control is that, not a menu. */
-  const keyless = $derived(!!models && groups.ready.length === 0);
+  const keyless = $derived(!!models && leadMissing);
 
   async function opened(next: boolean) {
     open = next;

@@ -2,17 +2,29 @@ import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
-import type { WorkModelsV1 } from "$shared/ipc/bindings";
+import type { WorkModelsReadyV1, WorkModelsV1 } from "$shared/ipc/bindings";
 import ModelPicker from "../components/bar/ModelPicker.svelte";
 import { PROFILE, models } from "$shared/testing/work-models";
 
-const native = vi.hoisted(() => ({ read: vi.fn(), choose: vi.fn(), more: vi.fn() }));
+const native = vi.hoisted(() => ({
+  read: vi.fn(),
+  choose: vi.fn(),
+  more: vi.fn(),
+  ready: vi.fn(async (profile: string): Promise<WorkModelsReadyV1> => ({
+    version: 1,
+    profile,
+    ready: true,
+    missing_roles: [],
+    fault: null,
+  })),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     workModels: native.read,
     workChooseModel: native.choose,
     workMoreModels: native.more,
+    workModelsReady: native.ready,
   });
 });
 
@@ -70,6 +82,13 @@ test("the menu lists each provider's curated models, the smaller ones too", asyn
 test("without any key the control is one calm way to add a key, straight to Settings", async () => {
   await page.viewport(1200, 800);
   native.read.mockResolvedValue(models({}));
+  native.ready.mockResolvedValue({
+    version: 1,
+    profile: PROFILE,
+    ready: false,
+    missing_roles: ["lead"],
+    fault: null,
+  });
   const onsettings = vi.fn();
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings });
   await screen.getByRole("button", { name: "Add a model key" }).click();
