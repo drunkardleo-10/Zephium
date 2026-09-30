@@ -2792,8 +2792,7 @@
     gap: 2px;
     padding: 8px;
     border-radius: var(--radius-panel) var(--radius-panel) 0 0;
-    background: var(--color-menu);
-    backdrop-filter: blur(14px) saturate(1.2);
+    background: color-mix(in srgb, var(--color-float) var(--wash-raised), var(--color-canvas));
     box-shadow: var(--shadow-popover);
     pointer-events: auto;
   }

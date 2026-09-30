@@ -220,8 +220,8 @@
     box-sizing: border-box;
     padding: 8px 8px 10px;
     border-radius: var(--radius-panel) var(--radius-panel) 0 0;
-    background: var(--color-menu);
-    backdrop-filter: blur(24px);
+    /* Solid, like the island: a blur would be redrawn from the canvas under it every frame a pan moves. */
+    background: color-mix(in srgb, var(--color-float) var(--wash-raised), var(--color-canvas));
     box-shadow: var(--shadow-sheet);
     transition: grid-template-columns var(--motion-slow) var(--ease-emphasized);
   }
