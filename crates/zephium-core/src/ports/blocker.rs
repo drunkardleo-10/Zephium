@@ -262,6 +262,25 @@ pub trait BlockerCatalog {
 /// callbacks may run on a worker and therefore must never call native UI APIs
 /// directly.
 pub trait BlockerCompiler {
+    fn prepare_site_preferences(
+        &self,
+        preferences: &crate::blocker::BlockerSitePreferences,
+    ) -> Option<Arc<crate::blocker::PreparedBlockerSites>> {
+        if !preferences.hides().is_empty() {
+            return None;
+        }
+        crate::blocker::PreparedBlockerSites::new(
+            preferences.revision(),
+            preferences
+                .paused_sites()
+                .map(|site| (site.clone(), true, Arc::from(""))),
+        )
+    }
+    /// Bounded, I/O-free validation for an explicit personal hide. Returning
+    /// None refuses syntax that cannot be represented as static CSS.
+    fn validate_personal_selector(&self, _selector: &str) -> Option<String> {
+        None
+    }
     fn compile(
         &self,
         profile: ProfileId,

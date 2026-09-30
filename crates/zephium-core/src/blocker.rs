@@ -12,6 +12,15 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::ProfileId;
 
+mod cosmetics;
+pub use cosmetics::{DeclarativeStyleRules, DocumentStyleFailure, DocumentStyleProvider};
+mod sites;
+pub use sites::{
+    BlockerSite, BlockerSitePreferences, PersonalHide, PreparedBlockerSite, PreparedBlockerSites,
+    SitePreferenceChange, SitePreferenceError, MAX_PAUSED_BLOCKER_SITES, MAX_PERSONAL_HIDES,
+    MAX_PERSONAL_RULE_BYTES,
+};
+
 /// Upper bound for one native declarative policy crossing the application to
 /// engine boundary. WebKit compilation has substantially higher temporary
 /// costs than the encoded JSON itself, so accepting an unbounded artifact
@@ -526,6 +535,8 @@ pub struct ContentRules {
     digest: ContentRuleDigest,
     coverage: ContentRuleCoverage,
     payload: ContentRulesPayload,
+    cosmetics: Option<Arc<dyn DocumentStyleProvider>>,
+    native_cosmetics: Option<DeclarativeStyleRules>,
 }
 
 impl ContentRules {
@@ -534,6 +545,8 @@ impl ContentRules {
             digest,
             coverage: ContentRuleCoverage::default(),
             payload: ContentRulesPayload::AllowAll,
+            cosmetics: None,
+            native_cosmetics: None,
         })
     }
 
@@ -547,6 +560,8 @@ impl ContentRules {
                 digest,
                 coverage,
                 payload: ContentRulesPayload::Runtime(policy),
+                cosmetics: None,
+                native_cosmetics: None,
             })
         })
     }
@@ -573,7 +588,32 @@ impl ContentRules {
                 artifact_digest,
                 encoded,
             },
+            cosmetics: None,
+            native_cosmetics: None,
         }))
+    }
+
+    /// Attaches separately compiled subscription styles without changing the
+    /// network artifact. The producer's policy digest must already bind both.
+    pub fn with_cosmetics(
+        mut self: Arc<Self>,
+        provider: Arc<dyn DocumentStyleProvider>,
+        native: Option<DeclarativeStyleRules>,
+    ) -> Arc<Self> {
+        if self.enabled() {
+            let rules = Arc::make_mut(&mut self);
+            rules.cosmetics = Some(provider);
+            rules.native_cosmetics = native;
+        }
+        self
+    }
+
+    pub fn cosmetics(&self) -> Option<&Arc<dyn DocumentStyleProvider>> {
+        self.cosmetics.as_ref()
+    }
+
+    pub fn native_cosmetics(&self) -> Option<&DeclarativeStyleRules> {
+        self.native_cosmetics.as_ref()
     }
 
     pub const fn digest(&self) -> ContentRuleDigest {
@@ -622,6 +662,7 @@ pub enum ContentRuleApplyFailure {
 /// initial failure has no policy and must continue holding first navigation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentPolicyFailure {
+    SitePreferencesUnavailable,
     GenerationExhausted,
     CompilerDispatchRejected,
     CompilerUnavailable,
@@ -644,6 +685,7 @@ impl ContentPolicyFailure {
         matches!(
             self,
             Self::CompilerDispatchRejected
+                | Self::SitePreferencesUnavailable
                 | Self::Compile(BlockerCompileFailure::SourceUnavailable)
                 | Self::Compile(BlockerCompileFailure::Internal)
                 | Self::NativeDispatchRejected

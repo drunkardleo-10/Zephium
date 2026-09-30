@@ -1,4 +1,6 @@
-use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
+use crate::blocker::{
+    BlockerConfig, BlockerConfigRevision, BlockerSitePreferences, ProfileBlockerConfig,
+};
 use crate::ids::ProfileId;
 use crate::permissions::{
     PagePermissionCatalog, PagePermissionCatalogRevision, PagePermissionPatch,
@@ -144,6 +146,23 @@ pub enum BlockerConfigLoadOutcome {
     Loaded(ProfileBlockerConfig),
     NotRegistered,
     NotAdmitted,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockerSiteLoadOutcome {
+    Loaded(std::sync::Arc<BlockerSitePreferences>),
+    NotRegistered,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockerSiteUpdateOutcome {
+    Updated(std::sync::Arc<BlockerSitePreferences>),
+    Conflict(std::sync::Arc<BlockerSitePreferences>),
+    NotRegistered,
+    /// A commit was attempted and its durable outcome must be reconciled.
+    OutcomeUnknown,
     Failed,
 }
 
@@ -312,6 +331,24 @@ pub trait Store {
         &self,
         _profile: ProfileId,
         _done: Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Private-session preferences must never be passed to these durable ports.
+    fn load_profile_blocker_sites(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(BlockerSiteLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+
+    fn update_profile_blocker_sites(
+        &self,
+        _profile: ProfileId,
+        _expected_revision: u64,
+        _next: std::sync::Arc<BlockerSitePreferences>,
+        _done: Box<dyn FnOnce(BlockerSiteUpdateOutcome) + Send>,
     ) -> bool {
         false
     }

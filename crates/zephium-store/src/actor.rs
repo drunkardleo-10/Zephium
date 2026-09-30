@@ -18,18 +18,18 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use zephium_agentic::{AgentAuditCompletion, AgentAuditDelivery};
-use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
+use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, BlockerSitePreferences};
 use zephium_core::downloads::{DownloadStoreCall, DownloadStoreReply};
 use zephium_core::ids::ProfileId;
 use zephium_core::item::sanitize_page_title;
 use zephium_core::navigation;
 use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPatch};
 use zephium_core::ports::store::{
-    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, HistoryHit, HistoryVisit,
-    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
-    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
-    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
-    UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
+    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, BlockerSiteLoadOutcome,
+    BlockerSiteUpdateOutcome, HistoryHit, HistoryVisit, PagePermissionCatalogLoadOutcome,
+    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
+    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
+    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -65,6 +65,8 @@ const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
 type PendingVisits = HashMap<(ProfileId, String), String>;
 type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
 type BlockerConfigLoadDone = Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>;
+type BlockerSiteLoadDone = Box<dyn FnOnce(BlockerSiteLoadOutcome) + Send>;
+type BlockerSiteUpdateDone = Box<dyn FnOnce(BlockerSiteUpdateOutcome) + Send>;
 type UserscriptCatalogLoadDone = Box<dyn FnOnce(UserscriptCatalogLoadOutcome) + Send>;
 type UserscriptCatalogMutationDone = Box<dyn FnOnce(UserscriptCatalogMutationOutcome) + Send>;
 type PagePermissionCatalogLoadDone = Box<dyn FnOnce(PagePermissionCatalogLoadOutcome) + Send>;
@@ -295,6 +297,13 @@ enum Cmd {
         BlockerConfigUpdateDone,
     ),
     LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
+    LoadProfileBlockerSites(ProfileId, BlockerSiteLoadDone),
+    UpdateProfileBlockerSites(
+        ProfileId,
+        u64,
+        Arc<BlockerSitePreferences>,
+        BlockerSiteUpdateDone,
+    ),
     LoadUserscriptCatalog(ProfileId, UserscriptCatalogLoadDone),
     MutateUserscriptCatalog(
         ProfileId,
@@ -705,6 +714,40 @@ impl Store for SqliteStore {
         }
         self.tx
             .try_send(Cmd::LoadProfileBlockerConfig(profile, done))
+            .is_ok()
+    }
+
+    fn load_profile_blocker_sites(&self, profile: ProfileId, done: BlockerSiteLoadDone) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadProfileBlockerSites(profile, done))
+            .is_ok()
+    }
+
+    fn update_profile_blocker_sites(
+        &self,
+        profile: ProfileId,
+        expected: u64,
+        next: Arc<BlockerSitePreferences>,
+        done: BlockerSiteUpdateDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::UpdateProfileBlockerSites(
+                profile, expected, next, done,
+            ))
             .is_ok()
     }
 
@@ -1320,6 +1363,26 @@ fn actor(
                     }
                 };
                 done(outcome);
+            }
+            Some(Cmd::LoadProfileBlockerSites(profile, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(BlockerSiteLoadOutcome::Failed);
+                    continue;
+                }
+                done(
+                    hub.profile_blocker_sites(profile)
+                        .unwrap_or(BlockerSiteLoadOutcome::Failed),
+                );
+            }
+            Some(Cmd::UpdateProfileBlockerSites(profile, expected, next, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(BlockerSiteUpdateOutcome::Failed);
+                    continue;
+                }
+                done(
+                    hub.update_profile_blocker_sites(profile, expected, next)
+                        .unwrap_or(BlockerSiteUpdateOutcome::Failed),
+                );
             }
             Some(Cmd::LoadProfileBlockerConfig(profile, done)) => {
                 let outcome = match hub.profile_blocker_config(profile) {

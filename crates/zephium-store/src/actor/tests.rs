@@ -2485,6 +2485,9 @@ fn authoritative_snapshot_must_exactly_match_validated_registry_before_purge() {
             .join(format!("profile-{snapshot_profile}.sqlite"));
     }
     let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    // Model out-of-band registry corruption, not a legal application update.
+    // The site-preference FK correctly prevents this mutation in normal use.
+    meta.pragma_update(None, "foreign_keys", false).unwrap();
     meta.execute(
         "UPDATE profiles SET id = ?1 WHERE id = ?2",
         params![registry_profile.to_string(), snapshot_profile.to_string()],
@@ -2501,6 +2504,114 @@ fn authoritative_snapshot_must_exactly_match_validated_registry_before_purge() {
         profile_path.exists(),
         "registry mismatch authorized destructive reconciliation"
     );
+}
+
+#[test]
+fn blocker_site_preferences_survive_session_saves_restart_and_stale_writes() {
+    use zephium_core::blocker::{
+        BlockerSite, BlockerSitePreferences, PersonalHide, SitePreferenceChange,
+    };
+    fn load(store: &SqliteStore, profile: ProfileId) -> Arc<BlockerSitePreferences> {
+        let (send, receive) = mpsc::channel();
+        assert!(store.load_profile_blocker_sites(
+            profile,
+            Box::new(move |outcome| send.send(outcome).unwrap())
+        ));
+        let BlockerSiteLoadOutcome::Loaded(value) =
+            receive.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("site preferences must load");
+        };
+        value
+    }
+    fn update(
+        store: &SqliteStore,
+        profile: ProfileId,
+        expected: u64,
+        next: Arc<BlockerSitePreferences>,
+    ) -> BlockerSiteUpdateOutcome {
+        let (send, receive) = mpsc::channel();
+        assert!(store.update_profile_blocker_sites(
+            profile,
+            expected,
+            next,
+            Box::new(move |outcome| send.send(outcome).unwrap())
+        ));
+        receive.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let site = BlockerSite::from_url("https://example.com/").unwrap();
+    let expected;
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        // The narrow load must make an already-admitted new-profile session
+        // visible without requiring an unrelated UI operation to flush it.
+        let initial = load(&store, profile);
+        let hidden = Arc::new(
+            initial
+                .changed(SitePreferenceChange::AddHide(PersonalHide {
+                    id: 0,
+                    site: site.clone(),
+                    selector: ".banner".into(),
+                    label: "Banner".into(),
+                    enabled: true,
+                }))
+                .unwrap(),
+        );
+        assert!(matches!(
+            update(&store, profile, initial.revision(), hidden.clone()),
+            BlockerSiteUpdateOutcome::Updated(_)
+        ));
+        expected = Arc::new(
+            hidden
+                .changed(SitePreferenceChange::Pause {
+                    site: site.clone(),
+                    paused: true,
+                })
+                .unwrap(),
+        );
+        assert!(matches!(
+            update(&store, profile, hidden.revision(), expected.clone()),
+            BlockerSiteUpdateOutcome::Updated(_)
+        ));
+        assert_eq!(
+            update(&store, profile, initial.revision(), hidden),
+            BlockerSiteUpdateOutcome::Conflict(expected.clone())
+        );
+        store.save_session(sample());
+        assert!(store.flush());
+        assert_eq!(load(&store, profile), expected);
+
+        let private = Arc::new(
+            BlockerSitePreferences::default()
+                .changed(SitePreferenceChange::Pause {
+                    site: BlockerSite::from_url("https://private-only.invalid/").unwrap(),
+                    paused: true,
+                })
+                .unwrap(),
+        );
+        assert_eq!(
+            update(&store, ProfileId::from(999), 1, private),
+            BlockerSiteUpdateOutcome::NotRegistered
+        );
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(load(&store, profile), expected);
+    assert!(load(&store, profile).paused(&site));
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        StoreShutdownOutcome::Clean
+    );
+    assert!(!std::fs::read(dir.path().join("meta.sqlite"))
+        .unwrap()
+        .windows(b"private-only.invalid".len())
+        .any(|w| w == b"private-only.invalid"));
 }
 
 #[test]

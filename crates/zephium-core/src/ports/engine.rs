@@ -527,7 +527,39 @@ pub enum StageMotion {
     Arrive,
 }
 
+/// Exactly-once completion ownership for a per-profile native site snapshot.
+/// Dropping a refused or shutdown task reports failure rather than stranding
+/// an accepted caller. It carries no page data or native handles.
+pub struct BlockerSiteCompletion(Option<Box<dyn FnOnce(bool) + Send>>);
+
+impl BlockerSiteCompletion {
+    pub fn new(done: impl FnOnce(bool) + Send + 'static) -> Self {
+        Self(Some(Box::new(done)))
+    }
+    pub fn finish(mut self, applied: bool) {
+        if let Some(done) = self.0.take() {
+            done(applied);
+        }
+    }
+}
+
+impl Drop for BlockerSiteCompletion {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(false);
+        }
+    }
+}
+
 pub trait Engine {
+    fn set_blocker_site_preferences(
+        &self,
+        _profile: ProfileId,
+        _preferences: Arc<crate::blocker::PreparedBlockerSites>,
+        completion: BlockerSiteCompletion,
+    ) {
+        completion.finish(false);
+    }
     /// Browser-owned file actions. Only trusted Shell admission supplies the
     /// profile partition; the caller supplies IDs, never filesystem paths.
     fn download_call(

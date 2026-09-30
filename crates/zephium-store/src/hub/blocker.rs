@@ -2,13 +2,74 @@
 
 use super::*;
 use rusqlite::Transaction;
+use std::sync::Arc;
+use zephium_core::blocker::BlockerSitePreferences;
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::ports::store::{BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome};
+use zephium_core::ports::store::{BlockerSiteLoadOutcome, BlockerSiteUpdateOutcome};
 
 const INITIAL_REVISION: i64 = BlockerConfigRevision::INITIAL.get() as i64;
 const DEFAULT_ENABLED: i64 = 0;
 
 impl Hub {
+    pub(crate) fn profile_blocker_sites(
+        &self,
+        profile: ProfileId,
+    ) -> rusqlite::Result<BlockerSiteLoadOutcome> {
+        if self.recovery_required.is_some() {
+            return Ok(BlockerSiteLoadOutcome::Failed);
+        }
+        if !self.registry.contains(&profile) {
+            return Ok(BlockerSiteLoadOutcome::NotRegistered);
+        }
+        Ok(BlockerSiteLoadOutcome::Loaded(Arc::new(
+            load_site_preferences(&self.meta, profile)?,
+        )))
+    }
+
+    pub(crate) fn update_profile_blocker_sites(
+        &mut self,
+        profile: ProfileId,
+        expected: u64,
+        next: Arc<BlockerSitePreferences>,
+    ) -> rusqlite::Result<BlockerSiteUpdateOutcome> {
+        if self.recovery_required.is_some() {
+            return Ok(BlockerSiteUpdateOutcome::Failed);
+        }
+        if !self.registry.contains(&profile) {
+            return Ok(BlockerSiteUpdateOutcome::NotRegistered);
+        }
+        let tx = self.meta.transaction()?;
+        let current = load_site_preferences(&tx, profile)?;
+        if current.revision() != expected {
+            return Ok(BlockerSiteUpdateOutcome::Conflict(Arc::new(current)));
+        }
+        if current == *next {
+            return Ok(BlockerSiteUpdateOutcome::Updated(next));
+        }
+        if expected.checked_add(1) != Some(next.revision()) {
+            return Ok(BlockerSiteUpdateOutcome::Failed);
+        }
+        let encoded = serde_json::to_string(next.as_ref())
+            .map_err(|_| invalid_data("blocker site preferences cannot be encoded"))?;
+        if encoded.len() > 2 * 1024 * 1024 {
+            return Ok(BlockerSiteUpdateOutcome::Failed);
+        }
+        let changed = tx.execute(
+            "UPDATE profile_blocker_sites SET revision=?3,payload=?4 WHERE profile_id=?1 AND revision=?2",
+            params![profile.to_string(), expected as i64, next.revision() as i64, encoded],
+        )?;
+        if changed != 1 {
+            return Err(invalid_data(
+                "blocker site preference CAS changed unexpectedly",
+            ));
+        }
+        Ok(match tx.commit() {
+            Ok(()) => BlockerSiteUpdateOutcome::Updated(next),
+            Err(_) => BlockerSiteUpdateOutcome::OutcomeUnknown,
+        })
+    }
+
     pub(crate) fn load_authoritative(&mut self) -> rusqlite::Result<Option<AuthoritativeLoad>> {
         let Some(state) = self.load()? else {
             // An empty registry still has an exact empty settings cohort.
@@ -59,6 +120,16 @@ impl Hub {
             "DELETE FROM profile_blocker_settings
              WHERE profile_id NOT IN (SELECT id FROM profiles)",
             [],
+        )?;
+        // Only genuinely new profiles get defaults. A missing row for an
+        // existing profile is not silently repaired or treated as an empty
+        // personal rule set. Deletion follows the profiles FK transaction.
+        tx.execute(
+            "INSERT INTO profile_blocker_sites(profile_id, revision, payload)
+             SELECT p.id, 1, ?1 FROM profiles p
+             WHERE NOT EXISTS (SELECT 1 FROM profile_blocker_settings b WHERE b.profile_id = p.id)",
+            [serde_json::to_string(&BlockerSitePreferences::default())
+                .map_err(|_| invalid_data("cannot encode default blocker site preferences"))?],
         )?;
         tx.execute(
             "INSERT OR IGNORE INTO profile_blocker_settings(profile_id, revision, enabled)
@@ -149,6 +220,30 @@ impl Hub {
     pub(crate) fn profile_blocker_configs(&self) -> rusqlite::Result<Vec<ProfileBlockerConfig>> {
         load_profile_blocker_configs(&self.meta, &self.registry)
     }
+}
+
+fn load_site_preferences(
+    conn: &Connection,
+    profile: ProfileId,
+) -> rusqlite::Result<BlockerSitePreferences> {
+    let (revision, payload): (i64, Option<String>) = conn.query_row(
+        "SELECT revision, CASE WHEN length(CAST(payload AS BLOB)) BETWEEN 1 AND 2097152 THEN payload END
+         FROM profile_blocker_sites WHERE profile_id=?1",
+        [profile.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let payload =
+        payload.ok_or_else(|| invalid_data("blocker site preferences exceed byte budget"))?;
+    let preferences: BlockerSitePreferences = serde_json::from_str(&payload)
+        .map_err(|_| invalid_data("blocker site preferences are invalid"))?;
+    if preferences.revision()
+        != u64::try_from(revision).map_err(|_| invalid_data("blocker site revision is invalid"))?
+    {
+        return Err(invalid_data(
+            "blocker site revision does not bind its payload",
+        ));
+    }
+    Ok(preferences)
 }
 
 fn load_profile_blocker_configs(

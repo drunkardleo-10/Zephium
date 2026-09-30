@@ -1638,6 +1638,21 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 22,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE profile_blocker_sites (
+                    profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE
+                        CHECK (length(CAST(profile_id AS BLOB)) = 26),
+                    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                    payload TEXT NOT NULL CHECK (length(CAST(payload AS BLOB)) BETWEEN 1 AND 2097152)
+                 ) STRICT;
+                 INSERT INTO profile_blocker_sites(profile_id, revision, payload)
+                 SELECT id, 1, '{\"version\":1,\"revision\":1,\"next_hide_id\":1,\"paused\":[],\"hides\":[]}' FROM profiles;",
+            )
+        },
+    },
 ];
 
 // These statements are the exact extension-branch PROFILE v14 artifact. The
@@ -2396,6 +2411,7 @@ mod tests {
         (19, 0xb30f_9566_ea44_65bf),
         (20, 0xeb32_555e_6d72_1ded),
         (21, 0xfe22_09ee_a55b_a3f5),
+        (22, 0x6a156db401738842),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
