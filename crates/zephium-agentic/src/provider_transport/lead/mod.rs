@@ -645,7 +645,7 @@ fn classify(status: StatusCode, body: &[u8]) -> WorkModelError {
         429 => WorkModelError::RateLimited {
             retry_after_ms: None,
         },
-        500 | 502 | 503 | 504 | 529 => WorkModelError::Overloaded,
+        500..=599 => WorkModelError::Overloaded,
         400 | 404 | 422 if too_long => WorkModelError::ContextTooLong,
         400..=499 => WorkModelError::BadRequest,
         _ => WorkModelError::Protocol,

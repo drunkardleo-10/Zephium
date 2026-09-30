@@ -18,10 +18,14 @@ pub(crate) enum WorkKeyStateV1 {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkModelsFaultV1 {
-    /// The provider refused the key; nothing was stored.
+    /// The provider refused the key.
     KeyRefused,
     /// The provider could not be reached.
     Unreachable,
+    Billing,
+    RateLimited,
+    ProviderDown,
+    Request,
     /// The Keychain refused.
     Keychain,
     /// The request was malformed (an unknown model, a bad address).
@@ -34,6 +38,8 @@ pub(crate) enum WorkModelsFaultV1 {
 pub(crate) struct WorkProviderStatusV1 {
     pub(crate) provider: WorkModelProvider,
     pub(crate) key: WorkKeyStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fault: Option<WorkModelsFaultV1>,
     /// The OpenAI-compatible endpoint's base URL.
     pub(crate) base: Option<String>,
 }
@@ -137,12 +143,37 @@ mod product {
         }
     }
 
+    fn provider_fault(fault: models::WorkKeyFault) -> WorkModelsFaultV1 {
+        match fault {
+            models::WorkKeyFault::WrongKey => WorkModelsFaultV1::KeyRefused,
+            models::WorkKeyFault::Billing => WorkModelsFaultV1::Billing,
+            models::WorkKeyFault::RateLimited => WorkModelsFaultV1::RateLimited,
+            models::WorkKeyFault::ProviderDown => WorkModelsFaultV1::ProviderDown,
+            models::WorkKeyFault::Offline => WorkModelsFaultV1::Unreachable,
+            models::WorkKeyFault::Keychain => WorkModelsFaultV1::Keychain,
+            models::WorkKeyFault::Request => WorkModelsFaultV1::Request,
+        }
+    }
+
+    fn checked(
+        profile: ProfileId,
+        provider: WorkModelProvider,
+        status: models::WorkKeyStatus,
+    ) -> Option<WorkModelsFaultV1> {
+        models::fill_defaults(profile, provider);
+        if status == models::WorkKeyStatus::Invalid {
+            return Some(WorkModelsFaultV1::KeyRefused);
+        }
+        models::provider_failure(provider).map(provider_fault)
+    }
+
     pub(super) fn fault(error: WorkModelError) -> WorkModelsFaultV1 {
         match error {
-            WorkModelError::Network
-            | WorkModelError::Overloaded
-            | WorkModelError::RateLimited { .. }
-            | WorkModelError::Protocol => WorkModelsFaultV1::Unreachable,
+            WorkModelError::Network => WorkModelsFaultV1::Unreachable,
+            WorkModelError::Overloaded => WorkModelsFaultV1::ProviderDown,
+            WorkModelError::RateLimited { .. } => WorkModelsFaultV1::RateLimited,
+            WorkModelError::OverBudget => WorkModelsFaultV1::Billing,
+            WorkModelError::Protocol => WorkModelsFaultV1::Request,
             WorkModelError::Unauthorized => WorkModelsFaultV1::Keychain,
             WorkModelError::MissingKey => WorkModelsFaultV1::KeyRefused,
             _ => WorkModelsFaultV1::Invalid,
@@ -167,6 +198,7 @@ mod product {
                 .map(|provider| WorkProviderStatusV1 {
                     provider: provider.provider,
                     key: key(provider.key),
+                    fault: provider.fault.map(provider_fault),
                     base: provider.base,
                 })
                 .collect(),
@@ -180,24 +212,19 @@ mod product {
 
     pub(super) async fn act(profile: ProfileId, action: Action) -> Option<WorkModelsFaultV1> {
         let result = match action {
-            Action::Read => {
-                tauri::async_runtime::spawn(models::refresh_cloud_catalog());
-                Ok(())
-            }
+            Action::Read => Ok(()),
             Action::Choose(role, id) => models::choose(profile, role, id.as_deref()),
             Action::SetKey(provider, secret) => match models::set_key(provider, secret).await {
-                Ok(models::WorkKeyStatus::Invalid) => return Some(WorkModelsFaultV1::KeyRefused),
-                Ok(_) => Ok(()),
+                Ok(status) => return checked(profile, provider, status),
                 Err(WorkModelError::BadRequest) => return Some(WorkModelsFaultV1::Invalid),
                 Err(error) => Err(error),
             },
             Action::TestKey(provider) => match models::test_key(provider).await {
-                Ok(models::WorkKeyStatus::Invalid) => return Some(WorkModelsFaultV1::KeyRefused),
-                Ok(_) => Ok(()),
+                Ok(status) => return checked(profile, provider, status),
                 Err(error) => Err(error),
             },
             Action::ClearKey(provider) => models::clear_key(provider).await,
-            Action::Endpoint(base) => models::set_compatible_base(base.as_deref()),
+            Action::Endpoint(base) => models::set_compatible_base(base.as_deref()).await,
         };
         result.err().map(fault)
     }
@@ -290,6 +317,44 @@ async fn respond(
 #[specta::specta]
 pub(crate) async fn work_models(caller: WebviewWindow, expected_profile: String) -> WorkModelsV1 {
     respond(caller, expected_profile, Action::Read, "work_models").await
+}
+
+/// A narrow readiness contract for the Work composer. Only a missing lead blocks.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct WorkModelsReadyV1 {
+    pub(crate) version: u16,
+    pub(crate) profile: String,
+    pub(crate) ready: bool,
+    pub(crate) missing_roles: Vec<WorkModelRole>,
+    pub(crate) fault: Option<WorkModelsFaultV1>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_models_ready(
+    caller: WebviewWindow,
+    expected_profile: String,
+) -> WorkModelsReadyV1 {
+    let profile = profile_of(&caller, &expected_profile, "work_models_ready");
+    #[cfg(feature = "work-product")]
+    let ready = match profile {
+        Some(profile) => zephium_app::work_models::ready(profile).await,
+        None => false,
+    };
+    #[cfg(not(feature = "work-product"))]
+    let ready = false;
+    WorkModelsReadyV1 {
+        version: 1,
+        profile: expected_profile,
+        ready,
+        missing_roles: if ready {
+            vec![]
+        } else {
+            vec![WorkModelRole::Lead]
+        },
+        fault: (profile.is_none() || !cfg!(feature = "work-product"))
+            .then_some(WorkModelsFaultV1::Unavailable),
+    }
 }
 
 #[tauri::command]
@@ -413,4 +478,41 @@ pub(crate) async fn work_more_models(
     }
     #[cfg(not(feature = "work-product"))]
     refused(WorkModelsFaultV1::Unavailable)
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_and_provider_faults_have_stable_wire_shapes() {
+        let ready = WorkModelsReadyV1 {
+            version: 1,
+            profile: "profile".into(),
+            ready: false,
+            missing_roles: vec![WorkModelRole::Lead],
+            fault: None,
+        };
+        assert_eq!(
+            serde_json::to_value(ready).unwrap(),
+            serde_json::json!({
+                "version": 1, "profile": "profile", "ready": false,
+                "missing_roles": ["lead"], "fault": null
+            })
+        );
+        let mut provider = WorkProviderStatusV1 {
+            provider: WorkModelProvider::OpenAi,
+            key: WorkKeyStateV1::Valid,
+            fault: None,
+            base: None,
+        };
+        assert!(serde_json::to_value(&provider)
+            .unwrap()
+            .get("fault")
+            .is_none());
+        provider.fault = Some(WorkModelsFaultV1::Billing);
+        let value = serde_json::to_value(provider).unwrap();
+        assert_eq!(value["key"], "valid");
+        assert_eq!(value["fault"], "billing");
+    }
 }

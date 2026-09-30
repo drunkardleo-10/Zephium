@@ -1,6 +1,6 @@
 //! The built-in model list: a short, curated set of current models per
 //! provider, lead and small, checked against each provider's own model and
-//! pricing pages (and OpenRouter's catalog) on 2026-09-29; and the Zephium
+//! pricing pages (and OpenRouter's catalog) on 2026-09-30; and the Zephium
 //! Cloud catalog parser, whose list replaces this one when signed in.
 
 use serde_json::Value;
@@ -85,6 +85,32 @@ const SPECS: &[Spec] = &[
         vision: true,
         search: true,
         price: (10.0, 0.25, 50.0),
+    },
+    // https://developers.openai.com/api/docs/models/gpt-5.6-terra
+    Spec {
+        provider: P::OpenAi,
+        model: "gpt-5.6-terra",
+        name: "GPT-5.6 Terra",
+        roles: &[R::Lead, R::Page],
+        recommended: false,
+        context: 1_050_000,
+        output: 128_000,
+        vision: true,
+        search: true,
+        price: (2.0, 0.2, 12.0),
+    },
+    // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    Spec {
+        provider: P::OpenAi,
+        model: "gpt-6.1-sol",
+        name: "GPT-6.1 Sol",
+        roles: &[R::Lead, R::Page],
+        recommended: true,
+        context: 1_050_000,
+        output: 128_000,
+        vision: true,
+        search: true,
+        price: (2.0, 0.1, 10.0),
     },
     Spec {
         provider: P::OpenAi,
@@ -333,11 +359,12 @@ pub fn family_default(provider: WorkModelProvider, role: WorkModelRole) -> Optio
     Some(match (provider, role) {
         (P::Anthropic, R::Lead) => "claude-opus-5-5",
         (P::Anthropic, R::Page | R::Light) => "claude-haiku-4-5-20251001",
-        (P::OpenAi, R::Lead | R::Page | R::Light) => "gpt-6-luna",
+        (P::OpenAi, R::Lead) => "gpt-6-astra",
+        (P::OpenAi, R::Page | R::Light) => "gpt-6-luna",
         (P::Google, R::Lead) => "gemini-3.1-pro-preview",
         (P::Google, R::Page) => "gemini-3.8-flash",
         (P::Google, R::Light) => "gemini-3.5-flash-lite",
-        (P::DeepSeek, R::Lead) => "deepseek-v4-pro",
+        (P::DeepSeek, R::Lead | R::Page) => "deepseek-v4-pro",
         (P::DeepSeek, R::Light) => "deepseek-flash",
         (P::OpenRouter, R::Lead) => "anthropic/claude-sonnet-5.5",
         (P::OpenRouter, R::Page | R::Light) => "openai/gpt-6-luna",
@@ -481,7 +508,7 @@ mod tests {
                 assert!(entry.roles.contains(&role));
             }
         }
-        assert_eq!(family_default(P::OpenAi, R::Lead), Some("gpt-6-luna"));
+        assert_eq!(family_default(P::OpenAi, R::Lead), Some("gpt-6-astra"));
         for provider in [
             P::OpenAi,
             P::Anthropic,
@@ -493,7 +520,7 @@ mod tests {
                 .iter()
                 .filter(|e| e.model.provider == provider)
                 .count();
-            assert!((2..=5).contains(&listed), "{provider:?} lists {listed}");
+            assert!((2..=6).contains(&listed), "{provider:?} lists {listed}");
         }
         assert_eq!(
             builtin_price(P::Anthropic, "claude-opus-5-5")

@@ -12,14 +12,22 @@ const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LISTED: usize = 400;
 
 /// What a key check found. It never carries provider text.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LeadKeyCheck {
     /// The provider accepted the key.
-    Valid,
+    Valid(Vec<WorkModelEntry>),
     /// The provider refused the key.
     Invalid,
     /// The provider could not be asked (offline, outage, limits).
     Unreachable,
+    /// Billing or quota prevents calls.
+    Billing,
+    /// The provider asks for a later retry.
+    RateLimited,
+    /// The provider is temporarily unavailable.
+    ProviderDown,
+    /// The response could not be understood.
+    Failed,
 }
 
 async fn get(
@@ -35,6 +43,7 @@ async fn get(
     let response = http(url.scheme() == "http")?
         .get(url)
         .headers(headers)
+        .timeout(std::time::Duration::from_secs(12))
         .send()
         .await
         .map_err(|_| WorkModelError::Network)?;
@@ -59,27 +68,50 @@ pub async fn check_key(target: &LeadTarget, secret: &LeadSecret) -> LeadKeyCheck
     } else {
         "models"
     };
-    match get(target, path, None, secret).await {
-        Ok((200..=299, _)) => LeadKeyCheck::Valid,
-        Ok((401 | 403, _)) => LeadKeyCheck::Invalid,
-        // Gemini answers an unknown key with 400 API_KEY_INVALID.
-        Ok((400, body)) if target.upstream == WorkModelProvider::Google => {
+    let query = match target.upstream {
+        WorkModelProvider::Anthropic => Some("limit=1000"),
+        WorkModelProvider::Google => Some("pageSize=1000"),
+        _ => None,
+    };
+    match get(target, path, query, secret).await {
+        Ok((200..=299, body)) => match serde_json::from_slice::<Value>(&body) {
+            Ok(body)
+                if body.get("data").is_some_and(Value::is_array)
+                    || body.get("models").is_some_and(Value::is_array)
+                    || (target.upstream == WorkModelProvider::OpenRouter
+                        && body.get("data").is_some_and(Value::is_object)) =>
+            {
+                LeadKeyCheck::Valid(parse_list(target, &body))
+            }
+            Ok(_) => LeadKeyCheck::Failed,
+            Err(_) => LeadKeyCheck::Failed,
+        },
+        Ok((status, body)) => {
             let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let invalid = json
-                .pointer("/error/details")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .any(|detail| {
-                    detail.get("reason").and_then(Value::as_str) == Some("API_KEY_INVALID")
-                });
-            if invalid {
-                LeadKeyCheck::Invalid
-            } else {
-                LeadKeyCheck::Unreachable
+            let invalid_google = target.upstream == WorkModelProvider::Google
+                && json
+                    .pointer("/error/details")
+                    .and_then(Value::as_array)
+                    .is_some_and(|details| {
+                        details.iter().any(|d| {
+                            d.get("reason").and_then(Value::as_str) == Some("API_KEY_INVALID")
+                        })
+                    });
+            if invalid_google {
+                return LeadKeyCheck::Invalid;
+            }
+            match super::classify(
+                reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_REQUEST),
+                &body,
+            ) {
+                WorkModelError::Unauthorized => LeadKeyCheck::Invalid,
+                WorkModelError::OverBudget => LeadKeyCheck::Billing,
+                WorkModelError::RateLimited { .. } => LeadKeyCheck::RateLimited,
+                WorkModelError::Overloaded => LeadKeyCheck::ProviderDown,
+                _ => LeadKeyCheck::Failed,
             }
         }
-        _ => LeadKeyCheck::Unreachable,
+        Err(_) => LeadKeyCheck::Unreachable,
     }
 }
 
@@ -94,15 +126,11 @@ pub async fn list_models(
         _ => None,
     };
     let (status, body) = get(target, "models", query, secret).await?;
-    match status {
-        200..=299 => {}
-        401 | 403 => return Err(WorkModelError::Unauthorized),
-        429 => {
-            return Err(WorkModelError::RateLimited {
-                retry_after_ms: None,
-            })
-        }
-        _ => return Err(WorkModelError::Protocol),
+    if !(200..=299).contains(&status) {
+        return Err(super::classify(
+            reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_REQUEST),
+            &body,
+        ));
     }
     let body: Value = serde_json::from_slice(&body).map_err(|_| WorkModelError::Protocol)?;
     Ok(parse_list(target, &body))
@@ -153,6 +181,15 @@ fn row_entry(
     wire: WorkModelWire,
     row: &Value,
 ) -> Option<WorkModelEntry> {
+    if row.get("deprecated").and_then(Value::as_bool) == Some(true)
+        || row.get("deprecation").is_some_and(|value| !value.is_null())
+        || matches!(
+            row.get("status").and_then(Value::as_str),
+            Some("deprecated" | "retired")
+        )
+    {
+        return None;
+    }
     let text = |key: &str| row.get(key).and_then(Value::as_str);
     let number = |value: Option<&Value>| {
         value
@@ -228,7 +265,7 @@ fn row_entry(
         }
         WorkModelProvider::Cloud => return None,
     };
-    if !valid_text(&model, 160) || !valid_text(&name, 96) {
+    if deprecated(provider, &model) || !valid_text(&model, 160) || !valid_text(&name, 96) {
         return None;
     }
     let price = if provider == WorkModelProvider::OpenRouter {
@@ -274,6 +311,75 @@ fn row_entry(
     })
 }
 
+// Official deprecation notices, checked 2026-09-30. Aliases and snapshots
+// sharing a retired family are hidden from the full listing as well.
+fn deprecated(provider: WorkModelProvider, id: &str) -> bool {
+    let (provider, id) = if provider == WorkModelProvider::OpenRouter {
+        match id.split_once('/') {
+            Some(("openai", id)) => (WorkModelProvider::OpenAi, id),
+            Some(("anthropic", id)) => (WorkModelProvider::Anthropic, id),
+            _ => (provider, id),
+        }
+    } else {
+        (provider, id)
+    };
+    match provider {
+        // https://developers.openai.com/api/docs/deprecations
+        WorkModelProvider::OpenAi => {
+            [
+                "gpt-3.5",
+                "gpt-4-",
+                "gpt-4-turbo",
+                "gpt-4.1-nano",
+                "gpt-4o-2024-05-13",
+                "gpt-5.2-chat",
+                "gpt-5.3-chat",
+                "gpt-5-2025-08-07",
+                "gpt-5-mini",
+                "gpt-5-nano",
+                "gpt-5-pro",
+                "o3-2025",
+                "o3-pro",
+                "gpt-5.4-cyber",
+            ]
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+                || matches!(id, "gpt-4" | "gpt-5" | "o3")
+        }
+        // https://platform.claude.com/docs/en/about-claude/model-deprecations
+        WorkModelProvider::Anthropic => {
+            ["claude-1.", "claude-2.", "claude-instant-", "claude-3-"]
+                .iter()
+                .any(|prefix| id.starts_with(prefix))
+                || matches!(
+                    id,
+                    "claude-mythos-preview"
+                        | "claude-opus-4-1-20250805"
+                        | "claude-opus-4-20250514"
+                        | "claude-sonnet-4-20250514"
+                )
+        }
+        // https://ai.google.dev/gemini-api/docs/deprecations
+        WorkModelProvider::Google => {
+            id.starts_with("gemini-2.5-pro-preview-")
+                || matches!(
+                    id,
+                    "gemini-2.0-flash"
+                        | "gemini-2.0-flash-001"
+                        | "gemini-3-pro-preview"
+                        | "gemini-3.1-flash-lite-preview"
+                        | "gemini-3.1-flash-image-preview"
+                        | "gemini-3-pro-image-preview"
+                        | "gemini-2.5-flash-lite-preview-09-2025"
+                        | "gemini-2.5-flash-preview-05-20"
+                        | "gemini-2.5-flash-image-preview"
+                        | "gemini-2.5-flash-preview-09-25"
+                )
+        }
+        _ => false,
+    }
+}
+
 fn chat_model(id: &str, prefixes: &[&str]) -> bool {
     const NOT_CHAT: &[&str] = &[
         "audio",
@@ -317,8 +423,63 @@ fn openrouter_price(row: &Value) -> Option<WorkModelPrice> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn current_builtins_survive_and_retired_models_are_hidden() {
+        use zephium_core::work::model::WorkModelProvider as P;
+        for entry in super::super::models::builtin() {
+            assert!(!super::deprecated(entry.model.provider, &entry.model.model));
+        }
+        for (provider, id) in [
+            (P::OpenAi, "gpt-3.5-turbo"),
+            (P::Anthropic, "claude-opus-4-1-20250805"),
+            (P::Google, "gemini-3-pro-preview"),
+        ] {
+            assert!(super::deprecated(provider, id));
+        }
+        assert!(!super::deprecated(P::Google, "gemini-2.5-pro"));
+    }
+
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn key_checks_are_free_and_distinguish_service_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, body, expected) in [
+            (
+                401,
+                r#"{"error":{"message":"secret provider text"}}"#,
+                LeadKeyCheck::Invalid,
+            ),
+            (403, "{}", LeadKeyCheck::Invalid),
+            (402, "{}", LeadKeyCheck::Billing),
+            (
+                429,
+                r#"{"error":{"code":"insufficient_quota"}}"#,
+                LeadKeyCheck::Billing,
+            ),
+            (429, "{}", LeadKeyCheck::RateLimited),
+            (501, "{}", LeadKeyCheck::ProviderDown),
+            (200, r#"{"data":[]}"#, LeadKeyCheck::Valid(vec![])),
+            (200, "{}", LeadKeyCheck::Failed),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let n = socket.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /v1/models "));
+                socket.write_all(format!("HTTP/1.1 {status} Response\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let target = LeadTarget::compatible(&format!("http://{address}/v1")).unwrap();
+            assert_eq!(
+                check_key(&target, &LeadSecret::new("test-only".into()).unwrap()).await,
+                expected
+            );
+            server.await.unwrap();
+        }
+    }
 
     #[test]
     fn listings_keep_chat_models_with_their_limits_and_prices() {
