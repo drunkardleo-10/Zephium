@@ -2,13 +2,15 @@
 //!
 //! This crate owns only the untrusted network boundary shared by independent
 //! update domains. It grants no package, catalog, activation, or filesystem
-//! authority. Callers must authenticate every returned byte through their own
-//! signed repository and product policy.
+//! authority. Repository callers authenticate returned bytes with their signed
+//! policy. The official-filter API explicitly provides only HTTPS server trust
+//! and requires independent source validation and last-known-good activation.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
 pub mod chrome_store;
+pub mod official_filters;
 
 use std::fmt;
 use std::time::Duration;
