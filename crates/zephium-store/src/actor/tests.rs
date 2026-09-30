@@ -300,7 +300,7 @@ fn default_blocker_configs(state: &SessionState) -> Vec<ProfileBlockerConfig> {
         .map(|profile| ProfileBlockerConfig {
             profile: profile.id,
             revision: BlockerConfigRevision::INITIAL,
-            config: BlockerConfig { enabled: false },
+            config: BlockerConfig::default(),
         })
         .collect();
     configs.sort_unstable_by_key(|config| config.profile.to_string());
@@ -1029,7 +1029,7 @@ fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
 }
 
 #[test]
-fn blocker_preferences_load_with_the_authoritative_session_and_default_disabled() {
+fn blocker_preferences_load_with_the_authoritative_session_and_default_enabled() {
     let store = SqliteStore::in_memory().unwrap();
     let session = two_profile_sample();
     store.save_session(session.clone());
@@ -1105,7 +1105,7 @@ fn blocker_preference_update_survives_a_clean_process_boundary() {
         assert!(store.update_profile_blocker_config(
             profile,
             BlockerConfigRevision::INITIAL,
-            BlockerConfig { enabled: true },
+            BlockerConfig { enabled: false },
             Box::new(move |outcome| {
                 done.send(outcome).unwrap();
             }),
@@ -1128,7 +1128,7 @@ fn blocker_preference_update_survives_a_clean_process_boundary() {
             blocker_configs: vec![ProfileBlockerConfig {
                 profile,
                 revision,
-                config: BlockerConfig { enabled: true },
+                config: BlockerConfig { enabled: false },
             }],
         }
     );
@@ -1258,7 +1258,7 @@ fn session_commit_preserves_survivors_and_defaults_only_new_profiles() {
         .update_profile_blocker_config(
             first_profile,
             BlockerConfigRevision::INITIAL,
-            BlockerConfig { enabled: true },
+            BlockerConfig { enabled: false },
         )
         .unwrap();
     let BlockerConfigUpdateOutcome::Updated(updated) = updated else {
@@ -1274,7 +1274,7 @@ fn session_commit_preserves_survivors_and_defaults_only_new_profiles() {
             ProfileBlockerConfig {
                 profile: ProfileId::from(3),
                 revision: BlockerConfigRevision::INITIAL,
-                config: BlockerConfig { enabled: false },
+                config: BlockerConfig::default(),
             },
         ]
     );

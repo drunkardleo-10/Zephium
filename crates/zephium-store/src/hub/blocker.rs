@@ -9,7 +9,7 @@ use zephium_core::ports::store::{BlockerConfigLoadOutcome, BlockerConfigUpdateOu
 use zephium_core::ports::store::{BlockerSiteLoadOutcome, BlockerSiteUpdateOutcome};
 
 const INITIAL_REVISION: i64 = BlockerConfigRevision::INITIAL.get() as i64;
-const DEFAULT_ENABLED: i64 = 0;
+const DEFAULT_ENABLED: i64 = 1;
 
 impl Hub {
     pub(crate) fn profile_blocker_sites(
@@ -115,7 +115,7 @@ impl Hub {
     ) -> rusqlite::Result<()> {
         // Preserve survivor rows exactly. Rows for explicitly removed
         // profiles disappear in this same transaction, while genuinely new
-        // profiles receive the conservative disabled initial preference.
+        // profiles receive protection enabled by default.
         tx.execute(
             "DELETE FROM profile_blocker_settings
              WHERE profile_id NOT IN (SELECT id FROM profiles)",

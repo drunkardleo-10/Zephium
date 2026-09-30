@@ -87,11 +87,17 @@ impl ContentPolicyGeneration {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockerConfig {
-    /// Blocking remains off until a concrete authenticated source package is
-    /// available; an empty catalog must never be projected as protection.
+    /// Desired protection. Readiness is reported separately until a concrete
+    /// bundled or validated updated policy has been installed.
     pub enabled: bool,
+}
+
+impl Default for BlockerConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

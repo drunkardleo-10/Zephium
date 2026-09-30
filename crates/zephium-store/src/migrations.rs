@@ -1653,6 +1653,19 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 23,
+        up: |tx| {
+            // One release transition, never a startup override. Subsequent
+            // explicit opt-outs survive reopening. Do not reset revision or
+            // change site pauses/personal hides. Exhaustion aborts atomically.
+            tx.execute_batch(
+                "UPDATE profile_blocker_settings
+                 SET enabled = 1, revision = revision + 1
+                 WHERE enabled = 0;",
+            )
+        },
+    },
 ];
 
 // These statements are the exact extension-branch PROFILE v14 artifact. The
@@ -2412,6 +2425,7 @@ mod tests {
         (20, 0xeb32_555e_6d72_1ded),
         (21, 0xfe22_09ee_a55b_a3f5),
         (22, 0x6a156db401738842),
+        (23, 0x6a156db401738842),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2773,6 +2787,77 @@ mod tests {
                 .unwrap(),
             PROFILE.last().unwrap().version
         );
+    }
+
+    #[test]
+    fn protection_release_migration_enables_once_and_preserves_site_preferences() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..22]).unwrap();
+        let off = "00000000000000000000000001";
+        let on = "00000000000000000000000002";
+        for (id, enabled, revision) in [(off, 0, 7), (on, 1, 9)] {
+            conn.execute(
+                "INSERT INTO profiles(id,name,kind,position) VALUES(?1,'Test','named',?2)",
+                rusqlite::params![id, enabled],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO profile_blocker_settings VALUES(?1,?2,?3)",
+                rusqlite::params![id, revision, enabled],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO profile_blocker_sites VALUES(?1,5,'unchanged-site-preferences')",
+                [id],
+            )
+            .unwrap();
+        }
+        apply(&mut conn, META).unwrap();
+        let settings = |conn: &Connection, id: &str| {
+            conn.query_row(
+                "SELECT enabled,revision FROM profile_blocker_settings WHERE profile_id=?1",
+                [id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(settings(&conn, off), (1, 8));
+        assert_eq!(settings(&conn, on), (1, 9));
+        assert_eq!(conn.query_row("SELECT count(*) FROM profile_blocker_sites WHERE revision=5 AND payload='unchanged-site-preferences'", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
+        conn.execute(
+            "UPDATE profile_blocker_settings SET enabled=0,revision=9 WHERE profile_id=?1",
+            [off],
+        )
+        .unwrap();
+        apply(&mut conn, META).unwrap();
+        assert_eq!(
+            settings(&conn, off),
+            (0, 9),
+            "later explicit opt-out survives reopening"
+        );
+    }
+
+    #[test]
+    fn protection_release_migration_rolls_back_revision_exhaustion() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..22]).unwrap();
+        conn.execute_batch("INSERT INTO profile_blocker_settings VALUES('00000000000000000000000001',7,0),('00000000000000000000000002',9223372036854775807,0)").unwrap();
+        assert!(apply(&mut conn, META).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            22
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT sum(enabled) FROM profile_blocker_settings",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(conn.query_row("SELECT revision FROM profile_blocker_settings WHERE profile_id='00000000000000000000000001'", [], |r| r.get::<_,i64>(0)).unwrap(), 7);
     }
 
     #[test]
