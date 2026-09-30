@@ -81,7 +81,7 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
     document.documentElement.dataset.theme = "dark";
   };
   await shoot("rest");
-  await screen.getByRole("button", { name: "Select", exact: true }).hover();
+  await screen.getByRole("button", { name: "Hand", exact: true }).hover();
   await new Promise((done) => setTimeout(done, 900));
   await shoot("hint");
   await screen.getByRole("button", { name: "Works" }).hover();
@@ -92,8 +92,6 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
     .poll(() => screen.container.querySelector<HTMLButtonElement>(".model-trigger")?.disabled)
     .toBe(false);
   await shoot("typing");
-  await screen.getByRole("button", { name: "Private run", exact: true }).click();
-  await shoot("private");
   await field.fill("");
   (document.activeElement as HTMLElement | null)?.blur();
   await screen.getByRole("button", { name: "Works" }).click();

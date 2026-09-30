@@ -39,7 +39,34 @@
   const id = $props.id();
   let textarea = $state<HTMLTextAreaElement>();
   let focused = $state(false);
-  const engaged = $derived(focused || !!value.trim() || holding);
+  let surface = $state<HTMLElement>();
+  /** A menu or popover the field's own controls opened: it may live in a portal, but it is the bar's. */
+  let menu = $state(false);
+  const opened = (element: Element | undefined) =>
+    !!element?.querySelector('.field [aria-expanded="true"]');
+  $effect(() => {
+    const element = surface;
+    if (!element) return;
+    const observer = new MutationObserver(() => {
+      const open = opened(element);
+      if (open === menu) return;
+      menu = open;
+      // A menu closed on something outside the bar: the bar lets go with it.
+      if (!open)
+        requestAnimationFrame(() => {
+          if (!element.contains(document.activeElement)) focused = false;
+        });
+    });
+    observer.observe(element, { subtree: true, attributeFilter: ["aria-expanded"] });
+    return () => observer.disconnect();
+  });
+  const engaged = $derived(focused || menu || !!value.trim() || holding);
+  /**
+   * WebKit does not focus a button it clicks: a press inside the bar blurs
+   * the field with nowhere named to go. The bar holds through its own
+   * presses and lets go on a press outside it (a menu it opened aside).
+   */
+  let pressing = false;
   const mode = $derived(engaged ? "focus" : "rest");
 
   function grow() {
@@ -64,11 +91,25 @@
   }
 </script>
 
+<svelte:window
+  onpointerdown={(event) => {
+    const target = event.target instanceof Node ? event.target : null;
+    if (!focused || menu || !surface || (target && surface.contains(target))) return;
+    focused = false;
+  }}
+  onpointerup={() => requestAnimationFrame(() => (pressing = false))}
+  onpointercancel={() => (pressing = false)}
+/>
+
 <div class="work-bar" data-mode={mode} data-engaged={engaged} bind:this={ref}>
   {#if above}<div class="above">{@render above()}</div>{/if}
   <div
     class="surface"
     role="presentation"
+    bind:this={surface}
+    onpointerdown={(event) => {
+      if (event.target instanceof Element && event.target.closest(".field")) pressing = true;
+    }}
     onfocusin={(event) => {
       // A tool's own panel is the tools at work, not the field: the bar stays as it is.
       if (event.target instanceof Element && event.target.closest(".tools")) return;
@@ -77,8 +118,9 @@
     onfocusout={(event) => {
       const next = event.relatedTarget;
       if (next instanceof Node && event.currentTarget.contains(next)) return;
-      // A menu the bar's own control opened holds the bar open while it is open.
-      if (event.currentTarget.querySelector('.trail [aria-expanded="true"]')) return;
+      if (pressing && !next) return;
+      // A menu the field's own control opened holds the bar open while it is open, portals included.
+      if (opened(event.currentTarget)) return;
       focused = false;
     }}
   >

@@ -40,9 +40,7 @@
     StickyNote03Icon,
     Cursor01Icon,
     HandIcon,
-    IncognitoIcon,
   } from "../lib/icons";
-  import Icon from "$shared/ui/Icon";
   import WorkBar from "./bar/WorkBar.svelte";
   import { centreSize, picksSheet } from "./objects/centre";
   import { partAsks } from "./asks/actions";
@@ -672,12 +670,6 @@
   let panel = $state<"note" | "tabs" | "media" | "attach" | null>(null);
   let attachKind = $state<AttachKind>("tabs");
   let objectivePending = $state(false);
-  /** The next requests run on their own, without the person's sessions or context. */
-  let privateRun = $state(false);
-  $effect(() => {
-    void snapshot?.id;
-    privateRun = false;
-  });
   let composerElement = $state<HTMLElement>();
   let composerHeight = $state(0);
   $effect(() => {
@@ -1743,14 +1735,14 @@
     if (!text || busy) return;
     const current = objectiveSession;
     if (runningObjective && current) {
-      const context = privateRun ? null : contextSel;
+      const context = contextSel;
       session.composer = "";
       openTabs = false;
       // Words typed while the agent works steer it now; if it cannot take
       // them mid-step, they go next.
       if (activeExecution) {
         if (!(await current.steer(text))) current.enqueue(text);
-      } else await current.continueWith(text, context, { private: privateRun });
+      } else await current.continueWith(text, context);
       return;
     }
     await createObjective();
@@ -1765,7 +1757,7 @@
       objective: session.composer.trim(),
       command: commandId(),
       attached: false,
-      context: privateRun ? null : contextSel,
+      context: contextSel,
     };
     session.objectiveSubmission = submission;
     objectivePending = true;
@@ -1839,7 +1831,7 @@
       openTabs = false;
       const skill = startSkill;
       startSkill = null;
-      await current.run(submission.context, { private: privateRun, skill });
+      await current.run(submission.context, { skill });
     } finally {
       objectivePending = false;
     }
@@ -2036,19 +2028,13 @@
       />{/snippet}</AttachPanel
   >{/snippet}
 {#snippet barTools()}
+  {@const hand = pointerTool() === "hand"}
   <BarTool
-    icon={Cursor01Icon}
-    label={m.work_tool_select()}
-    keys={["V"]}
-    pressed={pointerTool() === "select"}
-    onclick={() => setPointerTool("select")}
-  />
-  <BarTool
-    icon={HandIcon}
-    label={m.work_tool_hand()}
-    keys={["H"]}
-    pressed={pointerTool() === "hand"}
-    onclick={() => setPointerTool("hand")}
+    icon={hand ? HandIcon : Cursor01Icon}
+    label={hand ? m.work_tool_hand() : m.work_tool_select()}
+    keys={[hand ? "H" : "V"]}
+    also={{ label: hand ? m.work_tool_select() : m.work_tool_hand(), keys: [hand ? "V" : "H"] }}
+    onclick={() => setPointerTool(hand ? "select" : "hand")}
   />
   <span class="tool-rule" aria-hidden="true"></span>
   <BarTool
@@ -2632,18 +2618,7 @@
         context={openTabs || contextSel ? composerContext : undefined}
         onsubmit={() => void send()}
       >
-        {#snippet trailing()}<button
-            type="button"
-            class="private"
-            class:on={privateRun}
-            aria-pressed={privateRun}
-            aria-label={m.work_private_run()}
-            title={m.work_private_run_hint()}
-            onclick={() => (privateRun = !privateRun)}
-            ><Icon icon={IncognitoIcon} size={15} strokeWidth={1.6} />{#if privateRun}<span
-                >{m.work_private_run()}</span
-              >{/if}</button
-          >{#await loadModels() then picker}<picker.default
+        {#snippet trailing()}{#await loadModels() then picker}<picker.default
               profile={session.profile}
             />{/await}{/snippet}
       </WorkBar>{:else}<div class="tools-only" role="toolbar" aria-label={m.work_env_toolbar()}>
@@ -2904,43 +2879,6 @@
     max-block-size: 100%;
     object-fit: contain;
     border-radius: var(--radius-row);
-  }
-
-  /* A private run: a quiet mark before the model; lit, it names itself. */
-  .private {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    block-size: 28px;
-    min-inline-size: 28px;
-    margin-block: 3px;
-    padding-inline: 7px;
-    border: 0;
-    border-radius: var(--radius-control);
-    background: transparent;
-    color: var(--color-faint);
-    font: inherit;
-    font-size: var(--text-label);
-    font-weight: 500;
-    cursor: default;
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      color var(--motion-fast) var(--ease-out);
-  }
-
-  .private:hover {
-    background: var(--color-fill-hover);
-    color: var(--color-text);
-  }
-
-  .private:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 1px;
-  }
-
-  .private.on {
-    background: var(--color-accent-soft);
-    color: var(--color-accent);
   }
 
   .lift-plain p {

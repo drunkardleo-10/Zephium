@@ -22,7 +22,7 @@ test("a request just sent stands in the middle of what can be seen, clear of the
   const screen = await render(WorkCanvas, {
     items: [first],
     links: [],
-    authoritative: new Set(),
+    authoritative: new Set<string>(),
     initialView: {
       positions: { first: { x: 0, y: 0 }, second: { x: 0, y: 1400 } },
       viewport: { x: 40, y: 40, zoom: 1 },

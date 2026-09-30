@@ -14,6 +14,7 @@
     wide = false,
     keys = [],
     pressed,
+    also,
     content,
     onopenchange,
     onclick,
@@ -29,11 +30,20 @@
     keys?: string[];
     /** A mode it switches on: shown pressed. */
     pressed?: boolean;
+    /** What a click turns it into, named in its hint after its own name. */
+    also?: { label: string; keys: string[] };
     /** What the tool opens; without one the tool acts on a click. */
     content?: Snippet;
     onopenchange?: (open: boolean) => void;
     onclick?: () => void;
   } = $props();
+  /** The icon turns in only when it changes, never as the bar first draws. */
+  let turned = $state(false);
+  let seen: IconSvgElement | undefined;
+  $effect(() => {
+    if (seen && seen !== icon) turned = true;
+    seen = icon;
+  });
 </script>
 
 {#snippet face(props: Record<string, unknown>)}
@@ -48,9 +58,13 @@
     {disabled}
     onclick={content ? (props.onclick as (event: MouseEvent) => void) : onclick}
   >
-    <Icon {icon} size={small ? 16 : 17} strokeWidth={1.6} />
+    {#key icon}<span class="glyph" class:turned
+        ><Icon {icon} size={small ? 16 : 17} strokeWidth={1.6} /></span
+      >{/key}
     <span class="hint" aria-hidden="true"
-      >{label}{#if keys.length}<KeyHint {keys} />{/if}</span
+      >{label}{#if keys.length}<KeyHint {keys} />{/if}{#if also}<span class="also"
+          >{also.label}<KeyHint keys={also.keys} /></span
+        >{/if}</span
     >
   </button>
 {/snippet}
@@ -92,6 +106,31 @@
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out),
       scale var(--motion-base) var(--ease-spring);
+  }
+
+  .glyph {
+    display: grid;
+    place-items: center;
+  }
+
+  .glyph.turned {
+    animation: glyph-in var(--motion-base) var(--ease-spring);
+  }
+
+  .also {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding-inline-start: 10px;
+    border-inline-start: 1px solid var(--color-border);
+    color: var(--color-muted);
+  }
+
+  @keyframes glyph-in {
+    from {
+      opacity: 0;
+      transform: scale(0.7) rotate(-12deg);
+    }
   }
 
   .bar-tool[aria-pressed="true"] {
@@ -142,11 +181,13 @@
     outline-offset: -2px;
   }
 
+  /* The field's own +: a round control, the send button's quiet twin across the field. */
   .bar-tool.small {
-    inline-size: 30px;
-    block-size: 30px;
+    inline-size: 32px;
+    block-size: 32px;
     border-radius: var(--radius-capsule);
-    color: var(--color-muted);
+    background: var(--color-control);
+    color: var(--color-label-secondary);
   }
 
   .bar-tool:hover:not(:disabled),
