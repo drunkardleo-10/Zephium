@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { WorkServerDraftV1, WorkServerRowV1 } from "$shared/ipc/bindings";
+  import type { WorkServerCheckV1, WorkServerDraftV1, WorkServerRowV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
   import Icon from "$shared/ui/Icon";
@@ -26,6 +26,7 @@
     taken,
     saving,
     onsave,
+    onpreview,
     oncancel,
   }: {
     /** The server being edited, or `null` to add one. */
@@ -33,6 +34,7 @@
     /** Ids other servers already use. */
     taken: readonly string[];
     saving: boolean;
+    onpreview: (draft: WorkServerDraftV1) => Promise<WorkServerCheckV1 | null>;
     onsave: (draft: WorkServerDraftV1) => void;
     oncancel: () => void;
   } = $props();
@@ -41,6 +43,12 @@
   // svelte-ignore state_referenced_locally
   let form = $state<ServerForm>(editing ? formOf(editing) : emptyForm());
   let tried = $state(false);
+  let checking = $state(false);
+  let preview = $state.raw<WorkServerCheckV1 | null>(null);
+  let checkedForm = $state<string | null>(null);
+  let previewFailed = $state(false);
+  const signature = $derived(JSON.stringify(form));
+  const verified = $derived(checkedForm === signature && preview?.outcome === "ready");
   let root = $state<HTMLElement>();
   const fault = $derived(formFault(form, editing));
   const shown = $derived<FormFault | null>(tried ? fault : null);
@@ -79,10 +87,26 @@
     });
   }
 
-  function save() {
+  async function save() {
     tried = true;
-    if (fault) return;
-    onsave(draftOf(form, editing, taken));
+    if (fault || checking || saving) return;
+    const draft = draftOf(form, editing, taken);
+    if (verified) {
+      onsave(draft);
+      return;
+    }
+    const before = signature;
+    checking = true;
+    previewFailed = false;
+    try {
+      preview = await onpreview(draft);
+      checkedForm = before;
+      previewFailed = !preview;
+    } catch {
+      previewFailed = true;
+    } finally {
+      checking = false;
+    }
   }
 
   function escape(event: KeyboardEvent) {
@@ -97,7 +121,7 @@
   bind:this={root}
   onsubmit={(event) => {
     event.preventDefault();
-    save();
+    void save();
   }}
 >
   {#if !editing}
@@ -234,15 +258,42 @@
       >
     </div>
   {/if}
+  {#if verified && preview}
+    <div class="preview" role="status">
+      <p>{m.connections_preview_tools({ count: String(preview.tools.length) })}</p>
+      <ul>
+        {#each preview.tools as tool (tool.name)}<li>{tool.title ?? tool.name}</li>{/each}
+      </ul>
+    </div>
+  {:else if previewFailed || (preview && checkedForm === signature)}
+    <p class="fault" role="alert">
+      {preview?.outcome === "cancelled"
+        ? m.connections_sign_in_cancelled()
+        : preview?.outcome === "sign_in"
+          ? m.connections_sign_in_needed()
+          : m.connections_preview_failed()}
+    </p>
+  {/if}
   <div class="buttons">
     <Button size="compact" variant="ghost" onclick={oncancel}>{m.connections_cancel()}</Button>
-    <Button size="compact" variant="primary" type="submit" pending={saving}
-      >{m.connections_save()}</Button
+    <Button size="compact" variant="primary" type="submit" pending={saving || checking}
+      >{verified ? m.connections_save() : m.connections_preview()}</Button
     >
   </div>
 </form>
 
 <style>
+  .preview {
+    color: var(--color-muted);
+    font-size: var(--text-label);
+  }
+
+  .preview ul {
+    max-block-size: 160px;
+    overflow: auto;
+    padding-inline-start: 18px;
+  }
+
   .editor {
     display: grid;
     gap: 12px;

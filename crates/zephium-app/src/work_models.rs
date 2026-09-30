@@ -19,7 +19,7 @@ use zephium_core::work::model::*;
 use WorkModelProvider as P;
 
 /// Keys, in the order a role falls back to a provider when nothing is chosen.
-const FALLBACK_ORDER: [WorkModelProvider; 4] = [P::Anthropic, P::OpenAi, P::Google, P::DeepSeek];
+const FALLBACK_ORDER: [WorkModelProvider; 6] = KEYED_PROVIDERS;
 /// Providers that take a key in Settings, in display order.
 pub const KEYED_PROVIDERS: [WorkModelProvider; 6] = [
     P::Anthropic,
@@ -131,8 +131,94 @@ impl WorkKeyStatus {
     }
 }
 
+/// Credential acceptance and service availability are independent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkKeyFault {
+    WrongKey,
+    Billing,
+    RateLimited,
+    ProviderDown,
+    Offline,
+    Keychain,
+    Request,
+}
+
+fn failure(error: WorkModelError) -> Option<WorkKeyFault> {
+    Some(match error {
+        WorkModelError::Unauthorized => WorkKeyFault::WrongKey,
+        WorkModelError::OverBudget => WorkKeyFault::Billing,
+        WorkModelError::RateLimited { .. } => WorkKeyFault::RateLimited,
+        WorkModelError::Overloaded => WorkKeyFault::ProviderDown,
+        WorkModelError::Network => WorkKeyFault::Offline,
+        WorkModelError::BadRequest | WorkModelError::Protocol => WorkKeyFault::Request,
+        _ => return None,
+    })
+}
+
+fn record_observation(
+    provider: P,
+    generation: u64,
+    status: Option<WorkKeyStatus>,
+    fault: Option<WorkKeyFault>,
+) {
+    let changed = {
+        let mut state = state();
+        if state.generations.get(&provider).copied().unwrap_or(0) != generation {
+            return;
+        }
+        let mut changed = match fault {
+            Some(fault) => state.faults.insert(provider, fault) != Some(fault),
+            None => state.faults.remove(&provider).is_some(),
+        };
+        if let Some(status) = status {
+            changed |= state.verdicts.insert(provider, status) != Some(status);
+            store_setting(key_setting(provider), status.verdict().to_owned());
+        }
+        changed
+    };
+    if changed {
+        notify();
+    }
+}
+
+fn record_failure(provider: P, generation: u64, fault: Option<WorkKeyFault>) {
+    record_observation(
+        provider,
+        generation,
+        (fault == Some(WorkKeyFault::WrongKey)).then_some(WorkKeyStatus::Invalid),
+        fault,
+    );
+}
+
+pub fn provider_failure(provider: P) -> Option<WorkKeyFault> {
+    state().faults.get(&provider).copied()
+}
+
+fn generation(provider: P) -> u64 {
+    state().generations.get(&provider).copied().unwrap_or(0)
+}
+
+fn vault() -> Arc<dyn keys::KeyVault> {
+    #[cfg(not(test))]
+    {
+        Arc::new(keys::SystemVault)
+    }
+    #[cfg(test)]
+    {
+        static MEMORY: OnceLock<Arc<tests::MemoryVault>> = OnceLock::new();
+        MEMORY.get_or_init(Default::default).clone()
+    }
+}
+
+fn mutations() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(Default::default)
+}
+
 #[derive(Default)]
 struct State {
+    faults: HashMap<P, WorkKeyFault>,
+    generations: HashMap<P, u64>,
     presence: HashMap<WorkModelProvider, bool>,
     verdicts: HashMap<WorkModelProvider, WorkKeyStatus>,
     listed: HashMap<WorkModelProvider, Vec<WorkModelEntry>>,
@@ -184,14 +270,14 @@ async fn ensure_presence() {
     let found = blocking(move || {
         missing
             .into_iter()
-            .map(|provider| (provider, keys::present(provider).unwrap_or(false)))
+            .map(|provider| (provider, vault().present(provider).unwrap_or(false)))
             .collect::<Vec<_>>()
     })
     .await
     .unwrap_or_default();
     let mut state = state();
     for (provider, present) in found {
-        state.presence.insert(provider, present);
+        state.presence.entry(provider).or_insert(present);
         let verdict = match setting(&key_setting(provider)).as_deref() {
             Some("valid") => WorkKeyStatus::Valid,
             Some("invalid") => WorkKeyStatus::Invalid,
@@ -212,18 +298,6 @@ fn key_status(state: &State, provider: WorkModelProvider) -> WorkKeyStatus {
         .unwrap_or(WorkKeyStatus::Set)
 }
 
-fn record_verdict(provider: WorkModelProvider, status: WorkKeyStatus) {
-    let changed = {
-        let mut state = state();
-        let previous = state.verdicts.insert(provider, status);
-        previous != Some(status)
-    };
-    if changed {
-        store_setting(key_setting(provider), status.verdict().to_owned());
-        notify();
-    }
-}
-
 fn compatible_base() -> Option<String> {
     setting(COMPATIBLE_BASE_KEY)
 }
@@ -231,8 +305,10 @@ fn compatible_base() -> Option<String> {
 /// Whether calls to `provider` can be made now.
 fn usable(state: &State, provider: WorkModelProvider) -> bool {
     match provider {
-        P::Cloud => cloud().is_some(),
-        P::Compatible => compatible_base().is_some(),
+        P::Cloud => false,
+        P::Compatible => {
+            compatible_base().is_some() && key_status(state, provider) != WorkKeyStatus::Invalid
+        }
         provider => {
             state.presence.get(&provider).copied().unwrap_or(false)
                 && key_status(state, provider) != WorkKeyStatus::Invalid
@@ -302,15 +378,15 @@ pub async fn refresh_cloud_catalog() {
     notify();
 }
 
-/// Every entry the person can pick right now: Cloud's first when signed in,
-/// then the curated built-in list, then the models the person's own
-/// endpoint serves. Named providers offer only the curated list.
+/// Curated BYOK entries and custom endpoint models. Cloud stays dormant.
 fn entries(state: &State) -> Vec<WorkModelEntry> {
     let mut all = Vec::new();
-    if cloud().is_some() {
-        all.extend(state.cloud.iter().map(|model| model.entry.clone()));
-    }
-    all.extend(models::builtin());
+    all.extend(models::builtin().into_iter().filter(|entry| {
+        state
+            .listed
+            .get(&entry.model.provider)
+            .is_none_or(|listed| listed.iter().any(|item| item.id == entry.id))
+    }));
     for provider in [P::Compatible] {
         for entry in state.listed.get(&provider).into_iter().flatten() {
             if !all.iter().any(|known| known.id == entry.id) {
@@ -327,17 +403,14 @@ fn stored_choice(state: &State, profile: ProfileId, role: WorkModelRole) -> Opti
         Some(text) => serde_json::from_str(&text).ok()?,
         None => state.choices.get(&key).cloned()?,
     };
-    // A catalog entry may have changed since it was chosen (limits, prices);
-    // one no longer offered gives way to the family's default. The person's
-    // own endpoint lists its models only once asked, so its choice stands.
-    let current = entries(state)
-        .into_iter()
-        .find(|entry| entry.id == stored.id);
-    match current {
-        Some(entry) => Some(entry),
-        None if stored.model.provider == P::Compatible => Some(stored),
-        None => None,
-    }
+    // Keep an explicit choice even if it disappeared; never silently replace it.
+    Some(
+        entries(state)
+            .into_iter()
+            .chain(state.listed.values().flatten().cloned())
+            .find(|entry| entry.id == stored.id)
+            .unwrap_or(stored),
+    )
 }
 
 fn family_entry(
@@ -346,40 +419,59 @@ fn family_entry(
     role: WorkModelRole,
 ) -> Option<WorkModelEntry> {
     if provider == P::Cloud {
-        return state
-            .cloud
-            .iter()
-            .filter(|model| model.entry.roles.contains(&role))
-            .max_by_key(|model| model.entry.recommended)
-            .map(|model| model.entry.clone());
+        return None;
     }
-    let model = models::family_default(provider, role)?;
-    models::builtin()
-        .into_iter()
-        .find(|entry| entry.model.provider == provider && entry.model.model == model)
+    let offered = |entry: &&WorkModelEntry| {
+        entry.model.provider == provider
+            && state
+                .listed
+                .get(&provider)
+                .is_none_or(|listed| listed.iter().any(|item| item.id == entry.id))
+    };
+    let catalog = models::builtin();
+    let preferred = models::family_default(provider, role);
+    catalog
+        .iter()
+        .filter(offered)
+        .find(|entry| Some(entry.model.model.as_str()) == preferred)
+        .or_else(|| {
+            catalog
+                .iter()
+                .filter(offered)
+                .find(|entry| entry.roles.contains(&role))
+        })
+        .or_else(|| {
+            catalog
+                .iter()
+                .filter(offered)
+                .find(|entry| entry.roles.contains(&WorkModelRole::Lead))
+        })
+        .cloned()
+        .or_else(|| {
+            state
+                .listed
+                .get(&provider)?
+                .iter()
+                .find(|entry| {
+                    entry.roles.contains(&role) || entry.roles.contains(&WorkModelRole::Lead)
+                })
+                .cloned()
+        })
 }
 
 /// The model a role runs with: the person's choice when its provider is
 /// usable, else the lead's provider family, else the first keyed provider.
 fn effective(state: &State, profile: ProfileId, role: WorkModelRole) -> Option<WorkModelEntry> {
     if let Some(choice) = stored_choice(state, profile, role) {
-        if usable(state, choice.model.provider) {
-            return Some(choice);
-        }
+        let exists = state
+            .listed
+            .get(&choice.model.provider)
+            .is_none_or(|entries| entries.iter().any(|entry| entry.id == choice.id));
+        return (usable(state, choice.model.provider) && exists).then_some(choice);
     }
     if role != WorkModelRole::Lead {
         if let Some(lead) = effective(state, profile, WorkModelRole::Lead) {
-            if let Some(entry) = family_entry(state, lead.model.provider, role) {
-                return Some(entry);
-            }
-            if lead.roles.contains(&role) && (role != WorkModelRole::Page || lead.supports.vision) {
-                return Some(lead);
-            }
-        }
-    }
-    if cloud().is_some() {
-        if let Some(entry) = family_entry(state, P::Cloud, role) {
-            return Some(entry);
+            return family_entry(state, lead.model.provider, role).or(Some(lead));
         }
     }
     FALLBACK_ORDER
@@ -393,6 +485,7 @@ fn effective(state: &State, profile: ProfileId, role: WorkModelRole) -> Option<W
 struct Observed {
     inner: LeadClient,
     provider: WorkModelProvider,
+    generation: u64,
 }
 
 impl WorkModelClient for Observed {
@@ -403,13 +496,23 @@ impl WorkModelClient for Observed {
     ) -> WorkModelFuture<'a> {
         Box::pin(async move {
             let result = self.inner.call(request, events).await;
-            if KEYED_PROVIDERS.contains(&self.provider) && self.provider != P::Compatible {
+            if KEYED_PROVIDERS.contains(&self.provider)
+                && generation(self.provider) == self.generation
+            {
                 match &result {
-                    Ok(_) => record_verdict(self.provider, WorkKeyStatus::Valid),
-                    Err(WorkModelError::Unauthorized) => {
-                        record_verdict(self.provider, WorkKeyStatus::Invalid)
+                    Ok(_) => {
+                        record_observation(
+                            self.provider,
+                            self.generation,
+                            Some(WorkKeyStatus::Valid),
+                            None,
+                        );
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        if let Some(fault) = failure(*error) {
+                            record_failure(self.provider, self.generation, Some(fault));
+                        }
+                    }
                 }
             }
             result
@@ -417,16 +520,46 @@ impl WorkModelClient for Observed {
     }
 }
 
+struct VaultCredential {
+    provider: P,
+    generation: u64,
+}
+impl LeadCredential for VaultCredential {
+    fn secret(&self) -> LeadSecretFuture<'_> {
+        Box::pin(async move {
+            let provider = self.provider;
+            match blocking(move || vault().load(provider)).await {
+                Some(Ok(secret)) => Ok(secret),
+                Some(Err(keys::LeadKeyError::Missing)) => Err(WorkModelError::MissingKey),
+                _ => {
+                    record_failure(provider, self.generation, Some(WorkKeyFault::Keychain));
+                    // A vault refusal is not a provider authentication failure.
+                    Err(WorkModelError::MissingKey)
+                }
+            }
+        })
+    }
+    fn rejected(&self) {}
+}
+
 /// A local endpoint may need no key; it then gets a placeholder bearer.
-struct CompatibleCredential;
+struct CompatibleCredential {
+    generation: u64,
+}
 
 impl LeadCredential for CompatibleCredential {
     fn secret(&self) -> LeadSecretFuture<'_> {
         Box::pin(async move {
-            let stored = blocking(|| keys::load(P::Compatible)).await;
+            let stored = blocking(|| vault().load(P::Compatible)).await;
             match stored {
                 Some(Ok(secret)) => Ok(secret),
-                _ => LeadSecret::new("zephium".into()).map(Arc::new),
+                Some(Err(keys::LeadKeyError::Missing)) => {
+                    LeadSecret::new("zephium".into()).map(Arc::new)
+                }
+                _ => {
+                    record_failure(P::Compatible, self.generation, Some(WorkKeyFault::Keychain));
+                    Err(WorkModelError::MissingKey)
+                }
             }
         })
     }
@@ -455,11 +588,16 @@ fn client(
         }
         P::Compatible => (
             LeadTarget::compatible(&compatible_base().ok_or(WorkModelError::MissingKey)?)?,
-            Arc::new(CompatibleCredential),
+            Arc::new(CompatibleCredential {
+                generation: state.generations.get(&provider).copied().unwrap_or(0),
+            }),
         ),
         provider => (
             LeadTarget::direct(provider)?,
-            Arc::new(keys::KeychainCredential::new(provider)),
+            Arc::new(VaultCredential {
+                provider,
+                generation: state.generations.get(&provider).copied().unwrap_or(0),
+            }),
         ),
     };
     if target.wire() != entry.model.wire {
@@ -468,6 +606,7 @@ fn client(
     Ok(Arc::new(Observed {
         inner: LeadClient::new(target, credential, entry.price.clone()),
         provider,
+        generation: state.generations.get(&provider).copied().unwrap_or(0),
     }))
 }
 
@@ -497,6 +636,7 @@ pub async fn resolve_entry(
 pub struct WorkProviderView {
     pub provider: WorkModelProvider,
     pub key: WorkKeyStatus,
+    pub fault: Option<WorkKeyFault>,
     /// The configured base URL, for the OpenAI-compatible endpoint only.
     pub base: Option<String>,
 }
@@ -533,17 +673,17 @@ pub async fn view(profile: ProfileId) -> WorkModelsView {
         .map(|provider| WorkProviderView {
             provider,
             key: key_status(&state, provider),
+            fault: state.faults.get(&provider).copied(),
             base: (provider == P::Compatible).then(compatible_base).flatten(),
         })
         .collect();
-    let session = cloud();
     WorkModelsView {
         entries,
         chosen,
         effective,
         providers,
-        cloud_signed_in: session.is_some(),
-        cloud_plan: session.and_then(|session| session.plan()),
+        cloud_signed_in: false,
+        cloud_plan: None,
     }
 }
 
@@ -563,14 +703,20 @@ pub fn choose(
             let state = state();
             let entry = entries(&state)
                 .into_iter()
+                .chain(state.listed.values().flatten().cloned())
                 .find(|entry| entry.id == id)
                 .ok_or(WorkModelError::BadRequest)?;
-            if !entry.roles.contains(&role) {
+            if !entry.roles.contains(&role) && !entry.roles.contains(&WorkModelRole::Lead) {
                 return Err(WorkModelError::BadRequest);
             }
             serde_json::to_string(&entry).map_err(|_| WorkModelError::BadRequest)?
         }
     };
+    if SETTINGS.read().ok().is_some_and(|slot| slot.is_some())
+        && !store_setting(key.clone(), value.clone())
+    {
+        return Err(WorkModelError::Unauthorized);
+    }
     {
         let mut state = state();
         if value.is_empty() {
@@ -579,7 +725,6 @@ pub fn choose(
             state.choices.insert(key.clone(), entry);
         }
     }
-    store_setting(key, value);
     notify();
     Ok(())
 }
@@ -594,69 +739,111 @@ fn check_target(provider: WorkModelProvider) -> Result<LeadTarget, WorkModelErro
     }
 }
 
-/// Checks `secret` with the provider, then stores it. A refused key is not
-/// stored; an unreachable provider stores it unchecked.
-pub async fn set_key(
-    provider: WorkModelProvider,
-    secret: String,
-) -> Result<WorkKeyStatus, WorkModelError> {
+fn apply_check(provider: P, check: LeadKeyCheck) -> WorkKeyStatus {
+    let (status, fault) = match check {
+        LeadKeyCheck::Valid(entries) => {
+            if provider != P::OpenRouter {
+                state().listed.insert(provider, entries);
+            }
+            (WorkKeyStatus::Valid, None)
+        }
+        LeadKeyCheck::Invalid => (WorkKeyStatus::Invalid, Some(WorkKeyFault::WrongKey)),
+        LeadKeyCheck::Billing => (key_status(&state(), provider), Some(WorkKeyFault::Billing)),
+        LeadKeyCheck::RateLimited => (
+            key_status(&state(), provider),
+            Some(WorkKeyFault::RateLimited),
+        ),
+        LeadKeyCheck::ProviderDown => (
+            key_status(&state(), provider),
+            Some(WorkKeyFault::ProviderDown),
+        ),
+        LeadKeyCheck::Unreachable => (key_status(&state(), provider), Some(WorkKeyFault::Offline)),
+        LeadKeyCheck::Failed => (key_status(&state(), provider), Some(WorkKeyFault::Request)),
+    };
+    record_observation(provider, generation(provider), Some(status), fault);
+    status
+}
+
+/// Check without paid inference. Store even a refused key so its row stays truthful.
+pub async fn set_key(provider: P, secret: String) -> Result<WorkKeyStatus, WorkModelError> {
+    let _guard = mutations().lock().await;
     if !KEYED_PROVIDERS.contains(&provider) {
         return Err(WorkModelError::BadRequest);
     }
+    let target = check_target(provider)?;
     let secret = LeadSecret::new(secret)?;
-    let verdict = match check_target(provider) {
-        Ok(target) => lead::check_key(&target, &secret).await,
-        Err(_) => LeadKeyCheck::Unreachable,
-    };
-    if verdict == LeadKeyCheck::Invalid {
-        return Ok(WorkKeyStatus::Invalid);
-    }
-    blocking(move || keys::store(provider, secret))
+    let verdict = lead::check_key(&target, &secret).await;
+    blocking(move || vault().store(provider, secret))
         .await
         .ok_or(WorkModelError::Unauthorized)?
         .map_err(|_| WorkModelError::Unauthorized)?;
-    let status = if verdict == LeadKeyCheck::Valid {
-        WorkKeyStatus::Valid
-    } else {
-        WorkKeyStatus::Set
-    };
     {
         let mut state = state();
+        *state.generations.entry(provider).or_default() += 1;
         state.presence.insert(provider, true);
+        state.verdicts.insert(provider, WorkKeyStatus::Set);
         state.listed.remove(&provider);
     }
-    record_verdict(provider, status);
+    let status = apply_check(provider, verdict);
     notify();
     Ok(status)
 }
 
-/// Checks the stored key again.
-pub async fn test_key(provider: WorkModelProvider) -> Result<WorkKeyStatus, WorkModelError> {
-    let secret = match blocking(move || keys::load(provider)).await {
+pub async fn test_key(provider: P) -> Result<WorkKeyStatus, WorkModelError> {
+    let _guard = mutations().lock().await;
+    let secret = match blocking(move || vault().load(provider)).await {
         Some(Ok(secret)) => secret,
         Some(Err(keys::LeadKeyError::Missing)) => return Ok(WorkKeyStatus::Missing),
-        _ => return Err(WorkModelError::Unauthorized),
+        _ => {
+            record_failure(provider, generation(provider), Some(WorkKeyFault::Keychain));
+            return Err(WorkModelError::Unauthorized);
+        }
     };
-    let status = match lead::check_key(&check_target(provider)?, &secret).await {
-        LeadKeyCheck::Valid => WorkKeyStatus::Valid,
-        LeadKeyCheck::Invalid => WorkKeyStatus::Invalid,
-        LeadKeyCheck::Unreachable => return Err(WorkModelError::Network),
-    };
-    record_verdict(provider, status);
-    Ok(status)
+    Ok(apply_check(
+        provider,
+        lead::check_key(&check_target(provider)?, &secret).await,
+    ))
 }
 
-/// Removes the key; roles that ran on it fall back to another provider.
+/// Persist defaults only into empty roles after the first accepted key in this profile.
+pub fn fill_defaults(profile: ProfileId, provider: P) {
+    if key_status(&state(), provider) != WorkKeyStatus::Valid {
+        return;
+    }
+    for role in ROLES {
+        let entry = {
+            let state = state();
+            if stored_choice(&state, profile, role).is_some() {
+                continue;
+            }
+            family_entry(&state, provider, role)
+        };
+        if let Some(entry) = entry {
+            let _ = choose(profile, role, Some(&entry.id));
+        }
+    }
+}
+
+/// Lead availability alone gates Work; page and light can fall back to the lead.
+pub async fn ready(profile: ProfileId) -> bool {
+    ensure_presence().await;
+    effective(&state(), profile, WorkModelRole::Lead).is_some()
+}
+
+/// Removes the key, preserving explicit role choices for the person to replace.
 pub async fn clear_key(provider: WorkModelProvider) -> Result<(), WorkModelError> {
+    let _guard = mutations().lock().await;
     if !KEYED_PROVIDERS.contains(&provider) {
         return Err(WorkModelError::BadRequest);
     }
-    blocking(move || keys::clear(provider))
+    blocking(move || vault().clear(provider))
         .await
         .ok_or(WorkModelError::Unauthorized)?
         .map_err(|_| WorkModelError::Unauthorized)?;
     {
         let mut state = state();
+        *state.generations.entry(provider).or_default() += 1;
+        state.faults.remove(&provider);
         state.presence.insert(provider, false);
         state.verdicts.remove(&provider);
         state.listed.remove(&provider);
@@ -667,7 +854,8 @@ pub async fn clear_key(provider: WorkModelProvider) -> Result<(), WorkModelError
 }
 
 /// Sets or clears the OpenAI-compatible endpoint's base URL.
-pub fn set_compatible_base(base: Option<&str>) -> Result<(), WorkModelError> {
+pub async fn set_compatible_base(base: Option<&str>) -> Result<(), WorkModelError> {
+    let _guard = mutations().lock().await;
     let value = match base.map(str::trim).filter(|base| !base.is_empty()) {
         Some(base) => {
             LeadTarget::compatible(base)?;
@@ -675,7 +863,18 @@ pub fn set_compatible_base(base: Option<&str>) -> Result<(), WorkModelError> {
         }
         None => String::new(),
     };
-    state().listed.remove(&P::Compatible);
+    if compatible_base().as_deref().unwrap_or_default() != value {
+        blocking(|| vault().clear(P::Compatible))
+            .await
+            .ok_or(WorkModelError::Unauthorized)?
+            .map_err(|_| WorkModelError::Unauthorized)?;
+        let mut state = state();
+        *state.generations.entry(P::Compatible).or_default() += 1;
+        state.presence.insert(P::Compatible, false);
+        state.verdicts.remove(&P::Compatible);
+        state.faults.remove(&P::Compatible);
+        state.listed.remove(&P::Compatible);
+    }
     if !store_setting(COMPATIBLE_BASE_KEY.to_owned(), value) {
         return Err(WorkModelError::Unauthorized);
     }
@@ -687,22 +886,30 @@ pub fn set_compatible_base(base: Option<&str>) -> Result<(), WorkModelError> {
 pub async fn more_models(
     provider: WorkModelProvider,
 ) -> Result<Vec<WorkModelEntry>, WorkModelError> {
+    let _guard = mutations().lock().await;
+    let current_generation = generation(provider);
     if let Some(listed) = state().listed.get(&provider) {
         return Ok(listed.clone());
     }
     let target = check_target(provider)?;
     let secret: Arc<LeadSecret> = if provider == P::Compatible {
-        CompatibleCredential.secret().await?
+        CompatibleCredential {
+            generation: current_generation,
+        }
+        .secret()
+        .await?
     } else {
-        match blocking(move || keys::load(provider)).await {
+        match blocking(move || vault().load(provider)).await {
             Some(Ok(secret)) => secret,
             Some(Err(keys::LeadKeyError::Missing)) => return Err(WorkModelError::MissingKey),
             _ => return Err(WorkModelError::Unauthorized),
         }
     };
     let listed = lead::list_models(&target, &secret).await;
-    if listed == Err(WorkModelError::Unauthorized) && provider != P::Compatible {
-        record_verdict(provider, WorkKeyStatus::Invalid);
+    if let Err(error) = &listed {
+        if let Some(fault) = failure(*error) {
+            record_failure(provider, current_generation, Some(fault));
+        }
     }
     let listed = listed?;
     state().listed.insert(provider, listed.clone());
@@ -726,6 +933,30 @@ pub fn static_credential(secret: LeadSecret) -> Arc<dyn LeadCredential> {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    pub(super) struct MemoryVault(Mutex<HashMap<P, Arc<LeadSecret>>>);
+    impl keys::KeyVault for MemoryVault {
+        fn load(&self, provider: P) -> Result<Arc<LeadSecret>, keys::LeadKeyError> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&provider)
+                .cloned()
+                .ok_or(keys::LeadKeyError::Missing)
+        }
+        fn store(&self, provider: P, secret: LeadSecret) -> Result<(), keys::LeadKeyError> {
+            self.0.lock().unwrap().insert(provider, Arc::new(secret));
+            Ok(())
+        }
+        fn clear(&self, provider: P) -> Result<(), keys::LeadKeyError> {
+            self.0.lock().unwrap().remove(&provider);
+            Ok(())
+        }
+        fn present(&self, provider: P) -> Result<bool, keys::LeadKeyError> {
+            Ok(self.0.lock().unwrap().contains_key(&provider))
+        }
+    }
+
     struct Memory(Mutex<HashMap<String, String>>);
 
     impl WorkModelSettings for Memory {
@@ -746,11 +977,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn roles_follow_the_choice_then_the_lead_family_then_any_key() {
+    #[tokio::test]
+    async fn defaults_choices_failures_and_stale_results_stay_truthful() {
         install_settings(Arc::new(Memory(Mutex::new(HashMap::new()))));
         let profile = ProfileId::from(41_u128);
         with_keys(&[P::OpenAi]);
+        apply_check(
+            P::OpenAi,
+            LeadKeyCheck::Valid(
+                models::builtin()
+                    .into_iter()
+                    .filter(|e| e.model.provider == P::OpenAi)
+                    .collect(),
+            ),
+        );
+        fill_defaults(profile, P::OpenAi);
         let ids = |role| effective(&state(), profile, role).map(|entry| entry.id);
         assert_eq!(
             ids(WorkModelRole::Lead).as_deref(),
@@ -760,74 +1001,77 @@ mod tests {
             ids(WorkModelRole::Page).as_deref(),
             Some("openai/gpt-6-luna")
         );
-
-        with_keys(&[P::OpenAi, P::Anthropic]);
+        state().presence.insert(P::Anthropic, true);
+        apply_check(
+            P::Anthropic,
+            LeadKeyCheck::Valid(
+                models::builtin()
+                    .into_iter()
+                    .filter(|e| e.model.provider == P::Anthropic)
+                    .collect(),
+            ),
+        );
+        fill_defaults(profile, P::Anthropic);
         assert_eq!(
             ids(WorkModelRole::Lead).as_deref(),
-            Some("anthropic/claude-opus-5-5")
-        );
-        choose(profile, WorkModelRole::Lead, Some("openai/gpt-6-sol")).unwrap();
-        assert_eq!(
-            ids(WorkModelRole::Lead).as_deref(),
-            Some("openai/gpt-6-sol")
-        );
-        assert_eq!(
-            ids(WorkModelRole::Light).as_deref(),
             Some("openai/gpt-6-luna")
         );
         choose(
             profile,
-            WorkModelRole::Page,
+            WorkModelRole::Lead,
             Some("anthropic/claude-sonnet-5-5"),
         )
         .unwrap();
+        fill_defaults(profile, P::OpenAi);
         assert_eq!(
-            ids(WorkModelRole::Page).as_deref(),
+            ids(WorkModelRole::Lead).as_deref(),
             Some("anthropic/claude-sonnet-5-5")
         );
-
-        // A choice whose key went away falls back instead of failing the run.
-        with_keys(&[P::Anthropic]);
+        assert!(ready(profile).await);
+        for (check, fault) in [
+            (LeadKeyCheck::Billing, WorkKeyFault::Billing),
+            (LeadKeyCheck::RateLimited, WorkKeyFault::RateLimited),
+            (LeadKeyCheck::ProviderDown, WorkKeyFault::ProviderDown),
+            (LeadKeyCheck::Unreachable, WorkKeyFault::Offline),
+        ] {
+            assert_eq!(apply_check(P::Anthropic, check), WorkKeyStatus::Valid);
+            assert_eq!(provider_failure(P::Anthropic), Some(fault));
+        }
+        apply_check(P::Anthropic, LeadKeyCheck::Invalid);
+        assert!(!ready(profile).await);
         assert_eq!(
-            ids(WorkModelRole::Lead).as_deref(),
-            Some("anthropic/claude-opus-5-5")
+            stored_choice(&state(), profile, WorkModelRole::Lead)
+                .unwrap()
+                .id,
+            "anthropic/claude-sonnet-5-5"
         );
-        state()
-            .verdicts
-            .insert(P::Anthropic, WorkKeyStatus::Invalid);
-        assert_eq!(ids(WorkModelRole::Lead), None);
-
-        assert!(choose(
-            profile,
-            WorkModelRole::Light,
-            Some("anthropic/claude-opus-5-5")
-        )
-        .is_err());
-        assert!(choose(profile, WorkModelRole::Lead, Some("nobody/nothing")).is_err());
-        choose(profile, WorkModelRole::Lead, None).unwrap();
+        // An in-flight response using the previous credential cannot invalidate its replacement.
+        state().generations.insert(P::Anthropic, 1);
+        record_observation(P::Anthropic, 1, Some(WorkKeyStatus::Valid), None);
+        record_failure(P::Anthropic, 0, Some(WorkKeyFault::WrongKey));
+        assert!(ready(profile).await);
+        assert_eq!(provider_failure(P::Anthropic), None);
+        assert!(choose(profile, WorkModelRole::Decision, Some("openai/gpt-6-luna")).is_err());
+        let other = ProfileId::from(42_u128);
         with_keys(&[P::DeepSeek]);
         assert_eq!(
-            ids(WorkModelRole::Lead).as_deref(),
-            Some("deepseek/deepseek-v4-pro")
+            effective(&state(), other, WorkModelRole::Page)
+                .unwrap()
+                .model
+                .model,
+            "deepseek-v4-pro"
         );
-        // DeepSeek reads no images: the page role finds no vision model.
-        assert_eq!(ids(WorkModelRole::Page), None);
-
-        // A choice no longer offered gives way to the family's default.
-        with_keys(&[P::OpenAi]);
-        let mut gone = models::builtin()
-            .into_iter()
-            .find(|entry| entry.id == "openai/gpt-6-sol")
+        assert!(ready(other).await);
+        with_keys(&[P::OpenRouter]);
+        assert!(ready(other).await);
+        with_keys(&[]);
+        assert!(!ready(other).await);
+        // All test secret operations use the injected memory vault.
+        vault()
+            .store(P::OpenAi, LeadSecret::new("test-key".into()).unwrap())
             .unwrap();
-        gone.id = "openai/gpt-5.6-luna".into();
-        gone.model.model = "gpt-5.6-luna".into();
-        store_setting(
-            choice_key(profile, WorkModelRole::Lead),
-            serde_json::to_string(&gone).unwrap(),
-        );
-        assert_eq!(
-            ids(WorkModelRole::Lead).as_deref(),
-            Some("openai/gpt-6-luna")
-        );
+        assert!(vault().present(P::OpenAi).unwrap());
+        vault().clear(P::OpenAi).unwrap();
+        assert!(!vault().present(P::OpenAi).unwrap());
     }
 }

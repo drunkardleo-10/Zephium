@@ -51,6 +51,35 @@ fn cached(provider: WorkModelProvider) -> Option<Arc<LeadSecret>> {
     cache().lock().ok()?.get(&provider).cloned()
 }
 
+/// Secret storage boundary. Tests supply memory implementations, never the OS vault.
+pub trait KeyVault: Send + Sync {
+    /// Read a key off the async executor.
+    fn load(&self, provider: WorkModelProvider) -> Result<Arc<LeadSecret>, LeadKeyError>;
+    /// Replace a key off the async executor.
+    fn store(&self, provider: WorkModelProvider, secret: LeadSecret) -> Result<(), LeadKeyError>;
+    /// Remove a key off the async executor.
+    fn clear(&self, provider: WorkModelProvider) -> Result<(), LeadKeyError>;
+    /// Read presence without reading the secret.
+    fn present(&self, provider: WorkModelProvider) -> Result<bool, LeadKeyError>;
+}
+
+/// The operating system key vault used by the production app.
+pub struct SystemVault;
+impl KeyVault for SystemVault {
+    fn load(&self, provider: WorkModelProvider) -> Result<Arc<LeadSecret>, LeadKeyError> {
+        load(provider)
+    }
+    fn store(&self, provider: WorkModelProvider, secret: LeadSecret) -> Result<(), LeadKeyError> {
+        store(provider, secret)
+    }
+    fn clear(&self, provider: WorkModelProvider) -> Result<(), LeadKeyError> {
+        clear(provider)
+    }
+    fn present(&self, provider: WorkModelProvider) -> Result<bool, LeadKeyError> {
+        present(provider)
+    }
+}
+
 /// Loads `provider`'s key. Blocking; call off the async executor.
 pub fn load(provider: WorkModelProvider) -> Result<Arc<LeadSecret>, LeadKeyError> {
     if let Some(secret) = cached(provider) {

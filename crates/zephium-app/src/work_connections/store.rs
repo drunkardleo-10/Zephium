@@ -116,6 +116,62 @@ impl ConnectionStore {
         Ok(servers)
     }
 
+    /// Persist a validated server, restoring touched secrets if persistence fails.
+    pub fn commit_verified(
+        &self,
+        profile: &str,
+        server: WorkServerV1,
+        previous: Option<&str>,
+        secrets: &std::collections::HashMap<String, String>,
+        vault: &dyn zephium_mcp::keychain::SecretVault,
+    ) -> Result<(), StoreError> {
+        use zephium_mcp::keychain::KeychainError;
+        let mut before = Vec::new();
+        for account in secrets.keys() {
+            let value = match vault.read(profile, &server.id, account) {
+                Ok(value) => Some(value),
+                Err(KeychainError::Missing) => None,
+                Err(_) => return Err(StoreError::Io),
+            };
+            before.push((account, value));
+        }
+        let result = (|| {
+            for (account, value) in secrets {
+                vault
+                    .write(profile, &server.id, account, value)
+                    .map_err(|_| StoreError::Io)?;
+            }
+            self.put(profile, server.clone(), previous)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            for (account, value) in before {
+                let restored = match value {
+                    Some(value) => vault.write(profile, &server.id, account, &value),
+                    None => vault.delete(profile, &server.id, account),
+                };
+                if restored.is_err() {
+                    return Err(StoreError::Io);
+                }
+            }
+        }
+        result
+    }
+
+    /// Clear all accounts before removing configuration, preserving a retry on vault failure.
+    pub fn remove_with_vault(
+        &self,
+        profile: &str,
+        id: &str,
+        vault: &dyn zephium_mcp::keychain::SecretVault,
+    ) -> Result<(), StoreError> {
+        vault
+            .delete_server(profile, id)
+            .map_err(|_| StoreError::Io)?;
+        self.remove(profile, id)?;
+        Ok(())
+    }
+
     pub fn remove(&self, profile: &str, id: &str) -> Result<Vec<WorkServerV1>, StoreError> {
         let mut servers = self.servers(profile)?;
         servers.retain(|s| s.id != id);
@@ -227,6 +283,98 @@ mod tests {
             },
             enabled: true,
         }
+    }
+
+    #[derive(Default)]
+    struct MemoryVault(
+        std::cell::RefCell<std::collections::HashMap<(String, String), String>>,
+        std::cell::Cell<bool>,
+    );
+    impl zephium_mcp::keychain::SecretVault for MemoryVault {
+        fn read(
+            &self,
+            _: &str,
+            server: &str,
+            account: &str,
+        ) -> Result<String, zephium_mcp::keychain::KeychainError> {
+            self.0
+                .borrow()
+                .get(&(server.into(), account.into()))
+                .cloned()
+                .ok_or(zephium_mcp::keychain::KeychainError::Missing)
+        }
+        fn write(
+            &self,
+            _: &str,
+            server: &str,
+            account: &str,
+            secret: &str,
+        ) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            self.0
+                .borrow_mut()
+                .insert((server.into(), account.into()), secret.into());
+            Ok(())
+        }
+        fn delete(
+            &self,
+            _: &str,
+            server: &str,
+            account: &str,
+        ) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            self.0.borrow_mut().remove(&(server.into(), account.into()));
+            Ok(())
+        }
+        fn delete_server(
+            &self,
+            _: &str,
+            server: &str,
+        ) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            if self.1.get() {
+                return Err(zephium_mcp::keychain::KeychainError::Inaccessible);
+            }
+            self.0.borrow_mut().retain(|(s, _), _| s != server);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_persistence_restores_keys_and_removal_clears_all_accounts() {
+        use zephium_mcp::keychain::SecretVault;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        let vault = MemoryVault::default();
+        vault
+            .write("profile", "linear", "bearer", "original")
+            .unwrap();
+        let incoming = [("bearer".into(), "replacement".into())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            store.commit_verified("bad/profile", server("linear"), None, &incoming, &vault),
+            Err(StoreError::Invalid)
+        );
+        assert_eq!(
+            vault.read("profile", "linear", "bearer").unwrap(),
+            "original"
+        );
+        store
+            .commit_verified("profile", server("linear"), None, &incoming, &vault)
+            .unwrap();
+        vault
+            .write("profile", "linear", "env.OBSOLETE", "old")
+            .unwrap();
+        vault.1.set(true);
+        assert_eq!(
+            store.remove_with_vault("profile", "linear", &vault),
+            Err(StoreError::Io)
+        );
+        assert_eq!(store.servers("profile").unwrap().len(), 1);
+        vault.1.set(false);
+        store
+            .remove_with_vault("profile", "linear", &vault)
+            .unwrap();
+        assert!(vault.0.borrow().is_empty());
+        assert!(store.servers("profile").unwrap().is_empty());
     }
 
     #[test]

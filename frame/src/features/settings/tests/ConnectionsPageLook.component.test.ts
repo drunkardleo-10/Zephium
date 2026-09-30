@@ -124,8 +124,8 @@ test("Settings → Connections: tools on this Mac and servers, in both themes", 
   await page.viewport(1100, 1180);
   const screen = await render(ConnectionsStage);
   await expect.element(screen.getByText("Signed in as crynta")).toBeVisible();
-  await screen.getByRole("button", { name: "Test" }).first().click();
-  await screen.getByRole("button", { name: "Test" }).nth(1).click();
+  await screen.getByRole("button", { name: "Reconnect" }).first().click();
+  await screen.getByRole("button", { name: "Retry" }).click();
   await shoot("settings");
 
   await screen.getByRole("button", { name: "Add…" }).click();
@@ -134,7 +134,7 @@ test("Settings → Connections: tools on this Mac and servers, in both themes", 
 
   await screen.getByRole("radio", { name: "On this Mac" }).click();
   await screen.getByRole("button", { name: "Add variable" }).click();
-  await screen.getByRole("button", { name: "Save" }).click();
+  await screen.getByRole("button", { name: "Check connection" }).click();
   await shoot("settings-add-command");
   document.documentElement.dataset.theme = "dark";
 });

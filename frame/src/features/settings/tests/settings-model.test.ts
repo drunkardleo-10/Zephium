@@ -23,3 +23,11 @@ it("finds the reserved agent destinations without exposing unimplemented control
   expect(searchSettings("API key")).toEqual([]);
   expect(searchSettings("updates").some((result) => result.target === "updates.check")).toBe(true);
 });
+
+it("hides Account from navigation and search", async () => {
+  const { sections, searchSettings } = await import("../lib/settings-model");
+  expect(sections.some((section) => String(section.id) === "account")).toBe(false);
+  expect(searchSettings("account").some((result) => String(result.section) === "account")).toBe(
+    false,
+  );
+});

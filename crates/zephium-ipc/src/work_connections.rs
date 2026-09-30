@@ -26,6 +26,8 @@ pub struct WorkCliRowV1 {
     pub id: String,
     pub status: WorkCliStatusV1,
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// The account the tool says it uses: a login, an email, "ChatGPT".
     pub account: Option<String>,
 }
@@ -123,6 +125,8 @@ pub enum WorkServerOutcomeV1 {
     Ready,
     /// The server wants the person to sign in.
     SignIn,
+    /// Sign-in was closed or timed out.
+    Cancelled,
     /// The program was not found or could not start.
     NotFound,
     /// It did not answer in time.

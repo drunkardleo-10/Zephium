@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { commands } from "$shared/ipc/bindings";
+  import Button from "$shared/ui/Button";
   import type { WorkCliRowV1 } from "$shared/ipc/bindings";
   import { serviceKey, serviceMark } from "$domain/connections";
   import Icon from "$shared/ui/Icon";
@@ -47,6 +49,13 @@
         return null;
     }
   });
+  const install = {
+    gh: "https://cli.github.com/",
+    git: "https://git-scm.com/install/mac",
+    codex: "https://developers.openai.com/codex/cli/",
+    claude: "https://code.claude.com/docs/en/setup",
+  };
+  let linkFailed = $state(false);
   const missing = $derived(cli?.status === "missing");
 </script>
 
@@ -63,10 +72,16 @@
             >{/if}</span
         >{:else}{DOES[id]()}{/if}
     </p>
+    {#if cli?.path}<p class="path" title={cli.path}>{cli.path}</p>{/if}
+    {#if linkFailed}<p role="alert">{m.ai_link_failed()}</p>{/if}
   </div>
-  {#if missing}<span class="aside">{m.connections_missing()}</span>{:else if cli?.version}<span
-      class="aside version">{cli.version}</span
-    >{/if}
+  {#if missing}<span class="aside">{m.connections_missing()}</span><Button
+      size="compact"
+      onclick={() =>
+        void commands.browserOpenUrl(install[id], true).catch(() => {
+          linkFailed = true;
+        })}>{m.connections_install()}</Button
+    >{:else if cli?.version}<span class="aside version">{cli.version}</span>{/if}
 </div>
 
 <style>
@@ -167,6 +182,11 @@
     flex: none;
     color: var(--color-faint);
     font-size: var(--text-label);
+  }
+
+  .path {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
   }
 
   .version {

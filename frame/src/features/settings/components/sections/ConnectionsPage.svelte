@@ -70,8 +70,12 @@
           editing={null}
           {taken}
           saving={session?.busy === "save"}
+          onpreview={(draft) => session?.preview(draft) ?? Promise.resolve(null)}
           onsave={(draft) => void add(draft)}
-          oncancel={() => (adding = false)}
+          oncancel={() => {
+            void session?.cancelPreview();
+            adding = false;
+          }}
         />{/if}
     </div>
   </SettingsGroup>
