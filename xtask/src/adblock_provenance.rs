@@ -833,10 +833,11 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         .ok_or_else(|| "desktop has no structured zephium-blocker-service dependency".to_owned())?;
     require_key_set(
         service,
-        &["workspace"],
+        &["features", "workspace"],
         "desktop zephium-blocker-service dependency",
     )?;
     require_bool(service, "workspace", true)?;
+    require_string_array(service, "features", &["official-https"])?;
     let targets = require_table(&desktop, "target")?;
     let reviewed_targets = BTreeSet::from([
         "cfg(target_os = \"windows\")",
@@ -910,7 +911,7 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     let features = require_table(&update, "features")?;
     require_key_set(
         features,
-        &["default", "tuf"],
+        &["default", "official-https", "tuf"],
         "zephium-blocker-update feature table",
     )?;
     require_string_array(features, "default", &[])?;
@@ -924,9 +925,20 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
             "dep:tough",
             "dep:windows",
             "dep:zephium-update-transport",
+            "zephium-update-transport/tough",
         ],
     )?;
 
+    require_string_array(
+        features,
+        "official-https",
+        &[
+            "dep:rustix",
+            "dep:tokio",
+            "dep:windows",
+            "dep:zephium-update-transport",
+        ],
+    )?;
     let dependencies = require_table(&update, "dependencies")?;
     require_key_set(
         dependencies,
@@ -966,12 +978,11 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     let transport = require_dependency_table(dependencies, "zephium-update-transport")?;
     require_key_set(
         transport,
-        &["features", "optional", "workspace"],
+        &["optional", "workspace"],
         "zephium-blocker-update transport dependency",
     )?;
     require_bool(transport, "workspace", true)?;
     require_bool(transport, "optional", true)?;
-    require_string_array(transport, "features", &["tough"])?;
     let tokio = require_dependency_table(dependencies, "tokio")?;
     require_key_set(
         tokio,
@@ -1082,11 +1093,21 @@ fn validate_update_transport_manifest(repository: &Path) -> Result<(), String> {
             "futures-util",
             "reqwest",
             "thiserror",
+            "time",
             "tough",
             "url",
         ],
         "zephium-update-transport dependency table",
     )?;
+    let time = require_dependency_table(dependencies, "time")?;
+    require_key_set(
+        time,
+        &["default-features", "features", "version"],
+        "transport time dependency",
+    )?;
+    require_string(time, "version", "=0.3.49")?;
+    require_bool(time, "default-features", false)?;
+    require_string_array(time, "features", &["parsing"])?;
     let async_trait = require_dependency_table(dependencies, "async-trait")?;
     require_key_set(
         async_trait,
@@ -1156,11 +1177,16 @@ fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
     let features = require_table(&service, "features")?;
     require_key_set(
         features,
-        &["default", "tuf"],
+        &["default", "official-https", "tuf"],
         "zephium-blocker-service feature table",
     )?;
     require_string_array(features, "default", &[])?;
     require_string_array(features, "tuf", &["zephium-blocker-update/tuf"])?;
+    require_string_array(
+        features,
+        "official-https",
+        &["zephium-blocker-update/official-https"],
+    )?;
     let dependencies = require_table(&service, "dependencies")?;
     require_key_set(
         dependencies,
@@ -2070,9 +2096,8 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
             ],
         )?;
         verify_desktop_feature_graph(target, &output, blocker_features, adblock_features)?;
-        // The desktop now owns a lazy HTTPS search-suggestion client. Keep
-        // the blocker network-free by checking its own normal dependency graph,
-        // rather than rejecting every HTTP dependency in the entire browser.
+        // The library-only, no-feature service remains network-free. Desktop
+        // explicitly selects official HTTPS; TUF must stay out of that graph.
         let blocker = cargo_tree(
             repository,
             &[
@@ -2128,12 +2153,23 @@ fn verify_desktop_feature_graph(
         "0.13.2",
         expected_adblock_features,
     )?;
-    require_package_features(&tree, target, "zephium-blocker-service", "0.1.0", &[])?;
-    require_package_features(&tree, target, "zephium-blocker-update", "0.1.0", &[])?;
+    require_package_features(
+        &tree,
+        target,
+        "zephium-blocker-service",
+        "0.1.0",
+        &["official-https"],
+    )?;
+    require_package_features(
+        &tree,
+        target,
+        "zephium-blocker-update",
+        "0.1.0",
+        &["official-https"],
+    )?;
     require_direct_product_package(&tree, target, "reqwest", "0.13.4")?;
-    for package in ["tough", "zephium-update-transport"] {
-        reject_package(&tree, target, package)?;
-    }
+    require_package_features(&tree, target, "zephium-update-transport", "0.1.0", &[])?;
+    reject_package(&tree, target, "tough")?;
     Ok(())
 }
 

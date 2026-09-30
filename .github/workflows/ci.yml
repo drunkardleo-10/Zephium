@@ -345,10 +345,10 @@ jobs:
           cargo test --locked -p zephium-agentic --features probe-harness
           cargo clippy --locked -p zephium-agentic --all-targets --features probe-harness -- -D warnings
 
-      - name: Clippy dormant TUF blocker graph
+      - name: Clippy official HTTPS and optional TUF blocker graphs
         run: |
-          cargo clippy -p zephium-blocker-update --all-targets --locked --no-default-features --features tuf -- -D warnings
-          cargo clippy -p zephium-blocker-service --all-targets --locked --no-default-features --features tuf -- -D warnings
+          cargo clippy -p zephium-blocker-update --all-targets --locked --no-default-features --features tuf,official-https -- -D warnings
+          cargo clippy -p zephium-blocker-service --all-targets --locked --no-default-features --features tuf,official-https -- -D warnings
 
       - name: Clippy production workspace libraries
         run: cargo clippy --workspace --lib --locked -- -D warnings
@@ -523,10 +523,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo nextest run --locked --retries 2 --workspace --exclude zephium-desktop
 
-      - name: Test dormant TUF blocker graph
+      - name: Test official HTTPS and optional TUF blocker graphs
         run: |
-          cargo nextest run -p zephium-blocker-update --locked --no-default-features --features tuf
-          cargo nextest run -p zephium-blocker-service --locked --no-default-features --features tuf
+          cargo nextest run -p zephium-blocker-update --locked --no-default-features --features tuf,official-https
+          cargo nextest run -p zephium-blocker-service --locked --no-default-features --features tuf,official-https
 
       - name: Windows bounded diagnostic-log policy tests
         if: runner.os == 'Windows'

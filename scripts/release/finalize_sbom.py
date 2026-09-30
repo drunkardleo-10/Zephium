@@ -636,7 +636,7 @@ def blocker_component_properties(platform: str) -> list[dict[str, str]]:
         },
         {
             "name": "zephium:blocker:supply-feature-graph",
-            "value": "release-bundle",
+            "value": "release-bundle,official-https",
         },
     ]
     properties.extend(

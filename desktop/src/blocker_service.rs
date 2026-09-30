@@ -92,15 +92,15 @@ mod tests {
     fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
         let seed = bundled_release_seed().unwrap();
         let identity = seed.identity();
-        assert_eq!(identity.revision, 202_607_241_759);
+        assert_eq!(identity.revision, 202_609_300_903);
         assert_eq!(identity.source_count, 2);
-        assert_eq!(identity.source_bytes, 3_669_674);
+        assert_eq!(identity.source_bytes, 3_568_061);
         assert_eq!(
             identity.manifest_sha256,
             [
-                0x53, 0x5f, 0xe9, 0x7c, 0xdf, 0xd1, 0x29, 0xa9, 0x08, 0x42, 0x96, 0x49, 0x1e, 0xfa,
-                0x37, 0x21, 0xb4, 0x3d, 0xa2, 0x2e, 0x46, 0x9c, 0x42, 0x06, 0x2a, 0x20, 0xcc, 0xa4,
-                0xec, 0x94, 0xb4, 0xdc,
+                0x28, 0x89, 0xf7, 0x8f, 0x40, 0x16, 0xdc, 0xbc, 0x12, 0x7a, 0x3c, 0xea, 0xf2, 0x6e,
+                0xb2, 0x67, 0x41, 0x1f, 0x78, 0x85, 0xd8, 0xb5, 0x0d, 0x72, 0xb9, 0x05, 0x2e, 0x87,
+                0x0a, 0x69, 0x6c, 0xf0
             ]
         );
     }
@@ -128,7 +128,7 @@ mod tests {
 
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
         assert_eq!(snapshot.package_stale, Some(false));
-        assert_eq!(snapshot.package_revision, Some(202_607_241_759));
+        assert_eq!(snapshot.package_revision, Some(202_609_300_903));
         assert_eq!(
             snapshot.package_provenance,
             Some(BlockerCatalogProvenance::ReleaseBundle)
@@ -172,8 +172,8 @@ mod tests {
         };
         assert!(rules.enabled());
         assert!(rules.coverage().has_blocking_entries());
-        assert_eq!(rules.coverage().source_rules, 138_595);
-        assert_eq!(rules.coverage().accepted_rules, 110_941);
+        assert_eq!(rules.coverage().source_rules, 134_081);
+        assert_eq!(rules.coverage().accepted_rules, 106_244);
         assert_eq!(
             service.shutdown_until(Instant::now() + Duration::from_secs(10)),
             BlockerShutdownOutcome::Clean
