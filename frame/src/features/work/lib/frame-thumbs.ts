@@ -1,10 +1,23 @@
+import { commands } from "$shared/ipc/bindings";
+
 /**
  * Small copies of page frames and photos, at the size the canvas shows them.
- * A picture is decoded once at full size, drawn down, and let go; what the
- * canvas keeps is the copy, within a byte budget, so a whole day of pages
- * and photos holds a few megabytes, not one full decoded picture per card.
+ * Rust sends the picture already scaled to that width, so what is decoded is
+ * the size drawn; the canvas keeps the copy within a byte budget, and the
+ * webview's own cache of pictures is emptied once the works that used them
+ * are left or the screen has been still.
  */
-const BUDGET = 24 * 1024 * 1024;
+const BUDGET = 16 * 1024 * 1024;
+const MEDIA = /^(?:zephium-media:\/\/localhost|http:\/\/zephium-media\.localhost(?::\d+)?)\//u;
+
+/** A picture's address asking for the copy `width` CSS pixels wide, as sharp as the screen shows it. */
+export function thumbSrc(url: string, width: number): string {
+  if (!MEDIA.test(url)) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}w=${pixelsOf(width)}`;
+}
+const pixelsOf = (width: number) =>
+  Math.ceil(width * Math.min(2, globalThis.devicePixelRatio || 1));
+
 type Kept = { bitmap: Promise<ImageBitmap | null>; bytes: number };
 const kept = new Map<string, Kept>();
 let held = 0;
@@ -25,12 +38,12 @@ function drop(canvas: HTMLCanvasElement) {
 async function shrink(url: string, width: number): Promise<ImageBitmap | null> {
   const image = new Image();
   image.decoding = "async";
-  image.src = url;
+  image.src = thumbSrc(url, width);
   let scratch: HTMLCanvasElement | null = null;
   try {
     await image.decode();
     if (!image.naturalWidth) return null;
-    const scale = Math.min(1, width / image.naturalWidth);
+    const scale = Math.min(1, pixelsOf(width) / image.naturalWidth);
     scratch = document.createElement("canvas");
     scratch.width = Math.max(1, Math.round(image.naturalWidth * scale));
     scratch.height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -45,6 +58,30 @@ async function shrink(url: string, width: number): Promise<ImageBitmap | null> {
     image.src = "";
     if (scratch) drop(scratch);
   }
+}
+
+let shown = 0;
+let releasing: ReturnType<typeof setTimeout> | undefined;
+let releasedAt = 0;
+/** How long after the last canvas that drew a picture is gone, and after pictures were last decoded with some still on show, the copies go. */
+const LEFT_MS = 4000;
+const STILL_MS = 60_000;
+
+function releaseLater(after: number) {
+  clearTimeout(releasing);
+  releasing = setTimeout(() => {
+    releasing = undefined;
+    for (const entry of kept.values()) void entry.bitmap.then((bitmap) => bitmap?.close());
+    kept.clear();
+    held = 0;
+    if (Date.now() - releasedAt < 10_000) return;
+    releasedAt = Date.now();
+    try {
+      void commands.workReleaseMemory().catch(() => false);
+    } catch {
+      // Off the app (a test page), there is no webview to ask.
+    }
+  }, after);
 }
 
 function evict() {
@@ -65,6 +102,7 @@ function frameThumbnail(url: string, width: number): Promise<ImageBitmap | null>
     kept.set(key, hit);
     return hit.bitmap;
   }
+  releaseLater(shown ? STILL_MS : LEFT_MS);
   const entry: Kept = { bitmap: shrink(url, width), bytes: 0 };
   kept.set(key, entry);
   void entry.bitmap.then((bitmap) => {
@@ -91,6 +129,7 @@ export function thumbnail(canvas: HTMLCanvasElement, frame: Thumb) {
   let width = frame.width;
   let missing = frame.onmissing;
   let gone = false;
+  shown += 1;
   const draw = ({ url, width }: Thumb) =>
     void frameThumbnail(url, width).then((bitmap) => {
       if (gone || current !== url) return;
@@ -114,6 +153,8 @@ export function thumbnail(canvas: HTMLCanvasElement, frame: Thumb) {
     },
     destroy() {
       gone = true;
+      shown -= 1;
+      if (!shown) releaseLater(LEFT_MS);
       // After any leaving motion has drawn from it.
       setTimeout(() => {
         if (!canvas.isConnected) drop(canvas);

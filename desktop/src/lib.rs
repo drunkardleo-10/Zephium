@@ -101,6 +101,7 @@ mod work_decision;
 #[cfg(feature = "work-development-traces")]
 mod work_diagnostics;
 mod work_folders;
+mod work_memory;
 mod work_models;
 #[cfg(any(feature = "work-product", test))]
 mod work_operations;
@@ -1650,6 +1651,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             media::work_admit_folder,
             media::work_pick_folder,
             media::work_reveal_path,
+            work_memory::work_release_memory,
             work_folders::work_choose_folder,
             work_product::work_activity,
             work_product::human::work_human_pages,
@@ -5021,7 +5023,7 @@ pub fn run() {
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
-        .register_uri_scheme_protocol(media::SCHEME, media::serve)
+        .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
         // Must register first: a second launch (file association, dock, a
         // stale instance holding the global hotkey and the profile dbs)

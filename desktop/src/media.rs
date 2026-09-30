@@ -219,45 +219,73 @@ fn respond(
         .unwrap_or_else(|_| tauri::http::Response::new(Cow::Borrowed(b"" as &[u8])))
 }
 
-/// `zephium-media://localhost/<profile>/<digest>` from privileged main chrome
-/// only. Serves admitted image blobs; every other request is 404.
+/// `zephium-media://localhost/<profile>/<digest>[?w=<px>]` from privileged main
+/// chrome only. Serves admitted image blobs, scaled down to `w` when the
+/// picture is wider and one is asked for; every other request is 404. Work
+/// happens off the main thread.
 pub(crate) fn serve(
     ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
     request: tauri::http::Request<Vec<u8>>,
-) -> tauri::http::Response<Cow<'static, [u8]>> {
+    responder: tauri::UriSchemeResponder,
+) {
     if ctx.webview_label() != super::MAIN_LABEL {
-        return respond(403, Vec::new(), "text/plain");
+        return responder.respond(respond(403, Vec::new(), "text/plain"));
     }
-    let path = request.uri().path().trim_start_matches('/');
+    let app = ctx.app_handle().clone();
+    let uri = request.uri().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        responder.respond(resolve(&app, uri.path(), uri.query()));
+    });
+}
+
+fn resolve(
+    app: &AppHandle,
+    path: &str,
+    query: Option<&str>,
+) -> tauri::http::Response<Cow<'static, [u8]>> {
+    let path = path.trim_start_matches('/');
+    let width = thumb::width(query);
     if let Some(rest) = path.strip_prefix("frame/") {
-        return serve_page_frame(&ctx, rest);
+        return serve_page_frame(app, rest, width);
     }
-    let Some((profile, digest)) = path.split_once('/') else {
+    let Some((profile_text, digest)) = path.split_once('/') else {
         return respond(404, Vec::new(), "text/plain");
     };
-    let Some(profile) = profile_of(profile) else {
+    let Some(profile) = profile_of(profile_text) else {
         return respond(404, Vec::new(), "text/plain");
     };
-    let Some(blobs) = ctx.app_handle().try_state::<MediaBlobs>() else {
+    let Some(blobs) = app.try_state::<MediaBlobs>() else {
         return respond(503, Vec::new(), "text/plain");
     };
+    if let Some(width) = width {
+        if let Some(hit) = thumb::cached(app, profile_text, digest, width) {
+            return respond(200, hit.0, hit.1);
+        }
+    }
     let Some(bytes) = blobs
         .0
         .read(profile, digest, MAX_MEDIA_IMAGE_BYTES as usize)
     else {
         return respond(404, Vec::new(), "text/plain");
     };
-    match sniff_image(&bytes) {
-        Some(mime) => respond(200, bytes, mime),
-        None => respond(404, Vec::new(), "text/plain"),
+    let Some(mime) = sniff_image(&bytes) else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    if let Some(width) = width {
+        if let Some((small, small_mime)) = thumb::scaled(&bytes, width) {
+            thumb::keep(app, profile_text, digest, width, &small, small_mime);
+            return respond(200, small, small_mime);
+        }
     }
+    respond(200, bytes, mime)
 }
 
 /// `frame/<attempt>/<step>/<generation>`: the newest frame of one agent page.
 /// The generation only busts caches; the bytes are whatever is current.
 fn serve_page_frame(
-    ctx: &tauri::UriSchemeContext<'_, tauri::Wry>,
+    app: &AppHandle,
     rest: &str,
+    width: Option<u32>,
 ) -> tauri::http::Response<Cow<'static, [u8]>> {
     let mut parts = rest.split('/');
     let ids = (parts.next(), parts.next());
@@ -270,14 +298,14 @@ fn serve_page_frame(
         ) else {
             return respond(404, Vec::new(), "text/plain");
         };
-        let Some(state) = ctx
-            .app_handle()
-            .try_state::<super::work_product::WorkProductState>()
-        else {
+        let Some(state) = app.try_state::<super::work_product::WorkProductState>() else {
             return respond(503, Vec::new(), "text/plain");
         };
         match state.page_frame(attempt, step) {
-            Some(png) => respond(200, png.as_ref().clone(), "image/png"),
+            Some(png) => match width.and_then(|width| thumb::scaled(png.as_ref(), width)) {
+                Some((small, mime)) => respond(200, small, mime),
+                None => respond(200, png.as_ref().clone(), "image/png"),
+            },
             None => {
                 #[cfg(feature = "work-development-traces")]
                 super::work_provider::record_diagnostic(format_args!(
@@ -289,8 +317,199 @@ fn serve_page_frame(
     }
     #[cfg(not(feature = "work-product"))]
     {
-        let _ = (ctx, ids);
+        let _ = (app, ids, width);
         respond(404, Vec::new(), "text/plain")
+    }
+}
+
+/// Scaled copies of pictures at the width the canvas draws them: a picture
+/// decoded at 1600 px costs six megabytes of the interface's memory to show
+/// at 300, so the interface asks for the small one. Made once, kept on disk.
+mod thumb {
+    use super::{AppHandle, Manager};
+    use std::path::PathBuf;
+
+    /// The widths a copy is made at, so a few variants exist per picture.
+    const WIDTHS: [u32; 7] = [160, 240, 360, 540, 800, 1200, 1600];
+    /// What the copies may hold on disk before the oldest go.
+    const CACHE_BYTES: u64 = 96 * 1024 * 1024;
+
+    pub(super) fn width(query: Option<&str>) -> Option<u32> {
+        let asked: u32 = query?
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("w=")?.parse().ok())?;
+        WIDTHS.iter().copied().find(|step| *step >= asked)
+    }
+
+    fn path(app: &AppHandle, profile: &str, digest: &str, width: u32) -> Option<PathBuf> {
+        let plain = digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+        if !plain {
+            return None;
+        }
+        let dir = app.path().app_cache_dir().ok()?.join("media-thumbs");
+        Some(dir.join(profile).join(format!("{digest}-{width}")))
+    }
+
+    pub(super) fn cached(
+        app: &AppHandle,
+        profile: &str,
+        digest: &str,
+        width: u32,
+    ) -> Option<(Vec<u8>, &'static str)> {
+        let base = path(app, profile, digest, width)?;
+        for (extension, mime) in [("jpg", "image/jpeg"), ("png", "image/png")] {
+            if let Ok(bytes) = std::fs::read(base.with_extension(extension)) {
+                return Some((bytes, mime));
+            }
+        }
+        None
+    }
+
+    pub(super) fn keep(
+        app: &AppHandle,
+        profile: &str,
+        digest: &str,
+        width: u32,
+        bytes: &[u8],
+        mime: &str,
+    ) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static WRITES: AtomicU32 = AtomicU32::new(0);
+        let Some(base) = path(app, profile, digest, width) else {
+            return;
+        };
+        let file = base.with_extension(if mime == "image/png" { "png" } else { "jpg" });
+        let Some(dir) = file.parent() else { return };
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+        let temporary = file.with_extension("tmp");
+        if std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, &file).is_err()
+        {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        if WRITES.fetch_add(1, Ordering::Relaxed).is_multiple_of(32) {
+            if let Some(root) = dir.parent() {
+                prune(root);
+            }
+        }
+    }
+
+    /// The oldest copies go until what is kept fits the cache.
+    fn prune(root: &std::path::Path) {
+        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+        for profile in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            for entry in std::fs::read_dir(profile.path()).into_iter().flatten().flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    let stamp = meta
+                        .accessed()
+                        .or_else(|_| meta.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    files.push((stamp, meta.len(), entry.path()));
+                }
+            }
+        }
+        let mut total: u64 = files.iter().map(|file| file.1).sum();
+        files.sort_by_key(|file| file.0);
+        for (_, size, path) in files {
+            if total <= CACHE_BYTES {
+                break;
+            }
+            if std::fs::remove_file(path).is_ok() {
+                total -= size;
+            }
+        }
+    }
+
+    /// The picture at `width`, or None where it is already that narrow (or cannot be
+    /// scaled: an animation keeps its frames): JPEG, PNG where it has transparency.
+    #[cfg(feature = "work-product")]
+    pub(super) fn scaled(bytes: &[u8], width: u32) -> Option<(Vec<u8>, &'static str)> {
+        use image::{ImageFormat, ImageReader};
+        use std::io::Cursor;
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let format = image::guess_format(bytes).ok()?;
+        if format == ImageFormat::Gif {
+            return None;
+        }
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(zephium_core::resources::MAX_MEDIA_DIMENSION);
+        limits.max_image_height = Some(zephium_core::resources::MAX_MEDIA_DIMENSION);
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+        reader.limits(limits.clone());
+        let (natural, height) = reader.into_dimensions().ok()?;
+        if natural <= width {
+            return None;
+        }
+        let _turn = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+        reader.limits(limits);
+        let decoded = reader.decode().ok()?;
+        let alpha = decoded.color().has_alpha()
+            && decoded.to_rgba8().pixels().any(|pixel| pixel.0[3] < 255);
+        let target = (u64::from(height) * u64::from(width)).div_ceil(u64::from(natural));
+        let small = decoded.resize_exact(
+            width,
+            u32::try_from(target).ok()?.max(1),
+            image::imageops::FilterType::Triangle,
+        );
+        let mut out = Vec::new();
+        if alpha {
+            small
+                .to_rgba8()
+                .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+                .ok()?;
+            Some((out, "image/png"))
+        } else {
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82)
+                .encode_image(&small.to_rgb8())
+                .ok()?;
+            Some((out, "image/jpeg"))
+        }
+    }
+
+    #[cfg(not(feature = "work-product"))]
+    pub(super) fn scaled(_bytes: &[u8], _width: u32) -> Option<(Vec<u8>, &'static str)> {
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_width_is_asked_in_steps() {
+            assert_eq!(width(Some("w=100")), Some(160));
+            assert_eq!(width(Some("x=1&w=300")), Some(360));
+            assert_eq!(width(Some("w=1600")), Some(1600));
+            assert_eq!(width(Some("w=2000")), None);
+            assert_eq!(width(Some("w=abc")), None);
+            assert_eq!(width(None), None);
+        }
+
+        #[cfg(feature = "work-product")]
+        #[test]
+        fn a_wide_picture_is_scaled_and_a_narrow_one_left_alone() {
+            let png = |width: u32, height: u32, alpha: u8| {
+                let mut out = Vec::new();
+                image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, alpha]))
+                    .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                    .unwrap();
+                out
+            };
+            let (small, mime) = scaled(&png(1600, 900, 255), 360).unwrap();
+            let decoded = image::load_from_memory(&small).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (360, 203));
+            assert_eq!(mime, "image/jpeg");
+            let (clear, mime) = scaled(&png(1600, 900, 128), 360).unwrap();
+            assert_eq!(image::load_from_memory(&clear).unwrap().width(), 360);
+            assert_eq!(mime, "image/png");
+            assert!(scaled(&png(300, 200, 255), 360).is_none());
+            assert!(scaled(b"not a picture", 360).is_none());
+        }
     }
 }
 

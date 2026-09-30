@@ -16,11 +16,14 @@ export function pageFrameUrl(attempt: string, step: string, generation: number):
 
 /**
  * The privileged media route for one admitted blob. Rust serves only images
- * from the profile's own store to main chrome; anything else is a 404.
+ * from the profile's own store to main chrome; anything else is a 404. It
+ * sends the picture scaled down to `width` pixels when it is wider, so a card
+ * decodes what it shows and not the 1600 px the store keeps; a large view asks
+ * for more.
  */
-export function mediaUrl(profile: string, digest: string): string | null {
+export function mediaUrl(profile: string, digest: string, width = 720): string | null {
   if (!DIGEST.test(digest) || !PROFILE.test(profile)) return null;
-  return `${base}${profile}/${digest}`;
+  return `${base}${profile}/${digest}?w=${width}`;
 }
 
 export function mediaSize(bytes: number): string {

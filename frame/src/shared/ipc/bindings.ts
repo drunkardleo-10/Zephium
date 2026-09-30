@@ -37,6 +37,12 @@ export const commands = {
 	/**  Reveals an admitted folder, or a file inside one, in Finder. */
 	workRevealPath: (expectedProfile: string, path: string) => typedError<boolean, null>(__TAURI_INVOKE("work_reveal_path", { expectedProfile, path })),
 	/**
+	 *  Empties the memory cache of the calling interface web view, and nothing
+	 *  else: cookies, storage and disk caches stay, and no page's data store is
+	 *  reached (each page has its own).
+	 */
+	workReleaseMemory: () => __TAURI_INVOKE<boolean>("work_release_memory"),
+	/**
 	 *  Opens the folder panel at `start` (or its nearest existing folder) and
 	 *  admits the person's choice.
 	 */
