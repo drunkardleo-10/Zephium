@@ -234,8 +234,13 @@
     return { x: AIR - rect.x * zoom - over, y: fitTopInset + 40 - rect.y * zoom, zoom };
   }
   /** Brings a card to the reading place: its corner near the top left, as large as its span lets it read whole. */
-  function reveal(id: string, span?: number) {
+  function reveal(id: string, span?: number, tries = 30) {
     const node = nodeFor(id);
+    // The answer lands a frame or two after its run ends: wait for it rather than for nothing.
+    if (!node && tries > 0) {
+      requestAnimationFrame(() => reveal(id, span, tries - 1));
+      return;
+    }
     if (!node || !flow) return;
     homed = false;
     const position = absolutePosition(node, nodes);
@@ -598,6 +603,33 @@
       return bezier(b!, d!, (low + high) / 2);
     };
   }
+  /**
+   * A request just sent stands in the middle of what can be seen: between
+   * the island and the composer, at the zoom the person reads at.
+   */
+  function centreRequest(id: string) {
+    const node = nodeFor(id);
+    if (!node || !flow || !canvasWidth) return;
+    homed = false;
+    const zoom = viewport.zoom;
+    const position = absolutePosition(node, nodes);
+    const width = (node.width ?? 320) * zoom;
+    const height = (node.height ?? 80) * zoom;
+    const top = fitTopInset;
+    const bottom = canvasHeight - fitBottomInset;
+    void flow.setViewport(
+      {
+        x: (canvasWidth - width) / 2 - position.x * zoom,
+        y: top + (bottom - top - height) / 2 - position.y * zoom,
+        zoom,
+      },
+      {
+        duration: reducedMotion() ? 0 : duration("page"),
+        ease: curve(easing("emphasized")),
+        interpolate: "linear",
+      },
+    );
+  }
   function followTo(position: CanvasPosition, size: CanvasSize) {
     const zoom = viewport.zoom;
     const top = fitTopInset;
@@ -638,7 +670,9 @@
       for (const id of cards)
         if (!requests[id]) {
           requests[id] = true;
-          if (seeded) following = true;
+          if (!seeded) continue;
+          following = true;
+          requestAnimationFrame(() => centreRequest(id));
         }
       if (!agents.length && Object.keys(stands).length) {
         stands = {};

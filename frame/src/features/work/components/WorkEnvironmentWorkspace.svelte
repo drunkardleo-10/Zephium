@@ -877,7 +877,7 @@
         if (now.has(card)) continue;
         const stage = stages.find((entry) => entry.card === card);
         if (stage && canvasRef?.followAgent())
-          canvasRef.reveal(stage.column.head ?? card, resultSpan(stage));
+          canvasRef.reveal(stage.reply?.id ?? stage.column.head ?? card, resultSpan(stage));
       }
       wasLive = now;
     });
