@@ -220,6 +220,7 @@
     box-sizing: border-box;
     padding: 8px 8px 10px;
     border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+
     /* Solid, like the island: a blur would be redrawn from the canvas under it every frame a pan moves. */
     background: color-mix(in srgb, var(--color-float) var(--wash-raised), var(--color-canvas));
     box-shadow: var(--shadow-sheet);
