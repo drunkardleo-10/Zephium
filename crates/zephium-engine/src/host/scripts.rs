@@ -568,7 +568,12 @@ struct ProtectedScriptSpec {
 }
 
 const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
-    3 + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
+    4 + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
+    ProtectedScriptSpec {
+        id: 6,
+        source: include_str!("content_style.js"),
+        all_frames: false,
+    },
     ProtectedScriptSpec {
         id: 1,
         source: DISCARD_SAFETY_BOOTSTRAP_JS,

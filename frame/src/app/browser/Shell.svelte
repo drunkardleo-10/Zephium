@@ -23,7 +23,8 @@
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
-  import { BlockerShield } from "$features/blocker";
+  import { blocker } from "$domain/blocker";
+  import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
   import { preview } from "$features/settings";
   import { onMount } from "svelte";
@@ -138,6 +139,7 @@
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
 
+  let protectionMenuActivated = $state(0);
   let handledCommand = 0;
   $effect(() => {
     const command = ui.uiCommand();
@@ -147,6 +149,8 @@
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
       if (command.id === "extensions.manage") void browserPage.open("extensions");
+      if (command.id === "protection.site") void toggleSiteProtection();
+      if (command.id === "protection.hide") void hideElements();
     });
   });
   function selectTab(id: string) {
@@ -181,13 +185,19 @@
         <div class="sidebar-head"><ModeTabs /></div>
         <AddressField {compact}>
           {#snippet trailing()}
-            <UtilityTray>
-              <BlockerShield labelled />
+            <UtilityTray
+              onopen={() => {
+                protectionMenuActivated += 1;
+                void blocker.refresh();
+              }}
+            >
+              <BlockerShield labelled activated={protectionMenuActivated} />
               <ExtensionActions />
               <ManageExtensions />
             </UtilityTray>
           {/snippet}
         </AddressField>
+        <HidingBar />
         {#if tabs.profile()?.id}<DownloadStatus
             profile={tabs.profile()!.id}
             onopen={() => toolHost.open("downloads")}

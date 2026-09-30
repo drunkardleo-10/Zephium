@@ -12,6 +12,18 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::ProfileId;
 
+mod statistics;
+pub use statistics::{BlockedLoadCounter, BlockerStatistics};
+
+mod cosmetics;
+pub use cosmetics::{DocumentStyleFailure, DocumentStylePlan, DocumentStyleProvider};
+mod sites;
+pub use sites::{
+    BlockerSite, BlockerSitePreferences, PersonalHide, PreparedBlockerSite, PreparedBlockerSites,
+    SitePreferenceChange, SitePreferenceError, MAX_PAUSED_BLOCKER_SITES, MAX_PERSONAL_HIDES,
+    MAX_PERSONAL_RULE_BYTES,
+};
+
 /// Upper bound for one native declarative policy crossing the application to
 /// engine boundary. WebKit compilation has substantially higher temporary
 /// costs than the encoded JSON itself, so accepting an unbounded artifact
@@ -78,11 +90,17 @@ impl ContentPolicyGeneration {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockerConfig {
-    /// Blocking remains off until a concrete authenticated source package is
-    /// available; an empty catalog must never be projected as protection.
+    /// Desired protection. Readiness is reported separately until a concrete
+    /// bundled or validated updated policy has been installed.
     pub enabled: bool,
+}
+
+impl Default for BlockerConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,8 +125,9 @@ pub enum BlockerCompileFailure {
 
 /// Content digest of the canonical source/configuration used for an artifact.
 ///
-/// It is safe to log for local diagnostics: it identifies public filter
-/// material and preferences, never a page URL or browsing decision.
+/// Public subscription digests identify filter material. Digests derived from
+/// personal selections or site preferences remain private and must not enter
+/// persisted diagnostics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentRuleDigest([u8; 32]);
 
@@ -140,10 +159,13 @@ impl fmt::Debug for ContentRuleDigest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeclarativeArtifactDigest([u8; 32]);
 
+/// Shared compiler/consumer identity version for native WebKit JSON.
+pub const WEBKIT_ARTIFACT_FORMAT_VERSION: u32 = 4;
+
 impl DeclarativeArtifactDigest {
     fn for_encoded(format: DeclarativeRuleFormat, encoded: &str) -> Self {
         let format_version = match format {
-            DeclarativeRuleFormat::WebKitContentBlockerV1 => 3_u32,
+            DeclarativeRuleFormat::WebKitContentBlockerV1 => WEBKIT_ARTIFACT_FORMAT_VERSION,
         };
         let mut digest = Sha256::new();
         digest.update(b"zephium-webkit-content-rules");
@@ -526,6 +548,7 @@ pub struct ContentRules {
     digest: ContentRuleDigest,
     coverage: ContentRuleCoverage,
     payload: ContentRulesPayload,
+    cosmetics: Option<Arc<dyn DocumentStyleProvider>>,
 }
 
 impl ContentRules {
@@ -534,6 +557,7 @@ impl ContentRules {
             digest,
             coverage: ContentRuleCoverage::default(),
             payload: ContentRulesPayload::AllowAll,
+            cosmetics: None,
         })
     }
 
@@ -547,6 +571,7 @@ impl ContentRules {
                 digest,
                 coverage,
                 payload: ContentRulesPayload::Runtime(policy),
+                cosmetics: None,
             })
         })
     }
@@ -573,7 +598,25 @@ impl ContentRules {
                 artifact_digest,
                 encoded,
             },
+            cosmetics: None,
         }))
+    }
+
+    /// Attaches separately compiled subscription styles without changing the
+    /// network artifact. The producer's policy digest must already bind both.
+    pub fn with_cosmetics(
+        mut self: Arc<Self>,
+        provider: Arc<dyn DocumentStyleProvider>,
+    ) -> Arc<Self> {
+        if self.enabled() {
+            let rules = Arc::make_mut(&mut self);
+            rules.cosmetics = Some(provider);
+        }
+        self
+    }
+
+    pub fn cosmetics(&self) -> Option<&Arc<dyn DocumentStyleProvider>> {
+        self.cosmetics.as_ref()
     }
 
     pub const fn digest(&self) -> ContentRuleDigest {
@@ -619,9 +662,10 @@ pub enum ContentRuleApplyFailure {
 ///
 /// The application keeps this distinct from the current native generation: a
 /// failed replacement may still retain a prior known-good policy, while an
-/// initial failure has no policy and must continue holding first navigation.
+/// initial failure may leave browsing under the explicit provisional policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentPolicyFailure {
+    SitePreferencesUnavailable,
     GenerationExhausted,
     CompilerDispatchRejected,
     CompilerUnavailable,
@@ -644,6 +688,7 @@ impl ContentPolicyFailure {
         matches!(
             self,
             Self::CompilerDispatchRejected
+                | Self::SitePreferencesUnavailable
                 | Self::Compile(BlockerCompileFailure::SourceUnavailable)
                 | Self::Compile(BlockerCompileFailure::Internal)
                 | Self::NativeDispatchRejected
@@ -964,3 +1009,8 @@ mod tests {
         assert_ne!(artifact_digest(&first), artifact_digest(&second));
     }
 }
+
+mod picker;
+pub use picker::{
+    ElementPickerCompletion, ElementPickerRequest, ElementPickerResult, ElementSelection,
+};

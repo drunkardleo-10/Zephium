@@ -4,7 +4,9 @@ use zephium_core::blocker::{
     ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules, ContentRulesPayload,
 };
 use zephium_core::ids::ProfileId;
-use zephium_core::ports::engine::{ContentRuleSettlement, EngineEvent};
+use zephium_core::ports::engine::{
+    ContentRuleSettlement, ContentRuleValidationOutcome, EngineEvent,
+};
 
 #[cfg(not(target_os = "windows"))]
 use super::dispatch::{with_content_policy_settlement, with_content_policy_timeout};
@@ -26,11 +28,11 @@ const MAX_DECLARATIVE_CONTENT_POLICY_JOBS: usize = 2;
 const MAX_RESIDENT_DECLARATIVE_CONTENT_POLICY_BYTES: usize =
     zephium_core::blocker::MAX_DECLARATIVE_RULE_BYTES * 2;
 #[cfg(not(target_os = "windows"))]
-// The exact 2026-07-24 EasyList + EasyPrivacy artifact cold-compiles through
-// WKContentRuleListStore in roughly 39-50 seconds on supported macOS hardware.
-// Keep a measured, finite 2.4x envelope for slower supported machines. Native
-// work remains asynchronous, single-flight, byte-bounded, and cache-backed.
-const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+// The guarded host-boundary formatter cold-compiles the September release
+// corpus in about 2.2 seconds on the qualification Mac. Keep a finite safety
+// envelope for other hardware; the native CI performance gate is 15 seconds.
+// Cancellation remains advisory and never permits a second physical compile.
+const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(not(target_os = "windows"))]
 const CONTENT_RULE_CACHE_GC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 #[cfg(not(target_os = "windows"))]
@@ -39,6 +41,147 @@ const MAX_CONTENT_RULE_CACHE_GC_CANDIDATES: usize = 8;
 const CONTENT_RULE_IDENTIFIER_PREFIX: &str = "app.zephium.rules.v1.";
 
 impl EngineHost {
+    /// Validate a source candidate through the same bounded native compiler
+    /// queue as installed profiles. No dummy profile or navigation is created.
+    pub(crate) fn validate_content_rules(
+        &mut self,
+        rules: Arc<ContentRules>,
+        completion: zephium_core::ports::engine::ContentRuleValidationCompletion,
+    ) {
+        if matches!(rules.payload(), ContentRulesPayload::AllowAll) {
+            completion.finish(ContentRuleValidationOutcome::Rejected(
+                ContentRuleApplyFailure::UnsupportedArtifact,
+            ));
+            return;
+        }
+        #[cfg(not(target_os = "windows"))]
+        if self.shutdown_completion.is_some() {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            completion.finish(match crate::platform::imp::prepare_content_policy(&rules) {
+                Ok(_) => ContentRuleValidationOutcome::Valid,
+                Err(error) => ContentRuleValidationOutcome::Rejected(error),
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let ContentRulesPayload::Declarative {
+                format,
+                artifact_digest,
+                encoded,
+            } = rules.payload()
+            else {
+                return;
+            };
+            if *format != zephium_core::blocker::DeclarativeRuleFormat::WebKitContentBlockerV1 {
+                return;
+            }
+            self.validate_declarative_artifact(
+                encoded.clone(),
+                *artifact_digest.as_bytes(),
+                completion,
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn validate_declarative_artifact(
+        &mut self,
+        encoded: Arc<str>,
+        digest: [u8; 32],
+        completion: zephium_core::ports::engine::ContentRuleValidationCompletion,
+    ) {
+        if self.content_rule_preflight.is_some() || self.shutdown_completion.is_some() {
+            return;
+        }
+        if self
+            .declarative_content_policy_cache
+            .get(&digest)
+            .and_then(std::rc::Weak::upgrade)
+            .is_some()
+        {
+            self.protect_preflight_digest(digest);
+            completion.finish(ContentRuleValidationOutcome::Valid);
+            return;
+        }
+        if !self.queue_native_artifact(encoded, digest) {
+            return;
+        }
+        self.content_rule_preflight = Some((digest, completion));
+        self.start_next_declarative_content_policy_compilation();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn protect_preflight_digest(&mut self, digest: [u8; 32]) {
+        self.preflight_cache_digests.retain(|d| *d != digest);
+        self.preflight_cache_digests.push_front(digest);
+        self.preflight_cache_digests.truncate(2);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn queue_native_artifact(&mut self, encoded: Arc<str>, digest: [u8; 32]) -> bool {
+        if self
+            .active_declarative_content_policy_maintenance
+            .as_ref()
+            .and_then(active_compilation)
+            .is_some_and(|active| active.timed_out)
+        {
+            return false;
+        }
+        if self
+            .declarative_content_policy_compilations
+            .contains_key(&digest)
+        {
+            return true;
+        }
+        let encoded_bytes = encoded.len();
+        let Some(total) = self
+            .declarative_content_policy_bytes
+            .checked_add(encoded_bytes)
+            .filter(|bytes| *bytes <= MAX_RESIDENT_DECLARATIVE_CONTENT_POLICY_BYTES)
+        else {
+            return false;
+        };
+        if self.declarative_content_policy_compilations.len() >= MAX_DECLARATIVE_CONTENT_POLICY_JOBS
+        {
+            return false;
+        }
+        self.declarative_content_policy_bytes = total;
+        self.declarative_content_policy_compilations
+            .insert(digest, Vec::new());
+        self.declarative_content_policy_queue
+            .push_back(DeclarativeContentPolicyJob {
+                digest,
+                encoded_bytes,
+                encoded,
+            });
+        true
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn finish_content_rule_preflight(
+        &mut self,
+        digest: [u8; 32],
+        outcome: ContentRuleValidationOutcome,
+    ) {
+        if self
+            .content_rule_preflight
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == digest)
+        {
+            let (_, completion) = self
+                .content_rule_preflight
+                .take()
+                .expect("matching preflight");
+            if outcome == ContentRuleValidationOutcome::Valid {
+                self.protect_preflight_digest(digest);
+            }
+            completion.finish(outcome);
+        }
+    }
+
     pub(crate) fn install_content_rules(
         &mut self,
         profile: ProfileId,
@@ -114,6 +257,7 @@ impl EngineHost {
             } else if let Some(queued) = state.queued.take() {
                 state.compiling = Some(CompilingContentPolicy {
                     generation: queued.generation,
+                    cosmetics: queued.rules.cosmetics().cloned(),
                     superseded: false,
                 });
                 Next::Queued(queued)
@@ -236,7 +380,7 @@ impl EngineHost {
                     .push_back(DeclarativeContentPolicyJob {
                         digest,
                         encoded_bytes,
-                        rules,
+                        encoded: encoded.clone(),
                     });
                 self.start_next_declarative_content_policy_compilation();
             }
@@ -251,7 +395,7 @@ impl EngineHost {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn start_next_declarative_content_policy_compilation(&mut self) {
+    pub(super) fn start_next_declarative_content_policy_compilation(&mut self) {
         if self.active_declarative_content_policy_maintenance.is_some() {
             return;
         }
@@ -264,7 +408,12 @@ impl EngineHost {
                 .declarative_content_policy_compilations
                 .get(&job.digest)
                 .is_some_and(|waiters| !waiters.is_empty());
-            if has_waiters {
+            if has_waiters
+                || self
+                    .content_rule_preflight
+                    .as_ref()
+                    .is_some_and(|(digest, _)| *digest == job.digest)
+            {
                 break job;
             }
             self.declarative_content_policy_compilations
@@ -340,14 +489,14 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         let cancellation = crate::platform::imp::compile_content_policy(
             &self.content_rule_cache,
-            job.rules,
+            job.encoded,
             digest,
             callback,
         );
         #[cfg(all(unix, not(target_os = "macos")))]
         let cancellation = crate::platform::imp::compile_content_policy(
             &self.content_rule_cache,
-            job.rules,
+            job.encoded,
             digest,
             callback,
         );
@@ -391,6 +540,15 @@ impl EngineHost {
             .remove(&digest)
             .unwrap_or_default();
         let result = result.map(std::rc::Rc::new);
+        let preflight = if self.shutdown_completion.is_some() {
+            ContentRuleValidationOutcome::Unavailable
+        } else {
+            match &result {
+                Ok(_) => ContentRuleValidationOutcome::Valid,
+                Err(error) => ContentRuleValidationOutcome::Rejected(*error),
+            }
+        };
+        self.finish_content_rule_preflight(digest, preflight);
         if self.shutdown_completion.is_none() {
             if let Ok(native) = &result {
                 self.content_rule_cache_gc_pending = true;
@@ -451,6 +609,8 @@ impl EngineHost {
             cancellation.cancel();
         }
 
+        // The timed-out physical compiler also drains queued candidates.
+        self.content_rule_preflight.take();
         let active_waiters = self
             .declarative_content_policy_compilations
             .get_mut(&digest)
@@ -791,6 +951,9 @@ impl EngineHost {
 
     #[cfg(not(target_os = "windows"))]
     fn is_content_rule_cache_digest_protected(&self, digest: &[u8; 32]) -> bool {
+        if self.preflight_cache_digests.contains(digest) {
+            return true;
+        }
         if self.content_policies.values().any(|state| {
             state
                 .applied
@@ -833,6 +996,7 @@ impl EngineHost {
 
     #[cfg(not(target_os = "windows"))]
     fn fail_unstarted_declarative_content_policy(&mut self, job: DeclarativeContentPolicyJob) {
+        self.finish_content_rule_preflight(job.digest, ContentRuleValidationOutcome::Unavailable);
         self.release_declarative_content_policy_bytes(job.encoded_bytes);
         let waiters = self
             .declarative_content_policy_compilations
@@ -915,6 +1079,7 @@ impl EngineHost {
             };
             state.applied = Some(AppliedContentPolicy {
                 generation,
+                cosmetics: compiling.cosmetics,
                 // Existing WebView2 handlers capture this object. Retaining it
                 // also makes future views share the exact same runtime
                 // diagnostics counters instead of splitting one digest across
@@ -923,6 +1088,7 @@ impl EngineHost {
                 #[cfg(not(target_os = "windows"))]
                 digest: native_digest,
             });
+            self.refresh_profile_document_styles(profile);
             self.emit_content_policy_settlement(
                 profile,
                 generation,
@@ -945,7 +1111,11 @@ impl EngineHost {
             let Some(view) = self.views.get(&id) else {
                 continue;
             };
-            match crate::platform::imp::install_content_policy_on_view(view, &native) {
+            match crate::platform::imp::install_scoped_content_policy_on_view(
+                view,
+                &native,
+                &view.site_scope.pause,
+            ) {
                 Ok(registration) => registrations.push((id, registration)),
                 Err(failure) => {
                     if !self.rollback_content_policy_cohort(registrations, None) {
@@ -969,7 +1139,13 @@ impl EngineHost {
             .spare
             .as_ref()
             .filter(|spare| spare.partition.profile() == profile)
-            .map(|spare| crate::platform::imp::install_content_policy_on_view(&spare.view, &native))
+            .map(|spare| {
+                crate::platform::imp::install_scoped_content_policy_on_view(
+                    &spare.view,
+                    &native,
+                    &spare.view.site_scope.pause,
+                )
+            })
             .transpose();
         let spare_registration = match spare_registration {
             Ok(registration) => registration,
@@ -1142,10 +1318,12 @@ impl EngineHost {
         }
         state.applied = Some(AppliedContentPolicy {
             generation,
+            cosmetics: compiling.cosmetics,
             native,
             #[cfg(not(target_os = "windows"))]
             digest: native_digest,
         });
+        self.refresh_profile_document_styles(profile);
         self.emit_content_policy_settlement(
             profile,
             generation,
@@ -1215,12 +1393,20 @@ impl EngineHost {
 
     pub(super) fn retire_content_policy(&mut self, profile: ProfileId) {
         self.content_policies.remove(&profile);
+        self.blocker_sites.remove(&profile);
+        self.blocker_statistics.remove(&profile);
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }
     }
 
     pub(super) fn begin_content_policy_shutdown(&mut self) {
+        self.style_worker.take();
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.content_rule_preflight.take();
+            self.preflight_cache_digests.clear();
+        }
         self.content_policies.clear();
         self.declarative_content_policy_cache.clear();
         self.declarative_content_policy_compilations.clear();
@@ -1525,6 +1711,7 @@ mod tests {
             applied: None,
             compiling: Some(CompilingContentPolicy {
                 generation: ContentPolicyGeneration::new(1).unwrap(),
+                cosmetics: None,
                 superseded: false,
             }),
             queued: None,
@@ -1560,12 +1747,14 @@ mod tests {
         let state = ProfileContentPolicy {
             applied: Some(AppliedContentPolicy {
                 generation: applied,
+                cosmetics: None,
                 native: allow_all,
                 #[cfg(not(target_os = "windows"))]
                 digest: None,
             }),
             compiling: Some(CompilingContentPolicy {
                 generation: compiling,
+                cosmetics: None,
                 superseded: true,
             }),
             queued: Some(QueuedContentPolicy {
@@ -1756,7 +1945,7 @@ mod tests {
         assert_eq!(MAX_DECLARATIVE_CONTENT_POLICY_JOBS, 2);
         assert_eq!(
             DECLARATIVE_CONTENT_POLICY_TIMEOUT,
-            std::time::Duration::from_secs(120)
+            std::time::Duration::from_secs(60)
         );
         assert_eq!(
             MAX_RESIDENT_DECLARATIVE_CONTENT_POLICY_BYTES,
@@ -2163,6 +2352,7 @@ mod tests {
         let candidate = std::rc::Rc::new(crate::platform::imp::NativeContentPolicy::AllowAll);
         let applied = AppliedContentPolicy {
             generation: ContentPolicyGeneration::new(1).unwrap(),
+            cosmetics: None,
             native: installed.clone(),
             #[cfg(not(target_os = "windows"))]
             digest: None,

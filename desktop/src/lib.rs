@@ -2,6 +2,15 @@
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
 #[cfg(all(
+    feature = "adblock-qa",
+    any(
+        not(debug_assertions),
+        not(any(target_os = "macos", target_os = "windows"))
+    )
+))]
+compile_error!("protection QA requires a macOS or Windows debug build");
+
+#[cfg(all(
     feature = "file-workflows-qa",
     any(
         not(debug_assertions),
@@ -1242,7 +1251,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
             blocker_status,
+            blocker_stats,
             blocker_set_enabled,
+            blocker_site_change,
+            blocker_picker,
             blocker_retry,
             blocker_refresh_sources,
             profiles_delete,
@@ -1886,6 +1898,41 @@ fn tabs_bootstrap(caller: WebviewWindow, shell: State<'_, Handle>) {
     shell.dispatch(Command::Bootstrap);
 }
 
+static BLOCKER_STATS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+#[specta::specta]
+async fn blocker_stats(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    profile: String,
+) -> Result<zephium_ipc::BlockerStatsView, ()> {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_stats") {
+        return Err(());
+    }
+    let Some(profile) = zephium_core::ids::ProfileId::parse(&profile) else {
+        return Err(());
+    };
+    if BLOCKER_STATS_QUERY_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(());
+    }
+    let _guard = AtomicFlagReset(&BLOCKER_STATS_QUERY_IN_FLIGHT);
+    let request = shell.blocker_statistics(profile);
+    tauri::async_runtime::spawn_blocking(move || {
+        request
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or(())
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn blocker_status(
@@ -1925,6 +1972,81 @@ fn blocker_set_enabled(
         caller.app_handle(),
         &shell,
         Command::SetFocusedContentBlockerEnabled(enabled),
+    )
+}
+
+static BLOCKER_PICKER_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+#[specta::specta]
+async fn blocker_picker(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    context: zephium_ipc::BlockerSiteContext,
+    action: zephium_ipc::BlockerPickerAction,
+) -> Result<Option<zephium_ipc::BlockerPickerView>, ()> {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_picker")
+        || context.profile.len() > 64
+        || context.tab.len() > 64
+        || context.site.len() > 253
+        || context.revision.len() != 16
+        || match &action {
+            zephium_ipc::BlockerPickerAction::Start => false,
+            zephium_ipc::BlockerPickerAction::Read { session }
+            | zephium_ipc::BlockerPickerAction::Preview { session, .. }
+            | zephium_ipc::BlockerPickerAction::Stop { session } => session.len() != 16,
+        }
+        || BLOCKER_PICKER_QUERY_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return Ok(None);
+    }
+    let _guard = AtomicFlagReset(&BLOCKER_PICKER_QUERY_IN_FLIGHT);
+    let request = shell.element_picker(context, action);
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        request
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten())
+}
+
+#[tauri::command]
+#[specta::specta]
+fn blocker_site_change(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    context: zephium_ipc::BlockerSiteContext,
+    action: zephium_ipc::BlockerSiteAction,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "blocker_site_change")
+        || context.profile.len() > 64
+        || context.tab.len() > 64
+        || context.site.len() > 253
+        || context.revision.len() != 16
+        || match &action {
+            zephium_ipc::BlockerSiteAction::SaveSelection { session, selection } => {
+                session.len() != 16 || selection.len() != 64
+            }
+            zephium_ipc::BlockerSiteAction::Pause { .. }
+            | zephium_ipc::BlockerSiteAction::Retry => false,
+            zephium_ipc::BlockerSiteAction::SetHideEnabled { id, .. }
+            | zephium_ipc::BlockerSiteAction::RemoveHide { id } => id.len() != 16,
+        }
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::ChangeBlockerSite {
+            context: Box::new(context),
+            action,
+        },
     )
 }
 
@@ -2172,15 +2294,9 @@ fn extension_action_invoke(
     else {
         return rejected_extension_action("action-revision");
     };
-    let Ok(inner_size) = caller.inner_size() else {
-        return rejected_extension_action("window-size");
-    };
-    let Ok(scale_factor) = caller.scale_factor() else {
-        return rejected_extension_action("window-scale");
-    };
-    if !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return rejected_extension_action("window-scale-value");
-    }
+    // On macOS the chrome webview shrinks to the sidebar beside a web page, so
+    // its own size is not the window's; the anchor must fit the window.
+    let window = platform::imp::content_size(&caller).unwrap_or_else(|| inner_logical(&caller));
     // DOMRect is relative to the positioned privileged chrome WebView, while
     // the native popup parent is the window content view. Apply the same
     // generation-checked chrome origin used by drag/menu coordinates; never
@@ -2196,8 +2312,8 @@ fn extension_action_invoke(
         window_anchor_y,
         anchor_width,
         anchor_height,
-        f64::from(inner_size.width) / scale_factor,
-        f64::from(inner_size.height) / scale_factor,
+        window.width,
+        window.height,
     ) else {
         return rejected_extension_action("window-anchor-bounds");
     };
@@ -2476,6 +2592,10 @@ fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
 }
 
 fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAdmission {
+    if id == "browser.quit" {
+        app.exit(0);
+        return accepted_ui_operation();
+    }
     if shutdown_started(app) {
         return rejected_operation();
     }
@@ -2503,6 +2623,14 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         return match (app.get_webview_window(MAIN_LABEL), menu) {
             (Some(window), Ok(menu)) if window.popup_menu(&menu).is_ok() => accepted_ui_operation(),
             _ => rejected_operation(),
+        };
+    }
+    // Site protection acts on the frame's focused page state.
+    if matches!(id, PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND) {
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
         };
     }
     // Capture belongs to the frame, which decides where the new note opens.
@@ -3254,7 +3382,14 @@ fn tab_menu_popup(
 
 #[tauri::command]
 #[specta::specta]
-fn sidebar_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
+fn sidebar_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    site_protected: Option<bool>,
+    can_hide: bool,
+) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "sidebar_menu_popup") {
         return false;
     }
@@ -3276,7 +3411,7 @@ fn sidebar_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
         return false;
     };
     let keymap = load_keymap();
-    let Ok(menu) = build_sidebar_menu(&app, &keymap) else {
+    let Ok(menu) = build_sidebar_menu(&app, &keymap, site_protected, can_hide) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -3527,6 +3662,16 @@ fn build_command_menu_item_enabled(
     builder.build(handle)
 }
 
+fn build_quit_menu_item(
+    handle: &tauri::AppHandle,
+) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    // Native terminate: bypasses Tauri's ExitRequested path on macOS.
+    // An ordinary menu event reaches the existing draft/store shutdown barrier.
+    tauri::menu::MenuItemBuilder::with_id("browser.quit", "Quit Zephium")
+        .accelerator("CmdOrCtrl+Q")
+        .build(handle)
+}
+
 fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
@@ -3550,7 +3695,7 @@ fn build_menu(
         .hide_others()
         .show_all()
         .separator()
-        .quit()
+        .item(&build_quit_menu_item(handle)?)
         .build()?;
     let file = SubmenuBuilder::new(handle, "File")
         .item(&item("tab.new")?)
@@ -3645,6 +3790,9 @@ const SIDEBAR_MENU_COMMAND_IDS: [&str; 4] = [
     SIDEBAR_COMPACT_COMMAND,
 ];
 
+const PROTECTION_SITE_COMMAND: &str = "protection.site";
+const PROTECTION_HIDE_COMMAND: &str = "protection.hide";
+
 const TAB_MENU_ACTION_IDS: [&str; 4] = [
     "tabmenu.reload",
     "tabmenu.copyLink",
@@ -3652,11 +3800,17 @@ const TAB_MENU_ACTION_IDS: [&str; 4] = [
     "tabmenu.close",
 ];
 
+/// `site_protected` is the page's protection standing, absent where site
+/// controls do not apply; the frame owns both actions.
 fn build_sidebar_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
+    site_protected: Option<bool>,
+    can_hide: bool,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, PredefinedMenuItem};
+    use tauri::menu::{
+        CheckMenuItemBuilder, IsMenuItem, Menu, MenuItemBuilder, PredefinedMenuItem,
+    };
 
     let resolved = zephium_core::commands::resolve(overrides);
     let back = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[0])?;
@@ -3665,9 +3819,27 @@ fn build_sidebar_menu(
     let compact = build_command_menu_item(handle, &resolved, SIDEBAR_MENU_COMMAND_IDS[3])?;
     let separator = PredefinedMenuItem::separator(handle)?;
 
+    let protection = match site_protected {
+        Some(protected) => Some((
+            PredefinedMenuItem::separator(handle)?,
+            CheckMenuItemBuilder::with_id(PROTECTION_SITE_COMMAND, "Block Ads and Trackers")
+                .checked(protected)
+                .build(handle)?,
+            MenuItemBuilder::with_id(PROTECTION_HIDE_COMMAND, "Hide Elements…")
+                .enabled(can_hide)
+                .build(handle)?,
+        )),
+        None => None,
+    };
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&back, &forward, &reload];
+    if let Some((rule, site, hide)) = &protection {
+        items.extend([rule as &dyn IsMenuItem<tauri::Wry>, site, hide]);
+    }
+    items.extend([&separator as &dyn IsMenuItem<tauri::Wry>, &compact]);
+
     #[cfg(target_os = "macos")]
     {
-        Menu::with_items(handle, &[&back, &forward, &reload, &separator, &compact])
+        Menu::with_items(handle, &items)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -3675,20 +3847,13 @@ fn build_sidebar_menu(
         let minimize = PredefinedMenuItem::minimize(handle, None)?;
         let maximize = PredefinedMenuItem::maximize(handle, None)?;
         let close = PredefinedMenuItem::close_window(handle, None)?;
-        Menu::with_items(
-            handle,
-            &[
-                &back,
-                &forward,
-                &reload,
-                &separator,
-                &compact,
-                &window_separator,
-                &minimize,
-                &maximize,
-                &close,
-            ],
-        )
+        items.extend([
+            &window_separator as &dyn IsMenuItem<tauri::Wry>,
+            &minimize,
+            &maximize,
+            &close,
+        ]);
+        Menu::with_items(handle, &items)
     }
 }
 
@@ -3763,7 +3928,7 @@ fn build_profile_menu(
     let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
         .accelerator("CmdOrCtrl+,")
         .build(handle)?;
-    let quit = PredefinedMenuItem::quit(handle, None)?;
+    let quit = build_quit_menu_item(handle)?;
     Menu::with_items(
         handle,
         &[
@@ -4378,11 +4543,13 @@ pub fn run() {
             });
 
             let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
-            // The managed service owns the release-authenticated seed,
-            // compiled cache, and—once provisioned—the independently
-            // authenticated source updater. Startup fails rather than
-            // silently substituting an empty catalog.
-            let blocker = blocker_service::start(&data_dir).map_err(|error| {
+            // Official source candidates must pass the same native compiler
+            // as profile policies before becoming the durable current lists.
+            let native_validation:zephium_blocker_service::NativeRuleValidator={
+                let engine=engine.clone();
+                Arc::new(move |rules,done|zephium_core::ports::engine::Engine::validate_content_rules(engine.as_ref(),rules,done))
+            };
+            let blocker = blocker_service::start_with_updates(&data_dir,native_validation).map_err(|error| {
                 std::io::Error::other(format!(
                     "failed to start managed content-policy service: {error}"
                 ))
@@ -4892,6 +5059,15 @@ mod tests {
             outcome: OperationOutcome::Applied,
             reason: OperationReason::ProfileDeletionCompleted,
         }
+    }
+
+    #[test]
+    fn quit_menus_use_the_coordinated_exit_request() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!source.contains(".quit()"));
+        assert!(!source.contains("PredefinedMenuItem::quit"));
+        assert!(source.contains("if id == \"browser.quit\""));
+        assert!(source.contains("app.exit(0)"));
     }
 
     #[test]
@@ -5419,7 +5595,7 @@ mod tests {
     #[test]
     fn pre_shell_blocker_owner_reaps_the_real_managed_compiler() {
         let root = tempfile::tempdir().unwrap();
-        let blocker = super::blocker_service::start(root.path()).unwrap();
+        let blocker = super::blocker_service::start_seed_only(root.path()).unwrap();
         let owner = super::StartupBlocker::default();
         assert!(owner.install(blocker.clone()));
 
@@ -5816,7 +5992,7 @@ mod tests {
             .find("if !startup_store.transfer_to(&store)")
             .expect("exact Store ownership transfer");
         let blocker_start = setup
-            .find("let blocker = blocker_service::start(&data_dir)")
+            .find("let blocker = blocker_service::start_with_updates(&data_dir")
             .expect("managed blocker construction");
         let startup_blocker_owner = setup
             .find("if !startup_blocker.install(blocker.clone())")

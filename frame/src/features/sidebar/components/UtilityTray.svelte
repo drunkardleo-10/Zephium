@@ -5,7 +5,7 @@
   import Icon from "$shared/ui/Icon";
   import Disclosure from "$shared/ui/Disclosure";
 
-  let { children }: { children: Snippet } = $props();
+  let { children, onopen }: { children: Snippet; onopen?: () => void } = $props();
 </script>
 
 <!--
@@ -15,6 +15,7 @@
 -->
 <div class="utilities">
   <Disclosure
+    {onopen}
     label={m.utilities()}
     menu
     triggerClass="utilities-trigger"

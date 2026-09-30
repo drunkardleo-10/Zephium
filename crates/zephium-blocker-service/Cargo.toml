@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+official-https = ["zephium-blocker-update/official-https"]
 tuf = ["zephium-blocker-update/tuf"]
 
 [dependencies]
@@ -20,3 +21,7 @@ zephium-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[example]]
+name = "official_update_probe"
+required-features = ["official-https"]

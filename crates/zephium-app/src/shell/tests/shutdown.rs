@@ -93,7 +93,7 @@ fn assert_terminal_store_callback_cannot_reenter_store(
     case: &str,
     outcome: impl FnOnce(ProfileId) -> BlockerConfigUpdateOutcome,
 ) {
-    let store = Arc::new(FakeStore::default());
+    let store = super::blocker::opted_out_store();
     store
         .hold_blocker_updates
         .store(true, std::sync::atomic::Ordering::Release);
@@ -161,7 +161,7 @@ fn terminal_store_callbacks_cannot_reenter_store_after_shutdown() {
 
 #[test]
 fn pre_terminal_store_result_reconciles_before_store_shutdown() {
-    let store = Arc::new(FakeStore::default());
+    let store = super::blocker::opted_out_store();
     store
         .hold_blocker_updates
         .store(true, std::sync::atomic::Ordering::Release);

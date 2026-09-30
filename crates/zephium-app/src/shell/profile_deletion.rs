@@ -149,6 +149,7 @@ impl Shell {
         // the state row is a process-local quarantine and is never removed on
         // a retryable result.
         self.cancel_pending_blocker_mutation(profile, OperationReason::ProfileDeletionInProgress);
+        self.retire_blocker_statistics(profile);
         self.blocker.retire_profile(profile);
         self.finish_terminalized_blocker_native_operations();
         operation_result(
@@ -232,6 +233,7 @@ impl Shell {
         // native erasure boundary. A late list build can never reinstall
         // policy state for a journal-authorized profile.
         self.cancel_pending_blocker_mutation(profile, OperationReason::ProfileDeletionInProgress);
+        self.retire_blocker_statistics(profile);
         self.blocker.retire_profile(profile);
         self.finish_terminalized_blocker_native_operations();
         let mut favicon_items: std::collections::HashSet<ItemId> = self

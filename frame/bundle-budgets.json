@@ -56,7 +56,7 @@
     "css": 305115
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
-    "js": 281000,
+    "js": 282000,
     "css": 16000
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
@@ -100,11 +100,11 @@
     "css": 4500
   },
   "lazy:features/notes/components/Notes.svelte": {
-    "js": 270500,
+    "js": 271500,
     "css": 18500
   },
   "lazy:features/tasks/components/Tasks.svelte": {
-    "js": 317500,
+    "js": 318500,
     "css": 31000
   },
   "lazy:app/browser/WorkWorkspace.svelte": {
@@ -148,7 +148,7 @@
     "css": 41500
   },
   "lazy:features/tasks/components/TaskDetail.svelte": {
-    "js": 332000,
+    "js": 333000,
     "css": 39500
   },
   "lazy:features/tasks/components/TaskBoard.svelte": {
@@ -164,23 +164,27 @@
     "css": 7000
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
-    "js": 539000,
+    "js": 540000,
     "css": 16500
   },
   "lazy:features/notes/components/NotesPage.svelte": {
-    "js": 290500,
+    "js": 291500,
     "css": 24500
   },
   "lazy:domain/notes/index.ts": {
-    "js": 150000,
+    "js": 151000,
     "css": 4000
   },
   "lazy:features/notes/index.ts": {
-    "js": 138000,
+    "js": 139000,
     "css": 4000
   },
   "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 423000,
-    "css": 101500
+    "js": 430500,
+    "css": 103000
+  },
+  "lazy:features/blocker/components/ProtectionMenu.svelte": {
+    "js": 313000,
+    "css": 95500
   }
 }

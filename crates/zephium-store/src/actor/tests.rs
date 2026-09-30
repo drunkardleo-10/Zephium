@@ -300,7 +300,7 @@ fn default_blocker_configs(state: &SessionState) -> Vec<ProfileBlockerConfig> {
         .map(|profile| ProfileBlockerConfig {
             profile: profile.id,
             revision: BlockerConfigRevision::INITIAL,
-            config: BlockerConfig { enabled: false },
+            config: BlockerConfig::default(),
         })
         .collect();
     configs.sort_unstable_by_key(|config| config.profile.to_string());
@@ -1029,7 +1029,7 @@ fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
 }
 
 #[test]
-fn blocker_preferences_load_with_the_authoritative_session_and_default_disabled() {
+fn blocker_preferences_load_with_the_authoritative_session_and_default_enabled() {
     let store = SqliteStore::in_memory().unwrap();
     let session = two_profile_sample();
     store.save_session(session.clone());
@@ -1105,7 +1105,7 @@ fn blocker_preference_update_survives_a_clean_process_boundary() {
         assert!(store.update_profile_blocker_config(
             profile,
             BlockerConfigRevision::INITIAL,
-            BlockerConfig { enabled: true },
+            BlockerConfig { enabled: false },
             Box::new(move |outcome| {
                 done.send(outcome).unwrap();
             }),
@@ -1128,7 +1128,7 @@ fn blocker_preference_update_survives_a_clean_process_boundary() {
             blocker_configs: vec![ProfileBlockerConfig {
                 profile,
                 revision,
-                config: BlockerConfig { enabled: true },
+                config: BlockerConfig { enabled: false },
             }],
         }
     );
@@ -1258,7 +1258,7 @@ fn session_commit_preserves_survivors_and_defaults_only_new_profiles() {
         .update_profile_blocker_config(
             first_profile,
             BlockerConfigRevision::INITIAL,
-            BlockerConfig { enabled: true },
+            BlockerConfig { enabled: false },
         )
         .unwrap();
     let BlockerConfigUpdateOutcome::Updated(updated) = updated else {
@@ -1274,7 +1274,7 @@ fn session_commit_preserves_survivors_and_defaults_only_new_profiles() {
             ProfileBlockerConfig {
                 profile: ProfileId::from(3),
                 revision: BlockerConfigRevision::INITIAL,
-                config: BlockerConfig { enabled: false },
+                config: BlockerConfig::default(),
             },
         ]
     );
@@ -2485,6 +2485,9 @@ fn authoritative_snapshot_must_exactly_match_validated_registry_before_purge() {
             .join(format!("profile-{snapshot_profile}.sqlite"));
     }
     let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    // Model out-of-band registry corruption, not a legal application update.
+    // The site-preference FK correctly prevents this mutation in normal use.
+    meta.pragma_update(None, "foreign_keys", false).unwrap();
     meta.execute(
         "UPDATE profiles SET id = ?1 WHERE id = ?2",
         params![registry_profile.to_string(), snapshot_profile.to_string()],
@@ -2501,6 +2504,114 @@ fn authoritative_snapshot_must_exactly_match_validated_registry_before_purge() {
         profile_path.exists(),
         "registry mismatch authorized destructive reconciliation"
     );
+}
+
+#[test]
+fn blocker_site_preferences_survive_session_saves_restart_and_stale_writes() {
+    use zephium_core::blocker::{
+        BlockerSite, BlockerSitePreferences, PersonalHide, SitePreferenceChange,
+    };
+    fn load(store: &SqliteStore, profile: ProfileId) -> Arc<BlockerSitePreferences> {
+        let (send, receive) = mpsc::channel();
+        assert!(store.load_profile_blocker_sites(
+            profile,
+            Box::new(move |outcome| send.send(outcome).unwrap())
+        ));
+        let BlockerSiteLoadOutcome::Loaded(value) =
+            receive.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("site preferences must load");
+        };
+        value
+    }
+    fn update(
+        store: &SqliteStore,
+        profile: ProfileId,
+        expected: u64,
+        next: Arc<BlockerSitePreferences>,
+    ) -> BlockerSiteUpdateOutcome {
+        let (send, receive) = mpsc::channel();
+        assert!(store.update_profile_blocker_sites(
+            profile,
+            expected,
+            next,
+            Box::new(move |outcome| send.send(outcome).unwrap())
+        ));
+        receive.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let site = BlockerSite::from_url("https://example.com/").unwrap();
+    let expected;
+    {
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.save_session(sample());
+        // The narrow load must make an already-admitted new-profile session
+        // visible without requiring an unrelated UI operation to flush it.
+        let initial = load(&store, profile);
+        let hidden = Arc::new(
+            initial
+                .changed(SitePreferenceChange::AddHide(PersonalHide {
+                    id: 0,
+                    site: site.clone(),
+                    selector: ".banner".into(),
+                    label: "Banner".into(),
+                    enabled: true,
+                }))
+                .unwrap(),
+        );
+        assert!(matches!(
+            update(&store, profile, initial.revision(), hidden.clone()),
+            BlockerSiteUpdateOutcome::Updated(_)
+        ));
+        expected = Arc::new(
+            hidden
+                .changed(SitePreferenceChange::Pause {
+                    site: site.clone(),
+                    paused: true,
+                })
+                .unwrap(),
+        );
+        assert!(matches!(
+            update(&store, profile, hidden.revision(), expected.clone()),
+            BlockerSiteUpdateOutcome::Updated(_)
+        ));
+        assert_eq!(
+            update(&store, profile, initial.revision(), hidden),
+            BlockerSiteUpdateOutcome::Conflict(expected.clone())
+        );
+        store.save_session(sample());
+        assert!(store.flush());
+        assert_eq!(load(&store, profile), expected);
+
+        let private = Arc::new(
+            BlockerSitePreferences::default()
+                .changed(SitePreferenceChange::Pause {
+                    site: BlockerSite::from_url("https://private-only.invalid/").unwrap(),
+                    paused: true,
+                })
+                .unwrap(),
+        );
+        assert_eq!(
+            update(&store, ProfileId::from(999), 1, private),
+            BlockerSiteUpdateOutcome::NotRegistered
+        );
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(load(&store, profile), expected);
+    assert!(load(&store, profile).paused(&site));
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        StoreShutdownOutcome::Clean
+    );
+    assert!(!std::fs::read(dir.path().join("meta.sqlite"))
+        .unwrap()
+        .windows(b"private-only.invalid".len())
+        .any(|w| w == b"private-only.invalid"));
 }
 
 #[test]
@@ -3836,4 +3947,25 @@ fn saving_an_icon_clears_rows_that_can_never_be_read_back() {
     assert!(hub
         .favicon_raster_with_age(profile, "https://legacy.example")
         .is_none());
+}
+
+#[test]
+fn blocker_statistics_roundtrip_and_clear_with_browsing_data() {
+    let mut hub = Hub::in_memory().unwrap();
+    let session = sample();
+    let profile = session.profiles[0].id;
+    hub.save(&session).unwrap();
+    let mut statistics = zephium_core::blocker::BlockerStatistics::default();
+    statistics.record(700_000, 12);
+    statistics.record(700_001, 9);
+    hub.save_blocker_statistics(profile, &statistics).unwrap();
+    assert_eq!(hub.load_blocker_statistics(profile).unwrap(), statistics);
+    hub.clear_history(profile, None);
+    assert_eq!(
+        hub.load_blocker_statistics(profile).unwrap(),
+        Default::default()
+    );
+    assert!(hub
+        .save_blocker_statistics(ProfileId::from(999), &statistics)
+        .is_err());
 }

@@ -382,6 +382,7 @@ impl EngineHost {
                     url: url.clone(),
                 },
             );
+            self.refresh_document_styles(id);
         }
         self.navigation_snapshots
             .get(&id)

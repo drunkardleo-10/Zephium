@@ -499,12 +499,11 @@ fn webkit_separator_rules_preserve_byte_and_end_of_url_branches() {
         .collect();
 
     assert!(filters.iter().any(|filter| {
-        filter.ends_with("example\\.com([^A-Za-z0-9_.%-].*)?$")
-            && !filter.contains("allowed\\.example")
+        filter.ends_with("example\\.com[^A-Za-z0-9_.%-]") && !filter.contains("allowed\\.example")
     }));
     assert!(filters
         .iter()
-        .any(|filter| filter.ends_with("allowed\\.example([^A-Za-z0-9_.%-].*)?$")));
+        .any(|filter| filter.ends_with("allowed\\.example[^A-Za-z0-9_.%-]")));
     assert!(filters
         .iter()
         .any(|filter| filter.ends_with("/path[^A-Za-z0-9_.%-]segment")));

@@ -21,16 +21,19 @@ use zephium_core::blocker::{
 
 #[cfg(feature = "runtime")]
 use crate::compiler::prepare_and_validate_runtime_engine;
+use crate::cosmetics::PreparedCosmetics;
 #[cfg(feature = "runtime")]
 use crate::rules::CachedRuntimeRules;
 use crate::rules::CompiledRules;
+#[cfg(feature = "webkit")]
+use crate::webkit::ResourceType as WebKitResourceType;
 use crate::{
     CompileLimits, CompileTarget, ADBLOCK_ENGINE_VERSION, POLICY_FORMAT_VERSION,
     WEBKIT_ARTIFACT_FORMAT_VERSION,
 };
 
 const CACHE_MAGIC: &[u8; 8] = b"ZPHBLK01";
-const CACHE_FORMAT_VERSION: u32 = 2;
+const CACHE_FORMAT_VERSION: u32 = 3;
 const CACHE_KEY_DOMAIN: &[u8] = b"zephium-compiled-blocker-cache-key";
 #[cfg(feature = "webkit")]
 const WEBKIT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
@@ -41,11 +44,14 @@ const STAGE_FILE: &str = "stage.bin";
 const MAX_CACHE_DIRECTORY_ENTRIES: usize = 4;
 const MAX_RUNTIME_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WEBKIT_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+const MAX_COSMETIC_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const COVERAGE_FIELD_COUNT: usize = 9;
-const RECORD_HEADER_BYTES: usize = 272;
+const RECORD_HEADER_BYTES: usize = 280;
 const RECORD_CHECKSUM_BYTES: usize = 32;
-const MAX_RECORD_BYTES: usize =
-    RECORD_HEADER_BYTES + MAX_RUNTIME_PAYLOAD_BYTES + RECORD_CHECKSUM_BYTES;
+const MAX_RECORD_BYTES: usize = RECORD_HEADER_BYTES
+    + MAX_RUNTIME_PAYLOAD_BYTES
+    + MAX_COSMETIC_PAYLOAD_BYTES
+    + RECORD_CHECKSUM_BYTES;
 
 /// Private directory used only for Zephium's compiled blocker cache.
 ///
@@ -146,6 +152,7 @@ pub(crate) enum LoadedArtifact {
         digest: ContentRuleDigest,
         coverage: ContentRuleCoverage,
         rules: Box<CachedRuntimeRules>,
+        cosmetics: Option<PreparedCosmetics>,
     },
     #[cfg(feature = "webkit")]
     WebKit {
@@ -153,6 +160,7 @@ pub(crate) enum LoadedArtifact {
         coverage: ContentRuleCoverage,
         artifact_digest: [u8; 32],
         encoded: Arc<str>,
+        cosmetics: Option<PreparedCosmetics>,
     },
 }
 
@@ -292,6 +300,7 @@ struct DecodedRecord<'a> {
     coverage: ContentRuleCoverage,
     rule_count: usize,
     payload: &'a [u8],
+    cosmetics: &'a [u8],
 }
 
 fn encode_compiled_record(
@@ -338,7 +347,13 @@ fn encode_compiled_record(
     if payload.is_empty() || payload.len() > payload_limit {
         return None;
     }
-    encode_record(
+    let cosmetics = compiled
+        .cosmetics()
+        .map(|value| value.policy.encode())
+        .transpose()
+        .ok()?
+        .unwrap_or_default();
+    encode_record_with_cosmetics(
         key,
         compiled.target(),
         *rules.digest().as_bytes(),
@@ -346,9 +361,11 @@ fn encode_compiled_record(
         rules.coverage(),
         rule_count,
         payload.as_ref(),
+        &cosmetics,
     )
 }
 
+#[cfg(test)]
 fn encode_record(
     key: CacheKey,
     target: CompileTarget,
@@ -358,12 +375,36 @@ fn encode_record(
     rule_count: usize,
     payload: &[u8],
 ) -> Option<Vec<u8>> {
+    encode_record_with_cosmetics(
+        key,
+        target,
+        policy_digest,
+        native_digest,
+        coverage,
+        rule_count,
+        payload,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_record_with_cosmetics(
+    key: CacheKey,
+    target: CompileTarget,
+    policy_digest: [u8; 32],
+    native_digest: [u8; 32],
+    coverage: ContentRuleCoverage,
+    rule_count: usize,
+    payload: &[u8],
+    cosmetics: &[u8],
+) -> Option<Vec<u8>> {
     let payload_limit = match target {
         CompileTarget::Runtime => MAX_RUNTIME_PAYLOAD_BYTES,
         CompileTarget::WebKit => MAX_WEBKIT_PAYLOAD_BYTES,
     };
     if payload.is_empty()
         || payload.len() > payload_limit
+        || cosmetics.len() > MAX_COSMETIC_PAYLOAD_BYTES
         || !coverage.is_consistent()
         || !coverage.has_blocking_entries()
     {
@@ -373,6 +414,7 @@ fn encode_record(
     let mut bytes = Vec::with_capacity(
         RECORD_HEADER_BYTES
             .checked_add(payload.len())?
+            .checked_add(cosmetics.len())?
             .checked_add(RECORD_CHECKSUM_BYTES)?,
     );
     bytes.extend_from_slice(CACHE_MAGIC);
@@ -391,10 +433,12 @@ fn encode_record(
     }
     bytes.extend_from_slice(&u64::try_from(rule_count).ok()?.to_be_bytes());
     bytes.extend_from_slice(&u64::try_from(payload.len()).ok()?.to_be_bytes());
+    bytes.extend_from_slice(&u64::try_from(cosmetics.len()).ok()?.to_be_bytes());
     if bytes.len() != RECORD_HEADER_BYTES {
         return None;
     }
     bytes.extend_from_slice(payload);
+    bytes.extend_from_slice(cosmetics);
     let checksum: [u8; 32] = Sha256::digest(&bytes).into();
     bytes.extend_from_slice(&checksum);
     Some(bytes)
@@ -440,10 +484,15 @@ fn decode_record(
     let coverage = coverage_from_values(coverage_values)?;
     let rule_count = usize::try_from(reader.u64()?).ok()?;
     let payload_len = usize::try_from(reader.u64()?).ok()?;
+    let cosmetics_len = usize::try_from(reader.u64()?).ok()?;
+    if cosmetics_len > MAX_COSMETIC_PAYLOAD_BYTES {
+        return None;
+    }
     if reader.position() != RECORD_HEADER_BYTES || payload_len > payload_limit(target) {
         return None;
     }
     let payload = reader.slice(payload_len)?;
+    let cosmetics = reader.slice(cosmetics_len)?;
     if reader.remaining() != 0 || Sha256::digest(payload).as_slice() != expected_payload_digest {
         return None;
     }
@@ -454,6 +503,7 @@ fn decode_record(
         coverage,
         rule_count,
         payload,
+        cosmetics,
     })
 }
 
@@ -461,9 +511,20 @@ fn validate_payload(record: DecodedRecord<'_>, limits: CompileLimits) -> Option<
     if !coverage_within_limits(record.coverage, limits) {
         return None;
     }
+    let cosmetics = if record.cosmetics.is_empty() {
+        None
+    } else {
+        Some(
+            PreparedCosmetics::new(
+                crate::CosmeticPolicy::decode(record.cosmetics).ok()?,
+                record.target,
+            )
+            .ok()?,
+        )
+    };
     match record.target {
-        CompileTarget::Runtime => validate_runtime_payload(record, limits),
-        CompileTarget::WebKit => validate_webkit_payload(record, limits),
+        CompileTarget::Runtime => validate_runtime_payload(record, limits, cosmetics),
+        CompileTarget::WebKit => validate_webkit_payload(record, limits, cosmetics),
     }
 }
 
@@ -471,6 +532,7 @@ fn validate_payload(record: DecodedRecord<'_>, limits: CompileLimits) -> Option<
 fn validate_runtime_payload(
     record: DecodedRecord<'_>,
     limits: CompileLimits,
+    cosmetics: Option<PreparedCosmetics>,
 ) -> Option<LoadedArtifact> {
     if record.rule_count != 0
         || record.native_digest != [0; 32]
@@ -488,6 +550,7 @@ fn validate_runtime_payload(
         digest: ContentRuleDigest::from_bytes(record.policy_digest),
         coverage: record.coverage,
         rules: Box::new(CachedRuntimeRules::new(engine, limits)),
+        cosmetics,
     })
 }
 
@@ -495,6 +558,7 @@ fn validate_runtime_payload(
 fn validate_runtime_payload(
     _record: DecodedRecord<'_>,
     _limits: CompileLimits,
+    _cosmetics: Option<PreparedCosmetics>,
 ) -> Option<LoadedArtifact> {
     None
 }
@@ -503,6 +567,7 @@ fn validate_runtime_payload(
 fn validate_webkit_payload(
     record: DecodedRecord<'_>,
     limits: CompileLimits,
+    cosmetics: Option<PreparedCosmetics>,
 ) -> Option<LoadedArtifact> {
     if record.rule_count == 0
         || record.rule_count > limits.max_webkit_rules()
@@ -529,6 +594,7 @@ fn validate_webkit_payload(
         coverage: record.coverage,
         artifact_digest,
         encoded,
+        cosmetics,
     })
 }
 
@@ -536,6 +602,7 @@ fn validate_webkit_payload(
 fn validate_webkit_payload(
     _record: DecodedRecord<'_>,
     _limits: CompileLimits,
+    _cosmetics: Option<PreparedCosmetics>,
 ) -> Option<LoadedArtifact> {
     None
 }
@@ -616,7 +683,7 @@ const fn payload_limit(target: CompileTarget) -> usize {
 }
 
 const fn max_record_bytes(target: CompileTarget) -> usize {
-    RECORD_HEADER_BYTES + payload_limit(target) + RECORD_CHECKSUM_BYTES
+    RECORD_HEADER_BYTES + payload_limit(target) + MAX_COSMETIC_PAYLOAD_BYTES + RECORD_CHECKSUM_BYTES
 }
 
 const fn target_for_payload(payload: &ContentRulesPayload) -> CompileTarget {
@@ -1207,28 +1274,13 @@ struct CachedWebKitTrigger {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unless_domain: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    resource_type: Option<Vec<CachedWebKitResourceType>>,
+    resource_type: Option<Vec<WebKitResourceType>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     load_type: Vec<CachedWebKitLoadType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     if_top_url: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unless_top_url: Option<Vec<String>>,
-}
-
-#[cfg(feature = "webkit")]
-#[derive(Clone, Copy, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum CachedWebKitResourceType {
-    Document,
-    Image,
-    StyleSheet,
-    Script,
-    Font,
-    Raw,
-    SvgDocument,
-    Media,
-    Popup,
 }
 
 #[cfg(feature = "webkit")]
@@ -1244,60 +1296,128 @@ fn validate_canonical_webkit_payload(
     payload: &[u8],
     expected_rules: usize,
 ) -> Option<(Arc<str>, usize)> {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use std::io::Write;
+
+    // Validate and compare one rule at a time. Rebuilding the whole rule tree
+    // and another full JSON buffer caused large allocation peaks on warm hits.
+    struct Rules<'a> {
+        payload: &'a [u8],
+        expected: usize,
+    }
+    impl<'de> Visitor<'de> for Rules<'_> {
+        type Value = usize;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("canonical WebKit network rules")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<usize, A::Error> {
+            let mut writer = CanonicalComparison {
+                bytes: self.payload,
+                offset: 0,
+            };
+            writer.write_all(b"[").map_err(A::Error::custom)?;
+            let mut count = 0usize;
+            let mut blocking = 0usize;
+            let mut exceptions = false;
+            while let Some(rule) = seq.next_element::<CachedWebKitRule>()? {
+                if count >= self.expected || !valid_cached_webkit_rule(&rule) {
+                    return Err(A::Error::custom("invalid cached rule"));
+                }
+                match rule.action.typ {
+                    CachedWebKitActionType::Block if !exceptions => blocking += 1,
+                    CachedWebKitActionType::Block => {
+                        return Err(A::Error::custom("block after exception"))
+                    }
+                    CachedWebKitActionType::IgnorePreviousRules => exceptions = true,
+                }
+                if count != 0 {
+                    writer.write_all(b",").map_err(A::Error::custom)?;
+                }
+                serde_json::to_writer(&mut writer, &rule).map_err(A::Error::custom)?;
+                count += 1;
+            }
+            writer.write_all(b"]").map_err(A::Error::custom)?;
+            if count != self.expected || blocking == 0 || writer.offset != self.payload.len() {
+                return Err(A::Error::custom("invalid cached rule count or encoding"));
+            }
+            Ok(blocking)
+        }
+    }
+    let mut decoder = serde_json::Deserializer::from_slice(payload);
+    let blocking = serde::Deserializer::deserialize_seq(
+        &mut decoder,
+        Rules {
+            payload,
+            expected: expected_rules,
+        },
+    )
+    .ok()?;
+    decoder.end().ok()?;
+    Some((Arc::from(std::str::from_utf8(payload).ok()?), blocking))
+}
+
+#[cfg(feature = "webkit")]
+struct CanonicalComparison<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+#[cfg(feature = "webkit")]
+impl std::io::Write for CanonicalComparison<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let end = self
+            .offset
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("encoding overflow"))?;
+        if self.bytes.get(self.offset..end) != Some(bytes) {
+            return Err(std::io::Error::other("noncanonical cached encoding"));
+        }
+        self.offset = end;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "webkit")]
+fn valid_cached_webkit_rule(rule: &CachedWebKitRule) -> bool {
     const MAX_URL_FILTER_BYTES: usize = 8 * 1024;
     const MAX_PREDICATES_PER_FIELD: usize = 8 * 1024;
-    let rules: Vec<CachedWebKitRule> = serde_json::from_slice(payload).ok()?;
-    if rules.len() != expected_rules || rules.is_empty() {
-        return None;
+    if rule.action.selector.is_some()
+        || rule.trigger.url_filter.is_empty()
+        || rule.trigger.url_filter.len() > MAX_URL_FILTER_BYTES
+        || !rule.trigger.url_filter.is_ascii()
+        || (rule.trigger.if_domain.is_some() && rule.trigger.unless_domain.is_some())
+        || (rule.trigger.if_top_url.is_some() && rule.trigger.unless_top_url.is_some())
+        || !valid_string_predicates(
+            rule.trigger.if_domain.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            255,
+        )
+        || !valid_string_predicates(
+            rule.trigger.unless_domain.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            255,
+        )
+        || !valid_string_predicates(
+            rule.trigger.if_top_url.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            MAX_URL_FILTER_BYTES,
+        )
+        || !valid_string_predicates(
+            rule.trigger.unless_top_url.as_deref(),
+            MAX_PREDICATES_PER_FIELD,
+            MAX_URL_FILTER_BYTES,
+        )
+        || !unique_bounded(
+            rule.trigger.resource_type.as_deref(),
+            WebKitResourceType::COUNT,
+        )
+        || (!rule.trigger.load_type.is_empty() && !unique_bounded(Some(&rule.trigger.load_type), 2))
+    {
+        return false;
     }
-    let mut blocking_entries = 0usize;
-    let mut exceptions_started = false;
-    for rule in &rules {
-        if rule.action.selector.is_some()
-            || rule.trigger.url_filter.is_empty()
-            || rule.trigger.url_filter.len() > MAX_URL_FILTER_BYTES
-            || !rule.trigger.url_filter.is_ascii()
-            || (rule.trigger.if_domain.is_some() && rule.trigger.unless_domain.is_some())
-            || (rule.trigger.if_top_url.is_some() && rule.trigger.unless_top_url.is_some())
-            || !valid_string_predicates(
-                rule.trigger.if_domain.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                255,
-            )
-            || !valid_string_predicates(
-                rule.trigger.unless_domain.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                255,
-            )
-            || !valid_string_predicates(
-                rule.trigger.if_top_url.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                MAX_URL_FILTER_BYTES,
-            )
-            || !valid_string_predicates(
-                rule.trigger.unless_top_url.as_deref(),
-                MAX_PREDICATES_PER_FIELD,
-                MAX_URL_FILTER_BYTES,
-            )
-            || !unique_bounded(rule.trigger.resource_type.as_deref(), 9)
-            || (!rule.trigger.load_type.is_empty()
-                && !unique_bounded(Some(&rule.trigger.load_type), 2))
-        {
-            return None;
-        }
-        match rule.action.typ {
-            CachedWebKitActionType::Block if !exceptions_started => {
-                blocking_entries = blocking_entries.checked_add(1)?;
-            }
-            CachedWebKitActionType::Block => return None,
-            CachedWebKitActionType::IgnorePreviousRules => exceptions_started = true,
-        }
-    }
-    if blocking_entries == 0 || serde_json::to_vec(&rules).ok()?.as_slice() != payload {
-        return None;
-    }
-    let encoded = std::str::from_utf8(payload).ok()?;
-    Some((Arc::from(encoded), blocking_entries))
+    true
 }
 
 #[cfg(feature = "webkit")]

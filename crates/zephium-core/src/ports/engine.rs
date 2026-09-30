@@ -527,7 +527,104 @@ pub enum StageMotion {
     Arrive,
 }
 
+/// Exactly-once completion ownership for a per-profile native site snapshot.
+/// Dropping a refused or shutdown task reports failure rather than stranding
+/// an accepted caller. It carries no page data or native handles.
+pub struct BlockerSiteCompletion(Option<Box<dyn FnOnce(bool) + Send>>);
+
+impl BlockerSiteCompletion {
+    pub fn new(done: impl FnOnce(bool) + Send + 'static) -> Self {
+        Self(Some(Box::new(done)))
+    }
+    pub fn finish(mut self, applied: bool) {
+        if let Some(done) = self.0.take() {
+            done(applied);
+        }
+    }
+}
+
+impl Drop for BlockerSiteCompletion {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(false);
+        }
+    }
+}
+
+/// Native candidate admission does not install profile or view policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentRuleValidationOutcome {
+    Valid,
+    /// Dispatch/queue/lifecycle refusal is retryable, not a bad list verdict.
+    Unavailable,
+    Rejected(crate::blocker::ContentRuleApplyFailure),
+}
+
+/// Exactly-once native preflight completion; dropped work remains unavailable.
+pub struct ContentRuleValidationCompletion(
+    Option<Box<dyn FnOnce(ContentRuleValidationOutcome) + Send>>,
+);
+impl ContentRuleValidationCompletion {
+    pub fn new(done: impl FnOnce(ContentRuleValidationOutcome) + Send + 'static) -> Self {
+        Self(Some(Box::new(done)))
+    }
+    pub fn finish(mut self, outcome: ContentRuleValidationOutcome) {
+        if let Some(done) = self.0.take() {
+            done(outcome);
+        }
+    }
+}
+impl Drop for ContentRuleValidationCompletion {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(ContentRuleValidationOutcome::Unavailable);
+        }
+    }
+}
+
 pub trait Engine {
+    fn set_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _counter: crate::blocker::BlockedLoadCounter,
+    ) {
+    }
+    fn collect_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _reset: bool,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
+        done();
+    }
+
+    fn validate_content_rules(
+        &self,
+        _rules: Arc<ContentRules>,
+        completion: ContentRuleValidationCompletion,
+    ) {
+        completion.finish(ContentRuleValidationOutcome::Unavailable);
+    }
+
+    fn element_picker(
+        &self,
+        _profile: ProfileId,
+        _id: ItemId,
+        _site: crate::blocker::BlockerSite,
+        _request: crate::blocker::ElementPickerRequest,
+        completion: crate::blocker::ElementPickerCompletion,
+    ) {
+        completion.finish(None);
+    }
+
+    fn set_blocker_site_preferences(
+        &self,
+        _profile: ProfileId,
+        _preferences: Arc<crate::blocker::PreparedBlockerSites>,
+        completion: BlockerSiteCompletion,
+    ) {
+        completion.finish(false);
+    }
     /// Browser-owned file actions. Only trusted Shell admission supplies the
     /// profile partition; the caller supplies IDs, never filesystem paths.
     fn download_call(

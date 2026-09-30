@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Isolated actual-product protection QA; never a shipping application.
+adblock-qa = ["tauri/custom-protocol"]
 # Isolated actual-product file workflow verification, never a shipping app.
 file-workflows-qa = ["tauri/custom-protocol"]
 # Isolated user-resource UI verification; never a shipping application.
@@ -61,7 +63,7 @@ zephium-work-composition = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-store.workspace = true
 zephium-notes.workspace = true
-zephium-blocker-service.workspace = true
+zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true
 window-vibrancy = "=0.8.0"
 serde.workspace = true

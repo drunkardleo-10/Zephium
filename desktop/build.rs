@@ -70,6 +70,10 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => None,
         Err(error) => return Err(Box::new(error)),
     };
+    let adblock_qa = env::var_os("CARGO_FEATURE_ADBLOCK_QA").is_some();
+    if adblock_qa && env::var("OPT_LEVEL").as_deref() == Ok("0") {
+        return Err("protection QA must be optimized: set CARGO_PROFILE_DEV_OPT_LEVEL=2".into());
+    }
     let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
     let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
@@ -84,16 +88,24 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             return Err("the extensions QA app must use its exact isolated identity".into());
         }
     }
-    if resource_ui_qa && file_workflows_qa {
+    if [resource_ui_qa, file_workflows_qa, adblock_qa, webext_qa]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+        > 1
+    {
         return Err("product QA identities are mutually exclusive".into());
     }
-    if resource_ui_qa || file_workflows_qa {
+    if resource_ui_qa || file_workflows_qa || adblock_qa {
         let target = env::var("CARGO_CFG_TARGET_OS")?;
-        let supported_target = target == "macos" || (file_workflows_qa && target == "windows");
+        let supported_target =
+            target == "macos" || ((file_workflows_qa || adblock_qa) && target == "windows");
         if !supported_target || env::var("PROFILE").as_deref() != Ok("debug") || rendering_probe {
             return Err("product UI QA requires an isolated supported-platform debug build".into());
         }
-        let (qa_id, qa_name) = if file_workflows_qa {
+        let (qa_id, qa_name) = if adblock_qa {
+            ("app.zephium.protection-qa", "Zephium Protection QA")
+        } else if file_workflows_qa {
             (
                 "app.zephium.files-integration-qa",
                 "Zephium Files Integration QA",
@@ -155,6 +167,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !resource_ui_qa
                 && !file_workflows_qa
                 && !webext_qa
+                && !adblock_qa
             {
                 validate_linux_identity("effective", &config, &root)?;
             }

@@ -258,6 +258,30 @@ fn enabled_rules() -> BlockerCompileOutcome {
     )
 }
 
+// Most lifecycle tests exercise a later explicit enable operation. Give them
+// an existing opted-out profile instead of tying that setup to product defaults.
+pub(super) fn opted_out_store() -> Arc<FakeStore> {
+    let seed = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(seed.clone());
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Persist);
+    let session = seed.saved.lock().unwrap().clone().unwrap();
+    let store = Arc::new(FakeStore::default());
+    *store.blocker_configs.lock().unwrap() = Some(
+        session
+            .profiles
+            .iter()
+            .map(|p| ProfileBlockerConfig {
+                profile: p.id,
+                revision: BlockerConfigRevision::INITIAL,
+                config: BlockerConfig { enabled: false },
+            })
+            .collect(),
+    );
+    *store.saved.lock().unwrap() = Some(session);
+    store
+}
+
 fn controlled_shell() -> (
     Shell,
     Arc<FakeEngine>,
@@ -267,7 +291,7 @@ fn controlled_shell() -> (
 ) {
     let engine = Arc::new(FakeEngine::default());
     let compiler = Arc::new(ControlledCompiler::default());
-    let store = Arc::new(FakeStore::default());
+    let store = opted_out_store();
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
         profile: None,
@@ -301,7 +325,7 @@ fn controlled_shell_with_operation_log() -> (
 ) {
     let engine = Arc::new(FakeEngine::default());
     let compiler = Arc::new(ControlledCompiler::default());
-    let store = Arc::new(FakeStore::default());
+    let store = opted_out_store();
     let operations: OperationLog = Arc::new(Mutex::new(Vec::new()));
     let operation_sink = operations.clone();
     let mut shell = Shell::new_with_blocker(
@@ -324,12 +348,25 @@ fn shell_with_initial_catalog(catalog: BlockerCatalogSnapshot) -> (Shell, Arc<Co
     compiler.set_catalog(catalog);
     let shell = Shell::new_with_blocker(
         Arc::new(FakeEngine::default()),
-        Arc::new(FakeStore::default()),
+        opted_out_store(),
         compiler.clone(),
         Arc::new(FakeChrome),
         Box::new(|_| {}),
     );
     (shell, compiler)
+}
+
+// Initial empty policies are prepared locally, outside the compiler queue.
+fn initial_installation(shell: &Shell, profile: ProfileId) -> ContentPolicyGeneration {
+    let BlockerProfileState::Installing {
+        desired,
+        retained: None,
+        ..
+    } = shell.blocker.profiles[&profile].state
+    else {
+        panic!("initial empty policy must already await native installation");
+    };
+    desired
 }
 
 fn blocker_operation(operation_id: &str, enabled: bool) -> Command {
@@ -519,7 +556,7 @@ fn inline_compile_completion_has_one_prompt_wake_and_no_duplicate_native_effect(
     shell.attach_queue(queue.clone());
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -587,8 +624,8 @@ fn current_material_repair_keeps_fast_internal_settlement_polling() {
 fn exhausted_current_material_repair_blocks_enable_without_background_polling() {
     let (mut shell, _engine, compiler, _store, _operations) = controlled_shell_with_operation_log();
     shell.handle(Command::Bootstrap);
-    let initial = compiler.complete_next(allow_all());
     let profile = shell.windows.focused().unwrap().profile;
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -898,7 +935,7 @@ fn catalog_terminalization_settles_an_exact_native_mutation_operation() {
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
 
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -939,7 +976,7 @@ fn catalog_replacements_coalesce_without_displacing_an_inflight_native_generatio
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
 
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1021,7 +1058,7 @@ fn bundled_refresh_advice_does_not_degrade_an_exact_active_policy() {
 
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1102,7 +1139,7 @@ fn enabled_policy_terminal_short_circuits_only_enabled_compilation() {
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1142,7 +1179,7 @@ fn racing_enabled_terminal_dispatch_does_not_seal_allow_all_compilation() {
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1177,7 +1214,7 @@ fn racing_enabled_terminal_dispatch_does_not_seal_allow_all_compilation() {
 
 #[test]
 fn durable_toggle_is_not_completed_or_projected_before_the_exact_store_callback() {
-    let store = Arc::new(FakeStore::default());
+    let store = opted_out_store();
     store
         .hold_blocker_updates
         .store(true, std::sync::atomic::Ordering::Release);
@@ -1189,7 +1226,7 @@ fn durable_toggle_is_not_completed_or_projected_before_the_exact_store_callback(
     assert!(operations.lock().unwrap().is_empty());
     assert_eq!(
         shell.blocker.profiles[&profile].config.config,
-        BlockerConfig::default()
+        BlockerConfig { enabled: false }
     );
     assert_eq!(
         shell.focused_blocker_status_view().preference,
@@ -1228,7 +1265,7 @@ fn durable_toggle_is_not_completed_or_projected_before_the_exact_store_callback(
 
 #[test]
 fn indeterminate_store_outcome_self_heals_without_guessing_the_preference() {
-    let store = Arc::new(FakeStore::default());
+    let store = opted_out_store();
     store
         .blocker_update_outcomes
         .lock()
@@ -1272,7 +1309,7 @@ fn indeterminate_store_outcome_self_heals_without_guessing_the_preference() {
 
 #[test]
 fn conflicting_toggle_reconciles_returned_authority_and_rejects_the_operation() {
-    let store = Arc::new(FakeStore::default());
+    let store = opted_out_store();
     let (mut shell, _engine, _screen, operations) = setup_with_operation_log(store.clone());
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
@@ -1283,7 +1320,7 @@ fn conflicting_toggle_reconciles_returned_authority_and_rejects_the_operation() 
         .push_back(BlockerConfigUpdateOutcome::Conflict(ProfileBlockerConfig {
             profile,
             revision: BlockerConfigRevision::INITIAL.next().unwrap(),
-            config: BlockerConfig::default(),
+            config: BlockerConfig { enabled: false },
         }));
 
     shell.handle(blocker_operation("enable-conflict", true));
@@ -1310,7 +1347,7 @@ fn conflicting_toggle_reconciles_returned_authority_and_rejects_the_operation() 
 
 #[test]
 fn matching_store_conflict_completes_noop_only_after_native_reconciliation() {
-    let store = Arc::new(FakeStore::default());
+    let store = opted_out_store();
     let (mut shell, _engine, _screen, operations) = setup_with_operation_log(store.clone());
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
@@ -1345,7 +1382,7 @@ fn toggle_completion_waits_for_exact_native_settlement_and_reports_failure() {
     let (mut shell, _engine, compiler, _store, operations) = controlled_shell_with_operation_log();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let retained = compiler.complete_next(allow_all());
+    let retained = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1384,7 +1421,7 @@ fn disabling_waits_for_the_exact_native_allow_all_settlement() {
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
 
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1465,7 +1502,7 @@ fn enabled_source_terminal_does_not_seal_the_allow_all_disable_path() {
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
 
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1528,6 +1565,140 @@ fn enabled_source_terminal_does_not_seal_the_allow_all_disable_path() {
 }
 
 #[test]
+fn restored_enabled_profile_browses_under_explicit_provisional_policy_while_preparing() {
+    let saved = opted_out_store();
+    let (mut original, _, _) = setup_with(saved.clone());
+    original.handle(Command::Bootstrap);
+    original.persist();
+    let profile = original.windows.focused().unwrap().profile;
+
+    let (mut shell, engine, compiler, store, screen) = controlled_shell();
+    *store.saved.lock().unwrap() = saved.saved.lock().unwrap().clone();
+    *store.blocker_configs.lock().unwrap() = Some(vec![ProfileBlockerConfig {
+        profile,
+        revision: BlockerConfigRevision::INITIAL,
+        config: BlockerConfig { enabled: true },
+    }]);
+    shell.handle(Command::Bootstrap);
+    assert!(
+        compiler.requests.lock().unwrap().is_empty(),
+        "provisional policy must bypass compilation"
+    );
+    let BlockerProfileState::Installing {
+        desired: provisional,
+        ..
+    } = shell.blocker.profiles[&profile].state
+    else {
+        panic!("the provisional policy must await exact native installation");
+    };
+    let status = shell.focused_blocker_status_view();
+    assert_eq!(status.desired_enabled, Some(true));
+    assert_eq!(status.protection, BlockerProtection::Pending);
+
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: provisional,
+        settlement: ContentRuleSettlement::Applied {
+            generation: provisional,
+        },
+    }));
+    assert!(shell.blocker.native_policy_available(profile));
+    let (_, enabled, config) = compiler.request(0);
+    assert!(config.enabled);
+    assert!(enabled > provisional);
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Pending
+    );
+    shell.handle(Command::Navigate {
+        id: active_id(&screen),
+        input: "instant.example".into(),
+    });
+    assert!(
+        engine
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("create ") && call.contains("instant.example")),
+        "{:?}",
+        engine.calls()
+    );
+
+    // Compilation is not installation. Starting remains visible until the
+    // exact enabled generation settles, and a late provisional event is inert.
+    compiler.complete_next(enabled_rules());
+    shell.handle(Command::BlockerReady(profile));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Pending
+    );
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: provisional,
+        settlement: ContentRuleSettlement::Applied {
+            generation: provisional,
+        },
+    }));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Pending
+    );
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: enabled,
+        settlement: ContentRuleSettlement::Applied {
+            generation: enabled,
+        },
+    }));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+    assert!(shell.blocker.profiles[&profile].config.config.enabled);
+}
+
+#[test]
+fn fresh_profile_defaults_on_and_browses_before_background_compile_finishes() {
+    let (mut shell, engine, compiler, store, screen) = controlled_shell();
+    store.saved.lock().unwrap().take();
+    store.blocker_configs.lock().unwrap().take();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    assert!(shell.blocker.profiles[&profile].config.config.enabled);
+    let provisional = initial_installation(&shell, profile);
+    assert!(compiler.requests.lock().unwrap().is_empty());
+    shell.handle(Command::Navigate {
+        id: active_id(&screen),
+        input: "default-protection.example".into(),
+    });
+    shell.handle(Command::BlockerReady(profile));
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: provisional,
+        settlement: ContentRuleSettlement::Applied {
+            generation: provisional,
+        },
+    }));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("https://default-protection.example/")));
+    assert!(shell.blocker.profiles[&profile].held_effects.is_empty());
+    assert_eq!(compiler.requests.lock().unwrap().len(), 1);
+    assert!(compiler.request(0).2.enabled);
+    let generation = compiler.complete_next(enabled_rules());
+    shell.handle(Command::BlockerReady(profile));
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: generation,
+        settlement: ContentRuleSettlement::Applied { generation },
+    }));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+}
+
+#[test]
 fn first_view_waits_for_exact_native_allow_all_settlement() {
     let (mut shell, engine, compiler, _store, screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
@@ -1542,8 +1713,8 @@ fn first_view_waits_for_exact_native_allow_all_settlement() {
         id,
         input: "first-policy.example".into(),
     });
-    let (_, generation, config) = compiler.request(0);
-    assert!(!config.enabled);
+    let generation = initial_installation(&shell, profile);
+    assert!(compiler.requests.lock().unwrap().is_empty());
     assert!(!engine
         .calls()
         .iter()
@@ -1555,7 +1726,6 @@ fn first_view_waits_for_exact_native_allow_all_settlement() {
     });
     assert_eq!(shell.blocker.profiles[&profile].held_effects.len(), 1);
 
-    assert_eq!(compiler.complete_next(allow_all()), generation);
     shell.handle(Command::BlockerReady(profile));
     assert!(engine
         .calls()
@@ -1594,10 +1764,10 @@ fn first_view_waits_for_exact_native_allow_all_settlement() {
 
 #[test]
 fn close_of_a_materialized_view_is_not_consumed_by_its_held_navigation() {
-    let (mut shell, engine, compiler, _store, screen) = controlled_shell();
+    let (mut shell, engine, _compiler, _store, screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1657,22 +1827,21 @@ fn an_inflight_policy_generation_cannot_be_displaced_before_exact_settlement() {
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let first = compiler.request(0).1;
+    let first = initial_installation(&shell, profile);
 
     assert!(!shell
         .blocker
         .start_compile(profile, BlockerConfig { enabled: true }, None));
-    assert_eq!(compiler.requests.lock().unwrap().len(), 1);
+    assert!(compiler.requests.lock().unwrap().is_empty());
     assert_eq!(
         shell.blocker.profiles[&profile].state,
-        BlockerProfileState::Compiling {
+        BlockerProfileState::Installing {
             desired: first,
             retained: None,
             retries_remaining: 3,
         }
     );
 
-    assert_eq!(compiler.complete_next(allow_all()), first);
     shell.handle(Command::BlockerReady(profile));
     assert!(!shell
         .blocker
@@ -1698,7 +1867,7 @@ fn an_inflight_policy_generation_cannot_be_displaced_before_exact_settlement() {
     );
     assert_eq!(
         shell.blocker.status(profile).unwrap().applied_config,
-        Some(BlockerConfig::default())
+        Some(BlockerConfig { enabled: false })
     );
     assert_eq!(
         shell.blocker.status(profile).unwrap().applied_coverage,
@@ -1712,7 +1881,7 @@ fn focused_status_reports_only_exact_applied_coverage_and_retained_protection() 
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
 
-    let allow_all_generation = compiler.complete_next(allow_all());
+    let allow_all_generation = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1800,39 +1969,33 @@ fn focused_status_reports_only_exact_applied_coverage_and_retained_protection() 
 }
 
 #[test]
-fn initial_compile_failure_never_creates_an_unfiltered_view() {
+fn disabled_startup_bypasses_an_unavailable_compiler() {
     let (mut shell, engine, compiler, _store, screen) = controlled_shell();
+    compiler
+        .terminal
+        .store(true, std::sync::atomic::Ordering::Release);
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
+    let generation = initial_installation(&shell, profile);
+    assert!(compiler.requests.lock().unwrap().is_empty());
     shell.handle(Command::Navigate {
         id: active_id(&screen),
-        input: "failed-policy.example".into(),
+        input: "instant-disabled.example".into(),
     });
-    let generation = compiler.request(0).1;
-    compiler.complete_next(BlockerCompileOutcome::Failed(
-        BlockerCompileFailure::ResourceLimit,
-    ));
-    shell.handle(Command::BlockerReady(profile));
-
-    assert_eq!(
-        shell.blocker.profiles[&profile].state,
-        BlockerProfileState::Failed {
-            desired: generation,
-            retained: None,
-            failure: ContentPolicyFailure::Compile(BlockerCompileFailure::ResourceLimit),
-            retries_remaining: 0,
-        }
-    );
-    assert!(!engine
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: generation,
+        settlement: ContentRuleSettlement::Applied { generation },
+    }));
+    assert!(engine
         .calls()
         .iter()
-        .any(|call| { call.starts_with("install-content-rules ") || call.starts_with("create ") }));
-
-    let requests_before = compiler.requests.lock().unwrap().len();
-    let retry = shell.operation_retry_content_policy(profile, generation);
-    assert_eq!(retry.outcome, OperationOutcome::Rejected);
-    assert_eq!(retry.reason, OperationReason::StateUnchanged);
-    assert_eq!(compiler.requests.lock().unwrap().len(), requests_before);
+        .any(|call| call.starts_with("create ") && call.contains("instant-disabled.example")));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Disabled
+    );
+    assert!(compiler.requests.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1845,7 +2008,7 @@ fn exact_explicit_retry_recovers_initial_native_failure_without_releasing_the_ga
         input: "held-until-policy.example".into(),
     });
 
-    let failed = compiler.complete_next(allow_all());
+    let failed = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -1862,7 +2025,7 @@ fn exact_explicit_retry_recovers_initial_native_failure_without_releasing_the_ga
         ContentPolicyStatusQueryOutcome::Found(zephium_core::blocker::ProfileContentPolicyStatus {
             profile,
             config_revision: BlockerConfigRevision::INITIAL,
-            desired_config: BlockerConfig::default(),
+            desired_config: BlockerConfig { enabled: false },
             applied_config: None,
             applied_coverage: None,
             state: BlockerProfileState::Failed {
@@ -1963,7 +2126,7 @@ fn explicit_retry_budget_is_exact_and_never_loops_automatically() {
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
 
-    let mut failed = compiler.complete_next(allow_all());
+    let mut failed = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -2007,7 +2170,7 @@ fn source_unavailable_retry_waits_for_exact_material_epoch_advance() {
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let initial = compiler.complete_next(allow_all());
+    let initial = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -2057,7 +2220,7 @@ fn delayed_second_profile_source_failure_retries_after_existing_epoch_advance() 
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let first = shell.windows.focused().unwrap().profile;
-    let first_initial = compiler.complete_next(allow_all());
+    let first_initial = initial_installation(&shell, first);
     shell.handle(Command::BlockerReady(first));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile: first,
@@ -2067,8 +2230,10 @@ fn delayed_second_profile_source_failure_retries_after_existing_epoch_advance() 
         },
     }));
     let second = add_inactive_named_profile(&mut shell, 40_500);
+    let entry = shell.blocker.profiles.get_mut(&second).unwrap();
+    entry.config.config = BlockerConfig { enabled: false };
     assert!(shell.start_blocker_profile(second));
-    let second_initial = compiler.complete_next(allow_all());
+    let second_initial = initial_installation(&shell, second);
     shell.handle(Command::BlockerReady(second));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile: second,
@@ -2121,7 +2286,10 @@ fn rejected_compiler_admission_is_typed_and_can_be_explicitly_retried() {
         .reject
         .store(true, std::sync::atomic::Ordering::Release);
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    let profile = add_inactive_named_profile(&mut shell, 40_001);
+    assert!(!shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     let BlockerProfileState::Failed {
         desired: failed,
         retained: None,
@@ -2150,7 +2318,7 @@ fn terminal_compiler_dispatch_is_global_typed_and_preserves_a_known_good_policy(
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let first = compiler.complete_next(allow_all());
+    let first = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -2177,7 +2345,10 @@ fn terminal_compiler_dispatch_is_global_typed_and_preserves_a_known_good_policy(
             retries_remaining: 0,
         }
     );
-    assert_eq!(status.applied_config, Some(BlockerConfig::default()));
+    assert_eq!(
+        status.applied_config,
+        Some(BlockerConfig { enabled: false })
+    );
     assert!(shell.blocker.native_policy_available(profile));
     assert_eq!(shell.blocker.compiler_inbox_state(), (true, 0));
     assert_eq!(
@@ -2192,7 +2363,11 @@ fn terminal_compiler_dispatch_is_global_typed_and_preserves_a_known_good_policy(
 fn arbitrary_profile_retirement_churn_does_not_terminalize_the_compiler() {
     let (mut shell, engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    // Exercise worker lifetimes independently of the local startup artifact.
+    let profile = add_inactive_named_profile(&mut shell, 40_001);
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     let compiling = compiler.request(0).1;
 
     for offset in 0..=(zephium_core::session::MAX_SESSION_PROFILES * 2) {
@@ -2217,26 +2392,30 @@ fn arbitrary_profile_retirement_churn_does_not_terminalize_the_compiler() {
     assert!(engine
         .calls()
         .iter()
-        .any(|call| call.starts_with("install-content-rules ")));
+        .any(|call| call.starts_with(&format!("install-content-rules {profile} "))));
 
     let later = add_inactive_named_profile(&mut shell, 60_000);
     assert!(shell.start_blocker_profile(later));
     assert!(matches!(
         shell.blocker.profiles[&later].state,
-        BlockerProfileState::Compiling {
+        BlockerProfileState::Installing {
             retained: None,
             retries_remaining: 3,
             ..
         }
     ));
-    assert_eq!(compiler.requests.lock().unwrap().len(), 1);
+    assert!(compiler.requests.lock().unwrap().is_empty());
 }
 
 #[test]
 fn compiler_artifact_must_match_the_exact_enabled_preference() {
     let (mut shell, engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    // Exercise worker lifetimes independently of the local startup artifact.
+    let profile = add_inactive_named_profile(&mut shell, 40_001);
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     let generation = compiler.complete_next(enabled_rules());
     shell.handle(Command::BlockerReady(profile));
 
@@ -2252,7 +2431,7 @@ fn compiler_artifact_must_match_the_exact_enabled_preference() {
     assert!(!engine
         .calls()
         .iter()
-        .any(|call| call.starts_with("install-content-rules ")));
+        .any(|call| call.starts_with(&format!("install-content-rules {profile} "))));
 }
 
 #[test]
@@ -2260,7 +2439,7 @@ fn a_stale_native_settlement_cannot_replace_the_desired_generation() {
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let retired = compiler.complete_next(allow_all());
+    let retired = initial_installation(&shell, profile);
     shell.consume_blocker_compile_result(profile);
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -2301,7 +2480,7 @@ fn failed_replacement_retains_last_known_good_policy_and_view_admission() {
     let (mut shell, engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let first = compiler.complete_next(allow_all());
+    let first = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -2335,7 +2514,10 @@ fn failed_replacement_retains_last_known_good_policy_and_view_admission() {
     );
     let status = shell.blocker.status(profile).unwrap();
     assert_eq!(status.desired_config, BlockerConfig { enabled: true });
-    assert_eq!(status.applied_config, Some(BlockerConfig::default()));
+    assert_eq!(
+        status.applied_config,
+        Some(BlockerConfig { enabled: false })
+    );
 
     let creates_before = engine
         .calls()
@@ -2364,7 +2546,7 @@ fn native_cleanup_failure_never_treats_a_claimed_prior_generation_as_safe() {
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
-    let first = compiler.complete_next(allow_all());
+    let first = initial_installation(&shell, profile);
     shell.handle(Command::BlockerReady(profile));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile,
@@ -2415,7 +2597,7 @@ fn exact_blocker_config_cohort_is_required_before_compilation() {
     let config = |profile| ProfileBlockerConfig {
         profile,
         revision: BlockerConfigRevision::INITIAL,
-        config: BlockerConfig::default(),
+        config: BlockerConfig { enabled: false },
     };
     assert!(!shell.initialize_blocker_cohort(vec![config(first)]));
     assert!(!shell.initialize_blocker_cohort(vec![config(first), config(first),]));
@@ -2430,7 +2612,7 @@ fn exact_blocker_config_cohort_is_required_before_compilation() {
 
 #[test]
 fn bootstrap_never_invents_a_missing_durable_profile_policy() {
-    let store = Arc::new(FakeStore::default());
+    let store = opted_out_store();
     let (mut first, _engine, _screen) = setup_with(store.clone());
     first.handle(Command::Bootstrap);
     first.handle(Command::Persist);
@@ -2452,7 +2634,11 @@ fn bootstrap_never_invents_a_missing_durable_profile_policy() {
 fn retirement_suppresses_a_late_compiler_callback_and_drops_held_work() {
     let (mut shell, engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    // Exercise worker lifetimes independently of the local startup artifact.
+    let profile = add_inactive_named_profile(&mut shell, 40_001);
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     shell.blocker.retire_profile(profile);
     compiler.complete_next(allow_all());
     shell.handle(Command::BlockerReady(profile));
@@ -2462,17 +2648,21 @@ fn retirement_suppresses_a_late_compiler_callback_and_drops_held_work() {
         BlockerProfileState::Retired
     );
     assert!(shell.blocker.inbox.lock().unwrap().results.is_empty());
-    assert!(!engine
-        .calls()
-        .iter()
-        .any(|call| { call.starts_with("install-content-rules ") || call.starts_with("create ") }));
+    assert!(!engine.calls().iter().any(|call| {
+        call.starts_with(&format!("install-content-rules {profile} "))
+            || call.starts_with("create ")
+    }));
 }
 
 #[test]
 fn retirement_barrier_removes_a_late_result_even_when_its_wake_is_lost() {
     let (mut shell, _engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    // Exercise worker lifetimes independently of the local startup artifact.
+    let profile = add_inactive_named_profile(&mut shell, 40_001);
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     shell.blocker.retire_profile(profile);
 
     // Model a callback which crossed delivery before retirement and then a
@@ -2505,7 +2695,11 @@ fn retirement_barrier_removes_a_late_result_even_when_its_wake_is_lost() {
 fn stale_result_from_a_retired_lifecycle_cannot_affect_recreated_same_id_profile() {
     let (mut shell, engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    // Exercise worker lifetimes independently of the local startup artifact.
+    let profile = add_inactive_named_profile(&mut shell, 40_001);
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     let old_generation = compiler.request(0).1;
 
     shell.blocker.discard_uncommitted_profile(profile);
@@ -2514,7 +2708,9 @@ fn stale_result_from_a_retired_lifecycle_cannot_affect_recreated_same_id_profile
     // callback; the production worker rejects that window. Exercising the
     // stronger adversarial ordering proves the app does not rely solely on
     // adapter quiescence.
-    assert!(shell.start_blocker_profile(profile));
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     let new_generation = compiler.request(1).1;
     assert!(new_generation > old_generation);
 
@@ -2531,7 +2727,7 @@ fn stale_result_from_a_retired_lifecycle_cannot_affect_recreated_same_id_profile
     assert!(!engine
         .calls()
         .iter()
-        .any(|call| call.starts_with("install-content-rules ")));
+        .any(|call| call.starts_with(&format!("install-content-rules {profile} "))));
 
     assert_eq!(compiler.complete_next(allow_all()), new_generation);
     shell.handle(Command::BlockerReady(profile));
@@ -2586,7 +2782,7 @@ fn profile_deletion_wins_over_a_stale_explicit_policy_retry() {
     // Complete the focused profile so the controlled queue contains only the
     // independently managed profile used by this race.
     let focused = shell.windows.focused().unwrap().profile;
-    let focused_generation = compiler.complete_next(allow_all());
+    let focused_generation = initial_installation(&shell, focused);
     shell.handle(Command::BlockerReady(focused));
     shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
         profile: focused,
@@ -2597,7 +2793,9 @@ fn profile_deletion_wins_over_a_stale_explicit_policy_retry() {
     }));
 
     let profile = add_inactive_named_profile(&mut shell, 42_000);
-    assert!(shell.start_blocker_profile(profile));
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     let failed = compiler.complete_next(BlockerCompileOutcome::Failed(
         BlockerCompileFailure::Internal,
     ));
@@ -2665,7 +2863,11 @@ fn profile_deletion_wins_over_a_stale_explicit_policy_retry() {
 fn shutdown_makes_late_retry_completion_and_settlement_inert() {
     let (mut shell, engine, compiler, _store, _screen) = controlled_shell();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    // Exercise worker lifetimes independently of the local startup artifact.
+    let profile = add_inactive_named_profile(&mut shell, 40_001);
+    assert!(shell
+        .blocker
+        .start_compile(profile, BlockerConfig { enabled: false }, None));
     let failed = compiler.complete_next(BlockerCompileOutcome::Failed(
         BlockerCompileFailure::Internal,
     ));
@@ -2729,4 +2931,61 @@ fn compiler_shutdown_failure_is_terminal_and_does_not_skip_native_teardown() {
         1
     );
     assert_eq!(order.lock().unwrap().as_slice(), &["engine", "blocker"]);
+}
+
+#[test]
+fn official_https_freshness_needs_exact_verified_material_and_preserves_signed_expiry_rules() {
+    use zephium_core::ports::blocker::BlockerCatalogProvenance;
+    let mut stale = catalog_revision(10, 10);
+    stale.package_provenance = Some(BlockerCatalogProvenance::OfficialHttps);
+    stale.installed_provenance = Some(BlockerCatalogProvenance::OfficialHttps);
+    stale.phase = BlockerCatalogPhase::Stale;
+    stale.package_stale = Some(true);
+    stale.source_refresh_due = true;
+    let (mut shell, compiler) = shell_with_initial_catalog(stale);
+    shell.handle(Command::Bootstrap);
+    let mut checked = stale;
+    checked.revision += 1;
+    checked.phase = BlockerCatalogPhase::Fresh;
+    checked.package_stale = Some(false);
+    checked.source_refresh_due = false;
+    checked.source_material_epoch = 1;
+    compiler.set_catalog(checked);
+    shell.maintain_blocker_catalog();
+    assert_eq!(
+        shell.focused_blocker_status_view().source_phase,
+        BlockerSourcePhase::Fresh
+    );
+    assert!(shell.focused_blocker_status_view().can_enable);
+    let (mut unverified, compiler) = shell_with_initial_catalog(stale);
+    unverified.handle(Command::Bootstrap);
+    checked.source_material_epoch = 0;
+    compiler.set_catalog(checked);
+    unverified.maintain_blocker_catalog();
+    assert_eq!(
+        unverified.focused_blocker_status_view().source_failure,
+        Some(BlockerSourceFailure::Rollback)
+    );
+    stale.package_provenance = Some(BlockerCatalogProvenance::TufRepository);
+    stale.installed_provenance = Some(BlockerCatalogProvenance::TufRepository);
+    let (mut signed, compiler) = shell_with_initial_catalog(stale);
+    signed.handle(Command::Bootstrap);
+    checked.package_provenance = stale.package_provenance;
+    checked.installed_provenance = stale.installed_provenance;
+    checked.source_material_epoch = 1;
+    compiler.set_catalog(checked);
+    signed.maintain_blocker_catalog();
+    assert_eq!(
+        signed.focused_blocker_status_view().source_failure,
+        Some(BlockerSourceFailure::Rollback)
+    );
+}
+
+#[test]
+fn pending_source_candidate_does_not_withhold_the_working_compiler_catalog() {
+    let mut catalog = catalog_revision(10, 10);
+    set_catalog_candidate(&mut catalog, 11);
+    let (mut shell, _) = shell_with_initial_catalog(catalog);
+    shell.handle(Command::Bootstrap);
+    assert!(shell.focused_blocker_status_view().can_enable);
 }

@@ -529,6 +529,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM download_cleanup;
          DELETE FROM download_preferences;
          DELETE FROM downloads;
+         DELETE FROM blocker_statistics;
          DELETE FROM search_queries;
          DELETE FROM history;
          DELETE FROM history_usage;
@@ -647,6 +648,11 @@ mod tests {
         conn.execute("INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES(?1,?2,'00000000000000000000000001',1,1)",params![PROFILE_SCRUB_MARKER,vec![1_u8;32]]).unwrap();
         conn.execute("INSERT INTO task_lists(id,title,revision,deleted) VALUES('00000000000000000000000002',?1,1,0)",[PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO task_list_receipts(request_id,digest,list_id,retained) VALUES(?1,?2,'00000000000000000000000002',1)",params![PROFILE_SCRUB_MARKER,vec![2_u8;32]]).unwrap();
+        conn.execute(
+            "INSERT INTO blocker_statistics VALUES(1,?1)",
+            [r#"{"day":700000,"days":[0,0,0,0,0,0,12]}"#],
+        )
+        .unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -665,6 +671,7 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         let expected_tables = [
+            "blocker_statistics",
             "download_cleanup",
             "download_preferences",
             "downloads",
@@ -704,6 +711,7 @@ mod tests {
         );
 
         for table in [
+            "blocker_statistics",
             "download_cleanup",
             "download_preferences",
             "downloads",

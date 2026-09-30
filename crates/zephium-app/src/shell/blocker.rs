@@ -2,7 +2,7 @@
 
 use super::*;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 
 use zephium_core::blocker::{
@@ -62,11 +62,13 @@ impl CompileWakeHandoff {
 pub(super) struct BlockerInbox {
     pub(super) results: HashMap<ProfileId, PendingCompileResult>,
     store_results: HashMap<ProfileId, PendingStoreResult>,
+    pub(super) site_results: HashMap<ProfileId, super::blocker_sites::SiteReplySlot>,
 }
 
 pub(super) type BlockerProfileState = ProfileContentPolicyState;
 
 pub(super) struct BlockerProfile {
+    pub(super) sites: super::blocker_sites::SitePreferencesState,
     pub(super) config: ProfileBlockerConfig,
     pub(super) state: BlockerProfileState,
     pub(super) held_effects: VecDeque<Effect>,
@@ -82,6 +84,9 @@ pub(super) struct BlockerProfile {
     pending_catalog_revision: Option<u64>,
     compiling_catalog: Option<CatalogCompileAttempt>,
     applied_catalog_revision: Option<u64>,
+    /// A locally constructed allow-all is being installed before the enabled
+    /// startup target. This never changes the durable preference.
+    startup_provisional: bool,
 }
 
 pub(super) struct RuntimePolicyObserver {
@@ -217,14 +222,14 @@ struct CatalogCompileAttempt {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CatalogAuthority {
     current: Option<CatalogPackageIdentity>,
-    highest_signed: Option<CatalogPackageIdentity>,
+    high_water: Option<CatalogPackageIdentity>,
     installed: Option<CatalogInstalledIdentity>,
 }
 
 pub(super) struct BlockerCoordinator {
     pub(super) profiles: HashMap<ProfileId, BlockerProfile>,
     pub(super) inbox: BlockerResultInbox,
-    service: SharedBlocker,
+    pub(super) service: SharedBlocker,
     catalog: BlockerCatalogSnapshot,
     catalog_authority: CatalogAuthority,
     next_generation: Option<u64>,
@@ -235,6 +240,7 @@ pub(super) struct BlockerCoordinator {
     compiler_terminal: bool,
     catalog_initialized: bool,
     last_projected_status: Cell<Option<FocusedBlockerStatus>>,
+    last_projected_site: RefCell<Option<zephium_ipc::BlockerSiteView>>,
 }
 
 impl BlockerCoordinator {
@@ -259,6 +265,7 @@ impl BlockerCoordinator {
             compiler_terminal: true,
             catalog_initialized: false,
             last_projected_status: Cell::new(None),
+            last_projected_site: RefCell::new(None),
         }
     }
 
@@ -295,7 +302,7 @@ impl BlockerCoordinator {
         ContentPolicyGeneration::new(raw)
     }
 
-    fn allocate_store_token(&mut self) -> Option<u64> {
+    pub(super) fn allocate_store_token(&mut self) -> Option<u64> {
         let token = self.next_store_token?;
         if token == u64::MAX {
             self.next_store_token = None;
@@ -377,7 +384,11 @@ impl BlockerCoordinator {
         Some(ProfileContentPolicyStatus {
             profile,
             config_revision: entry.config.revision,
-            desired_config: entry.desired_config,
+            desired_config: if entry.startup_provisional {
+                entry.config.config
+            } else {
+                entry.desired_config
+            },
             applied_config: entry.applied_config,
             applied_coverage: entry.applied_coverage,
             state: entry.state,
@@ -400,11 +411,17 @@ impl BlockerCoordinator {
         })
     }
 
-    fn should_project(&self, status: FocusedBlockerStatus) -> bool {
-        if self.last_projected_status.get() == Some(status) {
+    fn should_project(
+        &self,
+        status: FocusedBlockerStatus,
+        site: &Option<zephium_ipc::BlockerSiteView>,
+    ) -> bool {
+        let mut previous_site = self.last_projected_site.borrow_mut();
+        if self.last_projected_status.get() == Some(status) && *previous_site == *site {
             return false;
         }
         self.last_projected_status.set(Some(status));
+        previous_site.clone_from(site);
         true
     }
 
@@ -440,6 +457,7 @@ impl BlockerCoordinator {
             self.profiles.insert(
                 config.profile,
                 BlockerProfile {
+                    sites: Default::default(),
                     config,
                     state: BlockerProfileState::Uninitialized,
                     held_effects: VecDeque::new(),
@@ -455,6 +473,7 @@ impl BlockerCoordinator {
                     pending_catalog_revision: None,
                     compiling_catalog: None,
                     applied_catalog_revision: None,
+                    startup_provisional: false,
                 },
             );
         }
@@ -470,6 +489,7 @@ impl BlockerCoordinator {
         self.profiles.insert(
             profile,
             BlockerProfile {
+                sites: super::blocker_sites::SitePreferencesState::fresh(),
                 config: ProfileBlockerConfig {
                     profile,
                     revision: BlockerConfigRevision::INITIAL,
@@ -489,23 +509,55 @@ impl BlockerCoordinator {
                 pending_catalog_revision: None,
                 compiling_catalog: None,
                 applied_catalog_revision: None,
+                startup_provisional: false,
             },
         );
         true
     }
 
-    pub(super) fn start_uninitialized(
-        &mut self,
-        profile: ProfileId,
-        callback: Option<CallbackHandle>,
-    ) -> bool {
+    pub(super) fn start_uninitialized(&mut self, profile: ProfileId) -> bool {
         let Some(entry) = self.profiles.get(&profile) else {
             return false;
         };
         if entry.state != BlockerProfileState::Uninitialized {
             return true;
         }
-        self.start_compile(profile, entry.config.config, callback)
+        let target = entry.config.config;
+        // Browsing must not wait for source parsing or native compilation.
+        // Deliver an explicit, allocation-small allow-all artifact locally,
+        // then use the ordinary exact native settlement before starting the
+        // enabled target. No compiler queue, JSON or native rule list is used.
+        let Some(generation) = self.allocate_generation() else {
+            return false;
+        };
+        let entry = self
+            .profiles
+            .get_mut(&profile)
+            .expect("profile was checked above");
+        entry.startup_provisional = target.enabled;
+        entry.desired_config = BlockerConfig { enabled: false };
+        entry.background_target = target.enabled.then_some(target);
+        entry.state = BlockerProfileState::Compiling {
+            desired: generation,
+            retained: None,
+            retries_remaining: MAX_EXPLICIT_POLICY_RETRIES,
+        };
+        self.inbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .results
+            .insert(
+                profile,
+                PendingCompileResult {
+                    generation,
+                    outcome: BlockerCompileOutcome::Compiled(
+                        zephium_core::blocker::ContentRules::allow_all(
+                            ContentRuleDigest::from_bytes([0; 32]),
+                        ),
+                    ),
+                },
+            );
+        true
     }
 
     pub(super) fn start_compile(
@@ -540,6 +592,9 @@ impl BlockerCoordinator {
                 | BlockerProfileState::Retired
         ) {
             return false;
+        }
+        if let Some(entry) = self.profiles.get_mut(&profile) {
+            entry.startup_provisional = false;
         }
         let Some(generation) = self.allocate_generation() else {
             let Some(exhausted) = ContentPolicyGeneration::new(u64::MAX) else {
@@ -860,6 +915,7 @@ impl BlockerCoordinator {
 
     pub(super) fn retire_profile(&mut self, profile: ProfileId) {
         if let Some(entry) = self.profiles.get_mut(&profile) {
+            entry.sites = Default::default();
             entry.held_effects.clear();
             entry.applied_config = None;
             entry.pending_coverage = None;
@@ -881,6 +937,7 @@ impl BlockerCoordinator {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             inbox.results.remove(&profile);
             inbox.store_results.remove(&profile);
+            inbox.site_results.remove(&profile);
         }
         let inbox = self.inbox.clone();
         let retirement = self.service.retire_profile(
@@ -986,21 +1043,26 @@ impl Shell {
     }
 
     pub(super) fn focused_blocker_status_view(&self) -> BlockerStatusView {
-        blocker_status_view(
+        let mut view = blocker_status_view(
             self.focused_blocker_status(),
             self.focused_runtime_policy_diagnostics(),
             self.next_projection_revision(),
-        )
+        );
+        view.site = self.focused_blocker_site_view().map(Box::new);
+        view
     }
 
     pub(super) fn project_blocker_status(&self) {
         let status = self.focused_blocker_status();
-        if self.blocker.should_project(status) {
-            (self.emit)(Projection::BlockerStatus(blocker_status_view(
+        let site = self.focused_blocker_site_view();
+        if self.blocker.should_project(status, &site) {
+            let mut view = blocker_status_view(
                 status,
                 self.focused_runtime_policy_diagnostics(),
                 self.next_projection_revision(),
-            )));
+            );
+            view.site = site.map(Box::new);
+            (self.emit)(Projection::BlockerStatus(view));
         }
     }
 
@@ -1371,16 +1433,17 @@ impl Shell {
     }
 
     pub(super) fn initialize_new_blocker_profile(&mut self, profile: ProfileId) -> bool {
-        self.blocker.initialize_new_profile(profile)
+        if !self.blocker.initialize_new_profile(profile) {
+            return false;
+        }
+        self.ensure_blocker_statistics(profile, true);
+        true
     }
 
     pub(super) fn start_blocker_profile(&mut self, profile: ProfileId) -> bool {
-        let accepted = self.blocker.start_uninitialized(
-            profile,
-            self.self_queue.as_ref().map(|queue| CallbackHandle {
-                queue: Arc::downgrade(&queue.inner),
-            }),
-        );
+        self.ensure_blocker_statistics(profile, false);
+        self.ensure_blocker_site_preferences(profile);
+        let accepted = self.blocker.start_uninitialized(profile);
         self.finish_terminalized_blocker_native_operations();
         self.project_blocker_status();
         // Deterministic compilers may complete inside `compile`. Consume that
@@ -1402,6 +1465,10 @@ impl Shell {
             .retry_failed(profile, failed_generation, callback)
         {
             BlockerRetry::Scheduled => {
+                if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
+                    entry.sites.failed = false;
+                }
+                self.ensure_blocker_site_preferences(profile);
                 self.project_blocker_status();
                 // Preserve the same synchronous-completion contract as
                 // startup: a deterministic compiler cannot strand its result
@@ -2074,6 +2141,7 @@ impl Shell {
         profile: ProfileId,
         reason: OperationReason,
     ) {
+        self.finish_blocker_site_operation(profile, OperationOutcome::Rejected, reason);
         self.finish_blocker_operation(profile, OperationOutcome::Rejected, reason);
         if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
             entry.preference = BlockerPreferenceAuthority::Unavailable;
@@ -2091,6 +2159,14 @@ impl Shell {
     }
 
     pub(super) fn finish_pending_blocker_operations_for_shutdown(&mut self) {
+        let profiles: Vec<_> = self.blocker.profiles.keys().copied().collect();
+        for profile in profiles {
+            self.finish_blocker_site_operation(
+                profile,
+                OperationOutcome::Deferred,
+                OperationReason::StoreOutcomeUnknown,
+            );
+        }
         let pending: Vec<_> = self
             .blocker
             .profiles
@@ -2131,9 +2207,32 @@ impl Shell {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inbox.results.clear();
         inbox.store_results.clear();
+        inbox.site_results.clear();
     }
 
     pub(super) fn consume_blocker_compile_result(&mut self, profile: ProfileId) {
+        if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
+            if entry.desired_config.enabled && !entry.sites.native_ready {
+                if entry.sites.failed {
+                    if let BlockerProfileState::Compiling {
+                        desired,
+                        retained,
+                        retries_remaining,
+                    } = entry.state
+                    {
+                        entry.state = BlockerCoordinator::failed_state(
+                            desired,
+                            retained,
+                            ContentPolicyFailure::SitePreferencesUnavailable,
+                            retries_remaining,
+                        );
+                    }
+                    self.finish_terminal_blocker_native_operation(profile);
+                    self.project_blocker_status();
+                }
+                return;
+            }
+        }
         let Some(result) = self.blocker.take_compile_result(profile) else {
             return;
         };
@@ -2266,6 +2365,18 @@ impl Shell {
     }
 
     pub(super) fn drain_blocker_inbox(&mut self) {
+        let site_profiles: Vec<_> = self
+            .blocker
+            .inbox
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .site_results
+            .keys()
+            .copied()
+            .collect();
+        for profile in site_profiles {
+            self.consume_blocker_site_result(profile);
+        }
         for profile in self.blocker.pending_result_profiles() {
             self.consume_blocker_compile_result(profile);
         }
@@ -2612,6 +2723,7 @@ fn blocker_status_view(
             },
             ProfileContentPolicyState::Ready { .. } => match authoritative_applied {
                 Some((config, _)) if config.enabled => BlockerProtection::Active,
+                Some(_) if status.desired_config.enabled => BlockerProtection::Pending,
                 Some(_) => BlockerProtection::Disabled,
                 None => BlockerProtection::Unavailable,
             },
@@ -2684,16 +2796,16 @@ impl CatalogAuthority {
         }
         Some(Self {
             current,
-            highest_signed: newest_catalog_identity(current, candidate),
+            high_water: newest_catalog_identity(current, candidate),
             installed,
         })
     }
 
     /// Admits only monotonic, exact package authority.
     ///
-    /// A rejected candidate may leave the durable signed high-water ahead of
+    /// A rejected candidate may leave the durable catalog high-water ahead of
     /// current. The unchanged current is therefore allowed to remain below
-    /// `highest_signed`, but any newly observed current or candidate must
+    /// `high_water`, but any newly observed current or candidate must
     /// match that high-water exactly or advance it.
     fn advance(
         self,
@@ -2734,25 +2846,30 @@ impl CatalogAuthority {
             }
             _ => {}
         }
-        if self.current == next_current
+        let verified_official = next_current
+            .is_some_and(|identity| identity.provenance == BlockerCatalogProvenance::OfficialHttps)
+            && observed.source_material_epoch > previous.source_material_epoch;
+        if !verified_official
+            && self.current == next_current
             && previous.package_stale == Some(true)
             && observed.package_stale == Some(false)
         {
             return None;
         }
-        if self.current == next_current
+        if !verified_official
+            && self.current == next_current
             && previous.source_refresh_due
             && !observed.source_refresh_due
         {
             return None;
         }
 
-        let mut highest_signed = self.highest_signed;
+        let mut high_water = self.high_water;
         if next_current != self.current {
-            admit_signed_identity(&mut highest_signed, next_current?)?;
+            admit_catalog_identity(&mut high_water, next_current?)?;
         }
         if let Some(candidate) = next_candidate {
-            admit_signed_identity(&mut highest_signed, candidate)?;
+            admit_catalog_identity(&mut high_water, candidate)?;
         }
 
         match (self.installed, next_installed) {
@@ -2781,13 +2898,13 @@ impl CatalogAuthority {
 
         Some(Self {
             current: next_current,
-            highest_signed,
+            high_water,
             installed: next_installed,
         })
     }
 }
 
-fn admit_signed_identity(
+fn admit_catalog_identity(
     highest: &mut Option<CatalogPackageIdentity>,
     observed: CatalogPackageIdentity,
 ) -> Option<()> {
@@ -2949,8 +3066,10 @@ pub(super) fn catalog_snapshot_valid(catalog: BlockerCatalogSnapshot) -> bool {
     if provenances.into_iter().flatten().any(|provenance| {
         matches!(
             (catalog.refresh_supported, provenance),
-            (false, BlockerCatalogProvenance::TufRepository)
-                | (true, BlockerCatalogProvenance::ReleaseBundle)
+            (
+                false,
+                BlockerCatalogProvenance::TufRepository | BlockerCatalogProvenance::OfficialHttps
+            )
         )
     }) {
         return false;
@@ -3070,7 +3189,6 @@ pub(super) fn catalog_snapshot_valid(catalog: BlockerCatalogSnapshot) -> bool {
 
 fn catalog_has_compiler_policy(catalog: BlockerCatalogSnapshot) -> bool {
     !catalog.enabled_policy_terminal
-        && !catalog.activation_pending
         && !catalog.source_material_repair_pending
         && !catalog.source_material_repair_retry_pending
         && catalog.package_revision.is_some()
@@ -3200,6 +3318,7 @@ const fn source_provenance_view(provenance: BlockerCatalogProvenance) -> Blocker
     match provenance {
         BlockerCatalogProvenance::ReleaseBundle => BlockerSourceProvenance::ReleaseBundle,
         BlockerCatalogProvenance::TufRepository => BlockerSourceProvenance::TufRepository,
+        BlockerCatalogProvenance::OfficialHttps => BlockerSourceProvenance::OfficialHttps,
     }
 }
 
@@ -3215,6 +3334,9 @@ fn format_manifest_sha256(digest: [u8; 32]) -> String {
 
 fn blocker_failure_view(failure: ContentPolicyFailure) -> BlockerFailure {
     match failure {
+        ContentPolicyFailure::SitePreferencesUnavailable => {
+            BlockerFailure::SitePreferencesUnavailable
+        }
         ContentPolicyFailure::GenerationExhausted => BlockerFailure::GenerationExhausted,
         ContentPolicyFailure::CompilerDispatchRejected => BlockerFailure::CompilerDispatchRejected,
         ContentPolicyFailure::CompilerUnavailable => BlockerFailure::CompilerUnavailable,

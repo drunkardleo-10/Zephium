@@ -2,8 +2,10 @@
 mod agent_context;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
 mod agent_cookie_source;
+mod blocker_statistics;
 mod construction;
 mod content_rules;
+mod content_styles;
 mod discard;
 mod dispatch;
 #[cfg(target_os = "macos")]
@@ -13,6 +15,7 @@ mod download_files;
 mod download_files;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) mod downloads;
+mod element_picker;
 #[cfg(target_os = "macos")]
 mod extension_action;
 mod extension_browser_surface;
@@ -30,6 +33,7 @@ mod profiles;
 mod resources;
 mod scripts;
 mod stages;
+mod style_worker;
 #[cfg(target_os = "macos")]
 mod webext;
 #[cfg(target_os = "windows")]
@@ -115,6 +119,8 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    site_scope: Rc<content_styles::ViewSiteScope>,
+    content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
     // A current layout may request a view before its first document commits
@@ -307,6 +313,7 @@ struct NavigationSnapshot {
 
 struct AppliedContentPolicy {
     generation: ContentPolicyGeneration,
+    cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     native: Rc<crate::platform::imp::NativeContentPolicy>,
     #[cfg(not(target_os = "windows"))]
     digest: Option<[u8; 32]>,
@@ -314,6 +321,7 @@ struct AppliedContentPolicy {
 
 struct CompilingContentPolicy {
     generation: ContentPolicyGeneration,
+    cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     superseded: bool,
 }
 
@@ -325,7 +333,7 @@ struct QueuedContentPolicy {
 #[cfg(not(target_os = "windows"))]
 struct DeclarativeContentPolicyJob {
     digest: [u8; 32],
-    rules: Arc<zephium_core::blocker::ContentRules>,
+    encoded: Arc<str>,
     encoded_bytes: usize,
 }
 
@@ -427,6 +435,19 @@ pub(crate) struct EngineHost {
     // relax this binding and therefore cannot resurrect a UDF in private mode.
     profile_persistence_classes: HashMap<ProfileId, ProfilePersistenceClass>,
     content_policies: HashMap<ProfileId, ProfileContentPolicy>,
+    style_worker: Option<style_worker::StyleWorker>,
+    main_dispatch: crate::MainThreadDispatch,
+    #[cfg(not(target_os = "windows"))]
+    content_rule_preflight: Option<(
+        [u8; 32],
+        zephium_core::ports::engine::ContentRuleValidationCompletion,
+    )>,
+    #[cfg(not(target_os = "windows"))]
+    preflight_cache_digests: std::collections::VecDeque<[u8; 32]>,
+    blocker_statistics: HashMap<ProfileId, zephium_core::blocker::BlockedLoadCounter>,
+    blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    picker: Option<Arc<element_picker::PickerSession>>,
+    next_picker: u64,
     // Declarative native objects are content-addressed by the SHA-256 of the
     // exact encoded JSON. Weak entries let identical policy generations and
     // profiles share one compiled 10–30 MiB object without pinning stale

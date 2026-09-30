@@ -7,10 +7,11 @@ use std::path::{Component, Path};
 use std::process::Command;
 
 pub(crate) const SHIPPING_FEATURE_SETS: [&str; 2] = [
-    "full-regex-handling",
-    "full-regex-handling,content-blocking",
+    "full-regex-handling,css-validation,embedded-domain-resolver",
+    "full-regex-handling,css-validation,content-blocking,embedded-domain-resolver",
 ];
-pub(crate) const OPTIONAL_EXACT_FEATURES: &str = "full-regex-handling,embedded-domain-resolver";
+pub(crate) const OPTIONAL_EXACT_FEATURES: &str =
+    "full-regex-handling,css-validation,embedded-domain-resolver";
 
 const UPSTREAM_COMMIT: &str = "00b19a06508ddd4f3453779f8618983421ddf32b";
 const UPSTREAM_TREE: &str = "17f03b25091db8ce9ef88408e4be9d11f3e6f755";
@@ -332,39 +333,39 @@ fn validate_release_gates(gates: &toml::Table) -> Result<(), String> {
         ),
         (
             "fork_windows_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_windows_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver -- -D warnings",
         ),
         (
             "fork_windows_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_webkit_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,content-blocking",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver",
         ),
         (
             "fork_webkit_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,content-blocking -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver -- -D warnings",
         ),
         (
             "fork_webkit_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,content-blocking",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,content-blocking,embedded-domain-resolver",
         ),
         (
             "fork_optional_exact_check",
-            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,embedded-domain-resolver",
+            "cargo check --manifest-path vendor/adblock/Cargo.toml --locked --lib --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_optional_exact_clippy",
-            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,embedded-domain-resolver -- -D warnings",
+            "cargo clippy --manifest-path vendor/adblock/Cargo.toml --locked --lib --tests --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver -- -D warnings",
         ),
         (
             "fork_optional_exact_tests",
-            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,embedded-domain-resolver",
+            "cargo test --manifest-path vendor/adblock/Cargo.toml --locked --lib --test fork_contract --no-default-features --features full-regex-handling,css-validation,embedded-domain-resolver",
         ),
         (
             "fork_upstream_compatibility_tests",
@@ -776,11 +777,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         "runtime-exact",
         &["runtime", "adblock/embedded-domain-resolver"],
     )?;
-    require_string_array(
-        blocker_features,
-        "webkit",
-        &["adblock/content-blocking", "dep:serde", "dep:serde_json"],
-    )?;
+    require_string_array(blocker_features, "webkit", &["adblock/content-blocking"])?;
     let blocker_adblock = require_table(&blocker, "dependencies")?
         .get("adblock")
         .and_then(toml::Value::as_table)
@@ -792,7 +789,15 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     )?;
     require_string(blocker_adblock, "version", "=0.13.2")?;
     require_bool(blocker_adblock, "default-features", false)?;
-    require_string_array(blocker_adblock, "features", &["full-regex-handling"])?;
+    require_string_array(
+        blocker_adblock,
+        "features",
+        &[
+            "full-regex-handling",
+            "css-validation",
+            "embedded-domain-resolver",
+        ],
+    )?;
     reject_dependency_aliases(
         require_table(&blocker, "dependencies")?,
         "zephium-blocker dependency table",
@@ -832,10 +837,11 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         .ok_or_else(|| "desktop has no structured zephium-blocker-service dependency".to_owned())?;
     require_key_set(
         service,
-        &["workspace"],
+        &["features", "workspace"],
         "desktop zephium-blocker-service dependency",
     )?;
     require_bool(service, "workspace", true)?;
+    require_string_array(service, "features", &["official-https"])?;
     let targets = require_table(&desktop, "target")?;
     let reviewed_targets = BTreeSet::from([
         "cfg(target_os = \"windows\")",
@@ -909,7 +915,7 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     let features = require_table(&update, "features")?;
     require_key_set(
         features,
-        &["default", "tuf"],
+        &["default", "official-https", "tuf"],
         "zephium-blocker-update feature table",
     )?;
     require_string_array(features, "default", &[])?;
@@ -923,9 +929,20 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
             "dep:tough",
             "dep:windows",
             "dep:zephium-update-transport",
+            "zephium-update-transport/tough",
         ],
     )?;
 
+    require_string_array(
+        features,
+        "official-https",
+        &[
+            "dep:rustix",
+            "dep:tokio",
+            "dep:windows",
+            "dep:zephium-update-transport",
+        ],
+    )?;
     let dependencies = require_table(&update, "dependencies")?;
     require_key_set(
         dependencies,
@@ -965,12 +982,11 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     let transport = require_dependency_table(dependencies, "zephium-update-transport")?;
     require_key_set(
         transport,
-        &["features", "optional", "workspace"],
+        &["optional", "workspace"],
         "zephium-blocker-update transport dependency",
     )?;
     require_bool(transport, "workspace", true)?;
     require_bool(transport, "optional", true)?;
-    require_string_array(transport, "features", &["tough"])?;
     let tokio = require_dependency_table(dependencies, "tokio")?;
     require_key_set(
         tokio,
@@ -1081,11 +1097,21 @@ fn validate_update_transport_manifest(repository: &Path) -> Result<(), String> {
             "futures-util",
             "reqwest",
             "thiserror",
+            "time",
             "tough",
             "url",
         ],
         "zephium-update-transport dependency table",
     )?;
+    let time = require_dependency_table(dependencies, "time")?;
+    require_key_set(
+        time,
+        &["default-features", "features", "version"],
+        "transport time dependency",
+    )?;
+    require_string(time, "version", "=0.3.49")?;
+    require_bool(time, "default-features", false)?;
+    require_string_array(time, "features", &["parsing"])?;
     let async_trait = require_dependency_table(dependencies, "async-trait")?;
     require_key_set(
         async_trait,
@@ -1155,11 +1181,16 @@ fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
     let features = require_table(&service, "features")?;
     require_key_set(
         features,
-        &["default", "tuf"],
+        &["default", "official-https", "tuf"],
         "zephium-blocker-service feature table",
     )?;
     require_string_array(features, "default", &[])?;
     require_string_array(features, "tuf", &["zephium-blocker-update/tuf"])?;
+    require_string_array(
+        features,
+        "official-https",
+        &["zephium-blocker-update/official-https"],
+    )?;
     let dependencies = require_table(&service, "dependencies")?;
     require_key_set(
         dependencies,
@@ -2007,22 +2038,53 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
         (
             "x86_64-pc-windows-msvc",
             &["runtime"],
-            &["full-regex-handling"],
+            &[
+                "addr",
+                "css-validation",
+                "cssparser",
+                "embedded-domain-resolver",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
         (
             "x86_64-apple-darwin",
             &["webkit"],
-            &["content-blocking", "full-regex-handling"],
+            &[
+                "content-blocking",
+                "addr",
+                "css-validation",
+                "cssparser",
+                "embedded-domain-resolver",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
         (
             "aarch64-apple-darwin",
             &["webkit"],
-            &["content-blocking", "full-regex-handling"],
+            &[
+                "content-blocking",
+                "addr",
+                "css-validation",
+                "cssparser",
+                "embedded-domain-resolver",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
         (
             "x86_64-unknown-linux-gnu",
             &["webkit"],
-            &["content-blocking", "full-regex-handling"],
+            &[
+                "content-blocking",
+                "addr",
+                "css-validation",
+                "cssparser",
+                "embedded-domain-resolver",
+                "full-regex-handling",
+                "selectors",
+            ],
         ),
     ];
 
@@ -2046,9 +2108,8 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
             ],
         )?;
         verify_desktop_feature_graph(target, &output, blocker_features, adblock_features)?;
-        // The desktop now owns a lazy HTTPS search-suggestion client. Keep
-        // the blocker network-free by checking its own normal dependency graph,
-        // rather than rejecting every HTTP dependency in the entire browser.
+        // The library-only, no-feature service remains network-free. Desktop
+        // explicitly selects official HTTPS; TUF must stay out of that graph.
         let blocker = cargo_tree(
             repository,
             &[
@@ -2104,12 +2165,23 @@ fn verify_desktop_feature_graph(
         "0.13.2",
         expected_adblock_features,
     )?;
-    require_package_features(&tree, target, "zephium-blocker-service", "0.1.0", &[])?;
-    require_package_features(&tree, target, "zephium-blocker-update", "0.1.0", &[])?;
+    require_package_features(
+        &tree,
+        target,
+        "zephium-blocker-service",
+        "0.1.0",
+        &["official-https"],
+    )?;
+    require_package_features(
+        &tree,
+        target,
+        "zephium-blocker-update",
+        "0.1.0",
+        &["official-https"],
+    )?;
     require_direct_product_package(&tree, target, "reqwest", "0.13.4")?;
-    for package in ["tough", "zephium-update-transport"] {
-        reject_package(&tree, target, package)?;
-    }
+    require_package_features(&tree, target, "zephium-update-transport", "0.1.0", &[])?;
+    reject_package(&tree, target, "tough")?;
     Ok(())
 }
 

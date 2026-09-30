@@ -680,6 +680,7 @@ pub enum BlockerSourcePhase {
 pub enum BlockerSourceProvenance {
     ReleaseBundle,
     TufRepository,
+    OfficialHttps,
 }
 
 /// Stable package-refresh failure category. Endpoint, parser, and native
@@ -704,6 +705,7 @@ pub enum BlockerSourceFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockerFailure {
+    SitePreferencesUnavailable,
     GenerationExhausted,
     CompilerDispatchRejected,
     CompilerUnavailable,
@@ -764,12 +766,70 @@ pub struct BlockerSourceIdentities {
     pub installed_manifest_sha256: Option<String>,
 }
 
-/// Read-only, focused-profile diagnostics delivered only to privileged main
-/// chrome. It deliberately contains no profile selector, URL, origin, request
-/// metadata, native error string, or filter-list text. Runtime health is
-/// represented only by volatile aggregate counters.
+/// Host-initiated picker controls, available only to privileged main chrome.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlockerPickerAction {
+    Start,
+    Read { session: String },
+    Preview { session: String, enabled: bool },
+    Stop { session: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct BlockerPickerView {
+    pub session: String,
+    pub active: bool,
+    pub selection: Option<BlockerSelectionView>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct BlockerSelectionView {
+    pub identity: String,
+    pub label: String,
+    pub count: u32,
+    pub positional: bool,
+}
+
+/// Exact privileged site-control context; never accepted from ordinary page IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct BlockerSiteContext {
+    pub profile: String,
+    pub tab: String,
+    pub site: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PersonalHideView {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerSiteView {
+    pub context: BlockerSiteContext,
+    pub paused: bool,
+    pub private_session: bool,
+    pub ready: bool,
+    pub busy: bool,
+    pub hides: Vec<PersonalHideView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlockerSiteAction {
+    SaveSelection { session: String, selection: String },
+    Retry,
+    Pause { paused: bool },
+    SetHideEnabled { id: String, enabled: bool },
+    RemoveHide { id: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct BlockerStatusView {
+    pub site: Option<Box<BlockerSiteView>>,
     pub projection_revision: String,
     pub protection: BlockerProtection,
     pub phase: BlockerPhase,
@@ -820,6 +880,7 @@ impl BlockerStatusView {
     /// be obtained. Revision zero cannot overwrite a real actor projection.
     pub fn unavailable() -> Self {
         Self {
+            site: None,
             projection_revision: "00000000000000000000000000000000".into(),
             protection: BlockerProtection::Unavailable,
             phase: BlockerPhase::Unavailable,
@@ -923,4 +984,15 @@ mod blocker_status_tests {
         assert!(!status.retryable);
         assert_eq!(status.retries_remaining, 0);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerStatsView {
+    #[specta(type = f64)]
+    pub today: u64,
+    #[serde(rename = "last7Days")]
+    #[specta(type = f64)]
+    pub last_seven_days: u64,
+    #[specta(type = Vec<f64>)]
+    pub days: [u64; 7],
 }

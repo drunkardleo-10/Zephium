@@ -29,12 +29,14 @@ mod webext_action_icon;
 
 pub(crate) use webext_action_icon::rasterize_action_icon;
 
+#[cfg(feature = "agentic-browser")]
+pub(crate) use content_filter::install_on_view as install_content_policy_on_view;
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
-    install_on_view as install_content_policy_on_view, remove_content_policy_cache_identifier,
-    same_policy as same_content_policy, ContentPolicyCacheMaintenanceCancellation,
-    ContentPolicyCachePage, ContentPolicyCompilationCancellation, ContentPolicyRegistration,
-    NativeContentPolicy,
+    install_scoped_on_view as install_scoped_content_policy_on_view,
+    remove_content_policy_cache_identifier, same_policy as same_content_policy,
+    ContentPolicyCacheMaintenanceCancellation, ContentPolicyCachePage,
+    ContentPolicyCompilationCancellation, ContentPolicyRegistration, NativeContentPolicy,
 };
 pub use credentials::{
     passkey_authorization_state, request_passkey_authorization,

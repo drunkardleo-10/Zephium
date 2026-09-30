@@ -9,16 +9,22 @@
 #![deny(missing_docs)]
 
 mod manifest;
+#[cfg(feature = "official-https")]
+mod official;
+#[cfg(feature = "official-https")]
+mod official_store;
 mod types;
 
-#[cfg(feature = "tuf")]
+#[cfg(any(feature = "tuf", feature = "official-https"))]
 mod cache_lock;
-#[cfg(feature = "tuf")]
+#[cfg(any(feature = "tuf", feature = "official-https"))]
 mod file_identity;
 #[cfg(feature = "tuf")]
 mod repository;
 #[cfg(feature = "tuf")]
 mod storage;
+#[cfg(any(feature = "tuf", feature = "official-https"))]
+mod storage_io;
 #[cfg(feature = "tuf")]
 mod transport;
 #[cfg(feature = "tuf")]
@@ -32,7 +38,9 @@ pub use manifest::{
     CATALOG_MANIFEST_TARGET, CATALOG_MANIFEST_VERSION,
 };
 #[cfg(feature = "tuf")]
-pub use storage::{GarbageCollectionReport, StoreError};
+pub use storage::GarbageCollectionReport;
+#[cfg(any(feature = "tuf", feature = "official-https"))]
+pub use storage_io::StoreError;
 pub use types::{
     ActivatedCatalog, CandidateCommitDispatch, CandidateCommitOutcome, CandidateRejectDispatch,
     CandidateRejectOutcome, CandidateRejectionReason, CandidateRepairDispatch,
@@ -42,10 +50,12 @@ pub use types::{
 };
 #[cfg(feature = "tuf")]
 pub use types::{RepositoryConfig, RepositoryId};
-#[cfg(feature = "tuf")]
-pub use worker::CatalogUpdateWorker;
+#[cfg(any(feature = "tuf", feature = "official-https"))]
+mod catalog_worker;
+#[cfg(any(feature = "tuf", feature = "official-https"))]
+pub use catalog_worker::CatalogUpdateWorker;
 
-#[cfg(not(feature = "tuf"))]
+#[cfg(not(any(feature = "tuf", feature = "official-https")))]
 mod disabled_worker {
     use std::time::Duration;
 
@@ -65,6 +75,14 @@ mod disabled_worker {
     pub enum CatalogUpdateWorker {}
 
     impl CatalogUpdateWorker {
+        /// Unreachable without an enabled source worker.
+        pub fn next_refresh_unix(&self) -> Option<u64> {
+            match *self {}
+        }
+        /// Unreachable without an enabled source worker.
+        pub fn official_freshness(&self) -> Option<(u64, bool)> {
+            match *self {}
+        }
         /// Unreachable without the feature that can construct this type.
         pub fn request_refresh(&self) -> RefreshAdmission {
             match *self {}
@@ -136,5 +154,5 @@ mod disabled_worker {
     }
 }
 
-#[cfg(not(feature = "tuf"))]
+#[cfg(not(any(feature = "tuf", feature = "official-https")))]
 pub use disabled_worker::CatalogUpdateWorker;

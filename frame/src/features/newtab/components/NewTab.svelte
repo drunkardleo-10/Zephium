@@ -27,8 +27,58 @@
     personalize?: boolean;
     showClock?: boolean;
   } = $props();
-  let input = $state<HTMLInputElement>();
   let now = $state(new Date());
+  let statisticsDay = $derived(now.toDateString());
+  let statisticsProfile = $derived(tabs.profile()?.id);
+  let statisticsTab = $derived(tabs.activeId());
+  let blockedToday = $state<number | null>(null);
+  let statisticsBusy = false;
+  let statisticsPending = false;
+  let statisticsRequest = 0;
+  async function refreshStatistics(profile: string) {
+    if (statisticsBusy) {
+      statisticsPending = true;
+      return;
+    }
+    statisticsBusy = true;
+    const request = ++statisticsRequest;
+    try {
+      const result = await commands.blockerStats(profile);
+      if (request === statisticsRequest && tabs.profile()?.id === profile) {
+        blockedToday = result.status === "ok" ? result.data.today : null;
+      }
+    } catch {
+      if (request === statisticsRequest) blockedToday = null;
+    } finally {
+      statisticsBusy = false;
+      if (statisticsPending) {
+        statisticsPending = false;
+        const current = tabs.profile()?.id;
+        if (current) void refreshStatistics(current);
+      }
+    }
+  }
+  $effect(() => {
+    void statisticsTab;
+    void statisticsDay;
+    const profile = statisticsProfile;
+    blockedToday = null;
+    if (profile) void refreshStatistics(profile);
+    return () => {
+      statisticsRequest++;
+      statisticsPending = false;
+    };
+  });
+  onMount(() => {
+    const visible = () => {
+      const profile = tabs.profile()?.id;
+      if (!document.hidden && profile) void refreshStatistics(profile);
+    };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
+  });
+
+  let input = $state<HTMLInputElement>();
   let firstName = $derived((tabs.profile()?.name ?? "").trim().split(/\s+/u)[0] ?? "");
   let greeting = $derived(greetingFor(now));
   let clock = $derived(
@@ -102,6 +152,9 @@
   {#if showClock}<div class="newtab-clock">
       <time datetime={now.toISOString()}>{clock}</time><span>{date}</span>
     </div>{/if}
+  {#if blockedToday !== null}<p class="newtab-protection">
+      {blockedToday.toLocaleString()} ads and trackers blocked today
+    </p>{/if}
   <div class="newtab-search">
     {#if search}{@render search()}{:else}<SearchField
         size="page"
@@ -144,3 +197,11 @@
     />
   </div>
 </section>
+
+<style>
+  .newtab-protection {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+  }
+</style>

@@ -1,3 +1,4 @@
+use objc2_foundation::NSString;
 // Copyright 2020-2024 Tauri Programme within The Commons Conservancy
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
@@ -40,7 +41,36 @@ use crate::{
 
 use super::wry_download_delegate::WryDownloadDelegate;
 
+pub struct BlockedLoadCounter {
+  pub identifier: Retained<NSString>,
+  pub previous_identifier: Option<Retained<NSString>>,
+  pub count: std::cell::Cell<u64>,
+  pub aggregate: Arc<(
+    std::sync::atomic::AtomicU64,
+    std::sync::atomic::AtomicBool,
+    std::sync::atomic::AtomicBool,
+  )>,
+}
+impl BlockedLoadCounter {
+  pub fn flush(&self, reset: bool) {
+    let count = self.count.replace(0);
+    if !reset && count != 0 {
+      let _ = self.aggregate.0.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |n| Some(n.saturating_add(count)),
+      );
+    }
+  }
+}
+impl Drop for BlockedLoadCounter {
+  fn drop(&mut self) {
+    self.flush(false);
+  }
+}
+
 pub struct WryNavigationDelegateIvars {
+  pub blocked_loads: std::cell::RefCell<Option<BlockedLoadCounter>>,
   pub pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
   pub has_download_handler: bool,
   #[cfg(target_os = "macos")]
@@ -69,7 +99,15 @@ define_class!(
   #[ivars = WryNavigationDelegateIvars]
   pub struct WryNavigationDelegate;
 
-  unsafe impl NSObjectProtocol for WryNavigationDelegate {}
+  unsafe impl NSObjectProtocol for WryNavigationDelegate {
+    #[unsafe(method(respondsToSelector:))]
+    fn responds_to_selector(&self, selector: objc2::runtime::Sel) -> objc2::runtime::Bool {
+      if selector == objc2::sel!(_webView:contentRuleListWithIdentifier:performedAction:forURL:) {
+        return self.ivars().blocked_loads.borrow().is_some().into();
+      }
+      unsafe { msg_send![super(self), respondsToSelector: selector] }
+    }
+  }
 
   // WebKit's macOS context-menu download entry point is an optional private
   // delegate selector (present since the WKDownload API). It delivers the
@@ -77,6 +115,39 @@ define_class!(
   // send it simply cannot use this path; navigation download hooks remain.
   #[cfg(target_os = "macos")]
   impl WryNavigationDelegate {
+    #[unsafe(method(_webView:contentRuleListWithIdentifier:performedAction:forURL:))]
+    fn content_rule_action(
+      &self,
+      _view: &WKWebView,
+      identifier: &NSString,
+      action: &objc2::runtime::AnyObject,
+      _url: Option<&objc2_foundation::NSURL>,
+    ) {
+      let counter = self.ivars().blocked_loads.borrow();
+      let Some(counter) = counter.as_ref() else {
+        return;
+      };
+      if !identifier.isEqualToString(&counter.identifier)
+        && !counter
+          .previous_identifier
+          .as_ref()
+          .is_some_and(|previous| identifier.isEqualToString(previous))
+      {
+        return;
+      }
+      // The optional SPI getter is checked once when counting is installed.
+      let blocked: bool = unsafe { msg_send![action, blockedLoad] };
+      if blocked {
+        let previous = counter.count.get();
+        counter.count.set(previous.saturating_add(1));
+        if previous == 0 {
+          counter
+            .aggregate
+            .1
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+      }
+    }
     #[unsafe(method(_webView:contextMenuDidCreateDownload:))]
     fn context_menu_download(&self, _webview: &WKWebView, download: &WKDownload) {
       if !self.ivars().has_download_handler {
@@ -281,6 +352,7 @@ impl WryNavigationDelegate {
     let delegate = mtm
       .alloc::<WryNavigationDelegate>()
       .set_ivars(WryNavigationDelegateIvars {
+        blocked_loads: Default::default(),
         pending_scripts,
         navigation_policy_function,
         #[cfg(target_os = "macos")]

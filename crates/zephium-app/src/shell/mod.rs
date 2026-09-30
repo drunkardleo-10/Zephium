@@ -1,6 +1,8 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
 mod blocker;
+mod blocker_sites;
+mod blocker_statistics;
 mod bootstrap;
 mod effects;
 mod engine_events;
@@ -200,6 +202,7 @@ pub struct Shell {
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
     blocker: blocker::BlockerCoordinator,
+    blocker_statistics: std::collections::HashMap<ProfileId, blocker_statistics::Statistics>,
     #[cfg(feature = "agentic-browser")]
     agent_lifecycle: AgentLifecycleOwner,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
@@ -405,6 +408,7 @@ impl Shell {
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
+            blocker_statistics: std::collections::HashMap::new(),
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
             #[cfg(feature = "work-execution")]
@@ -545,6 +549,15 @@ impl Shell {
                 if let Command::SetFocusedContentBlockerEnabled(enabled) = &command {
                     if let Some(mut completion) =
                         self.begin_focused_blocker_mutation(operation_id.clone(), *enabled)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
+                if let Command::ChangeBlockerSite { context, action } = &command {
+                    if let Some(mut completion) =
+                        self.begin_blocker_site_mutation(operation_id.clone(), context, action)
                     {
                         completion.operation_id = operation_id;
                         (self.emit)(Projection::OperationProcessed(completion));
@@ -854,6 +867,7 @@ impl Shell {
             Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }
             | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::ChangeBlockerSite { .. }
             | Command::RetryFocusedContentPolicy { .. }
             | Command::RefreshContentBlockerSources => {}
             Command::ContentPolicyStatus { profile, reply } => {
@@ -863,6 +877,14 @@ impl Shell {
                     .map(ContentPolicyStatusQueryOutcome::Found)
                     .unwrap_or(ContentPolicyStatusQueryOutcome::UnknownProfile);
                 let _ = reply.send(outcome);
+            }
+            Command::ElementPicker {
+                context,
+                action,
+                reply,
+            } => self.element_picker(&context, action, reply),
+            Command::BlockerStatistics { profile, reply } => {
+                self.query_blocker_statistics(profile, reply)
             }
             Command::FocusedContentPolicyStatus { reply } => {
                 self.maintain_blocker_catalog();
@@ -894,7 +916,10 @@ impl Shell {
                 self.consume_profile_deletion_outcome(profile)
             }
             Command::BlockerReady(profile) => self.consume_blocker_compile_result(profile),
-            Command::BlockerStoreReady(profile) => self.consume_blocker_store_result(profile),
+            Command::BlockerStoreReady(profile) => {
+                self.consume_blocker_store_result(profile);
+                self.consume_blocker_site_result(profile);
+            }
             Command::BlockerPreferenceRetry { profile, token } => {
                 self.on_blocker_preference_reconciliation_retry(profile, token)
             }
@@ -923,6 +948,7 @@ impl Shell {
                         return;
                     }
                 }
+                self.maintain_blocker_statistics();
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
                 self.drive_blocker_preference_reconciliations();
@@ -1034,6 +1060,7 @@ impl Shell {
         if !pre_store_coordination_clean {
             crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
         }
+        terminal_clean &= self.flush_blocker_statistics_until(deadline);
         let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.shutdown_until(deadline)
         })) {

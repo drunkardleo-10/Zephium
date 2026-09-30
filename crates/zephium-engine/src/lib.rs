@@ -1380,6 +1380,7 @@ pub fn install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
+        dispatch.clone(),
         initial_user_content.generation,
         initial_user_content.content,
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1517,6 +1518,66 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn set_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        counter: zephium_core::blocker::BlockedLoadCounter,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_blocker_statistics(profile, counter));
+        });
+    }
+    fn collect_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        reset: bool,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                host.collect_blocker_statistics(profile, reset);
+                done();
+            });
+        });
+    }
+
+    fn validate_content_rules(
+        &self,
+        rules: Arc<ContentRules>,
+        completion: zephium_core::ports::engine::ContentRuleValidationCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.validate_content_rules(rules, completion));
+        });
+    }
+
+    fn element_picker(
+        &self,
+        profile: ProfileId,
+        id: ItemId,
+        site: zephium_core::blocker::BlockerSite,
+        request: zephium_core::blocker::ElementPickerRequest,
+        completion: zephium_core::blocker::ElementPickerCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                host.element_picker(profile, id, site, request, completion)
+            });
+        });
+    }
+
+    fn set_blocker_site_preferences(
+        &self,
+        profile: ProfileId,
+        preferences: Arc<zephium_core::blocker::PreparedBlockerSites>,
+        completion: zephium_core::ports::engine::BlockerSiteCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+            });
+        });
+    }
     fn download_call(
         &self,
         partition: Partition,

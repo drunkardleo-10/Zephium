@@ -953,8 +953,12 @@ fn run_blocker_product_gates() {
         ("zephium-update-transport", None),
         ("zephium-blocker-update", None),
         ("zephium-blocker-update", Some("tuf")),
+        ("zephium-blocker-update", Some("official-https")),
+        ("zephium-blocker-update", Some("tuf,official-https")),
         ("zephium-blocker-service", None),
         ("zephium-blocker-service", Some("tuf")),
+        ("zephium-blocker-service", Some("official-https")),
+        ("zephium-blocker-service", Some("tuf,official-https")),
     ] {
         let mut common = vec![
             "-p",
@@ -1045,16 +1049,21 @@ fn check_blocker_dependency_graphs() {
         "--prefix",
         "none",
     ]);
-    for forbidden in [
-        "zephium-blocker-update feature \"tuf\"",
+    for forbidden in ["zephium-blocker-update feature \"tuf\"", "tough v"] {
+        if bundled.lines().any(|line| line.starts_with(forbidden)) {
+            eprintln!("official HTTPS desktop graph unexpectedly contains `{forbidden}`");
+            exit(1);
+        }
+    }
+    for required in [
+        "zephium-blocker-service feature \"official-https\"",
+        "zephium-blocker-update feature \"official-https\"",
         "zephium-update-transport v",
-        "tough v",
         "reqwest v",
         "rustls-platform-verifier v",
-        "aws-lc-rs v",
     ] {
-        if bundled.lines().any(|line| line.starts_with(forbidden)) {
-            eprintln!("bundled desktop dependency graph unexpectedly contains `{forbidden}`");
+        if !bundled.lines().any(|line| line.starts_with(required)) {
+            eprintln!("official HTTPS desktop graph is missing `{required}`");
             exit(1);
         }
     }
