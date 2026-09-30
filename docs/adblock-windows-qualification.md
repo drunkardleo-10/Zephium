@@ -27,7 +27,7 @@ profile. From the repository root:
 
 ```text
 pnpm -C frame check
-pnpm -C frame test:component src/features/blocker/tests/ElementPickerControls.component.test.ts src/features/settings/tests/ProtectionControls.component.test.ts
+pnpm -C frame test:component src/features/settings/tests/ProtectionControls.component.test.ts
 pnpm -C frame build
 cargo xtask check-frame-styles
 cargo test -p zephium-core -p zephium-app -p zephium-engine -p zephium-store --lib
@@ -76,11 +76,18 @@ list. A script path such as `/ads/cbr.js` is present in the current network list
    child-frame cosmetic delivery has been removed. Verify that inactive tabs do
    not run generic discovery and that DOM mutation bursts stay bounded. Record
    first-paint flash and input/frame timing on realistic pages.
-5. Picker: page click handlers never run for selected clicks; preview, undo,
-   save, live Show/Hide, remove and restart persistence. Cancel with Escape,
-   navigation, same-URL reload, tab close and menu teardown. Late results must
-   not save into another document/profile. Test author inline important display,
-   closed shadow/canvas/frame container selection and layout-dependent warnings.
+5. Hiding elements (Utilities menu → Hide elements): the page shows a tinted
+   outline with the element's name and size and a hint bar; ↑/↓ widen or
+   narrow the pick. One click hides the element at once and saves it (the
+   sidebar bar counts hides; Undo/⌘Z removes the newest; Done/Esc ends).
+   Page click handlers never run for picked clicks; several picks in a row
+   all persist; no flash between the instant hide and the saved rule. Ending
+   by navigation, reload, tab close or switching tabs stops the picker. Late
+   results must not save into another document/profile. Check author inline
+   important display, strict CSP (the picker uses a constructed sheet and no
+   innerHTML), closed shadow/canvas/frame container picks, and restart
+   persistence. "Hidden on this site" shows each hide again individually or all.
+   The per-site switch pauses/resumes and reloads the tab.
 6. Private windows: pause and hide work during the session, survive ordinary
    tab operations as intended, and leave no durable rules after session closure.
 7. Updates: both official sources, conditional 304, unchanged bytes, offline,
