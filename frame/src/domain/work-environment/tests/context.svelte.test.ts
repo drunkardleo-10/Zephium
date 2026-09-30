@@ -174,3 +174,65 @@ test("an attached work's page frames arrive with its projection, not with the se
   context.dispose();
   expect(context.pages.size).toBe(0);
 });
+
+test("an opening's reads are published together, and a lone read at once", async () => {
+  const { WorkEnvironmentContext } = await import("../context.svelte");
+  const projection = (id: string) => ({
+    version: 1,
+    interrupted: [],
+    executions: [],
+    work: {
+      schema_version: 2,
+      profile,
+      id,
+      revision: "1",
+      lifecycle: "active",
+      objective: id,
+      objective_revision: "1",
+      context_revision: "1",
+      objective_author: "user",
+      questions: [],
+      status: "plan_ready",
+      plan: null,
+    },
+  });
+  const resolvers: (() => void)[] = [];
+  native.call.mockReset();
+  native.call.mockImplementation(
+    (_profile: string, call: { request: { query: { work: string } } }) =>
+      new Promise((resolve) =>
+        resolvers.push(() =>
+          resolve({
+            version: 1,
+            profile,
+            reply: { kind: "projection", projection: projection(call.request.query.work) },
+          }),
+        ),
+      ),
+  );
+  const context = new WorkEnvironmentContext(profile);
+  context.update({
+    ...snapshot,
+    elements: ["a", "b", "c"].map((id) => ({
+      id: `element-${id}`,
+      area: null,
+      reference: { kind: "objective" as const, objective: id },
+    })),
+  });
+  await context.start();
+  await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+  resolvers[0]!();
+  await vi.waitFor(() => expect(resolvers).toHaveLength(3));
+  expect(context.objectives.size).toBe(0);
+  resolvers[1]!();
+  resolvers[2]!();
+  await vi.waitFor(() => expect(context.objectives.size).toBe(3));
+  context.update({
+    ...snapshot,
+    elements: [{ id: "element-d", area: null, reference: { kind: "objective", objective: "d" } }],
+  });
+  await vi.waitFor(() => expect(resolvers).toHaveLength(4));
+  resolvers[3]!();
+  await vi.waitFor(() => expect(context.objectives.has("d")).toBe(true));
+  context.dispose();
+});

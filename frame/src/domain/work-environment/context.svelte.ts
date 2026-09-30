@@ -13,6 +13,9 @@ import { observe } from "$shared/lib/observe";
 import { listenAll } from "$shared/lib/lifecycle";
 import { validRevision } from "$domain/work";
 
+/** How long the first read of an opening may wait for the others. */
+const PUBLISH_WITHIN = 250;
+
 /** Read-only joins for visible Work resources. No model or operation supervisor is started. */
 export class WorkEnvironmentContext {
   readonly objectives = new SvelteMap<string, WorkRuntimeProjection>();
@@ -43,6 +46,13 @@ export class WorkEnvironmentContext {
   private noteRead = 0;
   private stop: (() => void) | null = null;
   private lifetime = new AbortController();
+  /** Reads that finished while others are still out: published together, so a work opens in one pass. */
+  private arrived: Record<
+    string,
+    { projection: WorkRuntimeProjection; pages?: WorkPageV1[]; plan?: WorkPlanRevision }
+  > = {};
+  private publishing: ReturnType<typeof setTimeout> | undefined;
+  private since = 0;
   constructor(readonly profile: string) {}
   async start() {
     if (this.active) return;
@@ -144,7 +154,7 @@ export class WorkEnvironmentContext {
       response.value.reply.kind === "projection"
     ) {
       const next = response.value.reply.projection;
-      const current = this.objectives.get(id);
+      const current = this.arrived[id]?.projection ?? this.objectives.get(id);
       if (
         next.version === 1 &&
         next.work.id === id &&
@@ -153,12 +163,11 @@ export class WorkEnvironmentContext {
         next.executions.length <= 16 &&
         (!current || BigInt(next.work.revision) >= BigInt(current.work.revision))
       ) {
-        this.objectives.set(id, next);
-        this.unavailable.delete(id);
-        if (next.executions.length) await this.readPages(id, generation);
+        const pages = next.executions.length ? await this.readPages(id, generation) : undefined;
         if (!this.active || generation !== this.generation || !this.wanted.includes(id)) return;
         const revision = next.executions.at(-1)?.spec.plan_revision ?? next.work.plan?.revision;
-        if (revision && next.work.plan?.revision === revision) this.plans.set(id, next.work.plan);
+        let plan: WorkPlanRevision | undefined;
+        if (revision && next.work.plan?.revision === revision) plan = next.work.plan;
         else if (revision && this.plans.get(id)?.revision !== revision) {
           const historical = await observe(
             Promise.resolve().then(() =>
@@ -178,9 +187,14 @@ export class WorkEnvironmentContext {
             historical.value.reply.kind === "plan" &&
             historical.value.reply.plan.revision === revision
           )
-            this.plans.set(id, historical.value.reply.plan);
+            plan = historical.value.reply.plan;
         }
         this.failures.delete(id);
+        this.arrive(id, {
+          projection: next,
+          ...(pages ? { pages } : {}),
+          ...(plan ? { plan } : {}),
+        });
         return;
       }
     }
@@ -197,8 +211,37 @@ export class WorkEnvironmentContext {
       this.pump();
     }, 1000 * attempt);
   }
+  /**
+   * A finished read waits while other reads of this opening are still out, at
+   * most a moment, then everything that arrived is published at once: the
+   * canvas lays out once for all of them instead of once for each.
+   */
+  private arrive(
+    id: string,
+    read: { projection: WorkRuntimeProjection; pages?: WorkPageV1[]; plan?: WorkPlanRevision },
+  ) {
+    if (!Object.keys(this.arrived).length) this.since = Date.now();
+    this.arrived[id] = read;
+    clearTimeout(this.publishing);
+    const waiting = this.pending.size > 0 || this.workers > 1;
+    if (!waiting || Date.now() - this.since >= PUBLISH_WITHIN) this.publish();
+    else this.publishing = setTimeout(() => this.publish(), PUBLISH_WITHIN);
+  }
+  private publish() {
+    clearTimeout(this.publishing);
+    this.publishing = undefined;
+    const arrived = this.arrived;
+    this.arrived = {};
+    for (const [id, read] of Object.entries(arrived)) {
+      if (!this.wanted.includes(id)) continue;
+      this.objectives.set(id, read.projection);
+      this.unavailable.delete(id);
+      if (read.pages) this.pages.set(id, read.pages);
+      if (read.plan) this.plans.set(id, read.plan);
+    }
+  }
   /** The frames one work recorded, so its page cards are pictures on arrival. */
-  private async readPages(id: string, generation: number) {
+  private async readPages(id: string, generation: number): Promise<WorkPageV1[] | undefined> {
     const response = await observe(
       Promise.resolve().then(() => commands.workActivity(this.profile, id)),
       9000,
@@ -212,7 +255,8 @@ export class WorkEnvironmentContext {
       response.value.work === id &&
       !response.value.error
     )
-      this.pages.set(id, response.value.pages ?? []);
+      return response.value.pages ?? [];
+    return undefined;
   }
   private readNotes(): Promise<void> {
     if (this.notesTask) {
@@ -286,6 +330,8 @@ export class WorkEnvironmentContext {
     this.stop?.();
     this.stop = null;
     this.lifetime.abort();
+    clearTimeout(this.publishing);
+    this.arrived = {};
     this.pending.clear();
     this.objectives.clear();
     this.media.clear();
