@@ -47,10 +47,6 @@ export class WorkHumanSession {
       return;
     }
     this.stop = stop;
-    this.beat = setInterval(() => {
-      for (const work of this.works)
-        if ((this.pages.get(work) ?? []).some(held)) this.refresh(work);
-    }, BEAT);
     for (const work of this.works) this.refresh(work);
   }
   /** The works on this canvas; pages of a work that left are dropped with it. */
@@ -60,6 +56,7 @@ export class WorkHumanSession {
     const added = wanted.filter((work) => !this.works.includes(work));
     this.works = wanted;
     for (const work of [...this.pages.keys()]) if (!wanted.includes(work)) this.pages.delete(work);
+    this.pace();
     if (this.active) for (const work of added) this.refresh(work);
   }
   private refresh(work: string) {
@@ -94,6 +91,21 @@ export class WorkHumanSession {
     )
       return;
     this.pages.set(work, response.pages ?? []);
+    this.pace();
+  }
+  /** The beat runs only while a page is held: at rest nothing ticks. */
+  private pace() {
+    const holding =
+      this.active && this.works.some((work) => (this.pages.get(work) ?? []).some(held));
+    if (holding && !this.beat)
+      this.beat = setInterval(() => {
+        for (const work of this.works)
+          if ((this.pages.get(work) ?? []).some(held)) this.refresh(work);
+      }, BEAT);
+    else if (!holding && this.beat) {
+      clearInterval(this.beat);
+      this.beat = undefined;
+    }
   }
   /** Asks Rust to put the agent's own view inside `region`; acceptance is not presentation. */
   present(work: string, page: WorkHumanPageIdV1, region: WorkHumanRegionV1) {

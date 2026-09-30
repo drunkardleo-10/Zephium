@@ -447,6 +447,8 @@ type Engine = { layout: (graph: ElkNode) => Promise<ElkNode> };
 let local: Promise<Engine> | null = null;
 /** ELK in a worker; `failed` settles if the page refuses it (a policy, a failed load). */
 let worker: { elk: Engine; failed: Promise<never> } | null | undefined;
+/** An idle worker is let go: ELK's heap is tens of megabytes, and a new one starts in a moment. */
+const IDLE_MS = 15_000;
 
 type ElkClass = new () => Engine;
 /**
@@ -491,8 +493,10 @@ function spawn() {
       { resolve: (out: ElkNode) => void; reject: (e: Error) => void }
     >();
     let next = 0;
+    let idle: ReturnType<typeof setTimeout> | undefined;
     const ask = (message: Record<string, unknown>) =>
       new Promise<ElkNode>((resolve, reject) => {
+        clearTimeout(idle);
         const id = next++;
         waiting.set(id, { resolve, reject });
         thread.postMessage({ ...message, id });
@@ -502,16 +506,25 @@ function spawn() {
       waiting.delete(event.data.id);
       if (event.data.error) pending?.reject(new Error(String(event.data.error)));
       else pending?.resolve(event.data.data as ElkNode);
+      if (waiting.size) return;
+      clearTimeout(idle);
+      idle = setTimeout(() => {
+        if (waiting.size || worker?.elk !== elk) return;
+        thread.terminate();
+        worker = undefined;
+      }, IDLE_MS);
     });
     const failed = new Promise<never>((_, reject) =>
       thread.addEventListener("error", () => reject(new Error("worker")), { once: true }),
     );
-    failed.catch(() => (worker = null));
+    failed.catch(() => {
+      if (worker?.elk === elk) worker = null;
+    });
     void ask({ cmd: "register", algorithms: ["layered"] }).catch(() => {});
-    worker = {
-      elk: { layout: (graph) => ask({ cmd: "layout", graph, layoutOptions: {}, options: {} }) },
-      failed,
+    const elk: Engine = {
+      layout: (graph) => ask({ cmd: "layout", graph, layoutOptions: {}, options: {} }),
     };
+    worker = { elk, failed };
   } catch {
     worker = null;
   }
