@@ -38,9 +38,12 @@ mod stage;
 #[cfg(feature = "agentic-browser")]
 mod timeout;
 
+#[cfg(feature = "agentic-browser")]
+pub(crate) use content_filter::install_on_view as install_content_policy_on_view;
 pub(crate) use content_filter::{
-    install_on_view as install_content_policy_on_view, prepare as prepare_content_policy,
-    same_policy as same_content_policy, ContentPolicyRegistration, NativeContentPolicy,
+    install_scoped_on_view as install_scoped_content_policy_on_view,
+    prepare as prepare_content_policy, same_policy as same_content_policy,
+    ContentPolicyRegistration, NativeContentPolicy,
 };
 pub use stage::Stage;
 #[cfg(feature = "agentic-browser")]

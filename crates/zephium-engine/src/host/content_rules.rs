@@ -114,6 +114,7 @@ impl EngineHost {
             } else if let Some(queued) = state.queued.take() {
                 state.compiling = Some(CompilingContentPolicy {
                     generation: queued.generation,
+                    cosmetics: queued.rules.cosmetics().cloned(),
                     superseded: false,
                 });
                 Next::Queued(queued)
@@ -915,6 +916,7 @@ impl EngineHost {
             };
             state.applied = Some(AppliedContentPolicy {
                 generation,
+                cosmetics: compiling.cosmetics,
                 // Existing WebView2 handlers capture this object. Retaining it
                 // also makes future views share the exact same runtime
                 // diagnostics counters instead of splitting one digest across
@@ -923,6 +925,7 @@ impl EngineHost {
                 #[cfg(not(target_os = "windows"))]
                 digest: native_digest,
             });
+            self.refresh_profile_document_styles(profile);
             self.emit_content_policy_settlement(
                 profile,
                 generation,
@@ -945,7 +948,11 @@ impl EngineHost {
             let Some(view) = self.views.get(&id) else {
                 continue;
             };
-            match crate::platform::imp::install_content_policy_on_view(view, &native) {
+            match crate::platform::imp::install_scoped_content_policy_on_view(
+                view,
+                &native,
+                &view.site_scope.pause,
+            ) {
                 Ok(registration) => registrations.push((id, registration)),
                 Err(failure) => {
                     if !self.rollback_content_policy_cohort(registrations, None) {
@@ -969,7 +976,13 @@ impl EngineHost {
             .spare
             .as_ref()
             .filter(|spare| spare.partition.profile() == profile)
-            .map(|spare| crate::platform::imp::install_content_policy_on_view(&spare.view, &native))
+            .map(|spare| {
+                crate::platform::imp::install_scoped_content_policy_on_view(
+                    &spare.view,
+                    &native,
+                    &spare.view.site_scope.pause,
+                )
+            })
             .transpose();
         let spare_registration = match spare_registration {
             Ok(registration) => registration,
@@ -1142,10 +1155,12 @@ impl EngineHost {
         }
         state.applied = Some(AppliedContentPolicy {
             generation,
+            cosmetics: compiling.cosmetics,
             native,
             #[cfg(not(target_os = "windows"))]
             digest: native_digest,
         });
+        self.refresh_profile_document_styles(profile);
         self.emit_content_policy_settlement(
             profile,
             generation,
@@ -1215,6 +1230,7 @@ impl EngineHost {
 
     pub(super) fn retire_content_policy(&mut self, profile: ProfileId) {
         self.content_policies.remove(&profile);
+        self.blocker_sites.remove(&profile);
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }
@@ -1525,6 +1541,7 @@ mod tests {
             applied: None,
             compiling: Some(CompilingContentPolicy {
                 generation: ContentPolicyGeneration::new(1).unwrap(),
+                cosmetics: None,
                 superseded: false,
             }),
             queued: None,
@@ -1560,12 +1577,14 @@ mod tests {
         let state = ProfileContentPolicy {
             applied: Some(AppliedContentPolicy {
                 generation: applied,
+                cosmetics: None,
                 native: allow_all,
                 #[cfg(not(target_os = "windows"))]
                 digest: None,
             }),
             compiling: Some(CompilingContentPolicy {
                 generation: compiling,
+                cosmetics: None,
                 superseded: true,
             }),
             queued: Some(QueuedContentPolicy {
@@ -2163,6 +2182,7 @@ mod tests {
         let candidate = std::rc::Rc::new(crate::platform::imp::NativeContentPolicy::AllowAll);
         let applied = AppliedContentPolicy {
             generation: ContentPolicyGeneration::new(1).unwrap(),
+            cosmetics: None,
             native: installed.clone(),
             #[cfg(not(target_os = "windows"))]
             digest: None,

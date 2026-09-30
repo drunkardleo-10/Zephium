@@ -586,6 +586,15 @@ impl EngineHost {
             return None;
         }
         let title_permit = event_permit.clone();
+        let site_preferences = self
+            .blocker_sites
+            .entry(partition.profile())
+            .or_default()
+            .clone();
+        let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        let load_site_scope = site_scope.clone();
+        #[cfg(target_os = "windows")]
+        let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
         let title_navigation = navigation.clone();
         let on_load = self.sink.clone();
@@ -854,8 +863,13 @@ impl EngineHost {
                 if super::webext::intercept_auth_redirect(&target) {
                     return false;
                 }
-                navigation_permit.allows_navigation(&target)
-                    && policy_navigation.admits_target(&target)
+                let admitted = navigation_permit.allows_navigation(&target)
+                    && policy_navigation.admits_target(&target);
+                #[cfg(target_os = "windows")]
+                if admitted {
+                    navigation_site_scope.navigating(&target);
+                }
+                admitted
             })
             // Raw content starts with no device or ambient capabilities. The
             // pinned Wry revision carries this callback consistently across
@@ -967,6 +981,13 @@ impl EngineHost {
         // `scripts_for` prepends the protected host-owned registrations. Keep
         // that exact ordering so their captured intrinsics and observers are
         // installed before any caller-owned page content.
+        #[cfg(target_os = "macos")]
+        {
+            let scope = site_scope.clone();
+            builder = builder.with_main_frame_navigation_attempt_handler(move |target| {
+                scope.navigating(&target)
+            });
+        }
         for script in wry_document_start_scripts(&scripts) {
             builder = builder.with_initialization_script_for_main_only(
                 script.source.as_ref(),
@@ -1225,8 +1246,11 @@ impl EngineHost {
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: true });
                     }
                 }
-                NavigationTransition::Redirected(_) => {}
+                NavigationTransition::Redirected(_) => {
+                    load_site_scope.navigating(&event.url);
+                }
                 NavigationTransition::Committed(epoch) => {
+                    load_site_scope.navigating(&event.url);
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
                     // attribution to the final redirect destination.
@@ -1249,6 +1273,9 @@ impl EngineHost {
                     restored,
                     request,
                 } => {
+                    if let Some((_, url)) = load_navigation.committed_snapshot() {
+                        load_site_scope.navigating(&url);
+                    }
                     // The transition was current when accepted. End its
                     // loading state even when a provisional failure restored
                     // the still-visible previous committed document.
@@ -1526,7 +1553,11 @@ impl EngineHost {
         // observer and the first network-producing load. This ordering is the
         // first-navigation protection boundary.
         let content_policy_registration =
-            match crate::platform::imp::install_content_policy_on_view(&view, &content_policy) {
+            match crate::platform::imp::install_scoped_content_policy_on_view(
+                &view,
+                &content_policy,
+                &site_scope.pause,
+            ) {
                 Ok(registration) => registration,
                 Err(error) => {
                     eprintln!("content blocker: native view policy installation failed: {error:?}");
@@ -1688,6 +1719,8 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            site_scope,
+            content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]
             file_uploads,
             #[cfg(any(target_os = "macos", target_os = "windows"))]

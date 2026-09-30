@@ -1517,6 +1517,18 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn set_blocker_site_preferences(
+        &self,
+        profile: ProfileId,
+        preferences: Arc<zephium_core::blocker::PreparedBlockerSites>,
+        completion: zephium_core::ports::engine::BlockerSiteCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+            });
+        });
+    }
     fn download_call(
         &self,
         partition: Partition,

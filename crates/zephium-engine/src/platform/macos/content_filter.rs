@@ -46,6 +46,7 @@ pub(crate) fn content_policy_digest(policy: &NativeContentPolicy) -> Option<[u8;
 pub(crate) struct ContentPolicyRegistration {
     manager: Option<Retained<WKUserContentController>>,
     list: Option<Retained<WKContentRuleList>>,
+    _pause: Option<crate::platform::content_pause::PauseRegistration>,
 }
 
 impl ContentPolicyRegistration {
@@ -53,6 +54,7 @@ impl ContentPolicyRegistration {
         Self {
             manager: None,
             list: None,
+            _pause: None,
         }
     }
 
@@ -64,6 +66,7 @@ impl ContentPolicyRegistration {
 
 impl Drop for ContentPolicyRegistration {
     fn drop(&mut self) {
+        self._pause.take();
         if let (Some(manager), Some(list)) = (&self.manager, &self.list) {
             // Remove only the exact Zephium-owned object. `removeAll...`
             // would erase future extension/user-script policy sharing this
@@ -111,6 +114,7 @@ const MAX_CACHE_IDENTIFIERS_PER_PAGE: usize = 128;
 const MAX_CACHE_IDENTIFIER_CURSOR: usize = 4_096;
 const MAX_CACHE_IDENTIFIER_BYTES: usize = "app.zephium.rules.v1.".len() + 64;
 
+#[cfg(feature = "agentic-browser")]
 pub(crate) fn install_on_view(
     view: &wry::WebView,
     policy: &NativeContentPolicy,
@@ -133,9 +137,43 @@ pub(crate) fn install_on_view(
             Ok(ContentPolicyRegistration {
                 manager: Some(manager),
                 list: Some(list.clone()),
+                _pause: None,
             })
         }
     }
+}
+
+pub(crate) fn install_scoped_on_view(
+    view: &wry::WebView,
+    policy: &NativeContentPolicy,
+    pause: &crate::platform::content_pause::ContentPause,
+) -> Result<ContentPolicyRegistration, ContentRuleApplyFailure> {
+    let NativeContentPolicy::Declarative {
+        identifier, list, ..
+    } = policy
+    else {
+        return Ok(ContentPolicyRegistration::allow_all());
+    };
+    if unsafe { list.identifier() }.to_string() != identifier.as_ref() {
+        return Err(ContentRuleApplyFailure::NativeInstallation);
+    }
+    let manager = view.manager();
+    let callback_manager = manager.clone();
+    let callback_list = list.clone();
+    let registration = pause
+        .register(move |paused| unsafe {
+            if paused {
+                callback_manager.removeContentRuleList(&callback_list);
+            } else {
+                callback_manager.addContentRuleList(&callback_list);
+            }
+        })
+        .ok_or(ContentRuleApplyFailure::NativeInstallation)?;
+    Ok(ContentPolicyRegistration {
+        manager: Some(manager),
+        list: Some(list.clone()),
+        _pause: Some(registration),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

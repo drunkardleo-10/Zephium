@@ -26,9 +26,11 @@ impl EngineHost {
             let Some(view) = self.views.get_mut(&id) else {
                 return false;
             };
-            let Ok(next) =
-                crate::platform::imp::install_content_policy_on_view(&view.view, &policy)
-            else {
+            let Ok(next) = crate::platform::imp::install_scoped_content_policy_on_view(
+                &view.view,
+                &policy,
+                &view.site_scope.pause,
+            ) else {
                 return false;
             };
             let previous = view.content_policy_registration.replace(next);

@@ -146,7 +146,7 @@ fn explicit_content_policy_brackets_every_first_native_navigation() {
         .rfind("crate::platform::imp::configure(")
         .expect("construction lost platform hardening");
     let policy_install = source
-        .find("install_content_policy_on_view(&view, &content_policy)")
+        .find("install_scoped_content_policy_on_view(")
         .expect("construction lost native content-policy installation");
     let first_load = source
         .find("view.load_url(url)")

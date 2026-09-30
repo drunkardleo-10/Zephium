@@ -4,6 +4,7 @@ mod agent_context;
 mod agent_cookie_source;
 mod construction;
 mod content_rules;
+mod content_styles;
 mod discard;
 mod dispatch;
 #[cfg(target_os = "macos")]
@@ -113,6 +114,8 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    site_scope: Rc<content_styles::ViewSiteScope>,
+    content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
     // A current layout may request a view before its first document commits
@@ -305,6 +308,7 @@ struct NavigationSnapshot {
 
 struct AppliedContentPolicy {
     generation: ContentPolicyGeneration,
+    cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     native: Rc<crate::platform::imp::NativeContentPolicy>,
     #[cfg(not(target_os = "windows"))]
     digest: Option<[u8; 32]>,
@@ -312,6 +316,7 @@ struct AppliedContentPolicy {
 
 struct CompilingContentPolicy {
     generation: ContentPolicyGeneration,
+    cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     superseded: bool,
 }
 
@@ -425,6 +430,7 @@ pub(crate) struct EngineHost {
     // relax this binding and therefore cannot resurrect a UDF in private mode.
     profile_persistence_classes: HashMap<ProfileId, ProfilePersistenceClass>,
     content_policies: HashMap<ProfileId, ProfileContentPolicy>,
+    blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
     // Declarative native objects are content-addressed by the SHA-256 of the
     // exact encoded JSON. Weak entries let identical policy generations and
     // profiles share one compiled 10–30 MiB object without pinning stale

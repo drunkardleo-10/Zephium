@@ -237,6 +237,7 @@ enum HostTaskKey {
     // terminal navigation settlement or discard-safety phase for the same
     // view merely because they share an ItemId.
     Source(ItemId),
+    DocumentStyle(ItemId),
     Title(ItemId),
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
@@ -408,6 +409,7 @@ pub(crate) fn install(
             partitions: HashMap::new(),
             profile_persistence_classes: HashMap::new(),
             content_policies: HashMap::new(),
+            blocker_sites: HashMap::new(),
             declarative_content_policy_cache: HashMap::new(),
             declarative_content_policy_compilations: HashMap::new(),
             #[cfg(not(target_os = "windows"))]
@@ -858,6 +860,17 @@ where
         Some(HostTaskKey::Source(id)),
         f,
     );
+}
+
+pub(super) fn with_document_style<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Observation,
+        Some(HostTaskKey::DocumentStyle(id)),
+        f,
+    )
 }
 
 pub(super) fn with_title_observation<F>(id: ItemId, f: F)
