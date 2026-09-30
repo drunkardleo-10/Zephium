@@ -468,23 +468,11 @@ fn inputs(
     inputs
 }
 
-/// The first message of the conversation: the request, the time, what came
-/// before in this work and what the person attached. Never whole objects.
-fn context_text(
-    objective: &str,
-    projection: &WorkRuntimeProjection,
-    current: WorkExecutionId,
-    bodies: &[context::WorkContextBody],
-    tabs: &[context::WorkContextTabV1],
-    decisions: &[planning::PlanningAnswer],
-    grant: &WorkAgentGrantV1,
-) -> String {
-    let mut out = format!("Request: {objective}\nNow: {}\n", prompt::now_line());
-    let earlier: Vec<&WorkExecutionFact> = projection
-        .executions
-        .iter()
-        .filter(|e| e.id != current)
-        .collect();
+/// Earlier requests of this work with what each ended on and the answers the
+/// person gave in it, stopped runs included; a "Continue" resumes the stopped
+/// one with them.
+fn earlier_text(objective: &str, earlier: &[&WorkExecutionFact]) -> String {
+    let mut out = String::new();
     if !earlier.is_empty() {
         out.push_str("\nEarlier requests in this work, oldest first:\n");
         for execution in earlier.iter().rev().take(THREAD).rev() {
@@ -513,6 +501,42 @@ fn context_text(
                 call::clip(request, 400),
                 call::clip(&said, 240)
             ));
+            for (question, answer) in answered(execution) {
+                out.push_str(&format!(
+                    "  You asked \"{}\"; the person answered \"{}\"\n",
+                    call::clip(question, 200),
+                    call::clip(answer, 200)
+                ));
+            }
+        }
+        if let Some(stopped) = earlier.last().filter(|last| {
+            continues(objective)
+                && matches!(
+                    last.status,
+                    WorkExecutionStatus::Cancelled
+                        | WorkExecutionStatus::CancelRequested
+                        | WorkExecutionStatus::Interrupted
+                        | WorkExecutionStatus::Failed
+                )
+        }) {
+            if let Some(request) = &stopped.spec.request {
+                out.push_str(&format!(
+                    "This request continues \"{}\" where it stopped: do that request now with the answers above, never ask them again, and keep what its parts already found.\n",
+                    call::clip(request, 400)
+                ));
+                for part in &stopped.parts {
+                    out.push_str(&format!(
+                        "  Part {} ({}): {}\n",
+                        part.title,
+                        if part.state == WorkPartStateV1::Done {
+                            "done"
+                        } else {
+                            "not finished, start it again"
+                        },
+                        call::clip(part.summary.as_deref().unwrap_or(&part.goal), 160)
+                    ));
+                }
+            }
         }
         if let Some(question) = earlier.last().and_then(|last| {
             last.steps.iter().rev().find_map(|s| match &s.kind {
@@ -529,6 +553,68 @@ fn context_text(
             ));
         }
     }
+    out
+}
+
+/// The agent's own questions a run asked and the person answered.
+fn answered(execution: &WorkExecutionFact) -> impl Iterator<Item = (&str, &str)> {
+    execution.steps.iter().filter_map(|step| match &step.kind {
+        WorkStepKindV1::Ask {
+            prompt,
+            answer: Some(answer),
+            purpose: None | Some(WorkAskPurposeV1::Question),
+            ..
+        } => Some((prompt.as_str(), answer.as_str())),
+        _ => None,
+    })
+}
+
+/// "Continue", "go on", "keep going": a request to finish the last one.
+fn continues(objective: &str) -> bool {
+    let words: String = objective
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    words.split_whitespace().count() <= 5
+        && [
+            "continue",
+            "go on",
+            "keep going",
+            "resume",
+            "carry on",
+            "proceed",
+            "finish it",
+            "kontynuuj",
+            "dalej",
+        ]
+        .iter()
+        .any(|phrase| {
+            words == *phrase
+                || words.starts_with(&format!("{phrase} "))
+                || words.ends_with(&format!(" {phrase}"))
+        })
+}
+
+/// The first message of the conversation: the request, the time, what came
+/// before in this work and what the person attached. Never whole objects.
+fn context_text(
+    objective: &str,
+    projection: &WorkRuntimeProjection,
+    current: WorkExecutionId,
+    bodies: &[context::WorkContextBody],
+    tabs: &[context::WorkContextTabV1],
+    decisions: &[planning::PlanningAnswer],
+    grant: &WorkAgentGrantV1,
+) -> String {
+    let mut out = format!("Request: {objective}\nNow: {}\n", prompt::now_line());
+    let earlier: Vec<&WorkExecutionFact> = projection
+        .executions
+        .iter()
+        .filter(|e| e.id != current)
+        .collect();
+    out.push_str(&earlier_text(objective, &earlier));
     let canvas = objects::view(&objects::canvas(projection, current));
     if !canvas.is_empty() {
         out.push_str("\nOn the canvas (read_canvas returns an object's data):\n");
@@ -566,4 +652,84 @@ fn context_text(
         out.push_str("\nThis is a private run: no page uses the person's sessions.\n");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn execution(
+        id: &str,
+        request: &str,
+        status: &str,
+        steps: serde_json::Value,
+        parts: serde_json::Value,
+    ) -> WorkExecutionFact {
+        let node = "01M3RV9DBSG3ZRK3M2H2P2HZ0R";
+        let limits = json!({"model_tokens": 1000, "cost_micro_usd": 1000, "operations": 8, "timeout_seconds": 60, "max_workers": 1});
+        serde_json::from_value(json!({
+            "authorization": "user_directed_agent", "id": id, "approved_revision": "3",
+            "spec": {"plan_revision": "2", "limits": limits, "request": request, "nodes": [{
+                "node": node, "parent": null, "limits": limits,
+                "capability": {"kind": "agent", "grant": {"provider": "open_ai", "model": "gpt-6-luna", "max_turns": 4, "max_steps": 4, "browse_hops": 1}}}]},
+            "status": status, "attempts": [], "artifacts": [], "provider_evidence": [],
+            "user_artifacts": [], "steps": steps, "parts": parts, "inputs": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_continue_after_a_stop_resumes_the_request_with_its_answers() {
+        let stopped = execution(
+            "01M3RV9DBTWYS7770BES8YYKT1",
+            "Plan my YC trip from Warsaw",
+            "cancelled",
+            json!([
+                {"id": "01M3RV9DBTWYS7770BES8YYKT2", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "ask", "prompt": "When do you travel?", "options": [], "answer": "6 to 12 January", "purpose": "question"}},
+                {"id": "01M3RV9DBTWYS7770BES8YYKT3", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "ask", "prompt": "Work in your Airbnb?", "options": [], "answer": "Allow", "purpose": "entry"}}
+            ]),
+            json!([
+                {"id": "01M3RV9DBTWYS7770BES8YYKT4", "title": "Stay", "helper": "browser", "goal": "Homes near YC", "state": "done", "summary": "3 homes"},
+                {"id": "01M3RV9DBTWYS7770BES8YYKT5", "title": "Flights", "helper": "browser", "goal": "Flights WAW to SFO", "state": "stopped"}
+            ]),
+        );
+        let text = earlier_text("Continue", &[&stopped]);
+        assert!(
+            text.contains("the person answered \"6 to 12 January\""),
+            "{text}"
+        );
+        assert!(!text.contains("Allow"), "{text}");
+        assert!(
+            text.contains("This request continues \"Plan my YC trip from Warsaw\""),
+            "{text}"
+        );
+        assert!(text.contains("Part Stay (done): 3 homes"), "{text}");
+        assert!(
+            text.contains("Part Flights (not finished, start it again)"),
+            "{text}"
+        );
+        let later = earlier_text("Now make it cheaper", &[&stopped]);
+        assert!(
+            later.contains("6 to 12 January") && !later.contains("continues"),
+            "{later}"
+        );
+        for said in [
+            "Continue",
+            "continue please",
+            "Go on",
+            "ok, keep going",
+            "Kontynuuj",
+        ] {
+            assert!(continues(said), "{said}");
+        }
+        for other in [
+            "Continue the plan with a day in Napa and a dinner",
+            "What next?",
+        ] {
+            assert!(!continues(other), "{other}");
+        }
+    }
 }
