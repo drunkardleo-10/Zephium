@@ -127,6 +127,9 @@ pub(super) struct WindowsExtensions {
     popup: Option<Popup>,
     // A failed explicit child close must not destroy its native parent first.
     retained_popup_window: Option<popup::PopupWindow>,
+    // Consume an anchor click that first deactivated the popup, so the same
+    // click's later toolbar IPC dismisses instead of reopening it.
+    dismissed_action: Option<(ExtensionRuntimeInstance, ItemId, std::time::Instant)>,
     navigation: HashMap<ProfileId, super::permits::ExtensionNavigationGrants>,
 }
 
@@ -153,6 +156,7 @@ struct Popup {
     tab: ItemId,
     view: ExtensionView,
     window: popup::PopupWindow,
+    escape: Option<popup::EscapeRegistration>,
 }
 
 struct Install {
@@ -745,6 +749,8 @@ impl super::EngineHost {
         let Some(popup) = self.windows_extensions.popup.take() else {
             return;
         };
+        let restore_focus = popup.window.restore_owner_focus();
+        drop(popup.escape);
         let ExtensionView {
             mut view,
             resource,
@@ -757,6 +763,53 @@ impl super::EngineHost {
                 super::OwnedWindowsCleanupDebt::new(debt, Some(resource)),
             );
             self.windows_extensions.retained_popup_window = Some(popup.window);
+        }
+        if restore_focus {
+            if let Some(view) = self.views.get(&popup.tab) {
+                let _ = view.focus();
+            }
+        }
+    }
+
+    fn resize_windows_extension_popup(
+        &mut self,
+        hwnd: windows::Win32::Foundation::HWND,
+        runtime: ExtensionRuntimeInstance,
+        width: f64,
+        height: f64,
+    ) {
+        let Some(popup) = self.windows_extensions.popup.as_ref().filter(|popup| {
+            popup.window.0 == hwnd && popup.runtime == runtime && popup.view.alive.get()
+        }) else {
+            return;
+        };
+        if !popup.window.owner_active() {
+            self.close_windows_extension_popup();
+            return;
+        }
+        let result = popup
+            .window
+            .resize(width, height)
+            .and_then(|(width, height)| {
+                popup
+                    .view
+                    .view
+                    .set_bounds(wry::Rect {
+                        position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                        size: wry::dpi::PhysicalSize::new(width, height).into(),
+                    })
+                    .map_err(|e| e.to_string())
+            });
+        if result.is_err() {
+            self.close_windows_extension_popup();
+            return;
+        }
+        if popup.window.show() {
+            let _ = popup.view.view.focus();
+            let _ = popup
+                .view
+                .view
+                .evaluate_script("window.__zephiumPopupShown?.()");
         }
     }
 
@@ -1010,6 +1063,18 @@ impl super::EngineHost {
         drop(action);
         if self
             .windows_extensions
+            .dismissed_action
+            .take()
+            .is_some_and(|(closed, tab, at)| {
+                closed == runtime
+                    && tab == request.tab()
+                    && at.elapsed() < std::time::Duration::from_millis(500)
+            })
+        {
+            return Ok(ExtensionActionSettlement::PopupDismissed);
+        }
+        if self
+            .windows_extensions
             .popup
             .as_ref()
             .is_some_and(|popup| popup.runtime == runtime && popup.tab == request.tab())
@@ -1055,13 +1120,48 @@ impl super::EngineHost {
         let base = format!("chrome-extension://{extension_id}/");
         let navigation_base = base.clone();
         let burst = Cell::new((std::time::Instant::now(), 0u8));
+        let hwnd = window.0;
+        let alive = Rc::new(Cell::new(true));
+        let message_alive = alive.clone();
+        let close_alive = alive.clone();
+        let message_base = base.clone();
         let built = wry::WebViewBuilder::new()
             .with_environment(environment)
             .with_browser_extension_startup_gate(move |env, core| startup.authenticate(env, core))
             .with_initialization_script(&initialization)
+            .with_initialization_script(zephium_webext::windows::POPUP_SIZE_SCRIPT)
             .with_url(&url)
+            .with_background_color(popup::BACKGROUND)
             .with_visible(true)
-            .with_focused(true)
+            .with_focused(false)
+            .with_ipc_handler(move |message| {
+                if !message_alive.get()
+                    || message.body().len() > 256
+                    || valid_extension_url(&runtime, &message_base, &message.uri().to_string())
+                        .is_none()
+                {
+                    return;
+                }
+                let Ok(value) = serde_json::from_str::<Value>(message.body()) else {
+                    return;
+                };
+                if value["kind"] != "popup-size" {
+                    return;
+                }
+                let (Some(width), Some(height)) =
+                    (value["width"].as_f64(), value["height"].as_f64())
+                else {
+                    return;
+                };
+                super::dispatch::best_effort_with(move |host| {
+                    host.resize_windows_extension_popup(hwnd, runtime, width, height);
+                });
+            })
+            .with_page_close_handler(move || {
+                if close_alive.get() {
+                    popup::close(hwnd, false);
+                }
+            })
             .with_devtools(false)
             .with_autoplay(false)
             .with_fullscreen_enabled(false)
@@ -1090,12 +1190,15 @@ impl super::EngineHost {
             })
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                // A hidden conventional viewport lets percentage-height/iframe
+                // layouts initialize before the content measurement shrinks it.
                 size: wry::dpi::LogicalSize::new(400, 600).into(),
             })
             .build_as_child(&window);
         let view = match built {
             Ok(view) => view,
             Err(_) => {
+                alive.set(false);
                 let mut resource = Some(resource);
                 let debts = wry::pending_webview2_cleanup_debts();
                 if !debts.is_empty() {
@@ -1110,23 +1213,26 @@ impl super::EngineHost {
                 return Err(ExtensionActionRejection::PopupUnavailable);
             }
         };
-        window.show();
+        let escape = popup::EscapeRegistration::new(&view, hwnd, alive.clone());
+        let escape_failed = escape.is_err();
         self.windows_extensions.popup = Some(Popup {
             runtime,
             tab: request.tab(),
             window,
+            escape: escape.ok(),
             view: ExtensionView {
                 view,
                 resource,
-                alive: Rc::new(Cell::new(true)),
+                alive,
             },
         });
-        Ok(ExtensionActionSettlement::PopupPresented(
-            zephium_core::geometry::Size {
-                width: 400.0,
-                height: 600.0,
-            },
-        ))
+        if escape_failed {
+            self.close_windows_extension_popup();
+            return Err(ExtensionActionRejection::PopupUnavailable);
+        }
+        // Owned and loading, but not yet visible: its first content measurement
+        // will reveal it. Do not report PopupPresented with a guessed size.
+        Ok(ExtensionActionSettlement::Dispatched)
     }
 }
 
