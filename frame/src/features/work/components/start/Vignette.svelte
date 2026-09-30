@@ -408,11 +408,11 @@
   }
 
   .del {
-    fill: var(--color-soft-rose-wash);
+    fill: var(--hue-edge);
   }
 
   .add {
-    fill: var(--color-soft-mint-wash);
+    fill: var(--hue-edge);
   }
 
   .sign-del,
@@ -426,12 +426,12 @@
   }
 
   .sign-del {
-    stroke: var(--color-soft-rose-ink);
+    stroke: var(--hue-ink);
   }
 
   .sign-add,
   .check {
-    stroke: var(--color-soft-mint-ink);
+    stroke: var(--hue-ink);
   }
 
   .dash {
@@ -440,12 +440,12 @@
 
   .now {
     fill: none;
-    stroke: var(--color-soft-rose);
+    stroke: var(--hue);
     stroke-width: 1;
   }
 
   .now-dot {
-    fill: var(--color-soft-rose);
+    fill: var(--hue);
   }
 
   .tile {
@@ -453,35 +453,35 @@
   }
 
   .sky {
-    fill: var(--color-soft-sky);
+    fill: var(--hue);
   }
 
   .mint {
-    fill: var(--color-soft-mint);
+    fill: var(--hue);
   }
 
   .lemon {
-    fill: var(--color-soft-lemon);
+    fill: var(--hue);
   }
 
   .peach {
-    fill: var(--color-soft-peach);
+    fill: var(--hue);
   }
 
   .rose {
-    fill: var(--color-soft-rose);
+    fill: var(--hue);
   }
 
   .lilac {
-    fill: var(--color-soft-lilac);
+    fill: var(--hue);
   }
 
   .sun {
-    fill: var(--color-soft-lemon);
+    fill: var(--hue);
   }
 
   .hill {
-    fill: var(--color-soft-mint);
+    fill: var(--hue);
     opacity: 0.7;
   }
 </style>

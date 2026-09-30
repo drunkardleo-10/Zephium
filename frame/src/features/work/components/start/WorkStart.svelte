@@ -16,6 +16,18 @@
     type Workflow,
   } from "../../lib/start/workflows";
   import Vignette from "./Vignette.svelte";
+  import HostGlyph, { siteMark } from "../cards/HostGlyph.svelte";
+
+  /** The places a workflow reads, by the sites whose marks stand for them. */
+  const HOSTS: Record<string, string> = {
+    GitHub: "github.com",
+    Slack: "slack.com",
+    Gmail: "mail.google.com",
+    Calendar: "calendar.google.com",
+    Linear: "linear.app",
+    "Are.na": "are.na",
+    Dribbble: "dribbble.com",
+  };
 
   /**
    * A new work's first screen: workflows by what the person does. A tap
@@ -136,13 +148,21 @@
     {#key persona}<div class="flows" style:--count={flows.length}>
         {#each flows as flow (flow.skill)}<button
             type="button"
-            class="flow hue-{flow.hue}"
+            class="flow"
             aria-pressed={active === flow}
             aria-describedby="work-start-{flow.skill}"
             {disabled}
             onclick={() => pick(flow)}
           >
-            <span class="art"><Vignette shape={flow.shape} /></span>
+            <span class="art"
+              ><Vignette shape={flow.shape} />{#if flow.reads.length}<span class="marks"
+                  >{#each flow.reads as place (place)}{#if HOSTS[place] && siteMark(HOSTS[place]!)}<span
+                        class="mark"
+                        title={place}
+                        ><HostGlyph host={HOSTS[place]!} size={16} initial={false} /></span
+                      >{/if}{/each}</span
+                >{/if}</span
+            >
             <span class="words">
               <span class="title">{flow.title()}</span>
               <span class="line" id="work-start-{flow.skill}">{flow.line()}</span>
@@ -266,7 +286,13 @@
     animation: settle var(--motion-base) var(--ease-out) both;
   }
 
+  /* Calm tiles: the result drawn in greys on a quiet sheet; the only colour is
+     the marks of the apps a workflow reads. */
   .flow {
+    --hue: var(--color-faint);
+    --hue-edge: var(--color-fill-strong);
+    --hue-ink: var(--color-label-secondary);
+
     display: flex;
     flex-direction: column;
     min-inline-size: 0;
@@ -296,14 +322,35 @@
   }
 
   .flow[aria-pressed="true"] {
-    outline-color: var(--hue-ink);
+    outline-color: var(--color-ring);
   }
 
   .art {
+    position: relative;
     display: block;
     aspect-ratio: 2 / 1;
     padding: 6px 8px 2px;
-    background: var(--hue-wash);
+    border-block-end: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+
+  /* The apps it reads, their own marks on small plates at the sheet's corner. */
+  .marks {
+    position: absolute;
+    inset-block-start: 10px;
+    inset-inline-start: 10px;
+    display: flex;
+    gap: 4px;
+  }
+
+  .mark {
+    display: grid;
+    place-items: center;
+    inline-size: 24px;
+    block-size: 24px;
+    border-radius: var(--radius-inset);
+    background: var(--color-float);
+    box-shadow: var(--shadow-raised);
   }
 
   .words {
