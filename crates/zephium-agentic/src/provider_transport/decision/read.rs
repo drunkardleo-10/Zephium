@@ -1234,6 +1234,19 @@ fn copy_only(field: &SemanticExtractionFieldSchema) -> bool {
 }
 
 impl<'a> DecisionLocatedRead<'a> {
+    /// Records or list items this read carries.
+    pub fn rows_read(&self) -> usize {
+        self.rows.as_ref().map_or_else(
+            || {
+                self.copied
+                    .values()
+                    .filter_map(|value| value.get("items").and_then(Value::as_array))
+                    .map(Vec::len)
+                    .sum()
+            },
+            Vec::len,
+        )
+    }
     /// Only fields requiring generation, with their bounded source neighborhoods.
     pub fn generation(&self) -> Option<(&SemanticExtractionSchema, &SemanticReadResult<'a>)> {
         self.generation

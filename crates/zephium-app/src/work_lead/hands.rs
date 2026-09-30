@@ -164,6 +164,8 @@ pub(crate) struct Request {
     pub kind: WorkStepKindV1,
     /// A page task about the person's own account on its site.
     pub mine: bool,
+    /// A page task that only reads what a daily app's view lists.
+    pub view: bool,
 }
 
 pub(crate) struct Hands<'a, B> {
@@ -243,6 +245,18 @@ where
         };
         let started = std::time::Instant::now();
         let mut driver = self.driver.lock().await;
+        driver.view_pages(
+            requests
+                .iter()
+                .filter(|request| request.view)
+                .filter_map(|request| match &request.kind {
+                    WorkStepKindV1::Read {
+                        url, goal: Some(_), ..
+                    } => Some(url.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         if let Some(status) = self.enter_sites(&mut driver, &requests).await {
             return Err(status);
         }

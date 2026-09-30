@@ -368,7 +368,7 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
             (true, _) => ("finish", serde_json::json!({"say": "Checked the page."})),
             (false, false) => (
                 "browse",
-                serde_json::json!({"start": start, "goal": goal, "mine": true, "records": {
+                serde_json::json!({"start": start, "goal": goal, "mine": true, "view": start.contains(".probe.test/"), "records": {
                 "title": "Results", "max_items": 8, "columns": [
                     {"name": "price", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
                     {"name": "rating", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},

@@ -73,6 +73,11 @@ pub trait AgentWorkLocalActionPolicy: Send {
         false
     }
 
+    /// A daily app's view is read as its records before any model call.
+    fn reads_app_view(&self) -> bool {
+        false
+    }
+
     /// Narrows the model effect vocabulary when the assignment has one effect.
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
         None
@@ -213,6 +218,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .is_some_and(|policy| policy.whole_first_look())
+    }
+    fn reads_app_view(&self) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.reads_app_view())
     }
 
     fn allows_baseline_read(&self) -> bool {

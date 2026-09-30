@@ -9,11 +9,13 @@ use std::time::SystemTime;
 use zephium_core::work::{planning::WorkPlanningError, runtime::WorkExecutionLimits};
 use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RESPONSE_BYTES};
 
+mod apps;
 mod link;
 mod projection;
 mod read;
 mod rows;
 mod search;
+pub use apps::{read_app_view, DailyApp};
 pub use projection::{
     DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError,

@@ -746,6 +746,8 @@ struct GateState {
     signed_in_elsewhere: bool,
     /// Rust pressed a cookie banner's refusal on this page.
     consent_pressed: bool,
+    /// The task reads a daily app's view as its records.
+    view: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -775,6 +777,11 @@ impl SiteGate {
             },
             ..GateState::default()
         }))
+    }
+    /// The task only reads what a daily app's view lists.
+    pub(crate) fn reading_view(self) -> Self {
+        self.state().view = true;
+        self
     }
     pub(crate) fn site(&self) -> String {
         self.state().site.clone()
@@ -945,6 +952,10 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
 
     fn whole_first_look(&self) -> bool {
         self.gate.entry() == EntryCheck::Pending
+    }
+
+    fn reads_app_view(&self) -> bool {
+        self.gate.state().view
     }
 
     fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {

@@ -106,10 +106,13 @@ enum Check {
     /// Three signed-in apps read by three parts of one lead run: one entry
     /// question names all three and every page opens in the session.
     Apps,
+    /// Six daily apps' main views (Slack, Gmail, Calendar, Linear, Notion,
+    /// GitHub) read as records with no model call.
+    Views,
 }
 /// Freeze leaves a lost page's debt, which the probe's exit reports as an
 /// unclean shutdown; it runs on its own.
-const ALL: [Check; 21] = [
+const ALL: [Check; 22] = [
     Check::Session,
     Check::Always,
     Check::Never,
@@ -131,6 +134,7 @@ const ALL: [Check; 21] = [
     Check::Spa,
     Check::Heavy,
     Check::Apps,
+    Check::Views,
 ];
 static CHECKS: OnceLock<Vec<Check>> = OnceLock::new();
 
@@ -159,6 +163,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("spa") => vec![Check::Spa],
         Some("heavy") => vec![Check::Heavy],
         Some("apps") => vec![Check::Apps],
+        Some("views") => vec![Check::Views],
         _ => return Err(super::ProbeFailure::Authority),
     };
     let _ = CHECKS.set(checks);
@@ -500,6 +505,13 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             "200 OK",
             String::new(),
             page("Sign in", "<h1>Sign in to your account</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>"),
+        ),
+        (Site::Account, _, path) if super::work_app_views::view(path).is_some() => (
+            "200 OK",
+            String::new(),
+            super::work_app_views::view(path)
+                .map(|view| view.html.to_owned())
+                .unwrap_or_default(),
         ),
         (Site::Account, _, "/inbox") => (
             "200 OK",
@@ -1701,6 +1713,42 @@ pub(super) async fn workflow(
                 ));
                 last = run.state;
                 run.asked.len() == 1 && named && cookies && read
+            }
+            Check::Views => {
+                zephium_app::work_sites::set_standing(handle, profile, SITE.into(), None)
+                    .await
+                    .map_err(|_| "views_standing")?;
+                let starts: &'static str = Box::leak(
+                    super::work_app_views::VIEWS
+                        .iter()
+                        .map(|view| format!("{ACCOUNT}{}", view.path))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .into_boxed_str(),
+                );
+                let run = context
+                    .lead_run("What's new in my apps today?", starts, "Allow")
+                    .await?;
+                let read: Vec<bool> = super::work_app_views::VIEWS
+                    .iter()
+                    .map(|view| says(&run, view.fact))
+                    .collect();
+                let calls: u32 = run
+                    .opened
+                    .iter()
+                    .filter_map(|p| p.model_calls)
+                    .map(u32::from)
+                    .sum();
+                line(format!(
+                    "check=views asked={} read={read:?} model_calls={calls} pages=[{}]",
+                    run.asked.len(),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                run.asked.len() == 1
+                    && read.iter().all(|read| *read)
+                    && run.opened.len() == super::work_app_views::VIEWS.len()
+                    && calls == 0
             }
             Check::Churn => {
                 let first = context

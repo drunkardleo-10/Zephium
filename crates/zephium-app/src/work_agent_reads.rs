@@ -24,6 +24,7 @@ impl Driver {
         let mut reads = Vec::new();
         // Page tasks whose entry question waits on their start page.
         let mut entries: Vec<String> = Vec::new();
+        let mut viewing: Vec<String> = Vec::new();
         for kind in browses {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
@@ -38,8 +39,12 @@ impl Driver {
             };
             let session = match goal.clone() {
                 Some(goal) => {
+                    let view = self.views.contains(url);
                     if let Some(entry) = crate::work_sites::entry_url(url) {
                         *url = entry.to_owned();
+                    }
+                    if view {
+                        viewing.push(url.clone());
                     }
                     let enough = remaining_limits(self.limits, self.used).is_some_and(|left| {
                         left.operations >= PAGE_TASK_MIN.operations
@@ -171,6 +176,7 @@ impl Driver {
                     session: session.clone(),
                     confirm: task.then(WorkConfirmPort::default),
                     entry: task && entries.contains(&url.clone()),
+                    view: task && viewing.contains(url),
                     allow_edits: task
                         && crate::work_sites::site_of(url)
                             .is_some_and(|site| self.sites.edits_allowed(&site)),

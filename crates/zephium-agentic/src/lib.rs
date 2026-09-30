@@ -650,13 +650,13 @@ pub use provider_transport::agent::agent_turn_wire_faults;
 pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    search_enough_projection, search_reuse_projection, untracked_document_address,
-    AdmittedDecisionOutput, DecisionActionSelection, DecisionBackendKind, DecisionCallAccounting,
-    DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFacts,
-    DecisionEnvelopeFailure, DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,
-    DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadSelection,
-    DecisionRowDiscovery, JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
-    SearchQueryTerms,
+    read_app_view, search_enough_projection, search_reuse_projection, untracked_document_address,
+    AdmittedDecisionOutput, DailyApp, DecisionActionSelection, DecisionBackendKind,
+    DecisionCallAccounting, DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput,
+    DecisionEnvelopeFacts, DecisionEnvelopeFailure, DecisionLocatedRead, DecisionObservation,
+    DecisionObservationAnswers, DecisionObservationFallback, DecisionOperation,
+    DecisionProjectionError, DecisionReadSelection, DecisionRowDiscovery, JevDecisionClient,
+    OpenAiDecisionCall, OpenAiDecisionClient, SearchQueryTerms,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};

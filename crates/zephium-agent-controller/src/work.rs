@@ -319,6 +319,11 @@ pub trait AgentWorkTask: Send {
     fn whole_first_look(&self) -> bool {
         false
     }
+    /// A daily app's view (Slack, Gmail, Calendar, Linear, Notion, GitHub)
+    /// is read as its records at once, before any model call.
+    fn reads_app_view(&self) -> bool {
+        false
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -1018,6 +1023,9 @@ pub struct AgentWorkController {
     terminal: Arc<Mutex<Option<AgentWorkOutcome>>>,
     retained_terminal: Option<Arc<Mutex<Option<AgentWorkRetainedOutcome>>>>,
 }
+
+/// Landmarks an app view read opens whole before it gives up.
+const MAX_APP_LANDMARKS: usize = 4;
 
 impl AgentWorkController {
     /// Immutable session storage selected in the trusted input, while dormant.
@@ -2645,6 +2653,12 @@ impl AgentWorkController {
             state.observation = Some(observation);
             return Ok(());
         }
+        if state.task.reads_app_view() {
+            if let Some(look) = Box::pin(Self::read_app_rows(state, worker, browser)).await? {
+                state.observation = Some(look);
+                return Ok(());
+            }
+        }
         // The model starts from an ordinary fitted look.
         if first_look && !whole_page {
             state.refresh_account(worker, browser)?;
@@ -3323,6 +3337,105 @@ impl AgentWorkController {
                 ),
             )
             .await?;
+        }
+    }
+
+    /// The daily app the page's admitted document is on.
+    fn daily_app(state: &WorkState) -> Option<zephium_agentic::DailyApp> {
+        let browser = state.native.retained.as_ref()?;
+        let document = browser.binding().document();
+        zephium_agentic::DailyApp::of(document.as_url().host_str()?)
+    }
+
+    /// Reads an app's view as its records, with no model call: the page's
+    /// look, else each of its landmarks opened whole in turn, until one
+    /// holds records. None when no rows could be read, leaving the page
+    /// planner.
+    async fn read_app_rows(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
+        let Some(schema) = state.extraction_schema.clone() else {
+            return Ok(None);
+        };
+        let app = Self::daily_app(state);
+        state.refresh_account(worker, browser)?;
+        let fresh = Box::pin(Self::observe(state, worker, browser)).await?;
+        let landmarks: Vec<SemanticReferenceId> = fresh
+            .frames()
+            .first()
+            .map(|frame| {
+                frame
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.role() == SemanticRole::Landmark)
+                    .map(SemanticNode::reference)
+                    .take(MAX_APP_LANDMARKS)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let capability = state.observation_capability();
+        let mut look = fresh;
+        let mut next = landmarks.into_iter();
+        loop {
+            state.refresh_account(worker, browser)?;
+            let captured_at = SemanticCaptureInstant::from_millis(
+                state
+                    .journal_mut()?
+                    .clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)?
+                    .millis(),
+            );
+            let account = state
+                .session
+                .as_ref()
+                .ok_or(AgentWorkFailure::Contract)?
+                .account;
+            if let Some(located) =
+                zephium_agentic::read_app_view(&look, account, captured_at, &schema, app)
+            {
+                // The task judges the look its records come from.
+                state.task_progress(&look)?;
+                state.journal_mut()?.emit(AgentWorkEventKind::RowRead {
+                    found: u8::try_from(located.rows_read()).unwrap_or(u8::MAX),
+                    cells: false,
+                    refused: None,
+                })?;
+                Box::pin(Self::finish_located_read(state, worker, browser, located)).await?;
+                return Ok(Some(look));
+            }
+            let Some(landmark) = next.next() else {
+                return Ok(None);
+            };
+            // An expansion starts from the look the page delivered last.
+            let base = Box::pin(Self::observe(state, worker, browser)).await?;
+            let Some((acknowledgement, _)) =
+                SemanticObservationAcknowledgement::whole_page_scope(&base)
+            else {
+                return Ok(None);
+            };
+            state.native.check_control(worker, browser)?;
+            state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+            look = match state
+                .native
+                .observe_retained_scope(
+                    worker,
+                    Some((
+                        &base,
+                        &acknowledgement,
+                        landmark,
+                        SemanticExpansionKind::Subtree,
+                    )),
+                    capability,
+                )
+                .await
+            {
+                Ok(look) => look,
+                Err(AgentWorkFailure::InspectionAnchorLost) => base,
+                Err(error) => return Err(error),
+            };
         }
     }
 

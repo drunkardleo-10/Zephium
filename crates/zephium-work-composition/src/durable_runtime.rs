@@ -395,7 +395,7 @@ impl MacosWorkComposition {
         } else {
             None
         };
-        let gate = std::sync::Arc::new(crate::open_objective::site_work::SiteGate::new(
+        let gate = crate::open_objective::site_work::SiteGate::new(
             match &request.step {
                 WorkStepKindV1::Read { url, .. } => {
                     zephium_app::work_sites::site_of(url).unwrap_or_default()
@@ -404,7 +404,12 @@ impl MacosWorkComposition {
             },
             request.allow_edits,
             request.entry,
-        ));
+        );
+        let gate = std::sync::Arc::new(if request.view && page_task(&request) {
+            gate.reading_view()
+        } else {
+            gate
+        });
         let confirm = request.confirm.clone();
         let invocation = compile_step(
             probe,

@@ -38,6 +38,8 @@ pub struct WorkAgentBrowseRequest {
     /// The site's entry question waits on the start page: Rust checks it
     /// for a signed-out state before the question and before any model call.
     pub entry: bool,
+    /// A page task that only reads what a daily app's view lists.
+    pub view: bool,
 }
 
 /// A step a page task holds for the person, as the site policy read it
@@ -462,6 +464,7 @@ impl WorkAgentService {
             part: None,
             lead: false,
             extends: true,
+            views: Vec::new(),
         };
         if !driver.tabs.is_empty() {
             driver.report(WorkAgentDiagnostic::TabsListed {
@@ -558,6 +561,8 @@ struct Driver {
     lead: bool,
     /// Whether this driver may ask the person to grow the run's budget.
     extends: bool,
+    /// Page tasks that only read what a daily app's view lists, by start page.
+    views: Vec<String>,
 }
 
 enum Fetched {
@@ -2250,6 +2255,7 @@ impl WorkPartDriver {
             part,
             lead: true,
             extends: false,
+            views: Vec::new(),
         })
     }
     /// Runs searches, page reads and tasks, and file and command steps. A
@@ -2307,6 +2313,10 @@ impl WorkPartDriver {
         for site in personal {
             self.0.sites.personal(site);
         }
+    }
+    /// Page tasks on these start pages only read what the app's view lists.
+    pub(crate) fn view_pages(&mut self, pages: Vec<String>) {
+        self.0.views = pages;
     }
     /// Records the run's entry answer for one of this driver's sites.
     pub(crate) async fn enter(&mut self, site: &str, answer: crate::work_sites::EntryAnswer) {

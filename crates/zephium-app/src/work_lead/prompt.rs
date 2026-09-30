@@ -276,6 +276,7 @@ pub(crate) fn browse_tool() -> WorkModelTool {
                 "start": {"type": "string", "description": "An https page or a bare site such as airbnb.com."},
                 "goal": {"type": "string", "description": "What to find, open or fill there, with every fact it needs. At most 600 characters."},
                 "mine": {"type": "boolean", "description": "true when the goal is about the person's own account on the site: their inbox, messages, orders, lists, drafts, or acting as them. Public listings, prices and catalogs are false."},
+                "view": {"type": "boolean", "description": "true when the goal only reads what one of the person's apps lists in a view: a Slack channel, Unreads or Activity; the Gmail inbox or a Gmail search; the Calendar day; Linear's My issues; Notion's recent pages; GitHub notifications or review requests. The view is read as rows at once, with no clicks; start at the view's own address when you know it."},
                 "records": records_schema()
             }),
             &["start", "goal"],

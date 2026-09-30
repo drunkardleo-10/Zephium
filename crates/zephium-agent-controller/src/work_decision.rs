@@ -513,7 +513,7 @@ impl AgentWorkController {
 
     /// One extraction from located sources. Focused generation is the only
     /// provider call it can make, and it never reopens the general planner.
-    async fn finish_located_read(
+    pub(super) async fn finish_located_read(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,

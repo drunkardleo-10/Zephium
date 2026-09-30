@@ -418,6 +418,7 @@ where
                         goal: None,
                     },
                     mine: false,
+                    view: false,
                 })
                 .collect();
             match hands.run(requests).await {
@@ -586,7 +587,11 @@ where
                                     true,
                                 ))
                             }
-                            Ok(kind) => {
+                            Ok(mut kind) => {
+                                let view = tool_call.arguments.get("view").and_then(Value::as_bool) == Some(true);
+                                if let (true, WorkStepKindV1::Read { goal: Some(_), collection, .. }) = (view, &mut kind) {
+                                    *collection = None;
+                                }
                                 searches += usize::from(matches!(kind, WorkStepKindV1::Search { .. }));
                                 requests.push(Request {
                                     call: tool_call.id.clone(),
@@ -594,6 +599,11 @@ where
                                     mine: tool_call
                                         .arguments
                                         .get("mine")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false),
+                                    view: tool_call
+                                        .arguments
+                                        .get("view")
                                         .and_then(Value::as_bool)
                                         .unwrap_or(false),
                                 })
@@ -988,7 +998,8 @@ where
     /// all finish and the lead keeps room to build the result.
     fn part_share(&self) -> WorkExecutionLimits {
         let left = self.run.remaining();
-        let ways = (self.parts_running() as u32 + 1).max(2);
+        // Parts past the run's parallel slots wait: they do not share now.
+        let ways = (self.parts_running().min(PARALLEL_PARTS) as u32 + 1).max(2);
         WorkExecutionLimits {
             // A search reserves its whole context: a part holds room for one.
             model_tokens: (left.model_tokens / ways)
