@@ -790,6 +790,16 @@ where
         let Some(brand) = super::route::brand(spec.service.as_ref(), &spec.title) else {
             return;
         };
+        // Reading a service's public site (its product or pricing pages) is
+        // not the person's workspace: their connection is not offered.
+        if spec.helper == WorkHelperV1::Browser
+            && !super::route::reaches_own_app(
+                &brand,
+                spec.service.as_ref().and_then(|s| s.host.as_deref()),
+            )
+        {
+            return;
+        }
         let profile = self.run.profile.to_string();
         let servers = crate::work_connections::store::shared()
             .and_then(|store| store.servers(&profile).ok())

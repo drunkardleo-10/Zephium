@@ -82,6 +82,13 @@ pub(crate) fn site(brand: &str) -> Option<&'static str> {
         .map(|(.., host)| *host)
 }
 
+/// Whether a browsing part opens the person's own app for the service (its
+/// signed-in home), not the service's public site: only then is their
+/// connection the better way in. A part with no host names the service itself.
+pub(crate) fn reaches_own_app(brand: &str, host: Option<&str>) -> bool {
+    host.is_none_or(|host| site(brand) == Some(host))
+}
+
 /// The person's connection for the service: gh for GitHub when it is
 /// installed and signed in, else an enabled MCP server named for it.
 pub(crate) fn offer(brand: &str, gh_ready: bool, servers: &[WorkServerV1]) -> Option<Offer> {
@@ -200,6 +207,11 @@ mod tests {
         assert_eq!(offer("github", true, &servers).unwrap().yes, "Use GitHub");
         assert_eq!(offer("github", false, &servers), None);
         assert_eq!(offer("sla", false, &servers), None);
+        assert!(reaches_own_app("notion", Some("app.notion.com")));
+        assert!(reaches_own_app("slack", None));
+        assert!(!reaches_own_app("notion", Some("www.notion.so")));
+        assert!(!reaches_own_app("notion", Some("notion.com")));
+        assert!(!reaches_own_app("stripe", Some("stripe.com")));
 
         let used = settle(WorkHelperV1::Browser, "slack", Some(&slack), true).unwrap();
         assert_eq!(used.0, WorkHelperV1::Connection);
