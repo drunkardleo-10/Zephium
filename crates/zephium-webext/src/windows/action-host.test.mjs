@@ -164,3 +164,10 @@ test('a failed worker snapshot retries and another extension cannot invalidate t
   await refresh();
   assert.equal(state.snapshots, 2);
 });
+
+test('a worker that keeps failing or a broken icon is not woken on every refresh', async () => {
+  const {refresh, state} = fixture({defaultIcon: 'missing.png'});
+  state.report = async () => { throw new Error('Worker gone'); };
+  for (let i = 0; i < 10; i++) await refresh();
+  assert.equal(state.snapshots, 2);
+});

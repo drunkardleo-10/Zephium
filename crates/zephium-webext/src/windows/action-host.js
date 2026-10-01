@@ -8,7 +8,7 @@
   // Package files are immutable for this manager's lifetime. Retain only the
   // last decoded path, not a growing per-tab cache. setIcon(imageData) remains live.
   let cachedPath, cachedPixels;
-  let iconDirty = true, iconTab, actionPixels = null;
+  let iconDirty = true, iconTab, actionPixels = null, failedReads = 0;
   const iconPath = value => typeof value === 'string' ? value : value?.[32] || value?.[48] || value?.[16];
   async function pixels(icon) {
     const imageData = icon?.data && icon.width > 0 && icon.height > 0 && icon.width <= 128 && icon.height <= 128 && icon.data.length === icon.width * icon.height * 4;
@@ -53,25 +53,30 @@
       // Native metadata reads need no worker RPC. Reuse the last raster until
       // its tab changes or the observer reports a change, allowing idle workers
       // to sleep between real events. Clear before awaiting so a concurrent
-      // notification still invalidates the next queued snapshot.
+      // notification still invalidates the next queued snapshot. A read that
+      // fails (worker restarting, unreadable icon) is retried once, not on
+      // every refresh, so a broken icon cannot keep waking the worker.
       const readIcon = iconDirty || iconTab !== tabId;
       iconDirty = false;
+      let failed = false;
       const [title, badge, popup, enabled, report] = await Promise.all([
         action.getTitle({tabId}), action.getBadgeText({tabId}), action.getPopup({tabId}),
         action.isEnabled(tabId), readIcon
-          ? chrome.runtime.sendMessage({__zephiumActionSnapshot: true, tabId}).catch(() => { iconDirty = true; return null; })
+          ? chrome.runtime.sendMessage({__zephiumActionSnapshot: true, tabId}).catch(() => { failed = true; return null; })
           : null
       ]);
       if (readIcon) {
         actionPixels = null;
-        try { actionPixels = await pixels(report?.icon); } catch { iconDirty = true; }
+        try { actionPixels = await pixels(report?.icon); } catch { failed = true; }
+        failedReads = failed ? failedReads + 1 : 0;
+        if (failed && failedReads < 2) iconDirty = true;
         iconTab = tabId;
       }
       chrome.webview.postMessage(JSON.stringify({kind: 'action', windowId: requestedWindowId, tabId,
         title: (title || manifest.name || '').slice(0, 256), badge: (badge || '').slice(0, 32),
         popup: (popup || '').slice(0, 2048), enabled, icon: actionPixels}));
     } catch (error) {
-      iconDirty = true;
+      if (++failedReads < 2) iconDirty = true;
       chrome.webview.postMessage(JSON.stringify({kind: 'action-error', windowId: requestedWindowId, error: String(error).slice(0, 256)}));
     } finally {
       running = false;
