@@ -219,7 +219,8 @@ runtime implementation.
 
 Browser and panel startup graphs exclude heavy Work, XYFlow, LayerChart and Tiptap
 code. Lazy graph budgets are enforced by `frame/bundle-budgets.json`; exact build
-measurements appear in `frame/dist/bootstrap-report.json`. Complete static graph
+measurements appear in `frame/dist/bootstrap-report.json` (onboarding, a separate
+build, in `bootstrap-report.onboarding.json`). Complete static graph
 sizes may include already-loaded shared/browser chunks, so they are not incremental
 activation download sizes.
 

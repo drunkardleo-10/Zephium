@@ -449,6 +449,22 @@ pub fn to_window(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
 
+/// Hides or shows the chrome WebView while its window stays on screen, so the
+/// window shows only its material, never a document that is still loading.
+pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
+    window
+        .with_webview(move |webview| {
+            // SAFETY: Tauri supplies the live controller for the duration of
+            // this UI-thread callback.
+            if unsafe { webview.controller().SetIsVisible(!hidden) }.is_err() {
+                crate::write_diagnostic(format_args!(
+                    "onboarding: chrome WebView2 visibility was refused"
+                ));
+            }
+        })
+        .is_ok()
+}
+
 pub fn make_chrome(window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
     Arc::new(ChromeAdapter {
         window: window.clone(),

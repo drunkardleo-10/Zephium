@@ -10,6 +10,16 @@ export const commands = {
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
 	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
 	tabsSetEssential: (id: string, essential: boolean, before: string | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
+	/**
+	 *  Onboarding keeps a site by its catalog id; native owns the address and
+	 *  the mark, so chrome can never pin an arbitrary URL through this path.
+	 */
+	essentialsKeep: (site: string) => __TAURI_INVOKE<OperationAdmission>("essentials_keep", { site }),
+	profileRename: (name: string) => __TAURI_INVOKE<OperationAdmission>("profile_rename", { name }),
+	/**  Onboarding's intro sound, played natively; chrome keeps `autoplay=()`. */
+	onboardingPlayIntro: () => __TAURI_INVOKE<boolean>("onboarding_play_intro"),
+	/**  Finishes onboarding: records it, then opens the browser in its place. */
+	onboardingFinish: () => __TAURI_INVOKE<boolean>("onboarding_finish"),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),

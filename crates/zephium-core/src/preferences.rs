@@ -7,21 +7,29 @@ pub const KEYS: &[&str] = &[
     "sidebar.mode",
     "ui.accent",
     "ui.reduce-motion",
-    "ui.newtab-logo",
-    "ui.newtab-shortcuts",
+    "ui.newtab-greeting",
+    "ui.newtab-name",
+    "ui.newtab-clock",
+    "ui.newtab-clock-format",
+    "ui.newtab-tasks",
+    "ui.tab-layout",
+    "onboarding",
 ];
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
         "search.custom-url" => value.is_empty() || crate::search::valid_template(value),
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
-        "search.suggestions" => matches!(value, "true" | "false"),
         "appearance" => matches!(value, "system" | "light" | "dark"),
         "sidebar.mode" => matches!(value, "default" | "compact"),
         "ui.accent" => matches!(value, "graphite" | "sky" | "sage" | "rose"),
-        "ui.reduce-motion" | "ui.newtab-logo" | "ui.newtab-shortcuts" => {
-            matches!(value, "true" | "false")
-        }
+        "ui.newtab-clock-format" => matches!(value, "system" | "12h" | "24h"),
+        "ui.tab-layout" => matches!(value, "vertical" | "horizontal"),
+        // Native writes `pending` on a fresh install; chrome only ever
+        // finishes it, or asks for it again to replay.
+        "onboarding" => matches!(value, "pending" | "done"),
+        "search.suggestions" | "ui.reduce-motion" | "ui.newtab-greeting" | "ui.newtab-name"
+        | "ui.newtab-clock" | "ui.newtab-tasks" => matches!(value, "true" | "false"),
         _ => false,
     }
 }
@@ -33,12 +41,20 @@ mod tests {
     fn settings_are_closed_and_values_are_bounded() {
         assert!(value_allowed("sidebar.mode", "compact"));
         assert!(value_allowed("ui.accent", "sage"));
-        assert!(value_allowed("ui.newtab-logo", "false"));
+        assert!(value_allowed("ui.newtab-clock-format", "24h"));
+        assert!(value_allowed("ui.newtab-tasks", "false"));
+        assert!(value_allowed("ui.tab-layout", "horizontal"));
+        assert!(value_allowed("onboarding", "done"));
         for (key, value) in [
             ("ui.custom-css", "body{}"),
             ("ui.accent", "url(evil)"),
-            ("ui.newtab-logo", "yes"),
+            ("ui.newtab-style", "clock"),
+            ("ui.newtab-clock-format", "12-hour"),
+            ("ui.newtab-greeting", "yes"),
+            ("ui.newtab-logo", "true"),
             ("appearance", "sepia"),
+            ("ui.tab-layout", "diagonal"),
+            ("onboarding", "skipped"),
         ] {
             assert!(!value_allowed(key, value));
         }

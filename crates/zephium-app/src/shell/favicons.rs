@@ -590,7 +590,7 @@ impl Shell {
             .retain(|(owner, _, _), _| *owner != surface);
     }
 
-    fn incognito_profile(&self, profile: ProfileId) -> bool {
+    pub(super) fn incognito_profile(&self, profile: ProfileId) -> bool {
         self.profiles
             .get(profile)
             .is_some_and(|profile| profile.kind == ProfileKind::Incognito)

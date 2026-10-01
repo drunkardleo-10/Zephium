@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && vite build --config vite.onboarding.config.ts",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run stylelint && pnpm run format:check && pnpm run knip && pnpm run test",
     "typecheck": "pnpm run i18n && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && tsc6 --project tsconfig.node.json",
     "test": "vitest run --project unit",
@@ -15,7 +15,8 @@
     "test:component": "vitest run --project component",
     "stylelint": "stylelint \"src/**/*.{css,svelte}\"",
     "knip": "knip",
-    "check:styles": "node scripts/check-styles.mjs"
+    "check:styles": "node scripts/check-styles.mjs",
+    "kept-site-rasters": "node scripts/kept-site-rasters.mjs"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "4.2.3",

@@ -23,6 +23,7 @@ pub(crate) use diagnostic;
 
 mod actor;
 mod api;
+mod onboarding;
 mod shell;
 mod store_reads;
 #[cfg(feature = "work-execution")]
@@ -56,6 +57,7 @@ pub use api::{
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
     ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
 };
+pub use onboarding::{finish_onboarding, onboarding_due};
 pub use shell::Shell;
 
 #[doc(hidden)]

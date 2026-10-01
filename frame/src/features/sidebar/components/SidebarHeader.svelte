@@ -13,7 +13,7 @@
   import { IS_MAC } from "$shared/platform";
   import IconButton from "$shared/ui/IconButton";
   import ModePicker from "./ModePicker.svelte";
-  import WindowControls from "./WindowControls.svelte";
+  import WindowControls from "$shared/ui/WindowControls";
 
   let {
     compact,

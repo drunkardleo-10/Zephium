@@ -1,4 +1,4 @@
-export { taskSession, taskLists, TaskSession } from "./tasks.svelte";
+export { taskSession, taskLists, taskCounts, TaskSession } from "./tasks.svelte";
 export type { TaskRow, TaskNotice } from "./tasks.svelte";
 export type {
   TaskContext,

@@ -738,6 +738,12 @@ fn vk_keyval(vk: u32) -> Option<u32> {
 }
 
 // Full-window chrome: client coords already are window coords.
+/// Linux is not an onboarding target; the handover shows the page as it
+/// loads.
+pub fn set_chrome_hidden(_window: &WebviewWindow, _hidden: bool) -> bool {
+    true
+}
+
 pub fn to_window(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }

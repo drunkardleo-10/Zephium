@@ -49,6 +49,21 @@ impl Profiles {
         Some(profile)
     }
 
+    /// Names a profile. The name is bounded and stripped of controls exactly
+    /// as a restored one is, and a name with nothing left is refused rather
+    /// than replaced, so a cleared field never renames a profile to a default.
+    pub fn rename(&mut self, id: ProfileId, name: &str) -> bool {
+        let name = crate::session::bounded_name(name.trim(), "");
+        let name = name.trim();
+        match self.map.get_mut(&id) {
+            Some(profile) if !name.is_empty() && profile.kind != ProfileKind::Incognito => {
+                name.clone_into(&mut profile.name);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Profile> {
         self.order.iter().filter_map(|id| self.map.get(id))
     }
@@ -84,6 +99,25 @@ mod tests {
             name: "Overflow".into(),
             kind: ProfileKind::Named,
         }));
+    }
+
+    #[test]
+    fn a_rename_is_bounded_and_never_empties_a_name() {
+        let mut profiles = Profiles::default();
+        for (value, kind) in [(1, ProfileKind::Default), (2, ProfileKind::Incognito)] {
+            assert!(profiles.insert(Profile {
+                id: ProfileId::from(value),
+                name: "Personal".into(),
+                kind,
+            }));
+        }
+        let personal = ProfileId::from(1);
+        assert!(profiles.rename(personal, "  Alex\u{202e} Rivera \n"));
+        assert_eq!(profiles.get(personal).unwrap().name, "Alex Rivera");
+        assert!(!profiles.rename(personal, " \u{200f} "));
+        assert_eq!(profiles.get(personal).unwrap().name, "Alex Rivera");
+        assert!(!profiles.rename(ProfileId::from(2), "Private"));
+        assert!(!profiles.rename(ProfileId::from(3), "Nobody"));
     }
 
     #[test]

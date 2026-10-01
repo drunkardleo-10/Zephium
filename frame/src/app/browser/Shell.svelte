@@ -50,6 +50,11 @@
     const { noteSession } = await import("$domain/notes");
     await noteSession(profile, page ? "page" : "sidebar")?.create();
   }
+  // Settings opened from a page lands on the section that page asked for.
+  function openSettings(section: "newtab" | "profiles") {
+    handleNativeSection(`settings.section.${section}`);
+    void browserPage.open("settings");
+  }
   onMount(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
@@ -171,10 +176,10 @@
         <TabRail entries={railTabs} onSelect={selectTab} />
       {:else}
         <!--
-          The switch sits above the address field because it governs the
-          whole column, field included; the tray rides the field itself,
-          because everything in it acts on the page the field names.
-        -->
+        The switch sits above the address field because it governs the
+        whole column, field included; the tray rides the field itself,
+        because everything in it acts on the page the field names.
+      -->
         <div class="sidebar-head"><ModeTabs /></div>
         <AddressField {compact}>
           {#snippet trailing()}
@@ -268,17 +273,17 @@
       inset matches the core layout gap between chrome and content.
     -->
     <main class="min-w-0 flex-1 ps-2" data-zephium-new-tab>
-      <div class="content-pane h-full w-full overflow-hidden">
+      <!-- New Tab paints its own ground, so its dock can open onto the frame. -->
+      <div class="content-pane h-full w-full overflow-hidden" data-ground="own">
         <LazyView
           loader={loadNewTab}
           loadingLabel={m.surface_loading()}
           failureLabel={m.surface_render_failed()}
           retryLabel={m.surface_retry()}
           >{#snippet children(NewTab)}<NewTab
-              clockFormat={preview.get("ntp.clock-format", "System")}
-              showGreeting={preview.get("ntp.greeting", true)}
-              personalize={preview.get("ntp.personalize", false)}
-              showClock={preview.get("ntp.clock", true)}
+              oncustomize={() => openSettings("newtab")}
+              onprofile={() => openSettings("profiles")}
+              ontasks={() => void browserPage.open("tasks")}
               >{#snippet search()}{#key tabs.activeId()}<LazyView
                     loader={loadNewTabSearch}
                     loadingLabel={m.surface_loading()}

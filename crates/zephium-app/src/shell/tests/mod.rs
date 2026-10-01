@@ -1402,6 +1402,7 @@ pub(crate) struct FakeStore {
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
     reject_settings: std::sync::atomic::AtomicBool,
+    settings: Mutex<std::collections::HashMap<String, String>>,
     pending_deletions: Mutex<Vec<PendingProfileDeletion>>,
     pending_load_failures: std::sync::atomic::AtomicUsize,
     authorize_outcomes: Mutex<VecDeque<ProfileDeletionAuthorizeOutcome>>,
@@ -1676,13 +1677,18 @@ impl Store for FakeStore {
         });
         self.visits.lock().unwrap().push(url);
     }
-    fn app_setting(&self, _key: &str) -> Option<String> {
-        None
+    fn app_setting(&self, key: &str) -> Option<String> {
+        self.settings.lock().unwrap().get(key).cloned()
     }
-    fn set_app_setting(&self, _key: String, _value: String) -> bool {
-        !self
+    fn set_app_setting(&self, key: String, value: String) -> bool {
+        if self
             .reject_settings
             .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        self.settings.lock().unwrap().insert(key, value);
+        true
     }
     fn search_history(
         &self,
@@ -2280,6 +2286,7 @@ mod history;
 #[path = "navigation.rs"]
 mod navigation_tests;
 mod notes;
+mod onboarding;
 mod operations;
 mod page_permissions;
 mod persistence;

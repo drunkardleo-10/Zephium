@@ -947,6 +947,8 @@ fn tracked_operation_command(command: &Command) -> bool {
         Command::Open
             | Command::ShowBrowserPage(_)
             | Command::SetTabEssential { .. }
+            | Command::KeepSite(_)
+            | Command::RenameFocusedProfile(_)
             | Command::Activate(_)
             | Command::Close(_)
             | Command::Navigate { .. }

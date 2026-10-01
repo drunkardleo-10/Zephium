@@ -1068,6 +1068,13 @@ export class TaskSession {
   }
 }
 
+/** What is due by `today`, overdue included, without a page of rows: for a
+ *  surface that shows how much is left rather than what it is. */
+export async function taskCounts(profile: string, today: string): Promise<TaskCounts | null> {
+  const response = await resourceCall(profile, { kind: "task_overview", today });
+  return response.kind === "task_overview" ? response.counts : null;
+}
+
 /** The profile's lists, without a page of rows, for a capture made outside any
  *  task view. */
 export async function taskLists(profile: string, today: string): Promise<TaskList[]> {

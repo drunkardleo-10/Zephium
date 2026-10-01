@@ -219,6 +219,17 @@ impl Overlay {
             });
         });
     }
+    /// Onboarding steps its drawn launcher aside while the real one is up.
+    /// The browser hears only that the launcher came or went, never what
+    /// it holds.
+    fn tell_browser(&self, event: &'static str) {
+        crate::emit_to_privileged(
+            self.window.app_handle(),
+            crate::MAIN_LABEL,
+            crate::EVENT_UI,
+            &event,
+        );
+    }
     fn raise_browser(&self) {
         #[cfg(target_os = "macos")]
         crate::panel::forget_previous();
@@ -259,11 +270,15 @@ impl Overlay {
             return;
         }
         if !snapshot.visible {
+            if visible(&self.window) {
+                self.tell_browser("launcher.dismissed");
+            }
             do_hide(&self.window);
             return;
         }
         if !visible(&self.window) {
             self.place();
+            self.tell_browser("launcher.presented");
         }
         #[cfg(target_os = "macos")]
         crate::panel::show(&self.window);

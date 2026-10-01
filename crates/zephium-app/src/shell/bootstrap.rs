@@ -241,7 +241,6 @@ impl Shell {
         let window = self
             .windows
             .create(WindowKind::Main, profile, space, self.pending_size);
-
         let mut fx = Vec::new();
         if let Some(tree) = splits {
             for leaf in tree.tabs() {
@@ -264,6 +263,7 @@ impl Shell {
         self.apply(fx);
         let _ = self.relayout();
         self.project_items();
+        self.project_browser_page();
         self.bootstrapped = true;
         if session_absent {
             // Register the first-run profile with Store immediately. Extension

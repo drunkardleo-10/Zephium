@@ -139,18 +139,6 @@ export const fields = {
     description: m.settings_reduce_motion_desc,
     initial: false,
   },
-  "ntp.logo": {
-    section: "newtab",
-    label: m.settings_wordmark,
-    description: m.settings_wordmark_desc,
-    initial: true,
-  },
-  "ntp.essentials": {
-    section: "newtab",
-    label: m.settings_favorites,
-    description: m.settings_favorites_desc,
-    initial: false,
-  },
   "general.default": {
     section: "general",
     label: m.pref_general_default,
@@ -224,18 +212,18 @@ export const fields = {
     section: "newtab",
     label: m.pref_ntp_clock_format,
     description: m.pref_ntp_clock_format_help,
-    initial: "System",
+    initial: "system",
     options: [
-      { value: "System", label: m.pref_ntp_clock_format_option_0 },
-      { value: "12-hour", label: m.pref_ntp_clock_format_option_1 },
-      { value: "24-hour", label: m.pref_ntp_clock_format_option_2 },
+      { value: "system", label: m.pref_ntp_clock_format_option_0 },
+      { value: "12h", label: m.pref_ntp_clock_format_option_1 },
+      { value: "24h", label: m.pref_ntp_clock_format_option_2 },
     ],
   },
-  "ntp.continue": {
+  "ntp.tasks": {
     section: "newtab",
-    label: m.pref_ntp_continue,
-    description: m.pref_ntp_continue_help,
-    initial: false,
+    label: m.pref_ntp_tasks,
+    description: m.pref_ntp_tasks_help,
+    initial: true,
   },
   "tabs.new-position": {
     section: "tabs",

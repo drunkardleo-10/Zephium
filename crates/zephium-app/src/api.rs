@@ -417,6 +417,9 @@ pub enum Command {
         essential: bool,
         before: Option<ItemId>,
     },
+    /// Keeps one of onboarding's catalog sites, named by its catalog id.
+    KeepSite(String),
+    RenameFocusedProfile(String),
     Navigate {
         id: ItemId,
         input: String,

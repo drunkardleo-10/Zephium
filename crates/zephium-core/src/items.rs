@@ -111,6 +111,30 @@ impl Items {
         })
     }
 
+    /// A tab that knows its page but has not loaded it, exactly as a restored
+    /// one: it creates no view, so nothing reaches the network until it is
+    /// opened.
+    pub fn insert_unloaded_tab(
+        &mut self,
+        id: ItemId,
+        placement: Placement,
+        url: Url,
+        title: &str,
+    ) -> bool {
+        if !navigation::is_allowed(&url) {
+            return false;
+        }
+        let mut tab = TabState::new();
+        tab.url = Some(url);
+        tab.title = sanitize_page_title(title);
+        self.insert(Item {
+            id,
+            parent: None,
+            placement,
+            kind: ItemKind::Tab(tab),
+        })
+    }
+
     /// Removes an item and its whole subtree. Returns `Close` effects for
     /// every removed tab that had a live view.
     /// Reparents one existing tab without recreating its native identity or
@@ -649,6 +673,32 @@ mod tests {
             items.pending_navigation(id(1)),
             Some(NavigationRequestId(2))
         );
+    }
+
+    #[test]
+    fn an_unloaded_tab_knows_its_page_without_a_view() {
+        let mut items = Items::default();
+        let kept = Placement::Favorites {
+            profile: ProfileId::from(1),
+        };
+        let url = Url::parse("https://app.slack.com/client").unwrap();
+        assert!(items.insert_unloaded_tab(id(1), kept, url, "Slack\u{202e}"));
+        let tab = items.tab(id(1)).unwrap();
+        assert!(!tab.has_view());
+        assert_eq!(tab.title, "Slack");
+        assert_eq!(
+            tab.url.as_ref().map(Url::as_str),
+            Some("https://app.slack.com/client")
+        );
+        assert_eq!(items.roots(kept), &[id(1)]);
+        assert!(matches!(
+            items.ensure_view(id(1)).as_slice(),
+            [Effect::CreateView { url, .. }] if url == "https://app.slack.com/client"
+        ));
+
+        let script = Url::parse("javascript:alert(1)").unwrap();
+        assert!(!items.insert_unloaded_tab(id(2), kept, script, "x"));
+        assert!(items.tab(id(2)).is_none());
     }
 
     #[test]

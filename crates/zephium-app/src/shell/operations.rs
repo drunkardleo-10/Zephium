@@ -14,6 +14,8 @@ impl Shell {
                 essential,
                 before,
             } => self.operation_set_tab_essential(id, essential, before),
+            Command::KeepSite(id) => self.operation_keep_site(&id),
+            Command::RenameFocusedProfile(name) => self.operation_rename_focused_profile(&name),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
             Command::GoBack(id) => self.operation_history(id, false),

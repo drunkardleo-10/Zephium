@@ -7,6 +7,10 @@
     "js": 110000,
     "css": 30000
   },
+  "onboarding": {
+    "js": 190500,
+    "css": 99500
+  },
   "lazy:features/settings/components/sections/AboutPage.svelte": {
     "js": 1276581,
     "css": 300363

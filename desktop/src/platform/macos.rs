@@ -328,6 +328,19 @@ pub fn init(window: &WebviewWindow) -> bool {
     true
 }
 
+/// Hides or shows the chrome WebView while its window stays on screen, so the
+/// window shows only its material, never a document that is still loading.
+pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
+    window
+        .with_webview(move |webview| {
+            // SAFETY: Tauri supplies a live WKWebView pointer for the duration
+            // of this main-thread callback.
+            let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+            webkit.setHidden(hidden);
+        })
+        .is_ok()
+}
+
 pub fn harden_privileged(window: &WebviewWindow) -> bool {
     let installed = Arc::new(AtomicU64::new(0));
     let completed = installed.clone();

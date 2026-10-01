@@ -111,6 +111,13 @@ security boundary, not a rendering optimization.
   shapes, trigger settings, lifecycle and verification status. Production builds
   emit and enforce `dist/bootstrap-report.json`, which also fails if the panel can
   reach an editor or tool view at all; do not add browser features to the panel.
+- `onboarding.html` is a first run's page in the main window. Native picks it
+  over `browser.html` before either loads (`zephium_app::onboarding_due`), and
+  `onboarding_finish` replaces it with the browser in the same window: the
+  chrome view stays hidden until the browser passes the same `uiReady` gate as a
+  normal launch. It is built separately (`vite.onboarding.config.ts`) so it never
+  splits code out of the browser graph; the build fails if the browser can reach
+  any onboarding module, and reports to `dist/bootstrap-report.onboarding.json`.
 - Theme initialization applies the system mode and subscribes to theme commands
   before its first native query. The main surface installs projection listeners,
   resolves theme/material, synchronously forces style/layout, and only then

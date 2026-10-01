@@ -398,61 +398,6 @@
   mask: url(/zephium-wordmark.svg) center / contain no-repeat;
   -webkit-mask: url(/zephium-wordmark.svg) center / contain no-repeat;
 }
-.newtab-page {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  padding: 24px 32px 60px;
-}
-.newtab-search {
-  width: 100%;
-  max-width: 520px;
-  margin-top: 28px;
-}
-.newtab-customize {
-  position: absolute;
-  inset-inline-end: 16px;
-  bottom: 16px;
-  color: var(--color-faint);
-}
-.newtab-preview {
-  min-height: 210px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-control);
-  margin-block-end: 28px;
-}
-.newtab-preview .zephium-wordmark {
-  width: 150px;
-  height: 50px;
-}
-.preview-search {
-  padding: 10px 20px;
-  width: 65%;
-  border-radius: var(--radius-card);
-  background: var(--color-fill);
-  font-size: 10px;
-  color: var(--color-faint);
-  box-shadow: var(--shadow-field);
-}
-.preview-favorites {
-  display: flex;
-  gap: 6px;
-}
-.preview-favorites i {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-row);
-  background: var(--color-fill);
-}
 .essentials-hint {
   display: flex;
   align-items: center;
@@ -533,9 +478,6 @@
   }
   .settings-content {
     border-radius: 0;
-  }
-  .newtab-page {
-    padding-inline: 22px;
   }
   .zephium-wordmark {
     max-width: 65%;
@@ -893,29 +835,6 @@
   border-radius: var(--radius-control);
   padding: 16px;
   color: var(--color-muted);
-}
-.newtab-greeting {
-  font-size: 15px;
-  font-weight: 400;
-  color: var(--color-muted);
-  margin: 20px 0 0;
-  letter-spacing: -0.01em;
-}
-.newtab-clock {
-  position: absolute;
-  top: 26px;
-  inset-inline-end: 28px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 5px;
-  color: var(--color-faint);
-  font-size: 11px;
-}
-.newtab-clock time {
-  color: var(--color-muted);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
 }
 @keyframes interface-fade {
   from {

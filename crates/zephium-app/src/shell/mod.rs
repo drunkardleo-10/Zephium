@@ -183,6 +183,7 @@ impl AgentLifecycleOwner {
 }
 
 mod browser_pages;
+mod kept_sites;
 
 struct NativeOpener {
     source: ItemId,
@@ -706,6 +707,12 @@ impl Shell {
                 before,
             } => {
                 let _ = self.operation_set_tab_essential(id, essential, before);
+            }
+            Command::KeepSite(id) => {
+                let _ = self.operation_keep_site(&id);
+            }
+            Command::RenameFocusedProfile(name) => {
+                let _ = self.operation_rename_focused_profile(&name);
             }
             Command::Close(id) => {
                 let _ = self.operation_close(id);

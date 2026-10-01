@@ -398,7 +398,7 @@ fn valid_split_tree(tree: &Pane, items: &Items, spaces: &Spaces, space: SpaceId)
     walk(tree, items, spaces, space, 0, &mut HashSet::new())
 }
 
-fn bounded_name(value: &str, fallback: &str) -> String {
+pub(crate) fn bounded_name(value: &str, fallback: &str) -> String {
     let value: String = value
         .chars()
         .filter(|c| {

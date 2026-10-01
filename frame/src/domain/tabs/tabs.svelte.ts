@@ -1,6 +1,7 @@
 import { listenAll } from "$shared/lib/lifecycle";
 import { flushSync } from "svelte";
 import type { ItemsState, TabView } from "$shared/ipc/bindings";
+import { settle } from "$domain/operations";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { TabProjectionModel } from "./tabs-model";
@@ -126,6 +127,11 @@ export const split = (other: string) => void commands.tabsSplit(other);
 export const unsplit = () => void commands.tabsUnsplit();
 export const dragOver = (x: number, y: number) => void commands.tabDragOver(x, y);
 export const dropTab = (id: string, x: number, y: number) => void commands.tabDrop(id, x, y);
+/** Keeps one of onboarding's catalog sites in Essentials, named by its id;
+ *  native owns the address. Settles on native's answer, never assumed. */
+export const keepSite = (site: string) => settle(commands.essentialsKeep(site));
+/** Names the focused profile, which is who the browser greets. */
+export const renameProfile = (name: string) => settle(commands.profileRename(name));
 
 /** A tab pairs with the active one, so it must exist and not already be it. */
 export const canSplitWith = (id: string) =>

@@ -2,8 +2,11 @@ import budgets from "./bundle-budgets.json";
 import { checkBundleBudget } from "./bundle-budget";
 import type { Plugin } from "vite";
 
+/** A page native loads into a privileged WebView. */
+export type Page = "browser" | "panel" | "onboarding";
+
 /** Inspect emitted graphs: source folders alone cannot guarantee startup isolation. */
-export function bootstrapReport(): Plugin {
+export function bootstrapReport(pages: readonly Page[]): Plugin {
   const surfaceStyles = new Map<string, Set<string>>();
   return {
     name: "zephium-bootstrap-boundaries",
@@ -32,7 +35,7 @@ export function bootstrapReport(): Plugin {
         }
       > = {};
       const roots: Array<{ name: string; file: string; surface: boolean }> = [];
-      for (const name of ["browser", "panel"] as const) {
+      for (const name of pages) {
         const root = Object.values(bundle).find(
           (item) =>
             item.type === "chunk" && item.isEntry && item.facadeModuleId?.endsWith(`/${name}.html`),
@@ -50,7 +53,7 @@ export function bootstrapReport(): Plugin {
           surface: false,
         });
       }
-      const panel = roots.find((root) => root.name === "panel")!;
+      const panel = roots.find((root) => root.name === "panel");
       // The launcher's WebView is resident all day. Anything it can load
       // at all, not just at startup, is paid again on top of the browser's
       // copy, so an editor or a tool view must be unreachable from it.
@@ -68,7 +71,22 @@ export function bootstrapReport(): Plugin {
             this.error(`Panel can load ${id}, which the browser already hosts`);
         for (const child of [...item.imports, ...item.dynamicImports]) reach(child);
       };
-      reach(panel.file);
+      if (panel) reach(panel.file);
+      // A first run has its own page and build; nothing of it may be loadable
+      // from the browser, eagerly or lazily, so no later launch carries it.
+      const browser = roots.find((root) => root.name === "browser");
+      const fromBrowser = new Set<string>();
+      const follow = (file: string) => {
+        if (fromBrowser.has(file)) return;
+        fromBrowser.add(file);
+        const item = bundle[file];
+        if (!item || item.type !== "chunk") return;
+        for (const id of Object.keys(item.modules))
+          if (/\/src\/(?:features|app)\/onboarding\//u.test(id))
+            this.error(`Browser can load onboarding code: ${id}`);
+        for (const child of [...item.imports, ...item.dynamicImports]) follow(child);
+      };
+      if (browser) follow(browser.file);
       for (const root of roots) {
         const name = root.name;
         const visited = new Set<string>();
@@ -140,7 +158,9 @@ export function bootstrapReport(): Plugin {
       }
       this.emitFile({
         type: "asset",
-        fileName: "bootstrap-report.json",
+        fileName: pages.includes("browser")
+          ? "bootstrap-report.json"
+          : `bootstrap-report.${pages.join("-")}.json`,
         source: JSON.stringify(reports, null, 2),
       });
     },

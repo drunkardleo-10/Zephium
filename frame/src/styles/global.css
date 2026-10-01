@@ -104,6 +104,14 @@ button {
   background: var(--color-page);
 }
 
+/* The new tab draws the page's solid ground itself, less the openings where
+   the window's own material shows through. Only once it is there to draw it:
+   until then the pane stays solid, so a first load never shows the frame
+   through an empty rectangle. */
+.content-pane[data-ground="own"]:has(.newtab) {
+  background: transparent;
+}
+
 ::selection {
   background: color-mix(in srgb, var(--color-text) 22%, transparent);
 }
@@ -216,11 +224,11 @@ kbd {
 
 /* Native material samples arbitrary content. Keep text stronger than on solid
    surfaces, with hierarchy carried by shape and weight rather than opacity. */
-:root[data-material="liquid_glass"] .browser-sidebar {
+:root[data-material="liquid_glass"] :is(.browser-sidebar, [data-glass-text]) {
   --color-muted: rgb(244 244 246 / 0.78);
   --color-faint: rgb(244 244 246 / 0.55);
 }
-:root[data-material="liquid_glass"][data-theme="light"] .browser-sidebar {
+:root[data-material="liquid_glass"][data-theme="light"] :is(.browser-sidebar, [data-glass-text]) {
   --color-muted: rgb(27 28 33 / 0.72);
   --color-faint: rgb(27 28 33 / 0.55);
 }

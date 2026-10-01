@@ -11,8 +11,12 @@ const defaults = {
   "sidebar.mode": "default",
   "ui.accent": "graphite",
   "ui.reduce-motion": "false",
-  "ui.newtab-logo": "true",
-  "ui.newtab-shortcuts": "false",
+  "ui.newtab-greeting": "false",
+  "ui.newtab-name": "false",
+  "ui.newtab-clock": "true",
+  "ui.newtab-clock-format": "system",
+  "ui.newtab-tasks": "true",
+  "ui.tab-layout": "vertical",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });

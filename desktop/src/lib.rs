@@ -44,6 +44,7 @@ mod blocker_service;
 mod browser_credentials;
 #[cfg(feature = "curated-extension-distribution")]
 mod extension_distribution;
+mod intro_sound;
 mod launcher_trigger;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
@@ -360,24 +361,56 @@ struct HardExitWatchdog {
 
 #[derive(Clone)]
 struct UiStartupGate {
-    expected_url: tauri::Url,
+    expected_url: Arc<Mutex<tauri::Url>>,
+    /// Set when this launch opened onboarding first: the window then shows
+    /// onboarding, and later hands over to the browser in place.
+    handover: Option<Handover>,
     document_loaded: Arc<AtomicBool>,
     frontend_ready: Arc<AtomicBool>,
     visible: Arc<AtomicBool>,
+    handed_over: Arc<AtomicBool>,
+    browser_revealed: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct Handover {
+    onboarding: tauri::Url,
+    browser: tauri::Url,
 }
 
 impl UiStartupGate {
     fn new(expected_url: tauri::Url) -> Self {
         Self {
-            expected_url,
+            expected_url: Arc::new(Mutex::new(expected_url)),
+            handover: None,
             document_loaded: Arc::new(AtomicBool::new(false)),
             frontend_ready: Arc::new(AtomicBool::new(false)),
             visible: Arc::new(AtomicBool::new(false)),
+            handed_over: Arc::new(AtomicBool::new(false)),
+            browser_revealed: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Onboarding first, then the browser in the same window.
+    fn onboarding_first(onboarding: tauri::Url, browser: tauri::Url) -> Self {
+        Self {
+            handover: Some(Handover {
+                onboarding: onboarding.clone(),
+                browser,
+            }),
+            ..Self::new(onboarding)
+        }
+    }
+
+    fn expected(&self) -> tauri::Url {
+        self.expected_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn mark_document_loaded(&self, window: &WebviewWindow, loaded_url: &tauri::Url) {
-        if loaded_url != &self.expected_url {
+        if loaded_url != &self.expected() {
             return;
         }
         self.document_loaded.store(true, Ordering::Release);
@@ -388,7 +421,7 @@ impl UiStartupGate {
         let Ok(current_url) = window.url() else {
             return false;
         };
-        if current_url != self.expected_url {
+        if current_url != self.expected() {
             return false;
         }
         self.frontend_ready.store(true, Ordering::Release);
@@ -399,10 +432,17 @@ impl UiStartupGate {
     fn show_if_ready(&self, window: &WebviewWindow) {
         if !self.document_loaded.load(Ordering::Acquire)
             || !self.frontend_ready.load(Ordering::Acquire)
-            || self
-                .visible
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
+        {
+            return;
+        }
+        if self.handed_over.load(Ordering::Acquire) {
+            self.reveal_browser(window);
+            return;
+        }
+        if self
+            .visible
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
             return;
         }
@@ -414,6 +454,92 @@ impl UiStartupGate {
             );
         } else {
             on_main_window_mapped(window);
+        }
+    }
+
+    /// Whether the caller is the onboarding page this launch opened, and it
+    /// has not yet handed the window over.
+    fn serves_onboarding(&self, window: &WebviewWindow) -> bool {
+        let Some(handover) = &self.handover else {
+            return false;
+        };
+        !self.handed_over.load(Ordering::Acquire)
+            && window.url().is_ok_and(|url| url == handover.onboarding)
+    }
+
+    /// Replaces onboarding with the browser in the same window. The page view
+    /// is hidden until the browser has initialized, under the same two facts
+    /// startup requires, so neither a half-built browser nor its opaque
+    /// first paint is ever shown; the window keeps only its material.
+    fn hand_over(&self, window: &WebviewWindow) -> bool {
+        let Some(handover) = &self.handover else {
+            return false;
+        };
+        if !self.visible.load(Ordering::Acquire)
+            || !self.serves_onboarding(window)
+            || self
+                .handed_over
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        *self
+            .expected_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = handover.browser.clone();
+        self.document_loaded.store(false, Ordering::Release);
+        self.frontend_ready.store(false, Ordering::Release);
+        if !platform::imp::set_chrome_hidden(window, true) {
+            diagnostic!("onboarding: chrome could not be hidden for the handover");
+        }
+        if let Err(error) = window.navigate(handover.browser.clone()) {
+            request_startup_failure(
+                window.app_handle(),
+                format_args!("could not open the browser after onboarding: {error}"),
+            );
+            return false;
+        }
+        let gate = self.clone();
+        let app = window.app_handle().clone();
+        let spawned = std::thread::Builder::new()
+            .name("zephium-handover-watchdog".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(15));
+                if gate.browser_revealed.load(Ordering::Acquire) {
+                    return;
+                }
+                let exit_app = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if !gate.browser_revealed.load(Ordering::Acquire) {
+                        request_startup_failure(
+                            &exit_app,
+                            "trusted browser document did not initialize after onboarding",
+                        );
+                    }
+                });
+            });
+        if spawned.is_err() {
+            diagnostic!("onboarding: handover watchdog could not start");
+        }
+        true
+    }
+
+    fn reveal_browser(&self, window: &WebviewWindow) {
+        if self
+            .browser_revealed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let _ = window.set_resizable(true);
+        let _ = window.set_maximizable(true);
+        if !platform::imp::set_chrome_hidden(window, false) {
+            request_startup_failure(
+                window.app_handle(),
+                "could not show the browser after onboarding",
+            );
         }
     }
 
@@ -1556,6 +1682,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_activate,
             tabs_close,
             tabs_set_essential,
+            essentials_keep,
+            profile_rename,
+            onboarding_play_intro,
+            onboarding_finish,
             tabs_navigate,
             tabs_reload,
             tabs_back,
@@ -2029,6 +2159,8 @@ const MAX_NAVIGATION_INPUT_BYTES: usize = 8 * 1024;
 // keep the resulting launcher action below the navigation ceiling as well.
 const MAX_LAUNCHER_QUERY_BYTES: usize = 2 * 1024;
 const MAX_COMMAND_ID_BYTES: usize = 128;
+const MAX_KEPT_SITE_ID_BYTES: usize = 32;
+const MAX_PROFILE_NAME_BYTES: usize = 256;
 const MAX_WINDOW_COORDINATE: f64 = 1_000_000.0;
 use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
@@ -2441,6 +2573,39 @@ fn tabs_set_essential(
             essential,
             before,
         },
+    )
+}
+
+/// Onboarding keeps a site by its catalog id; native owns the address and
+/// the mark, so chrome can never pin an arbitrary URL through this path.
+#[tauri::command]
+#[specta::specta]
+fn essentials_keep(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    site: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize_onboarding(&caller, "essentials_keep") || !bounded(&site, MAX_KEPT_SITE_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(caller.app_handle(), &shell, Command::KeepSite(site))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn profile_rename(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    name: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize_onboarding(&caller, "profile_rename") || !bounded(&name, MAX_PROFILE_NAME_BYTES) {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::RenameFocusedProfile(name),
     )
 }
 
@@ -4158,6 +4323,59 @@ fn panel_intent(
     overlay.intent(intent);
     true
 }
+/// Onboarding's own page, which a first run opens in the main window
+/// instead of the browser.
+const ONBOARDING_PAGE: &str = "onboarding.html";
+
+/// Whether this launch opens onboarding. `ZEPHIUM_ONBOARDING=1 pnpm dev`
+/// opens it on an existing profile without recording anything until it is
+/// finished.
+fn onboarding_first(store: &SqliteStore) -> bool {
+    #[cfg(debug_assertions)]
+    if std::env::var("ZEPHIUM_ONBOARDING").as_deref() == Ok("1") {
+        return true;
+    }
+    zephium_app::onboarding_due(store)
+}
+
+/// Onboarding's commands answer only the onboarding page, and only until it
+/// has handed the window to the browser.
+fn authorize_onboarding(caller: &WebviewWindow, command: &str) -> bool {
+    authorize(caller, CallerPolicy::Main, command)
+        && caller
+            .try_state::<UiStartupGate>()
+            .is_some_and(|gate| gate.serves_onboarding(caller))
+}
+
+/// Onboarding's intro sound, played natively; chrome keeps `autoplay=()`.
+#[tauri::command]
+#[specta::specta]
+fn onboarding_play_intro(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
+    if !authorize_onboarding(&caller, "onboarding_play_intro") {
+        return false;
+    }
+    intro_sound::play(&app);
+    true
+}
+
+/// Finishes onboarding: records it, then opens the browser in its place.
+#[tauri::command]
+#[specta::specta]
+fn onboarding_finish(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
+    if !authorize_onboarding(&caller, "onboarding_finish") {
+        return false;
+    }
+    // Opening the browser matters more than the record: if it is lost,
+    // onboarding simply shows once more on the next launch.
+    if !APP_STORE
+        .get()
+        .is_some_and(|store| zephium_app::finish_onboarding(store.as_ref()))
+    {
+        diagnostic!("onboarding: finishing could not be recorded");
+    }
+    gate.hand_over(&caller)
+}
+
 #[tauri::command]
 #[specta::specta]
 fn launcher_trigger(caller: WebviewWindow) -> Option<launcher_trigger::LauncherTrigger> {
@@ -4857,7 +5075,16 @@ pub fn run() {
                 .first()
                 .cloned()
                 .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
-                let app_url = privileged_app_url(app, &main_config.url)?;
+                // Decided before either page loads: a first run opens onboarding
+                // in this window, and the browser replaces it there once it is
+                // finished. The browser bundle carries none of it.
+                let onboarding = onboarding_first(store.as_ref());
+                let browser_url = privileged_app_url(app, &main_config.url)?;
+                let app_url = if onboarding {
+                    privileged_app_url(app, &tauri::WebviewUrl::App(ONBOARDING_PAGE.into()))?
+                } else {
+                    browser_url.clone()
+                };
                 main_config.url = tauri::WebviewUrl::External(
                 tauri::Url::parse(PRIVILEGED_BOOTSTRAP_URL)
                     .map_err(|error| std::io::Error::other(error.to_string()))?,
@@ -4895,7 +5122,11 @@ pub fn run() {
                 window.addEventListener('DOMContentLoaded', () => report('document ready'));
               })();
             "#);
-            let ui_startup_gate = UiStartupGate::new(app_url.clone());
+            let ui_startup_gate = if onboarding {
+                UiStartupGate::onboarding_first(app_url.clone(), browser_url)
+            } else {
+                UiStartupGate::new(app_url.clone())
+            };
             app.manage(ui_startup_gate.clone());
             let page_gate = ui_startup_gate.clone();
             #[cfg(target_os = "windows")]
@@ -4903,8 +5134,16 @@ pub fn run() {
                 .fetch_or(PRIVILEGED_MAIN_ENVIRONMENT, Ordering::Release);
             let window = main_builder
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-                .on_web_resource_request(|_, response| {
-                    harden_privileged_headers(response.headers_mut())
+                .on_web_resource_request(|request, response| {
+                    harden_privileged_headers(response.headers_mut());
+                    // Onboarding is left for good: never kept in the
+                    // back-forward cache behind the browser that replaced it.
+                    if request.uri().path().strip_prefix('/') == Some(ONBOARDING_PAGE) {
+                        response.headers_mut().insert(
+                            tauri::http::header::CACHE_CONTROL,
+                            tauri::http::HeaderValue::from_static("no-store"),
+                        );
+                    }
                 })
                 .on_page_load(move |window, payload| {
                     // The native window is transparent and its privileged
@@ -4921,6 +5160,12 @@ pub fn run() {
                     }
                 })
                 .build()?;
+            // Onboarding composes for one size; the browser takes the window
+            // back resizable once it has replaced onboarding.
+            if onboarding {
+                window.set_resizable(false)?;
+                window.set_maximizable(false)?;
+            }
             let startup_watchdog_gate = ui_startup_gate.clone();
             let startup_watchdog_app = app.handle().clone();
             std::thread::Builder::new()
@@ -6270,6 +6515,7 @@ mod tests {
         for html in [
             crate::frame_sources::INDEX_HTML,
             crate::frame_sources::PANEL_HTML,
+            crate::frame_sources::ONBOARDING_HTML,
         ] {
             assert!(!html.to_ascii_lowercase().contains("<style"),
                 "Tauri adds nonces to inline style blocks; this disables the configured unsafe-inline and can strand dropdown pointer locks");
@@ -6795,6 +7041,60 @@ mod tests {
                     .and_then(serde_json::Value::as_bool),
                 Some(false),
                 "{name} must not auto-create privileged chrome before Rust installs its guards"
+            );
+        }
+    }
+
+    #[test]
+    fn onboarding_hands_the_window_to_the_browser_without_showing_it_unready() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("desktop production source");
+        let hand_over = production
+            .split("fn hand_over(&self, window: &WebviewWindow) -> bool {")
+            .nth(1)
+            .and_then(|body| body.split("fn reveal_browser").next())
+            .expect("onboarding handover");
+        let hidden = hand_over
+            .find("set_chrome_hidden(window, true)")
+            .expect("chrome hidden for the handover");
+        let navigated = hand_over
+            .find("window.navigate(handover.browser.clone())")
+            .expect("browser navigation");
+        assert!(hidden < navigated);
+        assert!(hand_over.contains("self.serves_onboarding(window)"));
+        assert!(hand_over.contains("zephium-handover-watchdog"));
+
+        // Shown again only through the gate, once the browser has loaded and
+        // acknowledged initialization.
+        let gate = production
+            .split("fn show_if_ready(&self, window: &WebviewWindow)")
+            .nth(1)
+            .and_then(|body| body.split("fn serves_onboarding").next())
+            .expect("startup gate");
+        let facts = gate.find("frontend_ready.load").expect("both facts");
+        let reveal = gate
+            .find("self.reveal_browser(window)")
+            .expect("browser reveal");
+        assert!(facts < reveal);
+        assert_eq!(
+            production
+                .matches("set_chrome_hidden(window, false)")
+                .count(),
+            1
+        );
+
+        for command in [
+            "onboarding_play_intro",
+            "onboarding_finish",
+            "essentials_keep",
+            "profile_rename",
+        ] {
+            assert!(
+                production.contains(&format!("authorize_onboarding(&caller, \"{command}\")")),
+                "{command} must answer only the onboarding page"
             );
         }
     }
