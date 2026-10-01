@@ -84,7 +84,17 @@ export default defineConfig({
             // Retina is the display this chrome is drawn for, and the one
             // where a radius or a hairline can actually be judged.
             provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),
-            instances: [{ browser: process.platform === "darwin" ? "webkit" : "chromium" }],
+            instances: [
+              {
+                browser:
+                  process.env.ZEPHIUM_COMPONENT_BROWSER === "chromium" ||
+                  process.env.ZEPHIUM_COMPONENT_BROWSER === "webkit"
+                    ? process.env.ZEPHIUM_COMPONENT_BROWSER
+                    : process.platform === "darwin"
+                      ? "webkit"
+                      : "chromium",
+              },
+            ],
           },
         },
       },
