@@ -1,9 +1,9 @@
 //! Shared private-file and atomic-publication primitives for source updates.
 
 use crate::types::FailureKind;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thiserror::Error;
 
 pub(crate) fn create_private_directory(path: &Path) -> Result<(), StoreError> {
@@ -28,7 +28,10 @@ pub(crate) fn create_private_directory(path: &Path) -> Result<(), StoreError> {
 }
 
 #[cfg(feature = "tuf")]
-pub(crate) fn create_child_directory(parent: &Path, name: &str) -> Result<PathBuf, StoreError> {
+pub(crate) fn create_child_directory(
+    parent: &Path,
+    name: &str,
+) -> Result<std::path::PathBuf, StoreError> {
     validate_private_directory(parent)?;
     let path = parent.join(name);
     match fs::symlink_metadata(&path) {
@@ -77,7 +80,7 @@ pub(crate) fn validate_private_directory(path: &Path) -> Result<(), StoreError> 
 
 #[cfg(unix)]
 pub(crate) fn validate_directory_chain(path: &Path, private_leaf: bool) -> Result<(), StoreError> {
-    let mut current = PathBuf::new();
+    let mut current = std::path::PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
         if current.as_os_str().is_empty() {
@@ -242,7 +245,7 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), StoreError> {
     validate_directory(path)?;
     #[cfg(unix)]
     {
-        File::open(path)
+        fs::File::open(path)
             .and_then(|file| file.sync_all())
             .map_err(|_| StoreError::Io)?;
     }
