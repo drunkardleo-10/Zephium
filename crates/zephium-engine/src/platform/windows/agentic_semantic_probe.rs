@@ -449,7 +449,6 @@ pub(crate) fn run(
             .with_page_close_policy(PageClosePolicy::Ignore)
             .with_navigation_handler(|target| target == "about:blank")
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
-            .with_browser_extensions_enabled(true)
             .with_browser_accelerator_keys(false)
             .with_default_context_menus(false)
             .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI")
@@ -534,6 +533,7 @@ pub(crate) fn run(
             ContextProfileStorageClass::Ephemeral,
             profile.path(),
             construction_deadline,
+            false,
             AgentOwnedViewCallbacks::new(
                 move |terminal| {
                     if navigation_callbacks
@@ -582,7 +582,7 @@ pub(crate) fn run(
             .as_ref()
             .ok_or_else(|| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
         owned
-            .attest(construction_deadline)
+            .attest()
             .map_err(|_| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
         let view_process = browser_process(owned.view())
             .map_err(|_| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
@@ -627,7 +627,7 @@ pub(crate) fn run(
             .ok_or_else(|| ProbeError::harness(WindowsSemanticProbeStage::Verify))?;
         facts.semantic_work_drained = owned.semantic_work_drained_for_audit() == Some(true);
         owned
-            .attest(run_deadline)
+            .attest()
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
         native_guard.sample(&host, Some(owned.view()));
         facts.resources_after = Some(sample_resources(

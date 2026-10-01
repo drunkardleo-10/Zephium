@@ -16,6 +16,7 @@ mod util;
 mod ios;
 
 mod class;
+pub(crate) use class::wry_navigation_delegate::BlockedLoadCounter;
 pub use class::wry_web_view::WryWebView;
 #[cfg(target_os = "macos")]
 use class::wry_web_view_parent::WryWebViewParent;
@@ -355,7 +356,7 @@ pub(crate) struct InnerWebView {
   document_title_changed_observer: Option<Retained<DocumentTitleChangedObserver>>,
   #[allow(dead_code)]
   // We need this the keep the reference count
-  navigation_policy_delegate: Retained<WryNavigationDelegate>,
+  pub(crate) navigation_policy_delegate: Retained<WryNavigationDelegate>,
   #[allow(dead_code)]
   // We need this the keep the reference count
   download_delegate: Option<Retained<WryDownloadDelegate>>,
@@ -860,6 +861,8 @@ impl InnerWebView {
         new_window_req_handler.clone(),
         attributes.navigation_handler,
         attributes.apple_navigation_action_handler,
+        #[cfg(target_os = "macos")]
+        attributes.main_frame_navigation_attempt_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,

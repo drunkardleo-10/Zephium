@@ -17,12 +17,27 @@ pub struct TabView {
     pub projection_revision: String,
     pub title: String,
     pub url: Option<String>,
+    /// Explicit content owner. Internal pages never carry a navigable URL.
+    #[serde(default)]
+    pub content: TabContentView,
     pub loading: bool,
     #[serde(default)]
     pub popup_blocked: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
+}
+
+/// Browser chrome's bounded tab renderer choice. Future extension-owned
+/// documents can add a separate variant without treating them as page URLs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabContentView {
+    #[default]
+    Web,
+    Settings,
+    Extensions,
+    ExtensionOwned,
 }
 
 /// Names a cached site icon without carrying its pixels. Chrome keeps rasters
@@ -146,294 +161,6 @@ pub struct ExtensionActionShortcutView {
     pub action_revision: String,
 }
 
-/// Settlement of the focused profile's lazy installed-extension projection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionManagementPhase {
-    Loading,
-    Ready,
-    NotConfigured,
-    CatalogNotSynchronized,
-    UpdateConsentRequired,
-    Unavailable,
-    Rejected,
-    FailedClosed,
-}
-
-/// Process-immutable product availability for the extension-management UX.
-/// This is a non-authorizing presentation fact. It carries no catalog,
-/// package, profile, repository, or runtime identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionManagementAvailabilityView {
-    Configured,
-    NotConfigured,
-    Unavailable,
-}
-
-/// Actor-ordered projection of extension-management product availability.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionManagementAvailabilityChangedView {
-    pub projection_revision: String,
-    pub availability: ExtensionManagementAvailabilityView,
-}
-
-/// Process-local regular-runtime state for one installed extension.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionManagementRuntimeView {
-    Disabled,
-    PendingActivation,
-    ProfilePaused,
-    Active,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionProfilePolicyView {
-    pub revision: String,
-    pub paused: bool,
-    pub denied_site_count: u16,
-    pub current_site_available: bool,
-    pub current_site_denied: bool,
-}
-
-/// Reviewed compatibility of the exact authenticated manifest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionManagementCompatibilityView {
-    Compatible,
-    Degraded,
-}
-
-/// Browser-authenticated acquisition/support lane for extension management UI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionManagementSourceView {
-    ZephiumVerified,
-    ExternalCompatibility,
-    DeveloperLocal,
-}
-
-/// Browser-authenticated, inert upstream identity for extension management UI.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionManagementProvenanceView {
-    pub source_url: String,
-    pub upstream_version: String,
-    pub license_expression: String,
-    pub attribution: String,
-}
-
-/// One browser-owned explanation for a reviewed platform degradation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExtensionManagementLimitationView {
-    ApiPermission { name: String },
-    HostAccess,
-    Background,
-    Action,
-    Offscreen,
-    NativeMessaging,
-    BrowserOverride,
-    ExtensionPagesCsp,
-    Sandbox,
-    ContentScripts,
-    WebAccessibleResources,
-    MinimumBrowserVersion,
-    Commands,
-    SidePanel,
-    ManagedStorage,
-    OptionsPage,
-    DeclarativeNetRequest,
-}
-
-/// Non-authorizing summary of the atomic grant row joined to an install.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionManagementGrantView {
-    pub initialized: bool,
-    pub revision: Option<String>,
-    pub api_permissions: Vec<String>,
-    pub host_permissions: Vec<String>,
-    pub file_access: bool,
-    pub private_access: bool,
-}
-
-/// One authenticated installed extension in browser-owned management UI.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionManagementEntryView {
-    pub install_id: String,
-    pub install_revision: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub author: Option<String>,
-    pub version: String,
-    pub has_options_page: bool,
-    pub source: ExtensionManagementSourceView,
-    /// Decimal Unix seconds of the authenticated Verified catalog release.
-    pub verified_catalog_unix: Option<String>,
-    pub provenance: Option<ExtensionManagementProvenanceView>,
-    pub runtime: ExtensionManagementRuntimeView,
-    /// Present only when `runtime` is `active`.
-    pub runtime_generation: Option<String>,
-    pub grants: ExtensionManagementGrantView,
-    /// Canonically ordered optional API declarations. Mutations return only
-    /// the array index plus the exact grant revision.
-    pub optional_api: Vec<String>,
-    /// Canonically ordered optional host declarations.
-    pub optional_hosts: Vec<String>,
-    pub compatibility: ExtensionManagementCompatibilityView,
-    pub limitations: Vec<ExtensionManagementLimitationView>,
-}
-
-/// One authenticated package offered by Zephium's current curated catalog.
-/// `candidate_index` is an opaque, short-lived selector into the exact
-/// revisioned catalog retained by Shell. Privileged chrome may only echo it;
-/// it conveys no package, repository, profile, or permission authority.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionInstallCandidateView {
-    pub candidate_index: u8,
-    pub name: String,
-    pub description: Option<String>,
-    pub author: Option<String>,
-    pub version: String,
-    pub source: ExtensionManagementSourceView,
-    /// Decimal Unix seconds of the authenticated Verified catalog release.
-    pub verified_catalog_unix: Option<String>,
-    pub provenance: Option<ExtensionManagementProvenanceView>,
-    pub required_api: Vec<String>,
-    pub required_hosts: Vec<String>,
-    /// Canonically ordered optional API grants. The frontend returns only
-    /// selected array indexes; Shell rejoins them to its retained candidate.
-    pub optional_api: Vec<String>,
-    /// Canonically ordered optional host grants.
-    pub optional_hosts: Vec<String>,
-    pub supports_file_access: bool,
-    pub file_access_available: bool,
-    pub private_access_available: bool,
-    pub compatibility: ExtensionManagementCompatibilityView,
-    pub limitations: Vec<ExtensionManagementLimitationView>,
-}
-
-/// One exact authenticated replacement awaiting changed-authority or newly
-/// degraded compatibility review. `review_id` is an opaque,
-/// subscription-local echo token; no package identity or permission name is
-/// accepted back from privileged chrome.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionUpdateConsentView {
-    pub review_id: String,
-    pub name: String,
-    pub version: String,
-    pub source: ExtensionManagementSourceView,
-    pub verified_catalog_unix: Option<String>,
-    pub provenance: Option<ExtensionManagementProvenanceView>,
-    pub added_required_api: Vec<String>,
-    pub added_required_hosts: Vec<String>,
-    pub compatibility: ExtensionManagementCompatibilityView,
-    pub limitations: Vec<ExtensionManagementLimitationView>,
-}
-
-/// Exact replacement management cohort for the focused profile.
-/// Loading and failure phases always carry no catalog revision or rows, so a
-/// delayed failure cannot leave stale selectors actionable in privileged UI.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionManagementView {
-    pub projection_revision: String,
-    pub profile_id: String,
-    pub phase: ExtensionManagementPhase,
-    pub catalog_revision: Option<String>,
-    /// Present only while `phase` is `ready`.
-    pub profile_policy: Option<ExtensionProfilePolicyView>,
-    pub entries: Vec<ExtensionManagementEntryView>,
-    pub candidates: Vec<ExtensionInstallCandidateView>,
-    /// Present only while `phase` is `update_consent_required`.
-    pub pending_update: Option<ExtensionUpdateConsentView>,
-}
-
-/// Stable distribution failure stage exposed only to privileged chrome.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExtensionDistributionFailureStageView {
-    Catalog,
-    PackageFetch { index: u8 },
-    PackageProvision { index: u8 },
-    CatalogActivation,
-}
-
-/// Redacted product-distribution failure reason. Network and native error
-/// strings never cross the privileged IPC boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionDistributionFailureReasonView {
-    Acquisition,
-    Busy,
-    ServiceUnavailable,
-    ServiceRejected,
-    ServiceFailedClosed,
-    SettlementTimedOut,
-    SettlementLost,
-    SubmissionPanicked,
-    OutcomeUnresolved,
-    ActivationRejected,
-    Accounting,
-}
-
-/// Exact replacement state for the dormant product distribution worker.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "phase", rename_all = "snake_case")]
-pub enum ExtensionDistributionStateView {
-    Idle,
-    Synchronizing,
-    Ready {
-        package_count: u8,
-        materialized_packages: u8,
-        reused_packages: u8,
-        exact_retries: u8,
-        newly_activated: bool,
-    },
-    Failed {
-        stage: ExtensionDistributionFailureStageView,
-        reason: ExtensionDistributionFailureReasonView,
-    },
-    Quarantined {
-        stage: ExtensionDistributionFailureStageView,
-        reason: ExtensionDistributionFailureReasonView,
-    },
-    Shutdown,
-}
-
-/// Shell-revisioned product-distribution status for privileged extension UI.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionDistributionView {
-    pub projection_revision: String,
-    pub state: ExtensionDistributionStateView,
-}
-
-/// One browser-owned optional-permission consent surface. Every identity is a
-/// short-lived echo token only; the Shell rejoins it to its retained native
-/// request before a user response can reach the serialized grant service.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionRuntimeGrantPromptEntryView {
-    pub profile_id: String,
-    pub install_id: String,
-    pub runtime_generation: String,
-    pub request_id: String,
-    pub extension_name: String,
-    pub api_permissions: Vec<String>,
-    pub host_permissions: Vec<String>,
-    pub private_context: bool,
-    /// True after an Allow gesture while the durable grant transaction is in
-    /// flight. Chrome must disable both response buttons until replacement.
-    pub processing: bool,
-}
-
-/// Exact replacement for the process-wide permission prompt surface. `None`
-/// closes any prior prompt; Shell serializes the bounded native cohort so the
-/// frame never chooses request ordering.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ExtensionRuntimeGrantPromptView {
-    pub projection_revision: String,
-    pub prompt: Option<ExtensionRuntimeGrantPromptEntryView>,
-}
-
 /// Closed page capability names rendered by browser-owned chrome. Native
 /// permission strings and page-controlled labels never cross this boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -463,6 +190,17 @@ pub struct PagePermissionPromptEntryView {
 pub struct PagePermissionPromptView {
     pub projection_revision: String,
     pub prompt: Option<PagePermissionPromptEntryView>,
+}
+
+/// An extension's run-time request for access, awaiting the user's answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WebExtensionAccessRequestView {
+    pub profile_id: String,
+    pub request: String,
+    pub extension_id: String,
+    pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
 }
 
 /// The one retained split group owned by the focused window. Members are
@@ -868,9 +606,6 @@ pub enum OperationReason {
     StoreConflict,
     StoreOutcomeUnknown,
     StoreReconciliationFailed,
-    ExtensionEnablementPending,
-    ExtensionActivationPending,
-    ExtensionRestartRequired,
     ContentPolicyApplyFailed,
     ContentPolicySourceUnavailable,
     ContentPolicySourceRefreshPending,
@@ -1014,6 +749,7 @@ pub enum BlockerSourcePhase {
 pub enum BlockerSourceProvenance {
     ReleaseBundle,
     TufRepository,
+    OfficialHttps,
 }
 
 /// Stable package-refresh failure category. Endpoint, parser, and native
@@ -1038,6 +774,7 @@ pub enum BlockerSourceFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockerFailure {
+    SitePreferencesUnavailable,
     GenerationExhausted,
     CompilerDispatchRejected,
     CompilerUnavailable,
@@ -1098,12 +835,70 @@ pub struct BlockerSourceIdentities {
     pub installed_manifest_sha256: Option<String>,
 }
 
-/// Read-only, focused-profile diagnostics delivered only to privileged main
-/// chrome. It deliberately contains no profile selector, URL, origin, request
-/// metadata, native error string, or filter-list text. Runtime health is
-/// represented only by volatile aggregate counters.
+/// Host-initiated picker controls, available only to privileged main chrome.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlockerPickerAction {
+    Start,
+    Read { session: String },
+    Preview { session: String, enabled: bool },
+    Stop { session: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct BlockerPickerView {
+    pub session: String,
+    pub active: bool,
+    pub selection: Option<BlockerSelectionView>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct BlockerSelectionView {
+    pub identity: String,
+    pub label: String,
+    pub count: u32,
+    pub positional: bool,
+}
+
+/// Exact privileged site-control context; never accepted from ordinary page IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct BlockerSiteContext {
+    pub profile: String,
+    pub tab: String,
+    pub site: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PersonalHideView {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerSiteView {
+    pub context: BlockerSiteContext,
+    pub paused: bool,
+    pub private_session: bool,
+    pub ready: bool,
+    pub busy: bool,
+    pub hides: Vec<PersonalHideView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlockerSiteAction {
+    SaveSelection { session: String, selection: String },
+    Retry,
+    Pause { paused: bool },
+    SetHideEnabled { id: String, enabled: bool },
+    RemoveHide { id: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct BlockerStatusView {
+    pub site: Option<Box<BlockerSiteView>>,
     pub projection_revision: String,
     pub protection: BlockerProtection,
     pub phase: BlockerPhase,
@@ -1154,6 +949,7 @@ impl BlockerStatusView {
     /// be obtained. Revision zero cannot overwrite a real actor projection.
     pub fn unavailable() -> Self {
         Self {
+            site: None,
             projection_revision: "00000000000000000000000000000000".into(),
             protection: BlockerProtection::Unavailable,
             phase: BlockerPhase::Unavailable,
@@ -1214,11 +1010,8 @@ pub enum Projection {
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
     ExtensionActionShortcut(ExtensionActionShortcutView),
-    ExtensionManagementAvailability(ExtensionManagementAvailabilityChangedView),
-    ExtensionManagement(ExtensionManagementView),
-    ExtensionDistribution(ExtensionDistributionView),
-    ExtensionRuntimeGrantPrompt(ExtensionRuntimeGrantPromptView),
     PagePermissionPrompt(PagePermissionPromptView),
+    WebExtensionAccessRequest(WebExtensionAccessRequestView),
     UiCommand(String),
     Search(SearchResults),
     OpenNote { profile: String, id: String },
@@ -1262,4 +1055,15 @@ mod blocker_status_tests {
         assert!(!status.retryable);
         assert_eq!(status.retries_remaining, 0);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BlockerStatsView {
+    #[specta(type = f64)]
+    pub today: u64,
+    #[serde(rename = "last7Days")]
+    #[specta(type = f64)]
+    pub last_seven_days: u64,
+    #[specta(type = Vec<f64>)]
+    pub days: [u64; 7],
 }

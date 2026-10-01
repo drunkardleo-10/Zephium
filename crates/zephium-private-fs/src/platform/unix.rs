@@ -9,12 +9,6 @@ use rustix::fs::{FileType, Mode, OFlags};
 use super::{DirectoryMode, RegularMode};
 use crate::PrivateFsError;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-mod tree_removal;
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(crate) use tree_removal::{remove_tree_bounded, TreeRemovalFaults};
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RawIdentity {
     device: u64,
@@ -131,8 +125,6 @@ pub(crate) fn create_new_regular(
         Mode::from_raw_mode(0o600),
     )
     .map_err(|error| map_failed_create(error, directory, name, true))?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_regular_create();
     let file = File::from(descriptor);
     let admission = (|| {
         let opened = file.metadata().map_err(|_| PrivateFsError::Io)?;
@@ -285,8 +277,6 @@ pub(crate) fn set_directory_mode(file: &File, mode: DirectoryMode) -> Result<(),
         DirectoryMode::Sealed => 0o500,
     };
     rustix::fs::fchmod(file, Mode::from_raw_mode(raw_mode)).map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_mode_change();
     Ok(())
 }
 
@@ -440,8 +430,6 @@ pub(crate) fn remove_regular(
 ) -> Result<(), PrivateFsError> {
     rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty())
         .map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_regular_unlink();
     Ok(())
 }
 
@@ -460,8 +448,6 @@ pub(crate) fn remove_directory(
             PrivateFsError::Io
         }
     })?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_unlink();
     Ok(())
 }
 
@@ -602,8 +588,6 @@ pub(crate) fn atomic_replace(
 ) -> Result<(), PrivateFsError> {
     rustix::fs::renameat(directory, source, directory, destination)
         .map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_rename();
     Ok(())
 }
 
@@ -629,8 +613,6 @@ pub(crate) fn atomic_publish_noreplace(
             PrivateFsError::Io
         }
     })?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_rename();
     Ok(())
 }
 
@@ -650,8 +632,6 @@ pub(crate) fn atomic_publish_noreplace_between(
                 PrivateFsError::Io
             }
         })?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_rename();
     Ok(())
 }
 
@@ -674,8 +654,6 @@ fn rename_noreplace_between(
 
 pub(crate) fn sync_directory(file: &File) -> Result<(), PrivateFsError> {
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_sync();
     Ok(())
 }
 
@@ -699,8 +677,6 @@ pub(crate) fn sync_ancestor_directory(path: &Path) -> Result<(), PrivateFsError>
         return Err(PrivateFsError::Unsafe);
     }
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_sync();
     Ok(())
 }
 
@@ -737,7 +713,7 @@ fn map_failed_create(
     }
 }
 
-fn relative_name_is_absent(parent: &File, name: &str) -> bool {
+pub(crate) fn relative_name_is_absent(parent: &File, name: &str) -> bool {
     matches!(
         rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW),
         Err(rustix::io::Errno::NOENT)

@@ -5,7 +5,7 @@
   import Icon from "$shared/ui/Icon";
   import Disclosure from "$shared/ui/Disclosure";
 
-  let { children }: { children: Snippet } = $props();
+  let { children, onopen }: { children: Snippet; onopen?: () => void } = $props();
 </script>
 
 <!--
@@ -14,7 +14,14 @@
   them, because none of them is worth a permanent seat in the chrome.
 -->
 <div class="utilities">
-  <Disclosure label={m.utilities()} triggerClass="utilities-trigger" align="end">
+  <Disclosure
+    {onopen}
+    label={m.utilities()}
+    menu
+    triggerClass="utilities-trigger"
+    panelClass="utilities-panel"
+    align="end"
+  >
     {#snippet trigger()}<Icon icon={Settings05Icon} size={15} />{/snippet}
     {@render children()}
   </Disclosure>
@@ -53,6 +60,13 @@
     transition:
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out);
+  }
+
+  .utilities :global(.utilities-panel) {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 212px;
   }
 
   .utilities :global(.utilities-trigger:hover),

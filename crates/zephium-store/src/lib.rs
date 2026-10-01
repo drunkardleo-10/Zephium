@@ -10,11 +10,7 @@ mod pane;
 #[cfg(target_os = "windows")]
 mod windows_file_identity;
 
-pub use actor::{
-    ExtensionRuntimeStartupInventory, ExtensionRuntimeStartupInventoryLoadOutcome,
-    ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError,
-    ExtensionServiceStoreCallOutcome, ExtensionServiceStoreStartupRequirement, SqliteStore,
-};
+pub use actor::SqliteStore;
 
 mod work_frames;
 mod work_migration_v2;

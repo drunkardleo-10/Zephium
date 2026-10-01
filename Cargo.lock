@@ -16,6 +16,7 @@ dependencies = [
  "arrayvec",
  "base64 0.22.1",
  "bitflags 2.13.0",
+ "cssparser 0.35.0",
  "flatbuffers",
  "idna",
  "itertools",
@@ -25,6 +26,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "seahash",
+ "selectors 0.32.0",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -869,6 +871,19 @@ dependencies = [
 
 [[package]]
 name = "cssparser"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e901edd733a1472f944a45116df3f846f54d37e67e68640ac8bb69689aca2aa"
+dependencies = [
+ "cssparser-macros 0.6.1",
+ "dtoa-short",
+ "itoa",
+ "phf 0.11.3",
+ "smallvec",
+]
+
+[[package]]
+name = "cssparser"
 version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae61cf9c0abb83bd659dab65b7e4e38d8236824c85f0f804f173567bda257d2"
@@ -876,7 +891,7 @@ dependencies = [
  "cssparser-macros 0.6.1",
  "dtoa-short",
  "itoa",
- "phf",
+ "phf 0.13.1",
  "smallvec",
 ]
 
@@ -889,7 +904,7 @@ dependencies = [
  "cssparser-macros 0.7.0",
  "dtoa-short",
  "itoa",
- "phf",
+ "phf 0.13.1",
  "smallvec",
 ]
 
@@ -3465,13 +3480,33 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "phf"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
+dependencies = [
+ "phf_macros 0.11.3",
+ "phf_shared 0.11.3",
+]
+
+[[package]]
+name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
- "phf_macros",
- "phf_shared",
+ "phf_macros 0.13.1",
+ "phf_shared 0.13.1",
  "serde",
+]
+
+[[package]]
+name = "phf_codegen"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aef8048c789fa5e851558d709946d6d79a8ff88c0440c587967f8e94bfb1216a"
+dependencies = [
+ "phf_generator 0.11.3",
+ "phf_shared 0.11.3",
 ]
 
 [[package]]
@@ -3480,8 +3515,18 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49aa7f9d80421bca176ca8dbfebe668cc7a2684708594ec9f3c0db0805d5d6e1"
 dependencies = [
- "phf_generator",
- "phf_shared",
+ "phf_generator 0.13.1",
+ "phf_shared 0.13.1",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
+dependencies = [
+ "phf_shared 0.11.3",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -3491,7 +3536,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
 dependencies = [
  "fastrand",
- "phf_shared",
+ "phf_shared 0.13.1",
+]
+
+[[package]]
+name = "phf_macros"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
+dependencies = [
+ "phf_generator 0.11.3",
+ "phf_shared 0.11.3",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -3500,11 +3558,20 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
 dependencies = [
- "phf_generator",
- "phf_shared",
+ "phf_generator 0.13.1",
+ "phf_shared 0.13.1",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
 ]
 
 [[package]]
@@ -4443,6 +4510,25 @@ dependencies = [
 
 [[package]]
 name = "selectors"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09975d3195f34dce9c7b381cb0f00c3c13381d4d3735c0f1a9c894b283b302ab"
+dependencies = [
+ "bitflags 2.13.0",
+ "cssparser 0.35.0",
+ "derive_more",
+ "log",
+ "new_debug_unreachable",
+ "phf 0.11.3",
+ "phf_codegen 0.11.3",
+ "precomputed-hash",
+ "rustc-hash",
+ "servo_arc",
+ "smallvec",
+]
+
+[[package]]
+name = "selectors"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c"
@@ -4452,8 +4538,8 @@ dependencies = [
  "derive_more",
  "log",
  "new_debug_unreachable",
- "phf",
- "phf_codegen",
+ "phf 0.13.1",
+ "phf_codegen 0.13.1",
  "precomputed-hash",
  "rustc-hash",
  "servo_arc",
@@ -4471,8 +4557,8 @@ dependencies = [
  "derive_more",
  "log",
  "new_debug_unreachable",
- "phf",
- "phf_codegen",
+ "phf 0.13.1",
+ "phf_codegen 0.13.1",
  "precomputed-hash",
  "rustc-hash",
  "servo_arc",
@@ -4919,7 +5005,7 @@ checksum = "a18596f8c785a729f2819c0f6a7eae6ebeebdfffbfe4214ae6b087f690e31901"
 dependencies = [
  "new_debug_unreachable",
  "parking_lot",
- "phf_shared",
+ "phf_shared 0.13.1",
  "precomputed-hash",
 ]
 
@@ -4929,8 +5015,8 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "585635e46db231059f76c5849798146164652513eb9e8ab2685939dd90f29b69"
 dependencies = [
- "phf_generator",
- "phf_shared",
+ "phf_generator 0.13.1",
+ "phf_shared 0.13.1",
  "proc-macro2",
  "quote",
 ]
@@ -5410,7 +5496,7 @@ dependencies = [
  "json-patch",
  "log",
  "memchr",
- "phf",
+ "phf 0.13.1",
  "plist",
  "proc-macro2",
  "quote",
@@ -6257,8 +6343,8 @@ version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7cff6eef815df1834fd250e3a2ff436044d82a9f1bc1980ca1dbdf07effc538"
 dependencies = [
- "phf",
- "phf_codegen",
+ "phf 0.13.1",
+ "phf_codegen 0.13.1",
  "string_cache",
  "string_cache_codegen",
 ]
@@ -6973,9 +7059,6 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "zephium-blocker",
  "zephium-core",
- "zephium-extension-acquisition",
- "zephium-extension-package",
- "zip",
 ]
 
 [[package]]
@@ -7132,6 +7215,7 @@ name = "zephium-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "globset",
  "grep-matcher",
  "grep-regex",
@@ -7162,14 +7246,17 @@ name = "zephium-blocker"
 version = "0.1.0"
 dependencies = [
  "adblock",
+ "flate2",
  "idna",
  "proptest",
+ "regex",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "url",
  "windows",
  "zephium-core",
 ]
@@ -7242,6 +7329,7 @@ name = "zephium-desktop"
 version = "0.1.0"
 dependencies = [
  "async-io",
+ "base64 0.22.1",
  "block2",
  "dispatch2",
  "futures-lite",
@@ -7269,7 +7357,6 @@ dependencies = [
  "tauri-utils",
  "tempfile",
  "tokio",
- "url",
  "webkit2gtk",
  "webview2-com",
  "window-vibrancy 0.8.0",
@@ -7287,13 +7374,11 @@ dependencies = [
  "zephium-blocker-service",
  "zephium-core",
  "zephium-engine",
- "zephium-extension-authority",
- "zephium-extension-distribution",
- "zephium-extension-service",
- "zephium-extension-updater",
  "zephium-ipc",
  "zephium-notes",
  "zephium-store",
+ "zephium-webext",
+ "zephium-webext-macos",
  "zephium-work-composition",
 ]
 
@@ -7304,6 +7389,7 @@ dependencies = [
  "block2",
  "dirs",
  "dispatch2",
+ "flate2",
  "gtk",
  "libc",
  "objc2",
@@ -7328,146 +7414,11 @@ dependencies = [
  "windows-sys 0.61.2",
  "wry",
  "zephium-agentic",
+ "zephium-blocker",
  "zephium-core",
- "zephium-extension-package",
- "zephium-extension-runtime-api",
+ "zephium-webext",
+ "zephium-webext-macos",
  "zeroize",
-]
-
-[[package]]
-name = "zephium-extension-acquisition"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "ring",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "zephium-core",
- "zephium-extension-package",
- "zip",
-]
-
-[[package]]
-name = "zephium-extension-authority"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "zephium-core",
- "zephium-extension-package",
-]
-
-[[package]]
-name = "zephium-extension-distribution"
-version = "0.1.0"
-dependencies = [
- "ring",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "url",
- "zephium-core",
- "zephium-extension-authority",
- "zephium-extension-package",
- "zephium-update-transport",
-]
-
-[[package]]
-name = "zephium-extension-package"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "proptest",
- "ring",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "url",
- "zephium-core",
-]
-
-[[package]]
-name = "zephium-extension-product-probe"
-version = "0.1.0"
-dependencies = [
- "libc",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "raw-window-handle",
- "sha2 0.10.9",
- "tempfile",
- "url",
- "zephium-core",
- "zephium-engine",
- "zephium-extension-authority",
- "zephium-extension-package",
- "zephium-extension-repository",
- "zephium-extension-runtime-api",
- "zephium-extension-service",
- "zephium-private-fs",
- "zephium-store",
-]
-
-[[package]]
-name = "zephium-extension-repository"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "ring",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "zephium-core",
- "zephium-extension-acquisition",
- "zephium-extension-authority",
- "zephium-extension-package",
- "zephium-extension-runtime-api",
- "zephium-private-fs",
- "zip",
-]
-
-[[package]]
-name = "zephium-extension-runtime-api"
-version = "0.1.0"
-dependencies = [
- "serde",
- "sha2 0.10.9",
- "zephium-core",
-]
-
-[[package]]
-name = "zephium-extension-service"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "ring",
- "sha2 0.10.9",
- "tempfile",
- "zephium-core",
- "zephium-extension-authority",
- "zephium-extension-package",
- "zephium-extension-repository",
- "zephium-extension-runtime-api",
- "zephium-private-fs",
- "zephium-store",
-]
-
-[[package]]
-name = "zephium-extension-updater"
-version = "0.1.0"
-dependencies = [
- "tokio",
- "zephium-app",
- "zephium-core",
- "zephium-extension-distribution",
 ]
 
 [[package]]
@@ -7521,6 +7472,7 @@ dependencies = [
  "rustix",
  "tempfile",
  "thiserror 2.0.18",
+ "unicode-normalization",
  "windows",
 ]
 
@@ -7559,7 +7511,6 @@ dependencies = [
  "zephium-core",
  "zephium-decision",
  "zephium-engine",
- "zephium-extension-service",
  "zephium-ipc",
  "zephium-store",
  "zephium-work-composition",
@@ -7573,8 +7524,53 @@ dependencies = [
  "futures-util",
  "reqwest",
  "thiserror 2.0.18",
+ "time",
  "tough",
  "url",
+]
+
+[[package]]
+name = "zephium-webext"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
+ "zip",
+]
+
+[[package]]
+name = "zephium-webext-macos"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "block2",
+ "dispatch2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
+ "serde_json",
+ "zephium-webext",
+]
+
+[[package]]
+name = "zephium-webext-windows"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "raw-window-handle",
+ "serde_json",
+ "sha2 0.10.9",
+ "webview2-com",
+ "windows",
+ "wry",
+ "zephium-webext",
 ]
 
 [[package]]

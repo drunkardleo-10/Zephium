@@ -232,6 +232,10 @@ where useful and performance-appropriate; unused library styling does not requir
 a custom chart implementation. Execution approval and semantic artifact editing
 bring the Work detail static graph to 121,330 JS / 14,479 CSS bytes; reviewed
 limits are 123,000 / 16,000. These features remain outside Browse startup.
+The 2026-09-25 extension store UI integration adds 147 bytes to shared lazy
+graphs: NotesPage measures 290,005 versus 289,858 bytes and the notes domain
+149,522 versus 149,375. Their JS caps were reviewed at 290,500 and 150,000;
+browser startup remains at the 24-request cap without a new eager feature.
 
 Native chrome/page separation, synchronous tab-presentation sentinels, fixed-raster
 favicons, scoped event transport and production CSP remain in place. Appearance,

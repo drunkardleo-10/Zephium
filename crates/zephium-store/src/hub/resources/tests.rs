@@ -242,7 +242,7 @@ fn schema28_widens_resource_kinds_and_keeps_receipts_joined() {
     let path = dir.path().join("resources.sqlite");
     let mut conn = Connection::open(&path).unwrap();
     configure(&conn).unwrap();
-    migrations::apply(&mut conn, &migrations::PROFILE[..27]).unwrap();
+    migrations::apply(&mut conn, &migrations::PROFILE[..30]).unwrap();
     let create = command("create", ResourceIntent::Create { draft: task() });
     let first = applied(mutate(&mut conn, ProfileId::from(1), create.clone()).unwrap());
     let bytes_before: i64 = conn
@@ -253,7 +253,7 @@ fn schema28_widens_resource_kinds_and_keeps_receipts_joined() {
         )
         .unwrap();
     migrations::apply(&mut conn, migrations::PROFILE).unwrap();
-    assert!(migrations::apply(&mut conn, &migrations::PROFILE[..27]).is_err());
+    assert!(migrations::apply(&mut conn, &migrations::PROFILE[..30]).is_err());
     conn.execute(
         "INSERT INTO resource_titles_fts(resource_titles_fts) VALUES('integrity-check')",
         [],

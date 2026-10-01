@@ -3156,30 +3156,21 @@ impl EngineHost {
         let deadline = now
             .checked_add(Duration::from_secs(5))
             .ok_or(ContextPortFailure::NativeRefused)?;
-        self.ensure_windows_extension_profile_at_path(
+        self.ensure_windows_profile_environment_at_path(
             profile,
             deadline,
             expected_user_data_folder.clone(),
+            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
         )
-        .map_err(map_windows_extension_profile_failure)?;
-        let native_profile = self
-            .windows_extension_profiles
-            .get(&profile)
-            .cloned()
-            .ok_or(ContextPortFailure::ExtensionIsolationUnproven)?;
-        let selected_is_empty =
-            if request.profile_lease().storage_class() == ContextProfileStorageClass::Durable {
-                native_profile
-                    .inventory_is_empty(deadline)
-                    .map_err(map_windows_extension_profile_failure)?
-            } else {
-                false
-            };
-        if !selected_is_empty && self.agent_cookie_quarantined_profiles.contains(&profile) {
+        .map_err(map_windows_profile_environment_failure)?;
+        // Durable environments admit human extensions from startup. Work
+        // always uses its existing, separate automation subprofile.
+        let selected = false;
+        if !selected && self.agent_cookie_quarantined_profiles.contains(&profile) {
             return Err(ContextPortFailure::CookieTransferFailed);
         }
-        let owned_profile = if selected_is_empty {
-            crate::platform::imp::AgentOwnedProfile::selected(native_profile)
+        let owned_profile = if selected {
+            crate::platform::imp::AgentOwnedProfile::Selected
         } else {
             crate::platform::imp::AgentOwnedProfile::automation(profile)
         };
@@ -3214,6 +3205,7 @@ impl EngineHost {
             request.profile_lease().storage_class(),
             &expected_user_data_folder,
             deadline,
+            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
             crate::platform::imp::AgentOwnedViewCallbacks::new(
                 move |terminal| {
                     let rejected = navigation_guard.clone();
@@ -3471,7 +3463,7 @@ impl EngineHost {
             .and_then(|binding| {
                 binding
                     .view
-                    .cookie_destination(&expected_environment, terminal_deadline)
+                    .cookie_destination(&expected_environment)
                     .map_err(|_| ContextCookieTransferFailure::DestinationUnavailable)
             });
         let (destination_manager, destination_native_profile) = match destination_authority {
@@ -3946,10 +3938,7 @@ impl EngineHost {
             return;
         }
         let expected = binding.committed_target.clone();
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
-            .unwrap_or_else(Instant::now);
-        if let Err(failure) = binding.view.attest(deadline) {
+        if let Err(failure) = binding.view.attest() {
             task.refuse(map_owned_view_construction_failure(failure));
             return;
         }
@@ -5017,42 +5006,14 @@ impl EngineHost {
 }
 
 #[cfg(target_os = "windows")]
-fn map_windows_extension_profile_failure(
-    failure: crate::platform::imp::WindowsNativeExtensionFailure,
+fn map_windows_profile_environment_failure(
+    failure: super::construction::WindowsProfileEnvironmentFailure,
 ) -> ContextPortFailure {
-    use crate::platform::imp::WindowsNativeExtensionFailure as Failure;
+    use super::construction::WindowsProfileEnvironmentFailure as Failure;
     match failure {
-        Failure::ExistingEnvironmentModeConflict | Failure::ProfileHostUnavailable => {
-            ContextPortFailure::ProfileBusy
-        }
-        Failure::EnvironmentAttestation
-        | Failure::ProfileMismatch
-        | Failure::PrivateProfileUnsupported => ContextPortFailure::ProfileUnavailable,
-        Failure::InventoryCapacityExceeded
-        | Failure::InventoryIdentityConflict
-        | Failure::InventoryOwnerMissing
-        | Failure::InventoryMismatch
-        | Failure::ProfileInterfaceUnavailable => ContextPortFailure::ExtensionIsolationUnproven,
-        Failure::NativeCall(_)
-        | Failure::NativeCallTimedOut(_)
-        | Failure::NativeCallInterruptedByShutdown(_)
-        | Failure::NativeMessagePumpFailed(_)
-        | Failure::NativeCallbackDisconnected(_)
-        | Failure::AdapterFailStopped
-        | Failure::ReentrantNativeCall
-        | Failure::NativeOwnerCapacityExceeded
-        | Failure::MissingNativeObject
-        | Failure::IdentityReadbackFailed
-        | Failure::IdentityMalformed
-        | Failure::IdentityMismatchQuarantined
-        | Failure::EnabledReadbackFailed
-        | Failure::InstalledOwnerDisabled
-        | Failure::ProfileHostConstructionFailed
-        | Failure::ProfileHostCleanupFailed
-        | Failure::AdapterInvariant
-        | Failure::PackageRootAccess(_)
-        | Failure::PackageRootRejected(_)
-        | Failure::RemovedOwnerStillPresent => ContextPortFailure::NativeRefused,
+        Failure::Busy => ContextPortFailure::ProfileBusy,
+        Failure::Mismatch => ContextPortFailure::ProfileUnavailable,
+        Failure::Construction => ContextPortFailure::NativeRefused,
     }
 }
 
@@ -5316,9 +5277,9 @@ mod tests {
             .split_once("#[cfg(target_os = \"windows\")]\nimpl EngineHost {")
             .expect("Windows owner implementation")
             .1;
-        let extension_profile = windows
-            .find("ensure_windows_extension_profile_at_path(")
-            .expect("extension-enabled environment proof");
+        let environment = windows
+            .find("ensure_windows_profile_environment_at_path(")
+            .expect("profile environment proof");
         let transient_resource = windows
             .find("try_acquire(NativeResourceClass::TransientConstruction)")
             .expect("transient resource");
@@ -5340,7 +5301,7 @@ mod tests {
         let publish = windows
             .find("self.agent_contexts.entry(id)")
             .expect("private owner publication");
-        assert!(extension_profile < transient_resource);
+        assert!(environment < transient_resource);
         assert!(transient_resource < build);
         assert!(build < cleanup_import);
         assert!(cleanup_import < process);

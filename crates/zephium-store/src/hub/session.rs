@@ -61,6 +61,10 @@ struct BoundedClosedTab {
     url: String,
     title: String,
     zoom: f64,
+    #[serde(default)]
+    session_id: Option<zephium_core::ids::ClosedSessionId>,
+    #[serde(default)]
+    closed_at_ms: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -85,6 +89,9 @@ enum BoundedKind {
         url: String,
         title: String,
         zoom: f64,
+    },
+    BrowserTab {
+        page: zephium_core::item::BrowserOwnedTab,
     },
 }
 
@@ -119,6 +126,7 @@ where
                     && zoom.is_finite()
                     && (0.3..=3.0).contains(zoom)
             }
+            BoundedKind::BrowserTab { .. } => true,
         }
     })
 }
@@ -134,6 +142,10 @@ where
             && entry.title.len() <= MAX_TITLE_BYTES
             && entry.zoom.is_finite()
             && (0.3..=3.0).contains(&entry.zoom)
+            && (entry.session_id.is_some() == entry.closed_at_ms.is_some())
+            && entry
+                .closed_at_ms
+                .is_none_or(|ms| (1_000..=9_007_199_254_740_991).contains(&ms))
     })
 }
 
@@ -175,6 +187,7 @@ impl From<BoundedSessionState> for SessionState {
                         BoundedKind::Tab { url, title, zoom } => {
                             PersistedKind::Tab { url, title, zoom }
                         }
+                        BoundedKind::BrowserTab { page } => PersistedKind::BrowserTab { page },
                     },
                 })
                 .collect(),
@@ -190,6 +203,8 @@ impl From<BoundedSessionState> for SessionState {
                     url: entry.url,
                     title: entry.title,
                     zoom: entry.zoom,
+                    session_id: entry.session_id,
+                    closed_at_ms: entry.closed_at_ms,
                 })
                 .collect(),
         }
@@ -200,6 +215,199 @@ fn decode_authoritative_snapshot(data: &str) -> Option<SessionState> {
     bounded_json::from_str::<BoundedSessionState>(data)
         .ok()
         .map(SessionState::from)
+}
+
+#[cfg(test)]
+mod qa_settings_recovery_tests {
+    use super::*;
+
+    const REASON: &str = "authoritative session is not in exact canonical form";
+
+    fn saved_qa_session() -> SessionState {
+        let profile = ProfileId::from(701);
+        let space = SpaceId::from(702);
+        SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "QA".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![PersistedSpace {
+                id: space,
+                profile,
+                name: "Browse".into(),
+            }],
+            items: vec![
+                PersistedItem {
+                    id: ItemId::from(703),
+                    parent: None,
+                    placement: Placement::Space {
+                        space,
+                        section: SpaceSection::Today,
+                    },
+                    kind: PersistedKind::Tab {
+                        url: "https://example.test/".into(),
+                        title: "Example".into(),
+                        zoom: 1.0,
+                    },
+                },
+                PersistedItem {
+                    id: ItemId::from(704),
+                    parent: None,
+                    placement: Placement::Space {
+                        space,
+                        section: SpaceSection::Today,
+                    },
+                    kind: PersistedKind::BrowserTab {
+                        page: zephium_core::item::BrowserOwnedTab::Settings,
+                    },
+                },
+            ],
+            active_space: Some(space),
+            active_item: Some(ItemId::from(704)),
+            splits: None,
+            recently_closed: Vec::new(),
+        }
+    }
+
+    fn marked_directory(reason: &str) -> (tempfile::TempDir, SessionState) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = saved_qa_session();
+        assert_eq!(core_session::canonicalize(state.clone()), state);
+        {
+            let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+            hub.save(&state).unwrap();
+            hub.record_visit(state.profiles[0].id, "https://example.test/", "Example");
+        }
+        let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+        let data: String = meta
+            .query_row(
+                "SELECT data FROM session_snapshot WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        meta.execute(
+            "INSERT INTO session_recovery(id, detected_at, reason, schema_version, data)
+             VALUES (1, 1, ?1, ?2, ?3)",
+            params![reason, SESSION_SCHEMA_VERSION, data.as_bytes()],
+        )
+        .unwrap();
+        (dir, state)
+    }
+
+    #[test]
+    fn exact_qa_settings_marker_recovers_without_rewriting_session_or_profile_files() {
+        let (dir, expected) = marked_directory(REASON);
+        let profile_file = dir
+            .path()
+            .join(format!("profile-{}.sqlite", expected.profiles[0].id));
+        let original: String = Connection::open(dir.path().join("meta.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT data FROM session_snapshot WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert!(hub.recovery_reason().is_none());
+        assert_eq!(hub.load().unwrap(), Some(expected));
+        assert!(profile_file.exists());
+        let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+        let after: String = meta
+            .query_row(
+                "SELECT data FROM session_snapshot WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let markers: i64 = meta
+            .query_row("SELECT count(*) FROM session_recovery", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(after, original);
+        assert_eq!(markers, 0);
+    }
+
+    #[test]
+    fn unrelated_or_changed_recovery_markers_remain_read_only() {
+        for case in ["other-reason", "changed-snapshot", "still-noncanonical"] {
+            let reason = if case == "other-reason" {
+                "unrelated recovery"
+            } else {
+                REASON
+            };
+            let (dir, mut state) = marked_directory(reason);
+            let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+            match case {
+                "changed-snapshot" => {
+                    meta.execute(
+                        "UPDATE session_snapshot SET data = data || ' ' WHERE id = 1",
+                        [],
+                    )
+                    .unwrap();
+                }
+                "still-noncanonical" => {
+                    state.active_item = Some(ItemId::from(999_999));
+                    let data = serde_json::to_string(&state).unwrap();
+                    meta.execute(
+                        "UPDATE session_snapshot SET data = ?1 WHERE id = 1",
+                        [&data],
+                    )
+                    .unwrap();
+                    meta.execute(
+                        "UPDATE session_recovery SET data = ?1 WHERE id = 1",
+                        [data.as_bytes()],
+                    )
+                    .unwrap();
+                }
+                _ => {}
+            }
+            drop(meta);
+            let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+            assert!(hub.recovery_reason().is_some(), "{case}");
+            assert!(hub.load().is_err(), "{case}");
+            let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+            let markers: i64 = meta
+                .query_row("SELECT count(*) FROM session_recovery", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(markers, 1, "{case}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod closed_session_wire_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_snapshot_decodes_old_closed_tabs_without_inventing_identity_or_time() {
+        let profile = ProfileId::from(1);
+        let space = SpaceId::from(2);
+        let mut value = serde_json::json!({
+            "profiles": [], "spaces": [], "items": [],
+            "active_space": null, "active_item": null, "splits": null,
+            "recently_closed": [{
+                "profile": profile, "space": space,
+                "url": "https://example.test/", "title": "Example", "zoom": 1.0
+            }]
+        });
+        let old = decode_authoritative_snapshot(&value.to_string()).unwrap();
+        assert_eq!(old.recently_closed[0].session_id, None);
+        assert_eq!(old.recently_closed[0].closed_at_ms, None);
+
+        value["recently_closed"][0]["session_id"] =
+            serde_json::json!(zephium_core::ids::ClosedSessionId::from(3));
+        assert!(decode_authoritative_snapshot(&value.to_string()).is_none());
+        value["recently_closed"][0]["closed_at_ms"] = serde_json::json!(1_700_000_000_123_u64);
+        assert!(decode_authoritative_snapshot(&value.to_string()).is_some());
+        value["recently_closed"][0]["unknown"] = serde_json::json!(true);
+        assert!(decode_authoritative_snapshot(&value.to_string()).is_none());
+    }
 }
 
 impl Hub {
@@ -294,9 +502,7 @@ impl Hub {
         Self::validate_blocker_cohort_before_session_commit(&tx, &self.registry)?;
         if let Some(profile) = authorize_deletion {
             // Establish the deletion anchor before removing the active-profile
-            // anchor. Native namespace obligations are allowed to belong to
-            // either set, but never to an unanchored intermediate durable
-            // state. The surrounding transaction keeps the temporary overlap
+            // anchor. The surrounding transaction keeps the temporary overlap
             // invisible and rolls both changes back together.
             let inserted = tx.execute(
                 "INSERT INTO profile_deletion_journal(profile_id, authorized_at)
@@ -587,6 +793,89 @@ impl Hub {
 
     pub(crate) fn recovery_reason(&self) -> Option<&str> {
         self.recovery_required.as_deref()
+    }
+
+    /// An earlier QA build temporarily represented Settings as a typed tab.
+    /// Its later removal made that otherwise valid snapshot fail the exact
+    /// canonicalization gate and enter read-only recovery. Clear only that
+    /// specific marker when its preserved bytes still equal the current
+    /// bounded snapshot and the complete state is canonical again. Shell
+    /// retires the legacy row after loading and saves the resulting session.
+    pub(super) fn recover_qa_settings_tab_quarantine(&mut self) -> rusqlite::Result<bool> {
+        const REASON: &str = "authoritative session is not in exact canonical form";
+        if self.recovery_required.as_deref() != Some(REASON) {
+            return Ok(false);
+        }
+        let marker = self
+            .meta
+            .query_row(
+                "SELECT schema_version,
+                        CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data END
+                 FROM session_recovery WHERE id = 1 AND reason = ?2",
+                params![MAX_SESSION_SNAPSHOT_BYTES as i64, REASON],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((Some(version), Some(marked_bytes))) = marker else {
+            return Ok(false);
+        };
+        if version != SESSION_SCHEMA_VERSION {
+            return Ok(false);
+        }
+        let snapshot = self
+            .meta
+            .query_row(
+                "SELECT schema_version,
+                        CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data END
+                 FROM session_snapshot WHERE id = 1",
+                [MAX_SESSION_SNAPSHOT_BYTES as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((current_version, Some(data))) = snapshot else {
+            return Ok(false);
+        };
+        if current_version != version || data.as_bytes() != marked_bytes {
+            return Ok(false);
+        }
+        let Some(state) = decode_authoritative_snapshot(&data) else {
+            return Ok(false);
+        };
+        let qa_settings = state.items.iter().any(|item| {
+            item.parent.is_none()
+                && matches!(item.placement, Placement::Space { .. })
+                && matches!(
+                    item.kind,
+                    PersistedKind::BrowserTab {
+                        page: zephium_core::item::BrowserOwnedTab::Settings
+                    }
+                )
+        });
+        if !qa_settings
+            || self.validate_authoritative_registry(&state).is_err()
+            || core_session::canonicalize(state.clone()) != state
+        {
+            return Ok(false);
+        }
+        let removed = self.meta.execute(
+            "DELETE FROM session_recovery
+             WHERE id = 1 AND reason = ?1 AND schema_version = ?2 AND data = ?3
+               AND EXISTS (
+                   SELECT 1 FROM session_snapshot
+                   WHERE id = 1 AND schema_version = ?2 AND CAST(data AS BLOB) = ?3
+               )",
+            params![REASON, version, marked_bytes],
+        )?;
+        if removed != 1 {
+            return Ok(false);
+        }
+        self.recovery_required = None;
+        Ok(true)
     }
 
     pub(super) fn has_authoritative_snapshot(&self) -> rusqlite::Result<bool> {

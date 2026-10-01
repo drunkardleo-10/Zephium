@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Non-shipping gate for the live Windows adapter validation campaign.
+windows-namespace-validation = []
+
 [dependencies]
 thiserror.workspace = true
+unicode-normalization = "=0.1.25"
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -24,11 +29,4 @@ windows = { version = "=0.61.3", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Threading",
-] }
-
-[lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = [
-    "cfg(zephium_internal_repository_e2e)",
-    "cfg(zephium_private_fs_operation_instrumentation)",
-    "cfg(zephium_extension_product_measurement)",
 ] }

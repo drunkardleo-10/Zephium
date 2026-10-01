@@ -4,7 +4,8 @@ import { commands } from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
 import { events } from "$shared/ipc/native-events";
 
-export type BrowserPage = "settings" | "history" | "downloads" | "work" | "tasks" | "notes";
+export type BrowserPage =
+  "settings" | "extensions" | "history" | "downloads" | "work" | "tasks" | "notes";
 let page = $state<BrowserPage | null>(null);
 let error = $state(false);
 let generation = 0;
@@ -30,22 +31,19 @@ async function initialize(epoch: number) {
         error = true;
         return;
       }
-      const confirmed =
-        payload === "browser.return"
+      const destination = payload.startsWith("browser.") ? payload.slice(8) : "";
+      const confirmed: BrowserPage | null | undefined =
+        destination === "return"
           ? null
-          : payload === "browser.work"
-            ? "work"
-            : payload === "browser.settings"
-              ? "settings"
-              : payload === "browser.history"
-                ? "history"
-                : payload === "browser.downloads"
-                  ? "downloads"
-                  : payload === "browser.tasks"
-                    ? "tasks"
-                    : payload === "browser.notes"
-                      ? "notes"
-                      : undefined;
+          : destination === "work" ||
+              destination === "settings" ||
+              destination === "extensions" ||
+              destination === "history" ||
+              destination === "downloads" ||
+              destination === "tasks" ||
+              destination === "notes"
+            ? destination
+            : undefined;
       if (confirmed !== undefined) {
         navigationEpoch++;
         flushSync(() => {

@@ -45,8 +45,11 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     return apply(getter, value, []);
   }
 
-  var documentQueryAll = Document.prototype.querySelectorAll;
-  var fragmentQueryAll = DocumentFragment.prototype.querySelectorAll;
+  var createTreeWalker = Document.prototype.createTreeWalker;
+  var walkerNext = TreeWalker.prototype.nextNode;
+  var elementMatches = Element.prototype.matches;
+  var WeakReference = globalThis.WeakRef;
+  var weakDeref = WeakReference && WeakReference.prototype.deref;
   var readyState = captureGetter(Document.prototype, 'readyState');
   var shadowRootGetter = captureGetter(Element.prototype, 'shadowRoot');
   var inputType = captureGetter(HTMLInputElement.prototype, 'type');
@@ -75,15 +78,25 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var wrappedAttachShadow = originalAttachShadow;
   function rememberShadowRoot(root) {
     if (!root || apply(weakSetHas, shadowRootSet, [root])) return;
+    if (!WeakReference || !weakDeref) { uncertain = true; return; }
+    if (shadowRoots.length >= MAX_SHADOW_ROOTS) {
+      // The observer must not keep detached component trees alive. Compact
+      // only when admission needs space; no polling or finalizer is required.
+      var retained = 0;
+      for (var i = 0; i < shadowRoots.length; i++) {
+        if (apply(weakDeref, shadowRoots[i], [])) shadowRoots[retained++] = shadowRoots[i];
+      }
+      shadowRoots.length = retained;
+    }
     if (shadowRoots.length >= MAX_SHADOW_ROOTS) {
       uncertain = true;
       return;
     }
     apply(weakSetAdd, shadowRootSet, [root]);
-    apply(arrayPush, shadowRoots, [root]);
+    apply(arrayPush, shadowRoots, [new WeakReference(root)]);
   }
   try {
-    if (typeof originalAttachShadow !== 'function' || !fragmentQueryAll || !shadowRootGetter) {
+    if (typeof originalAttachShadow !== 'function' || !createTreeWalker || !walkerNext || !elementMatches || !weakDeref || !shadowRootGetter) {
       uncertain = true;
     } else {
       wrappedAttachShadow = function() {
@@ -105,7 +118,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   }
   try {
     wrappedAdd = function(type, listener, options) {
-      if (this === globalThis && String(type).toLowerCase() === 'beforeunload' && listener != null) {
+      if ((this === undefined || this === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
         var capture = captureOption(options);
         var found = false;
         for (var i = 0; i < beforeUnload.length; i++) {
@@ -120,7 +133,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     };
     wrappedRemove = function(type, listener, options) {
       var result = apply(originalRemove, this, arguments);
-      if (this === globalThis && String(type).toLowerCase() === 'beforeunload' && listener != null) {
+      if ((this === undefined || this === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
         var capture = captureOption(options);
         for (var i = 0; i < beforeUnload.length; i++) {
           if (beforeUnload[i][0] === listener && beforeUnload[i][1] === capture) {
@@ -210,52 +223,43 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
         localUncertain = true;
       }
 
-      function collect(selector) {
-        var values = [];
-        function append(scope, query) {
-          var found = apply(query, scope, [selector]);
-          var remaining = MAX_TRACKED - values.length;
-          if (found.length > remaining) localUncertain = true;
-          for (var n = 0; n < found.length && n < remaining; n++) {
-            apply(arrayPush, values, [found[n]]);
-          }
-        }
-        append(document, documentQueryAll);
-        for (var r = 0; r < shadowRoots.length; r++) {
-          if (values.length >= MAX_TRACKED) {
-            localUncertain = true;
-            break;
-          }
-          append(shadowRoots[r], fragmentQueryAll);
-        }
-        return values;
-      }
-
-      // Parser-created declarative roots do not necessarily pass through the
-      // JS attachShadow hook. Open roots are detectable via the captured
-      // native getter; retain them for inspection but veto this discard as an
-      // untracked state transition. Closed declarative roots are not exposed
-      // by the platform, so any still-observable declarative template also
-      // makes the result uncertain.
-      var discoveryPasses = 0;
-      var discovered;
-      do {
-        discovered = false;
-        var hosts = collect('*');
-        for (var s = 0; s < hosts.length; s++) {
-          var untracked = callGetter(shadowRootGetter, hosts[s]);
+      // One bounded snapshot replaces full-document querySelectorAll arrays
+      // and repeated shadow-tree scans. The former '*' query allocated every
+      // element before enforcing MAX_TRACKED. Oversized/uncertain documents
+      // remain protected; a partial scan can never authorize discard.
+      if (!createTreeWalker || !walkerNext || !elementMatches || !weakDeref) return 256;
+      var snapshotElements = [];
+      function append(scope) {
+        var walker = apply(createTreeWalker, document, [scope, 1]);
+        var node;
+        while ((node = apply(walkerNext, walker, []))) {
+          if (snapshotElements.length >= MAX_TRACKED) return false;
+          apply(arrayPush, snapshotElements, [node]);
+          // Parser-created open roots may bypass attachShadow. Inspect them
+          // too, but keep the existing uncertainty veto for their discovery.
+          var untracked = callGetter(shadowRootGetter, node);
           if (untracked && !apply(weakSetHas, shadowRootSet, [untracked])) {
             localUncertain = true;
             rememberShadowRoot(untracked);
-            discovered = true;
           }
         }
-        discoveryPasses++;
-        if (discoveryPasses > MAX_SHADOW_ROOTS) {
-          localUncertain = true;
-          break;
+        return true;
+      }
+      if (!append(document)) return 256;
+      for (var r = 0; r < shadowRoots.length; r++) {
+        var root = apply(weakDeref, shadowRoots[r], []);
+        if (root && !append(root)) return 256;
+      }
+      // A live root beyond the tracking cap is always a veto, including one
+      // discovered while walking the current snapshot.
+      localUncertain = localUncertain || uncertain;
+      function collect(selector) {
+        var values = [];
+        for (var n = 0; n < snapshotElements.length; n++) {
+          if (apply(elementMatches, snapshotElements[n], [selector])) apply(arrayPush, values, [snapshotElements[n]]);
         }
-      } while (discovered);
+        return values;
+      }
       if (collect('template[shadowrootmode],template[shadowroot]').length !== 0) {
         localUncertain = true;
       }
@@ -567,7 +571,13 @@ struct ProtectedScriptSpec {
     all_frames: bool,
 }
 
-const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
+const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
+    4 + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
+    ProtectedScriptSpec {
+        id: 6,
+        source: include_str!("content_style.js"),
+        all_frames: false,
+    },
     ProtectedScriptSpec {
         id: 1,
         source: DISCARD_SAFETY_BOOTSTRAP_JS,
@@ -583,6 +593,13 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
         source: crate::PAGE_PRINT_DENY_SCRIPT,
         all_frames: true,
     },
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    ProtectedScriptSpec {
+        // The desktop's global page style already owns builtin ID 4.
+        id: 5,
+        source: zephium_webext::store::PAGE_SCRIPT,
+        all_frames: false,
+    },
 ];
 
 /// Exact native installation descriptors for the feature-gated macOS
@@ -590,20 +607,21 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
 /// registry makes a future protected-script addition fail the installed-state
 /// gate unless its real source and frame scope survive native extension
 /// load/unload as well.
-#[cfg(all(
-    target_os = "macos",
-    any(
-        feature = "native-web-extension-probes",
-        feature = "agentic-browser-qa"
-    )
-))]
+#[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub(crate) fn protected_script_specs_for_native_probe(
 ) -> [(&'static str, bool); PROTECTED_SCRIPT_SPECS.len()] {
     PROTECTED_SCRIPT_SPECS.map(|spec| (spec.source, spec.all_frames))
 }
 
-fn protected_scripts() -> [UserScript; PROTECTED_SCRIPT_SPECS.len()] {
-    PROTECTED_SCRIPT_SPECS.map(|spec| builtin_script(spec.id, spec.source, spec.all_frames))
+fn protected_scripts() -> &'static [UserScript; PROTECTED_SCRIPT_SPECS.len()] {
+    // These descriptors contain only immutable, profile-independent source
+    // and matching rules. Each view still gets its own native registrations
+    // and document state; sharing Rust source buffers grants no shared world.
+    static SCRIPTS: std::sync::OnceLock<[UserScript; PROTECTED_SCRIPT_SPECS.len()]> =
+        std::sync::OnceLock::new();
+    SCRIPTS.get_or_init(|| {
+        PROTECTED_SCRIPT_SPECS.map(|spec| builtin_script(spec.id, spec.source, spec.all_frames))
+    })
 }
 
 fn is_protected_builtin_id(id: ScriptId) -> bool {
@@ -802,15 +820,21 @@ impl UserContentRegistry {
     }
 
     fn scripts_for(&self, partition: Partition) -> Vec<UserScript> {
-        let mut out = Vec::with_capacity(PROTECTED_SCRIPT_SPECS.len());
-        out.extend(protected_scripts());
-        for scope in [
+        let scopes = [
             ContentScope::Global,
             ContentScope::Profile(partition.profile()),
-        ] {
-            if let Some(entry) = self.scopes.get(&scope) {
-                out.extend(entry.scripts.iter().cloned());
-            }
+        ]
+        .map(|scope| self.scopes.get(&scope));
+        let capacity = PROTECTED_SCRIPT_SPECS.len()
+            + scopes
+                .iter()
+                .flatten()
+                .map(|entry| entry.scripts.len())
+                .sum::<usize>();
+        let mut out = Vec::with_capacity(capacity);
+        out.extend(protected_scripts().iter().cloned());
+        for entry in scopes.into_iter().flatten() {
+            out.extend(entry.scripts.iter().cloned());
         }
         out
     }
@@ -1214,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_style_wrapper_is_shared_across_view_snapshots() {
+    fn immutable_host_sources_are_shared_across_view_snapshots() {
         let registry = UserContentRegistry::with_initial_global(
             generation(1),
             UserContent {
@@ -1232,6 +1256,22 @@ mod tests {
         let partition = Partition::Persistent(ProfileId::from(22));
         let first = registry.scripts_for(partition);
         let second = registry.scripts_for(partition);
+        let private = registry.scripts_for(Partition::Ephemeral(ProfileId::from(23)));
+        for index in 0..PROTECTED_SCRIPT_SPECS.len() {
+            assert!(std::sync::Arc::ptr_eq(
+                &first[index].source,
+                &second[index].source
+            ));
+            assert!(std::sync::Arc::ptr_eq(
+                &first[index].source,
+                &private[index].source
+            ));
+            assert_eq!(first[index].owner, ScriptOwner::Builtin);
+            assert_eq!(
+                first[index].all_frames,
+                PROTECTED_SCRIPT_SPECS[index].all_frames
+            );
+        }
         let first_style = first
             .iter()
             .find(|script| script.id == ScriptId::from(4))
@@ -1312,6 +1352,9 @@ mod tests {
             platform_refusals(&content),
             vec![UserScriptRefusal {
                 registration: content.scripts[0].key(),
+                #[cfg(target_os = "windows")]
+                reason: UserScriptRefusalReason::UnsupportedWorld,
+                #[cfg(not(target_os = "windows"))]
                 reason: UserScriptRefusalReason::UnsupportedMatchSet,
             }]
         );
@@ -1326,7 +1369,9 @@ mod tests {
             "elementProto.attachShadow !== wrappedAttachShadow",
             "rememberShadowRoot",
             "shadowRoots.length >= MAX_SHADOW_ROOTS",
-            "DocumentFragment.prototype.querySelectorAll",
+            "Document.prototype.createTreeWalker",
+            "new WeakReference(root)",
+            "snapshotElements.length >= MAX_TRACKED",
             "template[shadowrootmode]",
             "collect('input,textarea,select')",
             "collect('[contenteditable]",

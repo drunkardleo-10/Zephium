@@ -399,7 +399,11 @@ mod thumb {
     fn prune(root: &std::path::Path) {
         let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
         for profile in std::fs::read_dir(root).into_iter().flatten().flatten() {
-            for entry in std::fs::read_dir(profile.path()).into_iter().flatten().flatten() {
+            for entry in std::fs::read_dir(profile.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 if let Ok(meta) = entry.metadata() {
                     let stamp = meta
                         .accessed()

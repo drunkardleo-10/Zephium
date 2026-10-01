@@ -4,9 +4,7 @@ use std::sync::Arc;
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
-    ExtensionBrowserSurface, ExtensionCompatibilityBrokerRequest,
-    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
-    ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
+    ExtensionBrowserSurface,
 };
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
@@ -15,12 +13,28 @@ pub use crate::permissions::PagePermissionKind as PermissionKind;
 use crate::permissions::{
     PagePermissionRequest, PagePermissionRequestId, PagePermissionRequestSettlement,
 };
-use crate::ports::extensions::{
-    ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptSettlement,
-    ExtensionRuntimeGrantRequestId,
-};
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
+
+/// A prepared extension package the user has consented to run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionLoad {
+    pub install: ExtensionInstallId,
+    /// The Chrome Web Store ID, which is also the extension's origin.
+    pub extension_id: String,
+    pub root: std::path::PathBuf,
+    pub permissions: Vec<String>,
+    pub match_patterns: Vec<String>,
+    /// Set when the package changed since WebKit last ran it, so its
+    /// background runs once and WebKit relearns what it listens for.
+    pub start_background: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionLoaded {
+    pub name: String,
+    pub version: String,
+}
 
 /// Which engine data partition a view lives in. Every persistent profile gets
 /// its own engine store; incognito is ephemeral and never intentionally
@@ -513,7 +527,104 @@ pub enum StageMotion {
     Arrive,
 }
 
+/// Exactly-once completion ownership for a per-profile native site snapshot.
+/// Dropping a refused or shutdown task reports failure rather than stranding
+/// an accepted caller. It carries no page data or native handles.
+pub struct BlockerSiteCompletion(Option<Box<dyn FnOnce(bool) + Send>>);
+
+impl BlockerSiteCompletion {
+    pub fn new(done: impl FnOnce(bool) + Send + 'static) -> Self {
+        Self(Some(Box::new(done)))
+    }
+    pub fn finish(mut self, applied: bool) {
+        if let Some(done) = self.0.take() {
+            done(applied);
+        }
+    }
+}
+
+impl Drop for BlockerSiteCompletion {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(false);
+        }
+    }
+}
+
+/// Native candidate admission does not install profile or view policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentRuleValidationOutcome {
+    Valid,
+    /// Dispatch/queue/lifecycle refusal is retryable, not a bad list verdict.
+    Unavailable,
+    Rejected(crate::blocker::ContentRuleApplyFailure),
+}
+
+/// Exactly-once native preflight completion; dropped work remains unavailable.
+pub struct ContentRuleValidationCompletion(
+    Option<Box<dyn FnOnce(ContentRuleValidationOutcome) + Send>>,
+);
+impl ContentRuleValidationCompletion {
+    pub fn new(done: impl FnOnce(ContentRuleValidationOutcome) + Send + 'static) -> Self {
+        Self(Some(Box::new(done)))
+    }
+    pub fn finish(mut self, outcome: ContentRuleValidationOutcome) {
+        if let Some(done) = self.0.take() {
+            done(outcome);
+        }
+    }
+}
+impl Drop for ContentRuleValidationCompletion {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(ContentRuleValidationOutcome::Unavailable);
+        }
+    }
+}
+
 pub trait Engine {
+    fn set_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _counter: crate::blocker::BlockedLoadCounter,
+    ) {
+    }
+    fn collect_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _reset: bool,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
+        done();
+    }
+
+    fn validate_content_rules(
+        &self,
+        _rules: Arc<ContentRules>,
+        completion: ContentRuleValidationCompletion,
+    ) {
+        completion.finish(ContentRuleValidationOutcome::Unavailable);
+    }
+
+    fn element_picker(
+        &self,
+        _profile: ProfileId,
+        _id: ItemId,
+        _site: crate::blocker::BlockerSite,
+        _request: crate::blocker::ElementPickerRequest,
+        completion: crate::blocker::ElementPickerCompletion,
+    ) {
+        completion.finish(None);
+    }
+
+    fn set_blocker_site_preferences(
+        &self,
+        _profile: ProfileId,
+        _preferences: Arc<crate::blocker::PreparedBlockerSites>,
+        completion: BlockerSiteCompletion,
+    ) {
+        completion.finish(false);
+    }
     /// Browser-owned file actions. Only trusted Shell admission supplies the
     /// profile partition; the caller supplies IDs, never filesystem paths.
     fn download_call(
@@ -630,6 +741,41 @@ pub trait Engine {
     fn set_extension_browser_surface(&self, _surface: ExtensionBrowserSurface) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Loads a prepared extension package into the profile's runtime, or
+    /// replaces the loaded one for the same install. The outcome arrives as
+    /// [`EngineEvent::WebExtensionSettled`].
+    fn load_web_extension(&self, _profile: ProfileId, _load: WebExtensionLoad) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Stops one installed extension; it keeps its stored data.
+    fn unload_web_extension(
+        &self,
+        _profile: ProfileId,
+        _install: ExtensionInstallId,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Opens an extension's options page in a tab.
+    fn open_web_extension_options(
+        &self,
+        _profile: ProfileId,
+        _extension_id: String,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Settles a [`EngineEvent::WebExtensionAccessRequested`].
+    fn answer_web_extension_access(
+        &self,
+        _profile: ProfileId,
+        _request: u64,
+        _allowed: bool,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Stops an extension being uninstalled and erases what it stored.
+    fn remove_web_extension(&self, _profile: ProfileId, _load: WebExtensionLoad) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Requests one complete effective toolbar-action cohort for the exact
     /// published logical tab generation. The terminal result arrives as
     /// [`EngineEvent::ExtensionActionsSnapshotSettled`]. This query may read
@@ -651,11 +797,6 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
-    /// Opens the exact declared options page for one currently published
-    /// runtime in a browser-owned, capability-limited native surface.
-    fn open_extension_options(&self, _runtime: ExtensionRuntimeInstance) -> NativeDispatch {
-        NativeDispatch::Unsupported
-    }
     /// Settles one exact native WebExtension browser mutation. The native
     /// adapter retains the platform completion handler behind the
     /// `(profile, request)` correlation pair and invokes it exactly once.
@@ -664,31 +805,7 @@ pub trait Engine {
         _profile: ProfileId,
         _request: ExtensionBrowserRequestId,
         _settlement: ExtensionBrowserRequestSettlement,
-    ) -> NativeDispatch {
-        NativeDispatch::Unsupported
-    }
-    /// Settles one exact, authority-bound Zephium compatibility request. The
-    /// native adapter retains the one-shot reply and independently times it
-    /// out; this port exposes no arbitrary native application identifier.
-    fn settle_extension_compatibility_broker_request(
-        &self,
-        _runtime: ExtensionRuntimeInstance,
-        _request: ExtensionCompatibilityBrokerRequestId,
-        _settlement: ExtensionCompatibilityBrokerSettlement,
-    ) -> NativeDispatch {
-        NativeDispatch::Unsupported
-    }
-    /// Settles one exact native optional-grant callback cohort after Shell has
-    /// obtained a user decision and, for `Granted`, the serialized extension
-    /// service has durably committed and rebound that complete cohort.
-    ///
-    /// The native adapter matches both the process-local runtime generation
-    /// and request id before invoking retained WebKit completion handlers.
-    fn settle_extension_runtime_grant_prompt(
-        &self,
-        _runtime: ExtensionRuntimeInstance,
-        _request: ExtensionRuntimeGrantRequestId,
-        _settlement: ExtensionRuntimeGrantPromptSettlement,
+        _first_url_after_reply: Option<(Arc<str>, NavigationRequestId)>,
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -753,14 +870,9 @@ pub trait Engine {
     /// `TimedOut` is only a one-shot report to the caller: retry remains denied
     /// while the old native work might still be running, and a late terminal
     /// callback releases admission without invoking `done` again.
-    /// `extension_native_namespace` is the exact durable Store obligation that
-    /// must be joined into the native absence proof. `None` is authoritative
-    /// only when Store reported no such obligation; adapters must never infer
-    /// absence from process-local controller maps.
     fn erase_profile_data(
         &self,
         _profile: ProfileId,
-        _extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     );
     /// Close every native view/context on its owning thread. Completion runs
@@ -869,6 +981,16 @@ impl PartialEq for NativeTabAdoption {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionAccessRequest {
+    pub profile: ProfileId,
+    pub request: u64,
+    pub extension_id: String,
+    pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     /// A native browser environment reported that a newer runtime is
@@ -907,24 +1029,33 @@ pub enum EngineEvent {
     ExtensionBrowserRequested {
         request: ExtensionBrowserRequest,
     },
-    /// One exact published runtime invoked a product-sealed compatibility
-    /// operation after native context binding and API authority were proven.
-    ExtensionCompatibilityBrokerRequested {
-        request: Box<ExtensionCompatibilityBrokerRequest>,
+    /// The exact native tabs.create completion has returned to its extension.
+    /// Shell may now dispatch this previously admitted first URL for the
+    /// still-owned logical tab. It grants no committed document or URL.
+    ExtensionCreatedTabReplied {
+        profile: ProfileId,
+        request: ExtensionBrowserRequestId,
+        tab: ItemId,
+        url: Arc<str>,
+        intent: NavigationRequestId,
     },
-    /// A native WebExtension context requested one complete optional API/host
-    /// cohort. The engine retains and times out every platform completion;
-    /// Shell owns user consent and must answer through
-    /// [`Engine::settle_extension_runtime_grant_prompt`].
-    ExtensionRuntimeGrantRequested {
-        prompt: Box<ExtensionRuntimeGrantPrompt>,
+    /// A native extension document's browser-owned tab guest was closed or
+    /// failed admission. The Shell must rejoin both fields to its typed tab
+    /// marker before removing it; the event carries no page URL authority.
+    ExtensionPageClosed {
+        profile: ProfileId,
+        id: ItemId,
     },
-    /// The native completion cohort timed out or its exact runtime retired
-    /// before Shell settled it. Browser-owned consent UI must remove the
-    /// matching prompt and must not begin a durable grant transaction.
-    ExtensionRuntimeGrantCancelled {
-        runtime: ExtensionRuntimeInstance,
-        request: ExtensionRuntimeGrantRequestId,
+    /// Trusted native page metadata for an already broker-bound extension
+    /// tab. The Shell must join profile and typed marker before projection;
+    /// extension URLs are deliberately absent from this browser-owned event.
+    ExtensionPageChanged {
+        profile: ProfileId,
+        id: ItemId,
+        title: String,
+        loading: bool,
+        can_go_back: bool,
+        can_go_forward: bool,
     },
     /// Terminal response to one exact effective action-cohort query.
     ExtensionActionsSnapshotSettled {
@@ -939,18 +1070,20 @@ pub enum EngineEvent {
         request: crate::extensions::ExtensionActionRequestId,
         settlement: crate::extensions::ExtensionActionSettlement,
     },
-    /// Terminal response to one browser-owned installed-extension settings
-    /// request. The runtime identity is echoed only for stale-result rejection.
-    ExtensionOptionsPageSettled {
-        runtime: ExtensionRuntimeInstance,
-        settlement: crate::extensions::ExtensionOptionsPageSettlement,
-    },
     /// Coalescible native notification that one or more effective actions for
     /// this profile changed. It carries no native or extension identity; the
     /// Shell responds by requesting a fresh exact replacement cohort.
     ExtensionActionsInvalidated {
         profile: ProfileId,
     },
+    WebExtensionSettled {
+        profile: ProfileId,
+        install: ExtensionInstallId,
+        result: Result<WebExtensionLoaded, String>,
+    },
+    /// An extension asked at run time for access the user must approve;
+    /// answered through [`EnginePort::answer_web_extension_access`].
+    WebExtensionAccessRequested(Box<WebExtensionAccessRequest>),
     /// A native command matched the reserved browser-action shortcut for one
     /// exact published runtime and resident tab. The event carries no popup
     /// geometry: Shell must rejoin it to the current action snapshot and ask

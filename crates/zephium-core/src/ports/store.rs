@@ -1,15 +1,7 @@
-use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
-use crate::extensions::{
-    ExtensionGrantAuthority, ExtensionGrantCohort, ExtensionGrantManifestBindings,
-    ExtensionGrantMutation, ExtensionGrantPatch, ExtensionGrantRevision, ExtensionInstall,
-    ExtensionInstallCatalog, ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision, ExtensionManifestDescriptor, ExtensionNativeIncarnation,
-    ExtensionNativeNamespaceScope, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipJournal,
-    ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipOperation,
-    ExtensionRuntimeEligibilityDenial, MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES,
-    MAX_EXTENSION_GRANT_RETAINED_BYTES,
+use crate::blocker::{
+    BlockerConfig, BlockerConfigRevision, BlockerSitePreferences, ProfileBlockerConfig,
 };
-use crate::ids::{ExtensionInstallId, ProfileId};
+use crate::ids::ProfileId;
 use crate::permissions::{
     PagePermissionCatalog, PagePermissionCatalogRevision, PagePermissionPatch,
     PagePermissionPatchResults,
@@ -18,7 +10,6 @@ use crate::session::SessionState;
 use crate::userscripts::{
     Userscript, UserscriptCatalog, UserscriptCatalogMutation, UserscriptCatalogRevision,
 };
-use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,10 +48,6 @@ pub const MAX_FAVICON_BATCH_ORIGINS: usize = 512;
 pub struct PendingProfileDeletion {
     pub profile: ProfileId,
     pub native_erasure_verified: bool,
-    /// Exact durable platform namespace whose absence must be included in the
-    /// engine proof. `None` means Store retains no native namespace erasure
-    /// obligation for this profile.
-    pub extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,11 +69,6 @@ pub enum ProfileDeletionAuthorizeOutcome {
     NotRegistered,
     SessionConflict,
     InvalidSession,
-    /// One or more durable native-extension ownership rows still reference
-    /// this profile, or the complete cohort could not be safely proven empty.
-    /// The extension coordinator must reconcile native absence and durable
-    /// state before profile deletion can be authorized.
-    ExtensionNativeOwnershipPending,
     NotAdmitted,
     OutcomeUnknown,
     Failed,
@@ -168,6 +150,23 @@ pub enum BlockerConfigLoadOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockerSiteLoadOutcome {
+    Loaded(std::sync::Arc<BlockerSitePreferences>),
+    NotRegistered,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockerSiteUpdateOutcome {
+    Updated(std::sync::Arc<BlockerSitePreferences>),
+    Conflict(std::sync::Arc<BlockerSitePreferences>),
+    NotRegistered,
+    /// A commit was attempted and its durable outcome must be reconciled.
+    OutcomeUnknown,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UserscriptCatalogLoadOutcome {
     Loaded(UserscriptCatalog),
     NotRegistered,
@@ -236,381 +235,6 @@ pub enum PagePermissionCatalogMutationOutcome {
     },
     NotRegistered,
     DegradedProfile,
-    Invalid,
-    LimitReached,
-    RevisionExhausted,
-    OutcomeUnknown,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionInstallCatalogLoadOutcome {
-    Loaded(ExtensionInstallCatalog),
-    NotRegistered,
-    /// The exact per-profile database was preserved but could not be safely
-    /// opened at the shipped schema. No subset of its installs is returned.
-    DegradedProfile,
-    Failed,
-}
-
-/// Exact durable native namespace obligation for one registered profile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExtensionNativeNamespaceLoadOutcome {
-    Loaded(Option<ExtensionNativeNamespaceScope>),
-    NotRegistered,
-    DegradedProfile,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionProfilePolicyLoadOutcome {
-    Loaded(crate::extensions::ExtensionProfilePolicy),
-    NotRegistered,
-    DegradedProfile,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionProfilePolicyMutationOutcome {
-    Applied {
-        policy: crate::extensions::ExtensionProfilePolicy,
-        changed: bool,
-    },
-    Conflict {
-        current: crate::extensions::ExtensionProfilePolicyRevision,
-    },
-    NotRegistered,
-    DegradedProfile,
-    Invalid,
-    LimitReached,
-    RevisionExhausted,
-    RuntimeOwnershipConflict,
-    OutcomeUnknown,
-    Failed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExtensionInstallCatalogMutationApplied {
-    pub catalog_revision: ExtensionInstallCatalogRevision,
-    /// Greatest install id durably admitted by this profile, including rows
-    /// since deleted. Future install ids must compare strictly greater.
-    pub install_id_high_water: Option<ExtensionInstallId>,
-    /// The exact durable row after install/enablement. Deletion returns
-    /// `None`; callers retain the mutation's stable install id for
-    /// reconciliation.
-    pub install: Option<Box<ExtensionInstall>>,
-}
-
-/// Durable result of one profile extension-install catalog mutation.
-///
-/// The pure extension aggregate owns transition semantics. This port reports
-/// only persistence settlement: `OutcomeUnknown` requires an exact catalog
-/// reload before another mutation, while every definite refusal proves no
-/// durable commit was attempted.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionInstallCatalogMutationOutcome {
-    Applied(ExtensionInstallCatalogMutationApplied),
-    Conflict {
-        current: ExtensionInstallCatalogRevision,
-    },
-    NotRegistered,
-    DegradedProfile,
-    Invalid,
-    LimitReached,
-    RevisionExhausted,
-    /// A changed disable or deletion would invalidate an unresolved native
-    /// owner. Exact semantic no-ops remain admissible; callers must retire and
-    /// clear every context row for the install before retrying a real change.
-    RuntimeOwnershipConflict,
-    OutcomeUnknown,
-    Failed,
-}
-
-/// Durable settlement of one curated install and its complete initial grant
-/// authority in a single profile-database transaction.
-///
-/// The installed row is always created disabled. A successful result therefore
-/// records package selection and the user's exact permission decision without
-/// granting native runtime ownership or affirming enabled intent. Callers must
-/// enter the ordinary serialized enable/activation transaction separately.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ExtensionInstallProvisionOutcome {
-    Applied(ExtensionGrantMutationApplied),
-    Conflict {
-        current: ExtensionInstallCatalogRevision,
-    },
-    NotRegistered,
-    DegradedProfile,
-    Invalid,
-    LimitReached,
-    RevisionExhausted,
-    /// The SQLite commit was attempted but its settlement could not be
-    /// observed. No further management write is safe in this process.
-    OutcomeUnknown,
-    Failed,
-}
-
-/// Atomic settlement for one authenticated package replacement and its
-/// package-bound grant root.
-///
-/// The caller must retire every native context before admission. Store then
-/// compares catalog/install/grant revisions, verifies both manifests, carries
-/// forward only still-declared grants, and advances all three durable
-/// revisions in one SQLite transaction.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ExtensionInstallUpdateOutcome {
-    Applied(ExtensionGrantMutationApplied),
-    Conflict(ExtensionGrantConflict),
-    NotRegistered,
-    DegradedProfile,
-    Uninitialized,
-    /// The replacement adds required API or host authority that the existing
-    /// grant root does not cover. No durable state changed.
-    AdditionalConsentRequired,
-    Invalid,
-    RevisionExhausted,
-    RuntimeOwnershipConflict,
-    OutcomeUnknown,
-    Failed,
-}
-
-/// Exact grant policy for one atomic installed-package replacement.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExtensionInstallUpdateGrantDecision {
-    /// Carry forward only authority already granted and still declared. A new
-    /// required declaration returns `AdditionalConsentRequired` unchanged.
-    PreserveExisting,
-    /// The user reviewed the exact replacement package and approved all of
-    /// its required API and host declarations. Optional, file, and private
-    /// authority remain unchanged or denied.
-    GrantReplacementRequired,
-}
-
-/// Bounded grant write payload. Initialization persists a complete selected
-/// grant set in one transaction; later settings changes remain per-install
-/// CAS operations.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ExtensionGrantWrite {
-    Initialize {
-        authority: Box<ExtensionGrantAuthority>,
-    },
-    Apply {
-        expected: ExtensionGrantRevision,
-        mutation: ExtensionGrantMutation,
-    },
-    /// Applies a canonical multi-target patch as one grant revision and one
-    /// profile-database transaction.
-    ApplyPatch {
-        expected: ExtensionGrantRevision,
-        patch: ExtensionGrantPatch,
-    },
-    /// Applies a grant-only optional-permission patch while one exact native
-    /// owner remains live.
-    ///
-    /// This is a distinct authority path, not an exception to `ApplyPatch`:
-    /// Store implementations must verify that `owner` is the sole unresolved
-    /// row for the install, is positively `NativeOwned`, and is bound to the
-    /// exact pre-mutation grant revision and digest. The resulting owner
-    /// journal rebind is a subsequent fail-closed settlement step.
-    ApplyLivePatch {
-        expected: ExtensionGrantRevision,
-        patch: ExtensionGrantPatch,
-        owner: crate::extensions::ExtensionNativeOwnershipEntryCas,
-    },
-}
-
-/// Conservative maximum logical retained bytes of one grant-write payload.
-pub const MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES: usize =
-    std::mem::size_of::<ExtensionGrantWrite>()
-        + if MAX_EXTENSION_GRANT_RETAINED_BYTES > MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES {
-            MAX_EXTENSION_GRANT_RETAINED_BYTES
-        } else {
-            MAX_EXTENSION_GRANT_PATCH_RETAINED_BYTES
-        }
-        + 256;
-
-impl ExtensionGrantWrite {
-    pub fn retained_bytes(&self) -> usize {
-        let payload = match self {
-            Self::Initialize { authority } => authority.retained_bytes(),
-            Self::Apply { mutation, .. } => match mutation {
-                ExtensionGrantMutation::SetApi { name, .. } => {
-                    std::mem::size_of::<ExtensionGrantMutation>() + name.len() + 64
-                }
-                ExtensionGrantMutation::SetHost { pattern, .. } => pattern.retained_budget_bytes(),
-                ExtensionGrantMutation::SetFileAccess { .. }
-                | ExtensionGrantMutation::SetPrivateAccess { .. } => {
-                    std::mem::size_of::<ExtensionGrantMutation>()
-                }
-            },
-            Self::ApplyPatch { patch, .. } | Self::ApplyLivePatch { patch, .. } => {
-                patch.retained_bytes()
-            }
-        };
-        let retained = std::mem::size_of::<Self>().saturating_add(payload);
-        debug_assert!(retained <= MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES);
-        retained
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ExtensionGrantCohortLoadOutcome {
-    Loaded(ExtensionGrantCohort),
-    NotRegistered,
-    DegradedProfile,
-    /// The submitted manifest cohort does not exactly bind the current
-    /// install catalog. No durable write was attempted.
-    Invalid,
-    Failed,
-}
-
-/// Revisions observed while rejecting one grant CAS.
-///
-/// These values are diagnostic only: a caller must reload the exact atomic
-/// install-and-grant cohort before deriving another authority-bearing write.
-/// They are not a partial authority snapshot and must not be used for a blind
-/// retry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExtensionGrantConflict {
-    pub current_catalog: ExtensionInstallCatalogRevision,
-    pub current_install: Option<ExtensionInstallRevision>,
-    pub current_grant: Option<ExtensionGrantRevision>,
-}
-
-impl ExtensionGrantConflict {
-    pub const fn new(
-        current_catalog: ExtensionInstallCatalogRevision,
-        current_install: Option<ExtensionInstallRevision>,
-        current_grant: Option<ExtensionGrantRevision>,
-    ) -> Self {
-        Self {
-            current_catalog,
-            current_install,
-            current_grant,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct ExtensionGrantMutationApplied {
-    pub catalog_revision: ExtensionInstallCatalogRevision,
-    pub install: Box<ExtensionInstall>,
-    pub authority: Box<ExtensionGrantAuthority>,
-}
-
-impl ExtensionGrantMutationApplied {
-    pub const fn new(
-        catalog_revision: ExtensionInstallCatalogRevision,
-        install: Box<ExtensionInstall>,
-        authority: Box<ExtensionGrantAuthority>,
-    ) -> Self {
-        Self {
-            catalog_revision,
-            install,
-            authority,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ExtensionGrantMutationOutcome {
-    Applied(ExtensionGrantMutationApplied),
-    Conflict(ExtensionGrantConflict),
-    NotRegistered,
-    DegradedProfile,
-    Uninitialized,
-    Invalid,
-    RevisionExhausted,
-    /// A changed grant write would invalidate an unresolved native owner.
-    /// The conflict begins at `NativeAbsentPreparing` and remains until the
-    /// exact profile/install/context journal row is durably cleared.
-    RuntimeOwnershipConflict,
-    OutcomeUnknown,
-    Failed,
-}
-
-/// Which compact Store cohort fact no longer matches an authenticated native
-/// activation attempt.
-///
-/// These reasons intentionally carry no package, digest, path, profile, or
-/// install payload. A caller must obtain a fresh complete cohort rather than
-/// trying to repair or retry from partial diagnostic state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ExtensionNativeOwnershipActivationStale {
-    CatalogRevision,
-    InstallMissing,
-    InstallRevision,
-    Package,
-    GrantRevision,
-    GrantDigest,
-}
-
-/// Durable settlement of one Store-fenced fresh native activation step.
-///
-/// Both fresh Begin and the final Preparing-to-MayOwn transition validate the
-/// exact install/grant cohort in the same Store actor turn as the journal CAS.
-/// Ordinary cohort drift is explicit and is never reported as corruption.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionNativeOwnershipActivationOutcome {
-    Applied(ExtensionNativeOwnershipJournalMutationApplied),
-    Conflict {
-        current: ExtensionNativeOwnershipJournalRevision,
-    },
-    NotRegistered,
-    DegradedProfile,
-    /// Session recovery forbids creating or advancing native ownership.
-    SessionRecoveryRequired,
-    Stale(ExtensionNativeOwnershipActivationStale),
-    EligibilityChanged(ExtensionRuntimeEligibilityDenial),
-    Invalid,
-    LimitReached,
-    RevisionExhausted,
-    OutcomeUnknown,
-    Failed,
-}
-
-/// Result of loading the complete global native-ownership reconciliation
-/// journal. Corrupt, unknown, duplicate, or over-limit durable state fails as
-/// a whole; no filtered subset may be used for reconciliation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionNativeOwnershipJournalLoadOutcome {
-    Loaded(ExtensionNativeOwnershipJournal),
-    Failed,
-}
-
-/// Exact bounded state returned after one durable journal mutation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExtensionNativeOwnershipJournalMutationApplied {
-    pub journal_revision: ExtensionNativeOwnershipJournalRevision,
-    pub operation_high_water: Option<ExtensionNativeOwnershipOperation>,
-    pub native_incarnation_high_water: Option<ExtensionNativeIncarnation>,
-    pub grant_rebind_count: crate::extensions::ExtensionNativeOwnershipGrantRebindCount,
-    /// The exact affected row after begin/transition. Clear returns `None`.
-    pub entry: Option<Box<ExtensionNativeOwnershipEntry>>,
-}
-
-/// Durable settlement of one global-CAS journal begin, transition, or clear.
-///
-/// `OutcomeUnknown` means the transaction entered commit but settlement was
-/// not observable; callers must reload the complete journal before issuing
-/// another native call or mutation. `SessionRecoveryRequired`, `Invalid`,
-/// `LimitReached`, and `RevisionExhausted` prove no commit was attempted. The
-/// concrete Store authority reports definite actor non-admission separately;
-/// it is not represented by this persistence outcome.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionNativeOwnershipJournalMutationOutcome {
-    Applied(ExtensionNativeOwnershipJournalMutationApplied),
-    Conflict {
-        current: ExtensionNativeOwnershipJournalRevision,
-    },
-    NotRegistered,
-    DegradedProfile,
-    /// Session recovery forbids establishing or advancing a native owner.
-    /// Exact release-directed transitions and clear mutations remain
-    /// available so an already journaled owner can be retired without
-    /// weakening the cleanup barrier.
-    SessionRecoveryRequired,
     Invalid,
     LimitReached,
     RevisionExhausted,
@@ -734,6 +358,24 @@ pub trait Store {
     ) -> bool {
         false
     }
+    /// Private-session preferences must never be passed to these durable ports.
+    fn load_profile_blocker_sites(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(BlockerSiteLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+
+    fn update_profile_blocker_sites(
+        &self,
+        _profile: ProfileId,
+        _expected_revision: u64,
+        _next: std::sync::Arc<BlockerSitePreferences>,
+        _done: Box<dyn FnOnce(BlockerSiteUpdateOutcome) + Send>,
+    ) -> bool {
+        false
+    }
     /// Loads one complete bounded profile catalog. `true` transfers
     /// exactly-once callback ownership; `false` proves the request was not
     /// admitted. Implementations must never return a filtered valid subset of
@@ -776,78 +418,6 @@ pub trait Store {
         _expected: PagePermissionCatalogRevision,
         _patch: PagePermissionPatch,
         _done: Box<dyn FnOnce(PagePermissionCatalogMutationOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Loads one complete bounded extension-install catalog for a registered
-    /// durable profile. A malformed row fails the catalog as a whole; no
-    /// filtered subset may cross this boundary. `true` transfers exactly-once
-    /// callback ownership to the adapter; `false` proves non-admission and
-    /// guarantees that the callback will not run.
-    fn load_extension_install_catalog(
-        &self,
-        _profile: ProfileId,
-        _done: Box<dyn FnOnce(ExtensionInstallCatalogLoadOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Applies one fixed-size extension-install mutation after comparing the
-    /// complete catalog revision. Structural package identity is not package
-    /// authentication and does not authorize native activation. `true`
-    /// transfers exactly-once callback ownership; `false` proves that no
-    /// mutation was admitted and the callback will not run.
-    fn mutate_extension_install_catalog(
-        &self,
-        _profile: ProfileId,
-        _expected: ExtensionInstallCatalogRevision,
-        _mutation: ExtensionInstallCatalogMutation,
-        _done: Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Atomically loads the complete install catalog and explicit grant state
-    /// for every install against an exact bounded descriptor cohort.
-    fn load_extension_grant_cohort(
-        &self,
-        _profile: ProfileId,
-        _bindings: ExtensionGrantManifestBindings,
-        _done: Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Loads the complete profile-wide extension execution policy.
-    fn load_extension_profile_policy(
-        &self,
-        _profile: ProfileId,
-        _done: Box<dyn FnOnce(ExtensionProfilePolicyLoadOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Applies one exact profile-wide pause/site-denial policy mutation.
-    /// Changed mutations must be refused while native runtime ownership for
-    /// the profile remains unresolved.
-    fn mutate_extension_profile_policy(
-        &self,
-        _profile: ProfileId,
-        _expected: crate::extensions::ExtensionProfilePolicyRevision,
-        _mutation: crate::extensions::ExtensionProfilePolicyMutation,
-        _done: Box<dyn FnOnce(ExtensionProfilePolicyMutationOutcome) + Send>,
-    ) -> bool {
-        false
-    }
-    /// Initializes or changes one grant authority only after comparing the
-    /// install catalog, exact install row, and target grant absence/revision
-    /// in the same transaction.
-    #[allow(clippy::too_many_arguments)]
-    fn mutate_extension_grants(
-        &self,
-        _profile: ProfileId,
-        _expected_catalog: ExtensionInstallCatalogRevision,
-        _expected_install: ExtensionInstallRevision,
-        _install_id: ExtensionInstallId,
-        _manifest: Arc<ExtensionManifestDescriptor>,
-        _write: ExtensionGrantWrite,
-        _done: Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>,
     ) -> bool {
         false
     }
@@ -899,13 +469,26 @@ pub trait Store {
     /// Removes every visit to each address; returns how many rows went.
     fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32;
     /// Removes visits at or after `since`, or all of them when it is absent.
+    fn load_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        done: Box<dyn FnOnce(Option<crate::blocker::BlockerStatistics>) + Send>,
+    ) -> bool {
+        done(Some(crate::blocker::BlockerStatistics::default()));
+        true
+    }
+    fn save_blocker_statistics(
+        &self,
+        _profile: ProfileId,
+        _statistics: crate::blocker::BlockerStatistics,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) -> bool {
+        done(false);
+        true
+    }
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32;
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
-    /// Bounded, deduplicated recent history for browser-owned consumers such
-    /// as a reviewed extension compatibility adapter. Implementations must
-    /// keep profile isolation and the same URL/title validation as search.
-    fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit>;
     /// Age in seconds of the cached icon for a page origin, None when absent.
     fn favicon_age(&self, profile: ProfileId, origin: &str) -> Option<i64>;
     fn save_favicon(

@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+official-https = ["dep:rustix", "dep:tokio", "dep:windows", "dep:zephium-update-transport"]
 tuf = [
     "dep:async-trait",
     "dep:rustix",
@@ -13,6 +14,7 @@ tuf = [
     "dep:tough",
     "dep:windows",
     "dep:zephium-update-transport",
+    "zephium-update-transport/tough",
 ]
 
 [dependencies]
@@ -24,7 +26,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "time"], optional = true }
 tough = { workspace = true, optional = true }
 url.workspace = true
-zephium-update-transport = { workspace = true, features = ["tough"], optional = true }
+zephium-update-transport = { workspace = true, optional = true }
 
 [dev-dependencies]
 aws-lc-rs = "=1.17.3"

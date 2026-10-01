@@ -23,7 +23,7 @@ pub(super) struct ExtensionActionState {
     // Also acts as a bounded pending-settlement watchdog. A scheduled read
     // remains here until an exact applied result arrives, so the ordinary
     // maintenance tick repairs a dropped callback without a hot timer.
-    retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    retry_profiles: zephium_core::extensions::ExtensionActiveProfiles,
     pending: HashMap<ExtensionActionRequestId, ExtensionActionRequest>,
     next_request_id: Option<u64>,
 }
@@ -32,7 +32,7 @@ impl Default for ExtensionActionState {
     fn default() -> Self {
         Self {
             snapshots: HashMap::new(),
-            retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+            retry_profiles: zephium_core::extensions::ExtensionActiveProfiles::EMPTY,
             pending: HashMap::new(),
             next_request_id: Some(1),
         }
@@ -58,9 +58,15 @@ impl ExtensionActionState {
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> Vec<ExtensionActionView> {
-        let Some(snapshot) = self.snapshots.get(&profile).filter(|snapshot| {
-            snapshot.tab() == tab && snapshot.surface_generation() == surface_generation
-        }) else {
+        // A newer surface generation (a title or load-state change) does not
+        // change the tab's actions; keep them visible until the fresh
+        // snapshot replaces them rather than blanking the toolbar.
+        let _ = surface_generation;
+        let Some(snapshot) = self
+            .snapshots
+            .get(&profile)
+            .filter(|snapshot| snapshot.tab() == tab)
+        else {
             return Vec::new();
         };
         snapshot
@@ -112,9 +118,6 @@ impl ExtensionActionState {
             .first()
             .and_then(|window| window.tabs().iter().find(|candidate| candidate.id() == tab))
             .is_some_and(zephium_core::extensions::ExtensionBrowserTab::resident);
-        if !resident {
-            return Err(ExtensionActionRejection::TabDiscarded);
-        }
         let action = self
             .snapshots
             .get(&runtime.profile())
@@ -130,6 +133,9 @@ impl ExtensionActionState {
             .ok_or(ExtensionActionRejection::ActionUnavailable)?;
         if !action.is_enabled() {
             return Err(ExtensionActionRejection::ActionDisabled);
+        }
+        if !resident && !action.presents_popup() {
+            return Err(ExtensionActionRejection::TabDiscarded);
         }
         Ok(action.revision())
     }
@@ -185,7 +191,7 @@ impl ExtensionActionState {
     }
 
     #[cfg(test)]
-    fn retry_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    fn retry_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.retry_profiles
     }
 

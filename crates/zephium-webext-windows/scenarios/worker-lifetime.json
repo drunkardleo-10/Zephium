@@ -1,0 +1,12 @@
+[
+  {"load":"crates/zephium-webext-windows/fixtures/diagnostic"},
+  {"navigate":"$ORIGIN/first"},
+  {"sleep":4000},
+  {"label":"worker initial start","eval":"return JSON.parse(document.documentElement.dataset.zephiumWorker)"},
+  {"label":"worker target before idle","cdp":"Target.getTargets"},
+  {"sleep":45000,"label":"no extension messaging for 45 seconds"},
+  {"label":"worker target after idle","cdp":"Target.getTargets"},
+  {"navigate":"$ORIGIN/wake"},
+  {"sleep":1500},
+  {"label":"worker after new content-script message","eval":"const until=Date.now()+10000;while(!document.documentElement.dataset.zephiumWorker&&Date.now()<until)await new Promise(r=>setTimeout(r,100));return {url:location.href,data:{...document.documentElement.dataset},worker:document.documentElement.dataset.zephiumWorker?JSON.parse(document.documentElement.dataset.zephiumWorker):null}"}
+]

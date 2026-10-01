@@ -26,9 +26,11 @@ impl EngineHost {
             let Some(view) = self.views.get_mut(&id) else {
                 return false;
             };
-            let Ok(next) =
-                crate::platform::imp::install_content_policy_on_view(&view.view, &policy)
-            else {
+            let Ok(next) = crate::platform::imp::install_scoped_content_policy_on_view(
+                &view.view,
+                &policy,
+                &view.site_scope.pause,
+            ) else {
                 return false;
             };
             let previous = view.content_policy_registration.replace(next);
@@ -92,7 +94,7 @@ impl EngineHost {
         url: &str,
         features: NewWindowFeatures,
     ) -> NewWindowResponse {
-        if !features.user_initiated || !zephium_core::navigation::is_allowed_str(url) {
+        if !features.user_initiated || !permit.allows_target(url) {
             return NewWindowResponse::Deny;
         }
         let Some(view) = self.views.get(&source) else {
@@ -105,9 +107,9 @@ impl EngineHost {
         {
             return NewWindowResponse::Deny;
         }
-        let Some(token) = permit.active_token() else {
+        if permit.active_token().is_none() {
             return NewWindowResponse::Deny;
-        };
+        }
         let Some(partition) = self.partitions.get(&source).copied() else {
             return NewWindowResponse::Deny;
         };
@@ -146,6 +148,26 @@ impl EngineHost {
                 return NewWindowResponse::Deny;
             }
         }
+        self.adopt_native_tab(source, permit, activity, url, features, || true)
+    }
+
+    /// Both callers authenticate their native opener first. Preserve WebView2's
+    /// original request (including OAuth state); never replay just its URL.
+    pub(super) fn adopt_native_tab(
+        &mut self,
+        source: ItemId,
+        permit: &EventPermit,
+        activity: NavigationActivity,
+        url: &str,
+        features: NewWindowFeatures,
+        opener_current: impl Fn() -> bool,
+    ) -> NewWindowResponse {
+        let Some(token) = permit.active_token() else {
+            return NewWindowResponse::Deny;
+        };
+        let Some(partition) = self.partitions.get(&source).copied() else {
+            return NewWindowResponse::Deny;
+        };
         let child = ItemId::generate();
         let Some(active) =
             self.native_open_authority
@@ -167,7 +189,8 @@ impl EngineHost {
             self.native_open_authority.release_failed(child, &active);
             return NewWindowResponse::Deny;
         };
-        if !token.load(Ordering::Acquire)
+        if !opener_current()
+            || !token.load(Ordering::Acquire)
             || !active.load(Ordering::Acquire)
             || !self.views.get(&source).is_some_and(|view| {
                 view.event_permit.same_generation(permit)
@@ -323,6 +346,9 @@ fn windows_menu_item_allowed(name: &str) -> bool {
             | "openLinkInNewTab"
             | "openImageInNewWindow"
             | "openImageInNewTab"
+            // WebView2 owns the installed extension's submenu and dispatch.
+            // Keep it intact after the same foreground/document checks above.
+            | "extension"
     )
 }
 #[cfg(test)]
@@ -332,12 +358,14 @@ mod tests {
     fn native_windows_context_menu_keeps_file_actions_but_denies_unbrokered_surfaces() {
         assert!(windows_menu_item_allowed("saveImageAs"));
         assert!(windows_menu_item_allowed("copyLinkLocation"));
+        assert!(windows_menu_item_allowed("extension"));
         for name in [
             "print",
             "savePageAs",
             "inspectElement",
             "share",
             "unknownFutureCommand",
+            "custom",
         ] {
             assert!(!windows_menu_item_allowed(name));
         }

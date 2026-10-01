@@ -199,7 +199,7 @@ fn profile18_migration_and_reopen_preserve_objectives_selection_and_exact_receip
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("profile.sqlite");
     let mut conn = Connection::open(&path).unwrap();
-    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..25]).unwrap();
+    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..28]).unwrap();
     insert_objective(&mut conn, 1.into(), 60.into());
     crate::migrations::apply(&mut conn, crate::migrations::PROFILE).unwrap();
     let initial = create(&mut conn, 1, 1, 3);
@@ -954,16 +954,16 @@ fn schema19_upgrade_retains_old_receipts_and_checkpoint_cas_survives_reopen() {
     let path = dir.path().join("profile.sqlite");
     let mut conn = Connection::open(&path).unwrap();
     conn.pragma_update(None, "foreign_keys", true).unwrap();
-    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..26]).unwrap();
+    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..29]).unwrap();
     let initial = create(&mut conn, 1, 1, 3);
     // A provisional schema19 checkpoint receipt is historical metadata. Upgrade
     // retains its digest verbatim; no old random ID becomes a new checkpoint.
     let old_digest = vec![7_u8; 32];
     conn.execute("INSERT INTO work_environment_commands(command_id,digest,environment_id,revision,view_revision) VALUES (?1,?2,?3,1,1)",params![WorkCommandId::from(9_u128).to_string(),old_digest,initial.id.to_string()]).unwrap();
     crate::migrations::apply(&mut conn, crate::migrations::PROFILE).unwrap();
-    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..26]).is_err());
+    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..29]).is_err());
+    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..28]).is_err());
     assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..25]).is_err());
-    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..22]).is_err());
     assert_eq!(
         conn.query_row(
             "SELECT digest FROM work_environment_commands WHERE command_id=?1",

@@ -24,11 +24,7 @@ const LOCK_FILE_CONTENT: &[u8] = b"zephium-private-fs\nlock-format=1\n";
 
 #[inline]
 fn write_all_private_regular(file: &mut File, bytes: &[u8]) -> Result<(), PrivateFsError> {
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    let result = crate::instrumentation::MeasuredWriter::new(file).write_all(bytes);
-    #[cfg(not(zephium_private_fs_operation_instrumentation))]
-    let result = file.write_all(bytes);
-    result.map_err(|_| PrivateFsError::Io)
+    file.write_all(bytes).map_err(|_| PrivateFsError::Io)
 }
 
 #[inline]
@@ -37,33 +33,24 @@ fn copy_exact_to_private_regular(
     file: &mut File,
     expected: StreamingFileLength,
 ) -> Result<(), ExactCopyError> {
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    {
-        copy_exact(
-            source,
-            &mut crate::instrumentation::MeasuredWriter::new(file),
-            expected,
-        )
-    }
-    #[cfg(not(zephium_private_fs_operation_instrumentation))]
-    {
-        copy_exact(source, file, expected)
-    }
+    copy_exact(source, file, expected)
 }
 
 #[inline]
 fn sync_private_regular(file: &File) -> Result<(), PrivateFsError> {
+    #[cfg(target_os = "windows")]
+    platform::sync_regular(file)?;
+    #[cfg(not(target_os = "windows"))]
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_file_sync();
     Ok(())
 }
 
 #[inline]
 fn sync_private_directory(file: &File) -> Result<(), PrivateFsError> {
+    #[cfg(target_os = "windows")]
+    platform::sync_directory(file)?;
+    #[cfg(not(target_os = "windows"))]
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_sync();
     Ok(())
 }
 
@@ -312,8 +299,33 @@ impl SealedPrivateDirectory {
             DirectoryMode::Sealed,
             ChildName::Entry(name),
             limit,
-            callback,
+            |reader, _| callback(reader),
         )
+    }
+
+    /// Reads a sealed regular file's bounded logical length without reading payload.
+    /// Exact spelling, identity, read-only mode and unchanged length are checked.
+    pub fn entry_regular_length(
+        &self,
+        name: &PrivateEntryName,
+        limit: ByteLimit,
+    ) -> Result<Option<u64>, PrivateFsError> {
+        let _operation = self.lease.begin()?;
+        self.precheck_unlocked()?;
+        with_bounded_sealed_regular_reader_unlocked(
+            &self.core,
+            &self.lease,
+            DirectoryMode::Sealed,
+            ChildName::Entry(name),
+            limit,
+            |_, length| Ok::<_, std::convert::Infallible>(length),
+        )
+        .map(|value| {
+            value.map(|value| match value {
+                Ok(length) => length,
+                Err(never) => match never {},
+            })
+        })
     }
 
     /// Runs a synchronous callback with this sealed capability's verified path.
@@ -1532,7 +1544,7 @@ impl PrivateDirectory {
             DirectoryMode::Writable,
             name,
             limit,
-            callback,
+            |reader, _| callback(reader),
         )
     }
 
@@ -1558,6 +1570,36 @@ impl PrivateDirectory {
         name: ChildName<'_>,
         limit: ByteLimit,
         callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    ) -> Result<Option<Result<T, E>>, PrivateFsError> {
+        self.with_bounded_regular_reader_and_length_named(name, limit, |reader, _| callback(reader))
+    }
+
+    /// Reads a regular file's bounded logical length without reading its payload.
+    /// The same exact-name, identity, mode and final-length checks as a bounded
+    /// read protect the observation. It is a snapshot, not lasting file authority.
+    pub fn entry_regular_length(
+        &self,
+        name: &PrivateEntryName,
+        limit: ByteLimit,
+    ) -> Result<Option<u64>, PrivateFsError> {
+        self.with_bounded_regular_reader_and_length_named(
+            ChildName::Entry(name),
+            limit,
+            |_, length| Ok::<_, std::convert::Infallible>(length),
+        )
+        .map(|value| {
+            value.map(|value| match value {
+                Ok(length) => length,
+                Err(never) => match never {},
+            })
+        })
+    }
+
+    fn with_bounded_regular_reader_and_length_named<T, E>(
+        &self,
+        name: ChildName<'_>,
+        limit: ByteLimit,
+        callback: impl FnOnce(&mut dyn Read, u64) -> Result<T, E>,
     ) -> Result<Option<Result<T, E>>, PrivateFsError> {
         let _operation = self.begin_operation()?;
         self.reject_reserved_name(name)?;
@@ -1590,12 +1632,8 @@ impl PrivateDirectory {
         }
 
         let callback_result = {
-            let bounded = Read::by_ref(&mut verified.file).take(initial_length);
-            #[cfg(zephium_private_fs_operation_instrumentation)]
-            let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-            #[cfg(not(zephium_private_fs_operation_instrumentation))]
-            let mut bounded = bounded;
-            callback(&mut bounded)
+            let mut bounded = Read::by_ref(&mut verified.file).take(initial_length);
+            callback(&mut bounded, initial_length)
         };
         let validation = (|| {
             let final_length = verified
@@ -1638,15 +1676,11 @@ impl PrivateDirectory {
             return Err(PrivateFsError::BoundExceeded);
         }
         let mut bytes = Vec::with_capacity(length);
-        let bounded = Read::by_ref(&mut verified.file).take(
+        let mut bounded = Read::by_ref(&mut verified.file).take(
             u64::try_from(limit.get())
                 .unwrap_or(u64::MAX)
                 .saturating_add(1),
         );
-        #[cfg(zephium_private_fs_operation_instrumentation)]
-        let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-        #[cfg(not(zephium_private_fs_operation_instrumentation))]
-        let mut bounded = bounded;
         bounded
             .read_to_end(&mut bytes)
             .map_err(|_| PrivateFsError::Io)?;
@@ -2422,8 +2456,10 @@ impl LockedPrivateNamespace {
     /// Missing ancestors are never created. Every existing ancestor must be a
     /// non-symlink directory accepted by the platform boundary checks. Root,
     /// administrators, and principals granted mutation through an ancestor ACL
-    /// remain outside this boundary's guarantee. Windows and unsupported Unix
-    /// targets fail before path inspection.
+    /// remain outside this boundary's guarantee. Unsupported Unix targets and
+    /// Windows without its explicit debug validation feature fail before path
+    /// inspection. The Windows validation adapter additionally requires local
+    /// NTFS and protected explicit private-node DACLs.
     pub fn open_or_create(root: impl Into<PathBuf>) -> Result<Self, PrivateFsError> {
         platform::admit_namespace_support()?;
         let root = root.into();
@@ -2435,16 +2471,27 @@ impl LockedPrivateNamespace {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let parent = root.parent().ok_or(PrivateFsError::Unsafe)?;
                 validate_directory_chain(parent, false)?;
-                let builder = private_directory_builder();
-                match builder.create(&root) {
-                    Ok(()) => {
-                        if platform::sync_ancestor_directory(parent).is_err() {
-                            return Err(PrivateFsError::SettlementUnknown);
-                        }
-                        true
+                #[cfg(target_os = "windows")]
+                {
+                    let created = platform::create_private_root(&root)?;
+                    if created && platform::sync_ancestor_directory(parent).is_err() {
+                        return Err(PrivateFsError::SettlementUnknown);
                     }
-                    Err(create) if create.kind() == std::io::ErrorKind::AlreadyExists => false,
-                    Err(create) => return Err(classify_root_create_error(&root, &create)),
+                    created
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let builder = private_directory_builder();
+                    match builder.create(&root) {
+                        Ok(()) => {
+                            if platform::sync_ancestor_directory(parent).is_err() {
+                                return Err(PrivateFsError::SettlementUnknown);
+                            }
+                            true
+                        }
+                        Err(create) if create.kind() == std::io::ErrorKind::AlreadyExists => false,
+                        Err(create) => return Err(classify_root_create_error(&root, &create)),
+                    }
                 }
             }
             Err(_) => return Err(PrivateFsError::Io),
@@ -2770,21 +2817,18 @@ fn lock_staging_component() -> Result<PrivateComponent, PrivateFsError> {
 fn read_lock_content(file: &mut File) -> Result<Vec<u8>, PrivateFsError> {
     file.rewind().map_err(|_| PrivateFsError::Io)?;
     let mut bytes = Vec::with_capacity(LOCK_FILE_CONTENT.len().saturating_add(1));
-    let bounded = Read::by_ref(file).take(
+    let mut bounded = Read::by_ref(file).take(
         u64::try_from(LOCK_FILE_CONTENT.len())
             .unwrap_or(u64::MAX)
             .saturating_add(1),
     );
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-    #[cfg(not(zephium_private_fs_operation_instrumentation))]
-    let mut bounded = bounded;
     bounded
         .read_to_end(&mut bytes)
         .map_err(|_| PrivateFsError::Io)?;
     Ok(bytes)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn classify_root_create_error(root: &Path, _error: &std::io::Error) -> PrivateFsError {
     let absent = matches!(
         fs::symlink_metadata(root),
@@ -2943,7 +2987,7 @@ fn with_bounded_sealed_regular_reader_unlocked<T, E>(
     parent_mode: DirectoryMode,
     name: ChildName<'_>,
     limit: ByteLimit,
-    callback: impl FnOnce(&mut dyn Read) -> Result<T, E>,
+    callback: impl FnOnce(&mut dyn Read, u64) -> Result<T, E>,
 ) -> Result<Option<Result<T, E>>, PrivateFsError> {
     let opened = platform::open_sealed_regular(&parent.handle, &parent.path, name.as_str())
         .and_then(|(file, identity)| {
@@ -2989,12 +3033,8 @@ fn with_bounded_sealed_regular_reader_unlocked<T, E>(
     }
 
     let callback_result = {
-        let bounded = Read::by_ref(&mut file).take(initial_length);
-        #[cfg(zephium_private_fs_operation_instrumentation)]
-        let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-        #[cfg(not(zephium_private_fs_operation_instrumentation))]
-        let mut bounded = bounded;
-        callback(&mut bounded)
+        let mut bounded = Read::by_ref(&mut file).take(initial_length);
+        callback(&mut bounded, initial_length)
     };
     lease.observe(validate_sealed_regular_after_read(
         parent,
@@ -3060,7 +3100,12 @@ fn replace_published_directory_identity_for_test(
         .core
         .path
         .join(format!(".{}.identity-race", destination.as_str()));
+    // macOS 15 refuses to rename a `0500` directory even within one parent.
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o700))
+        .map_err(|_| PrivateFsError::Io)?;
     fs::rename(&installed, &recovery).map_err(|_| PrivateFsError::Io)?;
+    fs::set_permissions(&recovery, fs::Permissions::from_mode(0o500))
+        .map_err(|_| PrivateFsError::Io)?;
     private_directory_builder()
         .create(&installed)
         .map_err(|_| PrivateFsError::Io)?;
@@ -3347,6 +3392,7 @@ fn validate_directory_chain(path: &Path, private_leaf: bool) -> Result<(), Priva
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn private_directory_builder() -> fs::DirBuilder {
     #[cfg(unix)]
     {
@@ -3364,6 +3410,49 @@ fn private_directory_builder() -> fs::DirBuilder {
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
+    #[test]
+    fn metadata_length_is_bounded_for_writable_and_sealed_files() {
+        let (_parent, namespace) = test_namespace("file-length-test");
+        let child = namespace
+            .directory
+            .create_new_private_child(&PrivateComponent::new("child").unwrap())
+            .unwrap();
+        let name = PrivateEntryName::new("payload").unwrap();
+        child
+            .write_new_entry_synced(&name, b"exact bytes", ByteLimit::new(11).unwrap())
+            .unwrap();
+        assert_eq!(
+            child.entry_regular_length(&name, ByteLimit::new(11).unwrap()),
+            Ok(Some(11))
+        );
+        assert_eq!(
+            child.entry_regular_length(&name, ByteLimit::new(10).unwrap()),
+            Err(PrivateFsError::BoundExceeded)
+        );
+        child.seal_verified_entry_regular(&name).unwrap().unwrap();
+        let sealed = child.seal().unwrap();
+        assert_eq!(
+            sealed.entry_regular_length(&name, ByteLimit::new(11).unwrap()),
+            Ok(Some(11))
+        );
+        assert_eq!(
+            sealed.entry_regular_length(&name, ByteLimit::new(10).unwrap()),
+            Err(PrivateFsError::BoundExceeded)
+        );
+        assert_eq!(
+            sealed.entry_regular_length(
+                &PrivateEntryName::new("absent").unwrap(),
+                ByteLimit::new(11).unwrap()
+            ),
+            Ok(None)
+        );
+        sealed
+            .unseal()
+            .unwrap()
+            .remove_verified_entry_regular(&name)
+            .unwrap();
+    }
+
     use super::*;
     use crate::lease::{CommittedMutationFault, LifecycleFault, StreamingFault};
     use std::fs::OpenOptions;
@@ -3443,6 +3532,16 @@ mod tests {
         fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let namespace = LockedPrivateNamespace::open_or_create(parent.path().join(name)).unwrap();
         (parent, namespace)
+    }
+
+    /// Moves a sealed directory aside as an external actor would. macOS 15
+    /// requires write permission on the moved directory even for a
+    /// same-parent rename, so the `0500` mode is lifted and then restored.
+    fn rename_sealed_directory(from: &Path, to: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(from, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(from, to).unwrap();
+        fs::set_permissions(to, fs::Permissions::from_mode(0o500)).unwrap();
     }
 
     fn transition_error_while_pinned<T, S>(
@@ -3587,11 +3686,10 @@ mod tests {
                 .unwrap()
                 .seal()
                 .unwrap();
-            fs::rename(
-                parent.path().join("stale-pinned-unseal-test/child"),
-                parent.path().join("stale-pinned-unseal-test/moved"),
-            )
-            .unwrap();
+            rename_sealed_directory(
+                &parent.path().join("stale-pinned-unseal-test/child"),
+                &parent.path().join("stale-pinned-unseal-test/moved"),
+            );
             let lease = Arc::clone(&child.lease);
             let error = transition_error_while_pinned(&lease, || child.unseal());
             assert_terminal_identity_ambiguity(error);
@@ -3612,15 +3710,14 @@ mod tests {
                 .unwrap()
                 .seal()
                 .unwrap();
-            fs::rename(
-                parent
+            rename_sealed_directory(
+                &parent
                     .path()
                     .join("stale-pinned-publish-test/objects/source"),
-                parent
+                &parent
                     .path()
                     .join("stale-pinned-publish-test/objects/moved"),
-            )
-            .unwrap();
+            );
             let lease = Arc::clone(&child.lease);
             let error = transition_error_while_pinned(&lease, || {
                 child.publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
@@ -3664,11 +3761,10 @@ mod tests {
                 .unwrap()
                 .seal()
                 .unwrap();
-            fs::rename(
-                parent.path().join("stale-pinned-sealed-remove-test/child"),
-                parent.path().join("stale-pinned-sealed-remove-test/moved"),
-            )
-            .unwrap();
+            rename_sealed_directory(
+                &parent.path().join("stale-pinned-sealed-remove-test/child"),
+                &parent.path().join("stale-pinned-sealed-remove-test/moved"),
+            );
             let lease = Arc::clone(&child.lease);
             let error = transition_error_while_pinned(&lease, || child.remove_empty());
             assert_terminal_identity_ambiguity(error);
@@ -4683,3 +4779,6 @@ mod tests {
         assert!(!moved.join(staging_name.as_str()).exists());
     }
 }
+
+#[cfg(all(test, target_os = "windows", feature = "windows-namespace-validation"))]
+mod windows_tests;

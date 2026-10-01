@@ -95,8 +95,10 @@ test("all open tabs is consent for one request, shown in the composer", async ()
     .toBeVisible();
   await all.click();
   await expect.element(all).toBeChecked();
-  await expect.element(screen.getByText("Using your open tabs", { exact: true })).toBeVisible();
   await userEvent.keyboard("{Escape}");
+  // Context is shown when the compact composer is engaged.
+  await composer.click();
+  await expect.element(screen.getByText("Using your open tabs", { exact: true })).toBeVisible();
   await composer.fill("What am I researching?");
   await screen.getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => run.mock.calls.length).toBe(1);

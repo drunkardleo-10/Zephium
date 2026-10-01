@@ -6,16 +6,16 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct ExtensionBrowserSurfaceState {
-    active_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
-    retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
-    retiring_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    active_profiles: zephium_core::extensions::ExtensionActiveProfiles,
+    retry_profiles: zephium_core::extensions::ExtensionActiveProfiles,
+    retiring_profiles: zephium_core::extensions::ExtensionActiveProfiles,
     published: HashMap<ProfileId, ExtensionBrowserSurface>,
 }
 
 #[derive(Default)]
 pub(super) struct ExtensionBrowserSurfaceSync {
     pub(super) native: NativeWork,
-    failed_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    failed_profiles: zephium_core::extensions::ExtensionActiveProfiles,
 }
 
 impl ExtensionBrowserSurfaceSync {
@@ -40,17 +40,6 @@ impl ExtensionBrowserSurfaceSync {
 }
 
 impl ExtensionBrowserSurfaceState {
-    pub(super) fn activate(
-        &mut self,
-        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
-    ) -> bool {
-        if !self.active_profiles.is_empty() && self.active_profiles != profiles {
-            return false;
-        }
-        self.active_profiles = profiles;
-        true
-    }
-
     pub(super) fn retire_profile(&mut self, profile: ProfileId) {
         self.active_profiles.remove(profile);
         self.retry_profiles.remove(profile);
@@ -63,7 +52,7 @@ impl ExtensionBrowserSurfaceState {
     /// until an empty native browser surface is accepted.
     pub(super) fn replace_active_profiles(
         &mut self,
-        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+        profiles: zephium_core::extensions::ExtensionActiveProfiles,
     ) -> bool {
         for profile in self.active_profiles.iter() {
             if !profiles.contains(profile) && !self.retiring_profiles.try_insert(profile) {
@@ -77,9 +66,7 @@ impl ExtensionBrowserSurfaceState {
         true
     }
 
-    pub(super) fn active_profiles(
-        &self,
-    ) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    pub(super) fn active_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.active_profiles
     }
 
@@ -104,11 +91,11 @@ impl ExtensionBrowserSurfaceState {
         self.retry_profiles.try_insert(profile)
     }
 
-    fn retry_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    fn retry_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.retry_profiles
     }
 
-    fn retiring_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    fn retiring_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.retiring_profiles
     }
 }
@@ -193,7 +180,7 @@ impl Shell {
         &mut self,
         profile: ProfileId,
     ) -> ExtensionBrowserSurfaceSync {
-        let mut profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+        let mut profiles = zephium_core::extensions::ExtensionActiveProfiles::EMPTY;
         if self
             .extension_browser_surfaces
             .active_profiles()
@@ -208,7 +195,7 @@ impl Shell {
 
     fn sync_extension_browser_surface_profiles(
         &mut self,
-        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+        profiles: zephium_core::extensions::ExtensionActiveProfiles,
     ) -> ExtensionBrowserSurfaceSync {
         if profiles.is_empty() {
             return ExtensionBrowserSurfaceSync::default();
@@ -343,7 +330,10 @@ impl Shell {
             .ok_or("active extension profile is absent from the session")?
             .kind
             == ProfileKind::Incognito;
-        let logical = ExtensionBrowserWindow::new(window.id, private, window.active, tabs)
+        let active = window
+            .active
+            .filter(|id| self.extension_tab_in_scope(*id, profile));
+        let logical = ExtensionBrowserWindow::new(window.id, private, active, tabs)
             .map_err(|_| "logical extension window failed validation")?;
         let focused = self
             .windows
@@ -392,6 +382,12 @@ impl Shell {
         };
         match &item.kind {
             ItemKind::Tab(tab) => {
+                if self
+                    .profile_of_item(id)
+                    .is_none_or(|profile| !self.extension_tab_in_scope(id, profile))
+                {
+                    return Ok(());
+                }
                 let previous = previous_tabs
                     .get(*previous_index)
                     .filter(|previous| previous.id() == id);

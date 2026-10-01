@@ -30,7 +30,7 @@ impl Shell {
         // evidence about native state that bootstrap owns. Reject the whole
         // cohort until bootstrap has completed: loading completion can warm a
         // renderer, while crash/process-exit recovery can create replacement
-        // views. Neither is safe before extension startup has settled Ready.
+        // views. Neither is safe before the session has been restored.
         if !self.bootstrapped {
             match &event {
                 EngineEvent::RuntimeRestartRequired => {}
@@ -38,16 +38,8 @@ impl Shell {
                     self.on_extension_browser_request(request.clone());
                     return;
                 }
-                EngineEvent::ExtensionCompatibilityBrokerRequested { request } => {
-                    self.on_extension_compatibility_broker_request(request.as_ref().clone());
-                    return;
-                }
-                EngineEvent::ExtensionRuntimeGrantRequested { prompt } => {
-                    self.on_extension_runtime_grant_prompt(prompt.as_ref().clone());
-                    return;
-                }
-                EngineEvent::ExtensionRuntimeGrantCancelled { runtime, request } => {
-                    self.cancel_extension_runtime_grant_prompt(*runtime, *request);
+                EngineEvent::ExtensionPageClosed { profile, id } => {
+                    self.close_extension_owned_marker(*profile, *id);
                     return;
                 }
                 EngineEvent::PermissionRequested {
@@ -161,14 +153,35 @@ impl Shell {
             EngineEvent::ExtensionBrowserRequested { request } => {
                 self.on_extension_browser_request(request)
             }
-            EngineEvent::ExtensionCompatibilityBrokerRequested { request } => {
-                self.on_extension_compatibility_broker_request(*request)
+            EngineEvent::ExtensionCreatedTabReplied {
+                profile,
+                request: _,
+                tab,
+                url,
+                intent,
+            } => self.on_extension_created_tab_replied(profile, tab, url, intent),
+            EngineEvent::ExtensionPageClosed { profile, id } => {
+                self.close_extension_owned_marker(profile, id)
             }
-            EngineEvent::ExtensionRuntimeGrantRequested { prompt } => {
-                self.on_extension_runtime_grant_prompt(*prompt);
-            }
-            EngineEvent::ExtensionRuntimeGrantCancelled { runtime, request } => {
-                self.cancel_extension_runtime_grant_prompt(runtime, request)
+            EngineEvent::ExtensionPageChanged {
+                profile,
+                id,
+                title,
+                loading,
+                can_go_back,
+                can_go_forward,
+            } => {
+                if self.profile_of_item(id) == Some(profile)
+                    && self.items.tab(id).is_some_and(|tab| {
+                        tab.content == zephium_core::item::TabContent::ExtensionOwned
+                    })
+                {
+                    self.items.set_title(id, title);
+                    self.items.set_loading(id, loading);
+                    self.items.set_nav_flags(id, can_go_back, can_go_forward);
+                    self.project_tab(id);
+                    self.sync_extension_browser_surface_metadata(id);
+                }
             }
             EngineEvent::ExtensionActionsSnapshotSettled {
                 profile,
@@ -243,24 +256,23 @@ impl Shell {
                     );
                 }
             }
-            EngineEvent::ExtensionOptionsPageSettled {
-                runtime,
-                settlement,
-            } => {
-                if !self
-                    .extension_management
-                    .authorizes_options_runtime(runtime)
-                {
-                    crate::diagnostic!("extensions: stale options-page settlement ignored");
-                } else if let zephium_core::extensions::ExtensionOptionsPageSettlement::Rejected(
-                    reason,
-                ) = settlement
-                {
-                    crate::diagnostic!(
-                        "extensions: browser-owned options page rejected with typed reason {reason:?}"
-                    );
-                    self.project_extension_action_failure(runtime.profile(), None, reason);
-                }
+            EngineEvent::WebExtensionSettled {
+                profile,
+                install,
+                result,
+            } => self.on_web_extension_settled(profile, install, result),
+            EngineEvent::WebExtensionAccessRequested(request) => {
+                let request = *request;
+                (self.emit)(Projection::WebExtensionAccessRequest(
+                    zephium_ipc::WebExtensionAccessRequestView {
+                        profile_id: request.profile.to_string(),
+                        request: request.request.to_string(),
+                        extension_id: request.extension_id,
+                        warnings: request.warnings,
+                        permissions: request.permissions,
+                        patterns: request.patterns,
+                    },
+                ));
             }
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 let refresh = self.refresh_extension_actions(profile);
@@ -464,7 +476,7 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 };
-                if !navigation::is_allowed(&committed_url) {
+                if !navigation::is_browser_target(&committed_url) {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
@@ -513,15 +525,6 @@ impl Shell {
                     self.project_tab(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
-                if self
-                    .windows
-                    .focused()
-                    .is_some_and(|window| window.active == Some(id))
-                {
-                    if let Some(profile) = self.profile_of_item(id) {
-                        self.reproject_extension_site_policy_if_visible(profile);
-                    }
-                }
             }
         }
     }
@@ -555,13 +558,15 @@ impl Shell {
             // Requests must reach their handler even during retirement so the
             // retained native completion receives an explicit rejection.
             EngineEvent::ExtensionBrowserRequested { .. } => None,
-            EngineEvent::ExtensionCompatibilityBrokerRequested { .. } => None,
-            EngineEvent::ExtensionRuntimeGrantRequested { .. } => None,
-            EngineEvent::ExtensionRuntimeGrantCancelled { .. } => None,
+            EngineEvent::ExtensionCreatedTabReplied { profile, .. } => Some(*profile),
+            // Teardown must still remove a typed marker during retirement.
+            EngineEvent::ExtensionPageClosed { .. } => None,
+            EngineEvent::ExtensionPageChanged { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
-            EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => Some(runtime.profile()),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
+            EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
+            EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),
             EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
                 Some(runtime.profile())
             }

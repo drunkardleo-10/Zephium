@@ -2,9 +2,6 @@
 //! enter through a queue (UI intents and engine events alike), effects leave
 //! through ports, projections go to the UI.
 
-#[cfg(zephium_internal_repository_e2e)]
-compile_error!("the internal repository E2E authority may not link into Zephium application code");
-
 mod diagnostics;
 
 #[cfg(all(test, feature = "work-execution-probe"))]
@@ -67,20 +64,19 @@ pub use actor::{
     FocusedContentPolicyStatusRequest, Handle, ShutdownRequest, SpawnError, SpawnFailure,
 };
 #[cfg(feature = "agentic-browser")]
-pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticLifecycles, AgenticSpawnFailure};
+pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticSpawnFailure};
 #[cfg(feature = "agentic-browser")]
 pub use api::AgentLifecycle;
 pub use api::{
-    AcquiredExtensionCatalogSubmission, AcquiredExtensionPackageSubmission, BrowserPage,
-    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
-    ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PagePermissionPromptDecision,
+    BrowserPage, ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch,
+    Command, ContentPolicyStatusQueryOutcome, EmitFn, PagePermissionPromptDecision,
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
     ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
     WorkPaneTarget,
 };
 #[cfg(feature = "work-planning")]
 pub mod work_context;
-pub use shell::Shell;
+pub use shell::{Shell, WebExtensionStatus, WebExtensionTarget};
 
 #[doc(hidden)]
 pub use store_reads::StoreReadResult;

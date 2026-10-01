@@ -19,7 +19,6 @@ const MAX_PENDING_FAVICON_READS: usize = 64;
 const MAX_PENDING_FAVICON_PROBE_READS: usize = 8;
 const MAX_PENDING_HISTORY_CALLS: usize = 8;
 const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
-const MAX_CONSECUTIVE_EXTENSION_HISTORY_READS: usize = 4;
 pub(crate) const FAVICON_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
 
 fn now_secs() -> i64 {
@@ -34,11 +33,6 @@ pub enum StoreReadResult {
         generation: u64,
         profile: ProfileId,
         query: String,
-        hits: Vec<HistoryHit>,
-    },
-    ExtensionRecentHistory {
-        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
-        request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
         hits: Vec<HistoryHit>,
     },
     Favicon {
@@ -79,11 +73,6 @@ enum Request {
         profile: ProfileId,
         query: String,
     },
-    ExtensionRecentHistory {
-        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
-        request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
-        limit: u16,
-    },
     Favicon {
         generation: u64,
         id: ItemId,
@@ -112,20 +101,8 @@ struct State {
     accepting: bool,
     stopped: bool,
     in_flight: bool,
-    consecutive_extension_history_reads: usize,
     history: Option<Request>,
     history_calls: VecDeque<Request>,
-    extension_history: HashMap<
-        (
-            zephium_core::extensions::ExtensionRuntimeInstance,
-            zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
-        ),
-        Request,
-    >,
-    extension_history_order: VecDeque<(
-        zephium_core::extensions::ExtensionRuntimeInstance,
-        zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
-    )>,
     favicon_batch: Option<Request>,
     favicons: HashMap<ItemId, Request>,
     favicon_order: VecDeque<ItemId>,
@@ -138,11 +115,8 @@ impl Default for State {
             accepting: true,
             stopped: false,
             in_flight: false,
-            consecutive_extension_history_reads: 0,
             history: None,
             history_calls: VecDeque::new(),
-            extension_history: HashMap::new(),
-            extension_history_order: VecDeque::new(),
             favicon_batch: None,
             favicons: HashMap::new(),
             favicon_order: VecDeque::new(),
@@ -224,44 +198,6 @@ impl StoreReadQueue {
             profile,
             call,
         });
-        self.inner.ready.notify_one();
-        true
-    }
-
-    pub(crate) fn request_extension_recent_history(
-        &self,
-        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
-        request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
-        limit: u16,
-    ) -> bool {
-        if limit == 0
-            || limit > zephium_core::extensions::MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS
-        {
-            return false;
-        }
-        let key = (runtime, request);
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.stopped
-            || !state.accepting
-            || state.extension_history.contains_key(&key)
-            || state.extension_history.len()
-                >= zephium_core::extensions::MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS
-        {
-            return false;
-        }
-        state.extension_history.insert(
-            key,
-            Request::ExtensionRecentHistory {
-                runtime,
-                request,
-                limit,
-            },
-        );
-        state.extension_history_order.push_back(key);
         self.inner.ready.notify_one();
         true
     }
@@ -388,27 +324,7 @@ impl StoreReadQueue {
                 return None;
             }
             if state.accepting && !state.in_flight {
-                let browser_read_pending = state.history.is_some()
-                    || state.favicon_batch.is_some()
-                    || !state.favicons.is_empty()
-                    || !state.favicon_probes.is_empty();
-                let extension_first = state.consecutive_extension_history_reads
-                    < MAX_CONSECUTIVE_EXTENSION_HISTORY_READS
-                    || !browser_read_pending;
-                let request = if extension_first {
-                    pop_extension_history(&mut state).or_else(|| pop_browser_read(&mut state))
-                } else {
-                    pop_browser_read(&mut state).or_else(|| pop_extension_history(&mut state))
-                };
-                if let Some(request) = request {
-                    if matches!(&request, Request::ExtensionRecentHistory { .. }) {
-                        state.consecutive_extension_history_reads = state
-                            .consecutive_extension_history_reads
-                            .saturating_add(1)
-                            .min(MAX_CONSECUTIVE_EXTENSION_HISTORY_READS);
-                    } else {
-                        state.consecutive_extension_history_reads = 0;
-                    }
+                if let Some(request) = pop_browser_read(&mut state) {
                     state.in_flight = true;
                     return Some(Lease {
                         queue: self.clone(),
@@ -445,9 +361,6 @@ impl StoreReadQueue {
         state.accepting = false;
         state.history = None;
         state.history_calls.clear();
-        state.consecutive_extension_history_reads = 0;
-        state.extension_history.clear();
-        state.extension_history_order.clear();
         state.favicon_batch = None;
         state.favicons.clear();
         state.favicon_order.clear();
@@ -492,24 +405,12 @@ impl StoreReadQueue {
         state.accepting = false;
         state.history = None;
         state.history_calls.clear();
-        state.consecutive_extension_history_reads = 0;
-        state.extension_history.clear();
-        state.extension_history_order.clear();
         state.favicon_batch = None;
         state.favicons.clear();
         state.favicon_order.clear();
         state.favicon_probes.clear();
         self.inner.ready.notify_all();
     }
-}
-
-fn pop_extension_history(state: &mut State) -> Option<Request> {
-    while let Some(key) = state.extension_history_order.pop_front() {
-        if let Some(request) = state.extension_history.remove(&key) {
-            return Some(request);
-        }
-    }
-    None
 }
 
 fn pop_browser_read(state: &mut State) -> Option<Request> {
@@ -610,24 +511,6 @@ fn run_with(
                     })
                     .collect(),
                 query,
-            },
-            Request::ExtensionRecentHistory {
-                runtime,
-                request,
-                limit,
-            } => StoreReadResult::ExtensionRecentHistory {
-                runtime,
-                request,
-                hits: store
-                    .recent_history(runtime.profile(), u32::from(limit))
-                    .into_iter()
-                    .take(usize::from(limit))
-                    .filter(|hit| navigation::is_allowed_str(&hit.url))
-                    .map(|mut hit| {
-                        hit.title = sanitize_page_title(&hit.title);
-                        hit
-                    })
-                    .collect(),
             },
             Request::HistorySurface {
                 token,
@@ -767,56 +650,6 @@ mod tests {
                 ..
             }) if query == "new"
         ));
-    }
-
-    #[test]
-    fn exact_extension_history_requests_are_bounded_fifo_without_starving_browser_reads() {
-        let queue = StoreReadQueue::new();
-        let profile = ProfileId::from(1);
-        let runtime = zephium_core::extensions::ExtensionRuntimeInstance::new(
-            profile,
-            zephium_core::ids::ExtensionInstallId::from(2),
-            zephium_core::extensions::ExtensionRuntimeGeneration::new(3).unwrap(),
-        );
-        assert!(queue.request_history(1, profile, "replaceable".into()));
-        for raw in 1..=zephium_core::extensions::MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS
-        {
-            assert!(queue.request_extension_recent_history(
-                runtime,
-                zephium_core::extensions::ExtensionCompatibilityBrokerRequestId::new(raw as u64)
-                    .unwrap(),
-                10,
-            ));
-        }
-        assert!(!queue.request_extension_recent_history(
-            runtime,
-            zephium_core::extensions::ExtensionCompatibilityBrokerRequestId::new(100).unwrap(),
-            10,
-        ));
-
-        for expected in 1..=MAX_CONSECUTIVE_EXTENSION_HISTORY_READS {
-            let mut lease = queue.recv().unwrap();
-            assert!(matches!(
-                lease.take(),
-                Some(Request::ExtensionRecentHistory { request, .. })
-                    if request.get() == expected as u64
-            ));
-            drop(lease);
-        }
-        let mut lease = queue.recv().unwrap();
-        assert!(matches!(lease.take(), Some(Request::History { .. })));
-        drop(lease);
-        for expected in (MAX_CONSECUTIVE_EXTENSION_HISTORY_READS + 1)
-            ..=zephium_core::extensions::MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS
-        {
-            let mut lease = queue.recv().unwrap();
-            assert!(matches!(
-                lease.take(),
-                Some(Request::ExtensionRecentHistory { request, .. })
-                    if request.get() == expected as u64
-            ));
-            drop(lease);
-        }
     }
 
     #[test]

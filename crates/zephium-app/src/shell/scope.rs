@@ -3,6 +3,16 @@
 use super::*;
 
 impl Shell {
+    /// Extensions may address Browse tabs throughout their profile, but never
+    /// the tab currently borrowed or owned by the Work pane. Agent contexts
+    /// have separate identities and are never members of `items`.
+    pub(super) fn extension_tab_in_scope(&self, id: ItemId, profile: ProfileId) -> bool {
+        !self.profile_deletion_quarantines(profile)
+            && self.profile_of_item(id) == Some(profile)
+            && self.items.tab(id).is_some()
+            && self.work_pane.as_ref().is_none_or(|pane| pane.tab != id)
+    }
+
     pub(super) fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
         match self.items.get(id)?.placement {
             Placement::Favorites { profile } => Some(profile),
@@ -46,9 +56,13 @@ impl Shell {
     pub(super) fn pane_in_scope(&self, tree: &Pane, profile: ProfileId, space: SpaceId) -> bool {
         let tabs = tree.tabs();
         tabs.len() <= MAX_VISIBLE_PANES
-            && tabs
-                .into_iter()
-                .all(|id| self.item_in_scope(id, profile, space))
+            && tabs.into_iter().all(|id| {
+                self.item_in_scope(id, profile, space)
+                    && self
+                        .items
+                        .tab(id)
+                        .is_some_and(|tab| tab.content == zephium_core::item::TabContent::Web)
+            })
     }
 
     pub(super) fn partition_of(&self, id: ItemId) -> Partition {

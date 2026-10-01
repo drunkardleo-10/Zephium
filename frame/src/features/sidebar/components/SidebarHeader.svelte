@@ -9,6 +9,7 @@
     SidebarLeftIcon,
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
+  import { blocker, siteMenuState } from "$domain/blocker";
   import { commands } from "$shared/ipc/bindings";
   import { IS_MAC } from "$shared/platform";
   import IconButton from "$shared/ui/IconButton";
@@ -37,7 +38,8 @@
     const target = event.currentTarget;
     if (!(target instanceof HTMLButtonElement)) return;
     const anchor = target.getBoundingClientRect();
-    void commands.sidebarMenuPopup(anchor.left, anchor.bottom);
+    const { siteProtected, canHide } = siteMenuState(blocker.status());
+    void commands.sidebarMenuPopup(anchor.left, anchor.bottom, siteProtected, canHide);
   }
 </script>
 

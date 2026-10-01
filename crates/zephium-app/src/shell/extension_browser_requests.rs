@@ -6,7 +6,9 @@ impl Shell {
     pub(super) fn on_extension_browser_request(&mut self, request: ExtensionBrowserRequest) {
         let profile = request.profile();
         let id = request.id();
-        let settlement = if !self.bootstrapped
+        // Only macOS can revoke a created tab whose first navigation was lost.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut settlement = if !self.bootstrapped
             || !self.extension_browser_surfaces.is_active(profile)
             || self.profile_deletion_quarantines(profile)
         {
@@ -14,6 +16,30 @@ impl Shell {
                 ExtensionBrowserRequestRejection::InvalidContext,
             )
         } else {
+            if self.active_browser_page().is_some()
+                && !self.browser_return_ready
+                && matches!(
+                    request.action(),
+                    ExtensionBrowserRequestAction::CreateTab { .. }
+                )
+            {
+                if self.browser_after_return.is_some() {
+                    let _ = self.engine.settle_extension_browser_request(
+                        profile,
+                        id,
+                        ExtensionBrowserRequestSettlement::Rejected(
+                            ExtensionBrowserRequestRejection::CapacityExceeded,
+                        ),
+                        None,
+                    );
+                    return;
+                }
+                self.browser_after_return = Some(Box::new(Command::Engine(
+                    EngineEvent::ExtensionBrowserRequested { request },
+                )));
+                let _ = self.operation_show_browser_page(None);
+                return;
+            }
             match request.action() {
                 ExtensionBrowserRequestAction::OpenExtensionPage => {
                     self.extension_open_page(profile)
@@ -44,27 +70,80 @@ impl Shell {
             }
         };
 
-        if self
-            .engine
-            .settle_extension_browser_request(profile, id, settlement)
-            != NativeDispatch::Scheduled
+        #[cfg(target_os = "macos")]
+        let first_url_after_reply = match (request.action(), settlement) {
+            (
+                ExtensionBrowserRequestAction::CreateTab { url: Some(url), .. },
+                ExtensionBrowserRequestSettlement::Applied(
+                    ExtensionBrowserRequestResult::CreatedTab(tab),
+                ),
+            ) => {
+                match self.items.reserve_deferred_navigation(tab) {
+                    Some(intent) => Some((url.clone(), intent)),
+                    None => {
+                        crate::diagnostic!("extensions: deferred first tab navigation lost its exact logical marker");
+                        let _ = self.close(tab);
+                        settlement = ExtensionBrowserRequestSettlement::Rejected(
+                            ExtensionBrowserRequestRejection::NativeAdmissionFailed,
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        #[cfg(not(target_os = "macos"))]
+        let first_url_after_reply = None;
+        let dispatch = self.engine.settle_extension_browser_request(
+            profile,
+            id,
+            settlement,
+            first_url_after_reply,
+        );
+        if let ExtensionBrowserRequestSettlement::Applied(
+            ExtensionBrowserRequestResult::ExtensionPageAuthorized { tab, .. },
+        ) = settlement
         {
+            if dispatch == NativeDispatch::Scheduled {
+                self.items.adopt_extension_view(tab);
+                let _ = self.operation_activate(tab);
+            } else {
+                self.close_extension_owned_marker(profile, tab);
+            }
+        }
+        if dispatch != NativeDispatch::Scheduled {
             // The native broker owns an independent exact-once timeout, so a
             // saturated response queue cannot leave WebKit waiting forever.
             crate::diagnostic!("extensions: native browser request settlement was not admitted");
         }
     }
 
-    fn extension_open_page(&self, profile: ProfileId) -> ExtensionBrowserRequestSettlement {
-        // Internal extension documents are native-owned and never enter the
-        // ordinary URL/navigation model. The Shell authorizes only the exact
-        // foreground profile; the engine must still rejoin the context-bound
-        // request and a separately accounted native resource.
-        if self.windows.focused().map(|window| window.profile) != Some(profile) {
+    fn extension_open_page(&mut self, profile: ProfileId) -> ExtensionBrowserRequestSettlement {
+        let Some(window) = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+        else {
             return rejected(ExtensionBrowserRequestRejection::InvalidScope);
+        };
+        let window_id = window.id;
+        let placement = Placement::Space {
+            space: window.space,
+            section: SpaceSection::Today,
+        };
+        let tab = ItemId::generate();
+        if !self.items.insert_extension_tab(tab, placement) {
+            return rejected(ExtensionBrowserRequestRejection::CapacityExceeded);
+        }
+        if self.commit(Vec::new()).rejected {
+            self.close_extension_owned_marker(profile, tab);
+            return rejected(ExtensionBrowserRequestRejection::NativeAdmissionFailed);
         }
         ExtensionBrowserRequestSettlement::Applied(
-            ExtensionBrowserRequestResult::ExtensionPageAuthorized,
+            ExtensionBrowserRequestResult::ExtensionPageAuthorized {
+                tab,
+                window: window_id,
+            },
         )
     }
 
@@ -90,20 +169,49 @@ impl Shell {
         if !active {
             return rejected(ExtensionBrowserRequestRejection::Unsupported);
         }
+        #[allow(unused_mut)]
         let Some((tab, mut effects)) = self.open_tab_with_id() else {
             return rejected(ExtensionBrowserRequestRejection::CapacityExceeded);
         };
+        #[cfg(not(target_os = "macos"))]
         if let Some(url) = url {
             effects.extend(self.items.navigate(tab, url));
         }
+        #[cfg(target_os = "macos")]
+        let _ = url;
         let native = self.commit(effects);
         if native.rejected {
-            // A logically created tab remains observable even if its renderer
-            // could not be admitted. This matches normal browser creation:
-            // load failure is tab state, not retroactive tab nonexistence.
+            // The logical tab has been created, but its first URL is still
+            // held behind the native tabs.create reply. Reconcile any failed
+            // surface publication before the broker looks up its tab.
             let _ = self.sync_extension_browser_surfaces();
         }
         ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::CreatedTab(tab))
+    }
+
+    pub(super) fn on_extension_created_tab_replied(
+        &mut self,
+        profile: ProfileId,
+        tab: ItemId,
+        url: Arc<str>,
+        intent: zephium_core::ports::engine::NavigationRequestId,
+    ) {
+        if !self.bootstrapped
+            || self.profile_deletion_quarantines(profile)
+            || !self.extension_tab_in_scope(tab, profile)
+            || self.items.pending_navigation_request(tab) != Some(intent)
+            || !self.items.tab(tab).is_some_and(|state| {
+                state.content == zephium_core::item::TabContent::Web
+                    && !state.has_view()
+                    && state.url.is_none()
+            })
+        {
+            return;
+        }
+        let effects = self.items.navigate(tab, &url);
+        if effects.len() == 1 {
+            self.commit(effects);
+        }
     }
 
     fn extension_activate_tab(
@@ -111,14 +219,10 @@ impl Shell {
         profile: ProfileId,
         tab: ItemId,
     ) -> ExtensionBrowserRequestSettlement {
-        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+        if !self.extension_tab_in_scope(tab, profile) || !self.item_in_focused_scope(tab) {
             return rejected(ExtensionBrowserRequestRejection::InvalidScope);
         }
-        let effects = self.focus_tab(tab);
-        let native = self.commit(effects);
-        if native.rejected {
-            let _ = self.sync_extension_browser_surfaces();
-        }
+        let _ = self.operation_activate(tab);
         applied()
     }
 
@@ -127,10 +231,10 @@ impl Shell {
         profile: ProfileId,
         tab: ItemId,
     ) -> ExtensionBrowserRequestSettlement {
-        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+        if !self.extension_tab_in_scope(tab, profile) {
             return rejected(ExtensionBrowserRequestRejection::InvalidScope);
         }
-        let _native = self.close(tab);
+        self.close_in_any_space(tab);
         applied()
     }
 
@@ -140,7 +244,7 @@ impl Shell {
         tab: ItemId,
         url: &str,
     ) -> ExtensionBrowserRequestSettlement {
-        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+        if !self.extension_tab_in_scope(tab, profile) {
             return rejected(ExtensionBrowserRequestRejection::InvalidScope);
         }
         let effects = self.items.navigate(tab, url);
@@ -192,7 +296,7 @@ impl Shell {
     }
 
     fn extension_resident_tab(&self, profile: ProfileId, tab: ItemId) -> Option<&TabState> {
-        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+        if !self.extension_tab_in_scope(tab, profile) {
             return None;
         }
         let state = self.items.tab(tab)?;
@@ -212,10 +316,7 @@ impl Shell {
         profile: ProfileId,
         tab: ItemId,
     ) -> ExtensionBrowserRequestSettlement {
-        if self.profile_of_item(tab) == Some(profile)
-            && self.item_in_focused_scope(tab)
-            && self.items.tab(tab).is_some()
-        {
+        if self.extension_tab_in_scope(tab, profile) {
             rejected(ExtensionBrowserRequestRejection::TabDiscarded)
         } else {
             rejected(ExtensionBrowserRequestRejection::InvalidScope)

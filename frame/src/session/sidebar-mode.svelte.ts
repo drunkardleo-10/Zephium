@@ -34,6 +34,8 @@ export const effectiveWidth = () =>
       ? COMPACT_WIDTH
       : expandedWidth;
 
+export const hasPanel = () => panelExtent > 0;
+
 /** A utility panel borrows width beside the rail without changing the persisted mode. */
 export function setPanelExtent(extent: number) {
   const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
@@ -108,6 +110,21 @@ export function setMode(next: SidebarMode) {
   desiredMode = next;
   publish(true);
   save(next);
+}
+
+/**
+ * Shows the full column for a moment without touching the preference. The
+ * returned function puts the rail back, unless a shape was chosen meanwhile.
+ */
+export function expandBriefly(): () => void {
+  if (mode !== "compact") return () => {};
+  mode = "default";
+  publish(true);
+  return () => {
+    if (mode !== "default" || desiredMode !== "compact") return;
+    mode = "compact";
+    publish(true);
+  };
 }
 
 export function toggleMode() {

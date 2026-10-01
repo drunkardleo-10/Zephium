@@ -35,6 +35,8 @@ use crate::report::{webkit_counts, WebKitCoverage};
 use crate::rules::{ArtifactDigest, WebKitRules};
 use crate::rules::{CompiledRules, PolicyDigest};
 #[cfg(feature = "webkit")]
+use crate::webkit::ResourceType as WebKitResourceType;
+#[cfg(feature = "webkit")]
 use crate::WEBKIT_ARTIFACT_FORMAT_VERSION;
 use crate::{ADBLOCK_ENGINE_VERSION, POLICY_FORMAT_VERSION};
 
@@ -288,7 +290,26 @@ impl Compiler {
             return Err(CompileError::NoUsableRules);
         }
 
-        let digest = digest_policy(&prepared);
+        let cosmetic_policy =
+            crate::CosmeticPolicy::compile(prepared.iter().map(|source| source.cosmetics.as_str()))
+                .map_err(CompileError::Cosmetics)?;
+        let cosmetics = if cosmetic_policy.report().accepted == 0 {
+            None
+        } else {
+            Some(
+                crate::cosmetics::PreparedCosmetics::new(cosmetic_policy, target)
+                    .map_err(CompileError::Cosmetics)?,
+            )
+        };
+        let mut digest = digest_policy(&prepared);
+        if let Some(cosmetics) = &cosmetics {
+            use zephium_core::blocker::DocumentStyleProvider;
+            let mut combined = Sha256::new();
+            combined.update(b"zephium-network-and-cosmetic-policy-v1");
+            combined.update(digest.as_bytes());
+            combined.update(cosmetics.policy.fingerprint().as_bytes());
+            digest = PolicyDigest(combined.finalize().into());
+        }
         let (runtime, runtime_coverage, webkit, webkit_coverage, native_blocking_rule_entries) =
             match target {
                 CompileTarget::Runtime => {
@@ -337,6 +358,7 @@ impl Compiler {
             webkit,
             report,
             self.limits,
+            cosmetics,
         ))
     }
 }
@@ -359,6 +381,7 @@ struct PreparedSource {
     id: SourceId,
     format: SourceFormat,
     rules: String,
+    cosmetics: String,
     #[cfg(feature = "webkit")]
     accepted: Vec<AcceptedRule>,
     report: SourceReport,
@@ -374,6 +397,7 @@ fn prepare_source(
 ) -> Result<PreparedSource, CompileError> {
     let options = parse_options(source.format);
     let mut rules = String::new();
+    let mut cosmetics = String::new();
     #[cfg(feature = "webkit")]
     let mut accepted = Vec::new();
     let mut input_drops = BTreeMap::new();
@@ -423,6 +447,8 @@ fn prepare_source(
                     limit: limits.max_rules(),
                 });
             }
+            cosmetics.push_str(line);
+            cosmetics.push('\n');
             increment(&mut input_drops, InputDropReason::UnsupportedCosmeticRule);
             continue;
         }
@@ -445,6 +471,10 @@ fn prepare_source(
             }
         };
 
+        if matches!(&parsed, ParsedLine::Network(filter) if filter.is_generic_hide()) {
+            cosmetics.push_str(line);
+            cosmetics.push('\n');
+        }
         let admission = inspect_rule(target, line, parsed)?;
         let (
             webkit_failure,
@@ -535,6 +565,7 @@ fn prepare_source(
         id: source.id,
         format: source.format,
         rules,
+        cosmetics,
         #[cfg(feature = "webkit")]
         accepted,
         report,
@@ -770,7 +801,7 @@ fn parse_options(format: SourceFormat) -> ParseOptions {
     }
 }
 
-fn looks_like_cosmetic_rule(line: &str) -> bool {
+pub(crate) fn looks_like_cosmetic_rule(line: &str) -> bool {
     if line.starts_with('|') || line.starts_with("@@|") {
         return false;
     }
@@ -996,7 +1027,14 @@ fn compile_webkit(
             }
             let equivalent = webkit_equivalent_without_resource_semantics(filter)
                 .map_err(|_| CompileError::UpstreamInvariant)?;
-            let native_rules: Vec<_> = equivalent.into_iter().collect();
+            let mut native_rules: Vec<_> = equivalent.into_iter().collect();
+            for native in &mut native_rules {
+                if let Some(pattern) =
+                    crate::webkit::simplify_canonical_host_boundary(&native.trigger.url_filter)
+                {
+                    native.trigger.url_filter = pattern;
+                }
+            }
             if native_rules.is_empty() {
                 return Err(CompileError::UpstreamInvariant);
             }
@@ -1119,7 +1157,7 @@ struct CanonicalRule<'a> {
 #[cfg(feature = "webkit")]
 struct ConvertedRule {
     native: CbRule,
-    resource_types: Vec<&'static str>,
+    resource_types: Vec<WebKitResourceType>,
 }
 
 #[cfg(feature = "webkit")]
@@ -1143,7 +1181,7 @@ struct CanonicalTrigger<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     unless_domain: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    resource_type: Option<&'a [&'static str]>,
+    resource_type: Option<&'a [WebKitResourceType]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     load_type: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1157,33 +1195,39 @@ fn canonical_webkit_json(
     rules: &[ConvertedRule],
     byte_limit: usize,
 ) -> Result<String, CompileError> {
-    let canonical: Vec<_> = rules
-        .iter()
-        .map(|rule| CanonicalRule {
-            action: CanonicalAction {
-                kind: webkit_action_name(&rule.native.action.typ),
-                selector: rule.native.action.selector.as_deref(),
-            },
-            trigger: CanonicalTrigger {
-                url_filter: &rule.native.trigger.url_filter,
-                url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
-                if_domain: rule.native.trigger.if_domain.as_deref(),
-                unless_domain: rule.native.trigger.unless_domain.as_deref(),
-                resource_type: Some(&rule.resource_types),
-                load_type: rule
-                    .native
-                    .trigger
-                    .load_type
-                    .iter()
-                    .map(webkit_load_name)
-                    .collect(),
-                if_top_url: rule.native.trigger.if_top_url.as_deref(),
-                unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
-            },
-        })
-        .collect();
+    use serde::ser::{SerializeSeq, Serializer};
     let mut output = BoundedJsonWriter::new(byte_limit);
-    if let Err(error) = serde_json::to_writer(&mut output, &canonical) {
+    let result = (|| -> Result<(), serde_json::Error> {
+        let mut serializer = serde_json::Serializer::new(&mut output);
+        let mut sequence = serializer.serialize_seq(Some(rules.len()))?;
+        for rule in rules {
+            let canonical = CanonicalRule {
+                action: CanonicalAction {
+                    kind: webkit_action_name(&rule.native.action.typ),
+                    selector: rule.native.action.selector.as_deref(),
+                },
+                trigger: CanonicalTrigger {
+                    url_filter: &rule.native.trigger.url_filter,
+                    url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
+                    if_domain: rule.native.trigger.if_domain.as_deref(),
+                    unless_domain: rule.native.trigger.unless_domain.as_deref(),
+                    resource_type: Some(&rule.resource_types),
+                    load_type: rule
+                        .native
+                        .trigger
+                        .load_type
+                        .iter()
+                        .map(webkit_load_name)
+                        .collect(),
+                    if_top_url: rule.native.trigger.if_top_url.as_deref(),
+                    unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
+                },
+            };
+            sequence.serialize_element(&canonical)?;
+        }
+        sequence.end()
+    })();
+    if let Err(error) = result {
         if let Some(actual) = output.exceeded_at {
             return Err(CompileError::WebKitJsonTooLarge {
                 actual,
@@ -1215,73 +1259,11 @@ const fn webkit_load_name(load: &CbLoadType) -> &'static str {
 }
 
 #[cfg(feature = "webkit")]
-fn webkit_resource_types(mask: NetworkFilterMask) -> (Vec<&'static str>, bool) {
-    let mut resources = Vec::with_capacity(14);
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_DOCUMENT,
-        "top-document",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_SUBDOCUMENT,
-        "child-document",
-    );
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_IMAGE, "image");
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_MEDIA, "media");
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_OBJECT,
-        "svg-document",
-    );
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_OTHER, "other");
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_PING, "ping");
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_SCRIPT,
-        "script",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_STYLESHEET,
-        "style-sheet",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_WEBSOCKET,
-        "websocket",
-    );
-    push_resource_if(
-        &mut resources,
-        mask,
-        NetworkFilterMask::FROM_XMLHTTPREQUEST,
-        "fetch",
-    );
-    push_resource_if(&mut resources, mask, NetworkFilterMask::FROM_FONT, "font");
-    resources.sort_unstable();
-    resources.dedup();
+fn webkit_resource_types(mask: NetworkFilterMask) -> (Vec<WebKitResourceType>, bool) {
     (
-        resources,
+        WebKitResourceType::for_mask(mask),
         mask.intersects(NetworkFilterMask::FROM_OBJECT | NetworkFilterMask::FROM_OTHER),
     )
-}
-
-#[cfg(feature = "webkit")]
-fn push_resource_if(
-    resources: &mut Vec<&'static str>,
-    mask: NetworkFilterMask,
-    flag: NetworkFilterMask,
-    name: &'static str,
-) {
-    if mask.contains(flag) && !resources.contains(&name) {
-        resources.push(name);
-    }
 }
 
 #[cfg(feature = "webkit")]
@@ -1332,6 +1314,9 @@ fn increment<K: Ord>(counts: &mut BTreeMap<K, usize>, key: K) {
 /// Compilation failed before a complete generation could be published.
 #[derive(Debug, Error)]
 pub enum CompileError {
+    /// Static cosmetics could not be admitted within their syntax/resource bounds.
+    #[error("static cosmetic policy failed: {0}")]
+    Cosmetics(crate::CosmeticError),
     /// The crate was built without the requested native artifact feature.
     #[error("requested blocker artifact target is not enabled")]
     TargetUnavailable,

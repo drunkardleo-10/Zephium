@@ -13,33 +13,6 @@ struct SidebarProjection {
 }
 
 impl Shell {
-    pub(super) fn project_extension_management_availability(&self) {
-        let availability = if self.extension_lifecycle_terminal || !self.extension_startup_ready {
-            ExtensionManagementAvailabilityView::Unavailable
-        } else {
-            self.extension_service
-                .as_ref()
-                .map(|service| match service.extension_management_availability() {
-                    zephium_core::ports::extensions::ExtensionManagementAvailability::Configured => {
-                        ExtensionManagementAvailabilityView::Configured
-                    }
-                    zephium_core::ports::extensions::ExtensionManagementAvailability::NotConfigured => {
-                        ExtensionManagementAvailabilityView::NotConfigured
-                    }
-                    zephium_core::ports::extensions::ExtensionManagementAvailability::Unavailable => {
-                        ExtensionManagementAvailabilityView::Unavailable
-                    }
-                })
-                .unwrap_or(ExtensionManagementAvailabilityView::Unavailable)
-        };
-        (self.emit)(Projection::ExtensionManagementAvailability(
-            ExtensionManagementAvailabilityChangedView {
-                projection_revision: format!("{:032x}", self.next_projection_revision()),
-                availability,
-            },
-        ));
-    }
-
     pub(super) fn project_page_permission_prompt(&self) {
         let prompt =
             self.page_permissions
@@ -72,291 +45,6 @@ impl Shell {
         (self.emit)(Projection::PagePermissionPrompt(PagePermissionPromptView {
             projection_revision: format!("{:032x}", self.next_projection_revision()),
             prompt,
-        }));
-    }
-
-    pub(super) fn project_extension_runtime_grant_prompt(&self) {
-        let prompt = self
-            .extension_runtime_grants
-            .active()
-            .map(
-                |(prompt, processing)| ExtensionRuntimeGrantPromptEntryView {
-                    profile_id: prompt.runtime().profile().to_string(),
-                    install_id: prompt.runtime().install_id().to_string(),
-                    runtime_generation: format!("{:016x}", prompt.runtime().generation().get()),
-                    request_id: format!("{:016x}", prompt.id().get()),
-                    extension_name: prompt.extension_name().to_owned(),
-                    api_permissions: prompt
-                        .request()
-                        .api()
-                        .iter()
-                        .map(|permission| permission.as_str().to_owned())
-                        .collect(),
-                    host_permissions: prompt
-                        .request()
-                        .hosts()
-                        .iter()
-                        .map(|pattern| pattern.as_str().to_owned())
-                        .collect(),
-                    private_context: prompt.key().browsing_context()
-                        == zephium_core::extensions::ExtensionGrantBrowsingContext::Private,
-                    processing,
-                },
-            );
-        (self.emit)(Projection::ExtensionRuntimeGrantPrompt(
-            ExtensionRuntimeGrantPromptView {
-                projection_revision: format!("{:032x}", self.next_projection_revision()),
-                prompt,
-            },
-        ));
-    }
-
-    pub(super) fn project_extension_management_phase(
-        &self,
-        profile: ProfileId,
-        phase: ExtensionManagementPhase,
-    ) {
-        debug_assert!(phase != ExtensionManagementPhase::Ready);
-        (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
-            projection_revision: format!("{:032x}", self.next_projection_revision()),
-            profile_id: profile.to_string(),
-            phase,
-            catalog_revision: None,
-            profile_policy: None,
-            entries: Vec::new(),
-            candidates: Vec::new(),
-            pending_update: None,
-        }));
-    }
-
-    pub(super) fn project_extension_update_consent(&self) {
-        let Some((review, prompt)) = self.extension_management.pending_update() else {
-            return;
-        };
-        let update = ExtensionUpdateConsentView {
-            review_id: format!("{review:016x}"),
-            name: prompt.name().to_owned(),
-            version: prompt.version().to_owned(),
-            source: extension_management_source_view(prompt.source()),
-            verified_catalog_unix: prompt
-                .verified_catalog_unix()
-                .map(|value| value.to_string()),
-            provenance: prompt
-                .provenance()
-                .map(extension_management_provenance_view),
-            added_required_api: prompt
-                .added_required_api()
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            added_required_hosts: prompt
-                .added_required_hosts()
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            compatibility: match prompt.compatibility() {
-                ExtensionManagementCompatibility::Compatible => {
-                    ExtensionManagementCompatibilityView::Compatible
-                }
-                ExtensionManagementCompatibility::Degraded => {
-                    ExtensionManagementCompatibilityView::Degraded
-                }
-            },
-            limitations: prompt
-                .limitations()
-                .iter()
-                .map(extension_management_limitation_view)
-                .collect(),
-        };
-        (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
-            projection_revision: format!("{:032x}", self.next_projection_revision()),
-            profile_id: prompt.selector().install().profile().to_string(),
-            phase: ExtensionManagementPhase::UpdateConsentRequired,
-            catalog_revision: None,
-            profile_policy: None,
-            entries: Vec::new(),
-            candidates: Vec::new(),
-            pending_update: Some(update),
-        }));
-    }
-
-    pub(super) fn project_extension_management_catalog(&self) {
-        let Some(catalog) = self.extension_management.catalog() else {
-            return;
-        };
-        let entries = catalog
-            .entries()
-            .iter()
-            .map(|entry| {
-                let selector = entry.selector();
-                let (runtime, runtime_generation) = match entry.runtime() {
-                    ExtensionManagementRuntimeState::Disabled => {
-                        (ExtensionManagementRuntimeView::Disabled, None)
-                    }
-                    ExtensionManagementRuntimeState::PendingActivation => {
-                        (ExtensionManagementRuntimeView::PendingActivation, None)
-                    }
-                    ExtensionManagementRuntimeState::ProfilePaused => {
-                        (ExtensionManagementRuntimeView::ProfilePaused, None)
-                    }
-                    ExtensionManagementRuntimeState::Active(generation) => (
-                        ExtensionManagementRuntimeView::Active,
-                        Some(format!("{:016x}", generation.get())),
-                    ),
-                };
-                let grants = match entry.grants() {
-                    ExtensionManagementGrantState::Uninitialized => ExtensionManagementGrantView {
-                        initialized: false,
-                        revision: None,
-                        api_permissions: Vec::new(),
-                        host_permissions: Vec::new(),
-                        file_access: false,
-                        private_access: false,
-                    },
-                    ExtensionManagementGrantState::Initialized {
-                        revision,
-                        api_permissions,
-                        host_permissions,
-                        file_access,
-                        private_access,
-                        ..
-                    } => ExtensionManagementGrantView {
-                        initialized: true,
-                        revision: Some(format!("{:016x}", revision.get())),
-                        api_permissions: api_permissions.iter().map(ToString::to_string).collect(),
-                        host_permissions: host_permissions
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect(),
-                        file_access: *file_access,
-                        private_access: *private_access,
-                    },
-                };
-                ExtensionManagementEntryView {
-                    install_id: selector.install().to_string(),
-                    install_revision: format!("{:016x}", selector.install_revision().get()),
-                    name: entry.name().to_owned(),
-                    description: entry.description().map(str::to_owned),
-                    author: entry.author().map(str::to_owned),
-                    version: entry.version().to_owned(),
-                    has_options_page: entry.has_options_page(),
-                    source: extension_management_source_view(entry.source()),
-                    verified_catalog_unix: entry
-                        .verified_catalog_unix()
-                        .map(|value| value.to_string()),
-                    provenance: entry.provenance().map(extension_management_provenance_view),
-                    runtime,
-                    runtime_generation,
-                    grants,
-                    optional_api: entry
-                        .optional_api()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                    optional_hosts: entry
-                        .optional_hosts()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                    compatibility: match entry.compatibility() {
-                        ExtensionManagementCompatibility::Compatible => {
-                            ExtensionManagementCompatibilityView::Compatible
-                        }
-                        ExtensionManagementCompatibility::Degraded => {
-                            ExtensionManagementCompatibilityView::Degraded
-                        }
-                    },
-                    limitations: entry
-                        .limitations()
-                        .iter()
-                        .map(extension_management_limitation_view)
-                        .collect(),
-                }
-            })
-            .collect();
-        let candidates = catalog
-            .candidates()
-            .iter()
-            .enumerate()
-            .map(|(index, candidate)| ExtensionInstallCandidateView {
-                candidate_index: u8::try_from(index)
-                    .expect("extension candidate count is statically bounded below u8::MAX"),
-                name: candidate.name().to_owned(),
-                description: candidate.description().map(str::to_owned),
-                author: candidate.author().map(str::to_owned),
-                version: candidate.version().to_owned(),
-                source: extension_management_source_view(candidate.source()),
-                verified_catalog_unix: candidate
-                    .verified_catalog_unix()
-                    .map(|value| value.to_string()),
-                provenance: candidate
-                    .provenance()
-                    .map(extension_management_provenance_view),
-                required_api: candidate
-                    .required_api()
-                    .iter()
-                    .map(|permission| permission.to_string())
-                    .collect(),
-                required_hosts: candidate
-                    .required_hosts()
-                    .iter()
-                    .map(|pattern| pattern.to_string())
-                    .collect(),
-                optional_api: candidate
-                    .optional_api()
-                    .iter()
-                    .map(|permission| permission.to_string())
-                    .collect(),
-                optional_hosts: candidate
-                    .optional_hosts()
-                    .iter()
-                    .map(|pattern| pattern.to_string())
-                    .collect(),
-                supports_file_access: candidate.supports_file_access(),
-                file_access_available: candidate.file_access_available(),
-                private_access_available: candidate.private_access_available(),
-                compatibility: match candidate.compatibility() {
-                    ExtensionManagementCompatibility::Compatible => {
-                        ExtensionManagementCompatibilityView::Compatible
-                    }
-                    ExtensionManagementCompatibility::Degraded => {
-                        ExtensionManagementCompatibilityView::Degraded
-                    }
-                },
-                limitations: candidate
-                    .limitations()
-                    .iter()
-                    .map(extension_management_limitation_view)
-                    .collect(),
-            })
-            .collect();
-        let current_site = self
-            .windows
-            .focused()
-            .filter(|window| window.profile == catalog.profile())
-            .and_then(|window| window.active)
-            .and_then(|item| self.items.tab(item))
-            .and_then(|tab| tab.url.as_ref())
-            .and_then(|url| zephium_core::extensions::ExtensionSiteAccessScope::from_url(url).ok());
-        let profile_policy = ExtensionProfilePolicyView {
-            revision: format!("{:016x}", catalog.profile_policy().revision().get()),
-            paused: catalog.profile_policy().paused(),
-            denied_site_count: u16::try_from(catalog.profile_policy().denied_sites().len())
-                .expect("extension site-denial count is statically bounded below u16::MAX"),
-            current_site_available: current_site.is_some(),
-            current_site_denied: current_site
-                .as_ref()
-                .is_some_and(|scope| catalog.profile_policy().denies(scope)),
-        };
-        (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
-            projection_revision: format!("{:032x}", self.next_projection_revision()),
-            profile_id: catalog.profile().to_string(),
-            phase: ExtensionManagementPhase::Ready,
-            catalog_revision: Some(format!("{:016x}", catalog.catalog_revision().get())),
-            profile_policy: Some(profile_policy),
-            entries,
-            candidates,
-            pending_update: None,
         }));
     }
 
@@ -496,10 +184,31 @@ impl Shell {
 
     pub(super) fn items_snapshot(&self) -> Option<ItemsState> {
         let win = self.windows.focused()?;
-        let profile = self.profiles.get(win.profile)?;
-        let active_space = self
-            .spaces
-            .get(win.space)
+        self.items_snapshot_from(
+            &self.profiles,
+            &self.spaces,
+            &self.items,
+            win.profile,
+            win.space,
+            win.active,
+            win.splits.as_ref(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // One projection of a single session scope.
+    fn items_snapshot_from(
+        &self,
+        profiles: &Profiles,
+        spaces: &Spaces,
+        items: &Items,
+        profile_id: ProfileId,
+        space_id: SpaceId,
+        active: Option<ItemId>,
+        splits: Option<&Pane>,
+    ) -> Option<ItemsState> {
+        let profile = profiles.get(profile_id)?;
+        let active_space = spaces
+            .get(space_id)
             .filter(|space| space.profile == profile.id)?;
 
         let profile_view = ProfileView {
@@ -511,8 +220,7 @@ impl Shell {
                 ProfileKind::Incognito => ProfileKindView::Incognito,
             },
         };
-        let spaces = self
-            .spaces
+        let spaces = spaces
             .iter()
             .filter(|space| space.profile == profile.id)
             .map(|space| SpaceView {
@@ -544,16 +252,20 @@ impl Shell {
                 SidebarSectionView::Today,
             ),
         ] {
-            for id in self.items.roots(placement) {
-                self.project_sidebar_node(*id, None, placement, section, profile.id, &mut sidebar);
+            for id in items.roots(placement) {
+                self.project_sidebar_node(
+                    items,
+                    *id,
+                    None,
+                    placement,
+                    section,
+                    profile.id,
+                    &mut sidebar,
+                );
             }
         }
 
-        let split_group = win.splits.as_ref().and_then(|tree| {
-            if !self.pane_in_scope(tree, win.profile, win.space) {
-                return None;
-            }
-
+        let split_group = splits.and_then(|tree| {
             let members = tree.tabs();
             let mut unique = HashSet::with_capacity(members.len());
             let valid = (2..=MAX_VISIBLE_PANES).contains(&members.len())
@@ -572,16 +284,17 @@ impl Shell {
             active_space_id: Some(active_space.id.to_string()),
             nodes: sidebar.nodes,
             tabs: sidebar.tabs,
-            active: win
-                .active
+            active: active
                 .filter(|id| sidebar.tab_ids.contains(id))
                 .map(|id| id.to_string()),
             split_group,
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // Bounded recursive projection retains its exact scope.
     fn project_sidebar_node(
         &self,
+        items: &Items,
         id: ItemId,
         parent: Option<ItemId>,
         placement: Placement,
@@ -589,8 +302,7 @@ impl Shell {
         profile: ProfileId,
         projection: &mut SidebarProjection,
     ) {
-        let Some(item) = self
-            .items
+        let Some(item) = items
             .get(id)
             .filter(|item| item.parent == parent && item.placement == placement)
         else {
@@ -621,8 +333,9 @@ impl Shell {
         });
 
         if matches!(item.kind, ItemKind::Folder { .. }) {
-            for child in self.items.children(id) {
+            for child in items.children(id) {
                 self.project_sidebar_node(
+                    items,
                     *child,
                     Some(id),
                     placement,
@@ -635,6 +348,13 @@ impl Shell {
     }
 
     pub(super) fn project_tab(&self, id: ItemId) {
+        if self
+            .windows
+            .focused()
+            .is_some_and(|window| window.active == Some(id))
+        {
+            self.project_blocker_status();
+        }
         let profile = self.profile_of_item(id);
         if let Some(tab) = self.items.tab(id) {
             let projection = self.generic_tab_view(id, tab, profile);
@@ -742,31 +462,6 @@ impl Shell {
     }
 }
 
-const fn extension_management_source_view(
-    source: ExtensionManagementSource,
-) -> ExtensionManagementSourceView {
-    match source {
-        ExtensionManagementSource::ZephiumVerified => {
-            ExtensionManagementSourceView::ZephiumVerified
-        }
-        ExtensionManagementSource::ExternalCompatibility => {
-            ExtensionManagementSourceView::ExternalCompatibility
-        }
-        ExtensionManagementSource::DeveloperLocal => ExtensionManagementSourceView::DeveloperLocal,
-    }
-}
-
-fn extension_management_provenance_view(
-    provenance: &ExtensionManagementProvenance,
-) -> ExtensionManagementProvenanceView {
-    ExtensionManagementProvenanceView {
-        source_url: provenance.source_url().to_owned(),
-        upstream_version: provenance.upstream_version().to_owned(),
-        license_expression: provenance.license_expression().to_owned(),
-        attribution: provenance.attribution().to_owned(),
-    }
-}
-
 fn page_permission_kind_view(
     kind: zephium_core::permissions::PagePermissionKind,
 ) -> Option<PagePermissionKindView> {
@@ -782,52 +477,6 @@ fn page_permission_kind_view(
         zephium_core::permissions::PagePermissionKind::Geolocation
         | zephium_core::permissions::PagePermissionKind::Notifications
         | zephium_core::permissions::PagePermissionKind::ClipboardRead => None,
-    }
-}
-
-fn extension_management_limitation_view(
-    limitation: &ExtensionManagementLimitation,
-) -> ExtensionManagementLimitationView {
-    match limitation {
-        ExtensionManagementLimitation::ApiPermission(name) => {
-            ExtensionManagementLimitationView::ApiPermission {
-                name: name.to_string(),
-            }
-        }
-        ExtensionManagementLimitation::HostAccess => ExtensionManagementLimitationView::HostAccess,
-        ExtensionManagementLimitation::Background => ExtensionManagementLimitationView::Background,
-        ExtensionManagementLimitation::Action => ExtensionManagementLimitationView::Action,
-        ExtensionManagementLimitation::Offscreen => ExtensionManagementLimitationView::Offscreen,
-        ExtensionManagementLimitation::NativeMessaging => {
-            ExtensionManagementLimitationView::NativeMessaging
-        }
-        ExtensionManagementLimitation::BrowserOverride => {
-            ExtensionManagementLimitationView::BrowserOverride
-        }
-        ExtensionManagementLimitation::ExtensionPagesCsp => {
-            ExtensionManagementLimitationView::ExtensionPagesCsp
-        }
-        ExtensionManagementLimitation::Sandbox => ExtensionManagementLimitationView::Sandbox,
-        ExtensionManagementLimitation::ContentScripts => {
-            ExtensionManagementLimitationView::ContentScripts
-        }
-        ExtensionManagementLimitation::WebAccessibleResources => {
-            ExtensionManagementLimitationView::WebAccessibleResources
-        }
-        ExtensionManagementLimitation::MinimumBrowserVersion => {
-            ExtensionManagementLimitationView::MinimumBrowserVersion
-        }
-        ExtensionManagementLimitation::Commands => ExtensionManagementLimitationView::Commands,
-        ExtensionManagementLimitation::SidePanel => ExtensionManagementLimitationView::SidePanel,
-        ExtensionManagementLimitation::ManagedStorage => {
-            ExtensionManagementLimitationView::ManagedStorage
-        }
-        ExtensionManagementLimitation::OptionsPage => {
-            ExtensionManagementLimitationView::OptionsPage
-        }
-        ExtensionManagementLimitation::DeclarativeNetRequest => {
-            ExtensionManagementLimitationView::DeclarativeNetRequest
-        }
     }
 }
 
@@ -892,6 +541,18 @@ fn tab_view(
         projection_revision: format!("{revision:032x}"),
         title: tab.title.clone(),
         url: tab.url.as_ref().map(ToString::to_string),
+        content: match tab.content {
+            zephium_core::item::TabContent::Web => zephium_ipc::TabContentView::Web,
+            zephium_core::item::TabContent::BrowserOwned(
+                zephium_core::item::BrowserOwnedTab::Settings,
+            ) => zephium_ipc::TabContentView::Settings,
+            zephium_core::item::TabContent::BrowserOwned(
+                zephium_core::item::BrowserOwnedTab::Extensions,
+            ) => zephium_ipc::TabContentView::Extensions,
+            zephium_core::item::TabContent::ExtensionOwned => {
+                zephium_ipc::TabContentView::ExtensionOwned
+            }
+        },
         loading: tab.loading,
         popup_blocked: tab.popup_blocked,
         can_go_back: tab.can_go_back,

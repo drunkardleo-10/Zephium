@@ -12,7 +12,8 @@
   import { Dock } from "$features/dock";
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionActions } from "$features/extensions";
+  import { ExtensionActions, ManageExtensions } from "$features/extensions";
+  import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
@@ -23,7 +24,8 @@
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
-  import { BlockerShield } from "$features/blocker";
+  import { blocker } from "$domain/blocker";
+  import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
   import { preview } from "$features/settings";
   import { onMount } from "svelte";
@@ -149,6 +151,7 @@
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
 
+  let protectionMenuActivated = $state(0);
   let handledCommand = 0;
   $effect(() => {
     const command = ui.uiCommand();
@@ -157,6 +160,9 @@
     untrack(() => {
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
+      if (command.id === "extensions.manage") void browserPage.open("extensions");
+      if (command.id === "protection.site") void toggleSiteProtection();
+      if (command.id === "protection.hide") void hideElements();
     });
   });
   function selectTab(id: string) {
@@ -176,14 +182,14 @@
   class:p-2={!IS_MAC || inWork}
   class:pb-0={inWork}
   data-zephium-active-tab={tabs.activeId() ?? ""}
-  data-zephium-surface={browserPage.currentPage() === "settings" ? "settings" : "browse"}
+  data-zephium-surface={browserPage.currentPage() ?? "browse"}
 >
   <Sidebar
     >{#snippet browserBody(compact)}
       {#if compact && (inWork || toolHost.activeTool() !== null)}
-        {#if !inWork}<AddressField {compact} />{/if}
+        {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
-      {:else if compact}<AddressField {compact} />
+      {:else if compact}<AddressField {compact} /><StoreInstallRail />
       {:else}<div class="sidebar-head"><ModeTabs /></div>{/if}
       <!-- One column in both environments: only what it lists changes, and the
            new list settles in where the old one was. -->
@@ -198,14 +204,19 @@
           -->
             <AddressField {compact}>
               {#snippet trailing()}
-                <UtilityTray>
-                  <div class="utility-panel">
-                    <BlockerShield />
-                    <ExtensionActions />
-                  </div>
+                <UtilityTray
+                  onopen={() => {
+                    protectionMenuActivated += 1;
+                    void blocker.refresh();
+                  }}
+                >
+                  <BlockerShield labelled activated={protectionMenuActivated} />
+                  <ExtensionActions />
+                  <ManageExtensions />
                 </UtilityTray>
               {/snippet}
             </AddressField>
+            <HidingBar />
             {#if tabs.profile()?.id}<DownloadStatus
                 profile={tabs.profile()!.id}
                 onopen={() => toolHost.open("downloads")}
@@ -217,6 +228,9 @@
           {/if}
         </div>{/key}
     {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact tools={!inWork}>
+          {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
+              variant="stack"
+            />{/snippet}
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
               onSelect={selectTab}
@@ -283,7 +297,7 @@
   {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
       {m.browser_nav_failed()}
     </div>{/if}
-  {#if !tabs.activeTab()?.url && browserPage.currentPage() === null}
+  {#if !tabs.activeTab()?.url && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
     <!--
       Occupies exactly the rect a content WebView would, so moving between a
       page and the new tab never changes the window's shape. The inline start
@@ -324,6 +338,13 @@
             {#if browserPage.currentPage() === "settings"}
               <LazyView
                 loader={loadSettings}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+              >
+            {:else if browserPage.currentPage() === "extensions"}
+              <LazyView
+                loader={loadWebExtensionManager}
                 loadingLabel={m.surface_loading()}
                 failureLabel={m.surface_render_failed()}
                 retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView

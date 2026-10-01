@@ -86,6 +86,11 @@ impl Hub {
                     PersistedKind::Tab { url, title, zoom } => {
                         ("tab", None, Some(url.as_str()), Some(title.as_str()), *zoom)
                     }
+                    PersistedKind::BrowserTab { .. } => {
+                        return Err(invalid_data(
+                            "legacy session writer cannot encode browser-owned tabs",
+                        ));
+                    }
                 };
                 ins.execute(params![
                     item.id.to_string(),

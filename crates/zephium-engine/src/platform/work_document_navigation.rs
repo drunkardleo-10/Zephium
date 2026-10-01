@@ -216,9 +216,9 @@ fn log_brand_move(requested: Option<&ContextNavigationTarget>, current: &str) {
     };
     if from != to {
         if let Some(brand) = zephium_agentic::brand_family(from.as_bytes(), to.as_bytes()) {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
             crate::diagnostic!("work: site_session moved within brand={brand}");
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(all(target_os = "macos", feature = "native-agentic-work-resource-probe")))]
             let _ = brand;
         }
     }

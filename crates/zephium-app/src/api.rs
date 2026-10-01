@@ -6,26 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionProfilePolicyRevision,
-    ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
+use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
-use zephium_core::ports::extensions::ExtensionServiceLifecycle;
-use zephium_core::ports::extensions::{
-    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
-    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
-    ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionDistributionStatus, ExtensionGrantEditOutcome, ExtensionGrantEditTarget,
-    ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
-    ExtensionProfilePolicyEditOutcome, ExtensionRepositoryMaintenanceOutcome,
-    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome,
-    ExtensionUninstallOutcome,
-};
 use zephium_core::ports::store::Store;
 use zephium_core::ports::store::{
     PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
@@ -38,141 +25,6 @@ use crate::store_reads::StoreReadResult;
 #[cfg(feature = "agentic-browser")]
 use zephium_agentic::AgentBrowserLifecycle;
 
-struct AcquiredPackageSubmissionInner {
-    request: ExtensionAcquiredPackageProvisioningRequest,
-    deadline: std::time::Instant,
-    done: ExtensionAcquiredPackageProvisioningCallback,
-}
-
-/// Opaque, exactly-once transfer of one authenticated acquired package into
-/// the Shell-owned extension lifecycle.
-///
-/// Cloning shares the same one-shot slot solely because [`Command`] is
-/// cloneable for post-shutdown recovery. Product composition cannot inspect,
-/// replace, or duplicate the move-only package bytes.
-#[derive(Clone)]
-pub struct AcquiredExtensionPackageSubmission {
-    inner: Arc<Mutex<Option<AcquiredPackageSubmissionInner>>>,
-}
-
-impl AcquiredExtensionPackageSubmission {
-    pub(crate) fn new(
-        request: ExtensionAcquiredPackageProvisioningRequest,
-        deadline: std::time::Instant,
-        done: ExtensionAcquiredPackageProvisioningCallback,
-    ) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(AcquiredPackageSubmissionInner {
-                request,
-                deadline,
-                done,
-            }))),
-        }
-    }
-
-    pub(crate) fn take(
-        &self,
-    ) -> Option<(
-        ExtensionAcquiredPackageProvisioningRequest,
-        std::time::Instant,
-        ExtensionAcquiredPackageProvisioningCallback,
-    )> {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()?;
-        Some((inner.request, inner.deadline, inner.done))
-    }
-
-    pub(crate) fn settle_unavailable(&self) {
-        if let Some((_request, _deadline, done)) = self.take() {
-            settle_callback(
-                done,
-                ExtensionAcquiredPackageProvisioningOutcome::Unavailable,
-            );
-        }
-    }
-}
-
-impl fmt::Debug for AcquiredExtensionPackageSubmission {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AcquiredExtensionPackageSubmission")
-            .field(
-                "pending",
-                &self.inner.lock().map_or(true, |slot| slot.is_some()),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-struct AcquiredCatalogSubmissionInner {
-    request: ExtensionAcquiredCatalogActivationRequest,
-    deadline: std::time::Instant,
-    done: ExtensionAcquiredCatalogActivationCallback,
-}
-
-/// Opaque, exactly-once transfer of one source-free catalog activation into
-/// the Shell-owned extension lifecycle.
-#[derive(Clone)]
-pub struct AcquiredExtensionCatalogSubmission {
-    inner: Arc<Mutex<Option<AcquiredCatalogSubmissionInner>>>,
-}
-
-impl AcquiredExtensionCatalogSubmission {
-    pub(crate) fn new(
-        request: ExtensionAcquiredCatalogActivationRequest,
-        deadline: std::time::Instant,
-        done: ExtensionAcquiredCatalogActivationCallback,
-    ) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(AcquiredCatalogSubmissionInner {
-                request,
-                deadline,
-                done,
-            }))),
-        }
-    }
-
-    pub(crate) fn take(
-        &self,
-    ) -> Option<(
-        ExtensionAcquiredCatalogActivationRequest,
-        std::time::Instant,
-        ExtensionAcquiredCatalogActivationCallback,
-    )> {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()?;
-        Some((inner.request, inner.deadline, inner.done))
-    }
-
-    pub(crate) fn settle_unavailable(&self) {
-        if let Some((_request, _deadline, done)) = self.take() {
-            settle_callback(done, ExtensionAcquiredCatalogActivationOutcome::Unavailable);
-        }
-    }
-}
-
-impl fmt::Debug for AcquiredExtensionCatalogSubmission {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AcquiredExtensionCatalogSubmission")
-            .field(
-                "pending",
-                &self.inner.lock().map_or(true, |slot| slot.is_some()),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-fn settle_callback<T>(done: Box<dyn FnOnce(T) + Send>, outcome: T) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| done(outcome)));
-}
-
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
 pub type SharedBlocker = Arc<dyn ContentBlocker + Send + Sync>;
@@ -184,72 +36,19 @@ pub type SharedChrome = Arc<dyn PresentationChrome + Send + Sync>;
 /// surface.
 #[cfg(feature = "agentic-browser")]
 pub type AgentLifecycle = Box<dyn AgentBrowserLifecycle>;
-/// Unique application-owned lifecycle authority for the extension service.
-///
-/// Unlike the cloneable observation handles exposed by the concrete service,
-/// this owner moves onto the shell actor and is consumed exactly once during
-/// ordered process shutdown.
-pub type ExtensionLifecycle = Box<dyn ExtensionServiceLifecycle>;
-/// Maximum user-owned extension management operations awaiting serialized
-/// service settlement. This also reserves critical Shell mailbox capacity.
-pub const MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS: usize = 8;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExtensionManagementCompletion {
-    Install(ExtensionManagementSettlement<ExtensionInstallOutcome>),
-    Update(ExtensionManagementSettlement<zephium_core::ports::extensions::ExtensionUpdateOutcome>),
-    SetEnabled(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>),
-    Uninstall(ExtensionManagementSettlement<ExtensionUninstallOutcome>),
-    GrantEdit(ExtensionManagementSettlement<ExtensionGrantEditOutcome>),
-    ProfilePolicy(ExtensionManagementSettlement<ExtensionProfilePolicyEditOutcome>),
-}
 /// Redacted terminal reason delivered to the desktop composition root when
 /// the shell can no longer continue safely in the current process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellTerminalFailure {
-    ExtensionStartupCleanupRequired,
-    ExtensionStartupFailedClosed,
-    ExtensionStartupLifecyclePanicked,
-    ExtensionStartupLifecycleMissing,
-    ExtensionProfileRetirementFailedClosed,
-    ExtensionProfileRetirementBoundaryPanicked,
-    ExtensionProfileRetirementLifecycleMissing,
-    ExtensionProfileRetirementContractViolated,
-    ExtensionProfileDeletionInvariant,
-    ExtensionDistributionLifecyclePanicked,
-    ExtensionDistributionLifecycleMissing,
+    ProfileDeletionInvariant,
     ActorExitedUnexpectedly,
 }
 
 impl std::fmt::Display for ShellTerminalFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::ExtensionStartupCleanupRequired => "extension cleanup is still required",
-            Self::ExtensionStartupFailedClosed => "extension startup failed closed",
-            Self::ExtensionStartupLifecyclePanicked => "extension startup lifecycle panicked",
-            Self::ExtensionStartupLifecycleMissing => {
-                "extension startup lifecycle owner is missing"
-            }
-            Self::ExtensionProfileRetirementFailedClosed => {
-                "extension profile retirement failed closed"
-            }
-            Self::ExtensionProfileRetirementBoundaryPanicked => {
-                "extension profile retirement boundary panicked"
-            }
-            Self::ExtensionProfileRetirementLifecycleMissing => {
-                "extension profile retirement lifecycle owner is missing"
-            }
-            Self::ExtensionProfileRetirementContractViolated => {
-                "extension profile retirement continuation contract was violated"
-            }
-            Self::ExtensionProfileDeletionInvariant => {
+            Self::ProfileDeletionInvariant => {
                 "profile deletion violated a post-retirement invariant"
-            }
-            Self::ExtensionDistributionLifecyclePanicked => {
-                "extension distribution lifecycle panicked"
-            }
-            Self::ExtensionDistributionLifecycleMissing => {
-                "extension distribution lifecycle owner is missing"
             }
             Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
         })
@@ -312,11 +111,10 @@ pub trait PresentationChrome: GeometryChrome {
 
 /// Terminal result of the ordered application shutdown protocol.
 ///
-/// A retryable failure happens before the unique extension-service owner or
-/// native engine is torn down and leaves the actor live. `Unclean` is
-/// terminal: either the actor exited without completing the barrier or one of
-/// agent lifecycle, extension, Store, blocker, or native cleanup was not
-/// proven, so the process must exit unsuccessfully.
+/// A retryable failure happens before the native engine is torn down and
+/// leaves the actor live. `Unclean` is terminal: either the actor exited
+/// without completing the barrier or one of agent lifecycle, Store, blocker,
+/// or native cleanup was not proven, so the process must exit unsuccessfully.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShutdownOutcome {
     RetryableFailure,
@@ -350,6 +148,7 @@ pub enum ContentPolicyStatusQueryOutcome {
 pub enum BrowserPage {
     Work,
     Settings,
+    Extensions,
     History,
     Downloads,
     Tasks,
@@ -361,6 +160,7 @@ impl BrowserPage {
         match self {
             Self::Work => "browser.work",
             Self::Settings => "browser.settings",
+            Self::Extensions => "browser.extensions",
             Self::History => "browser.history",
             Self::Downloads => "browser.downloads",
             Self::Tasks => "browser.tasks",
@@ -512,80 +312,6 @@ pub enum Command {
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
     },
-    /// Changes one installed extension in the focused profile. All selector
-    /// fields must originate from the latest privileged management
-    /// projection; Shell supplies the profile identity itself.
-    SetFocusedExtensionEnabled {
-        install: ExtensionInstallId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-        enabled: bool,
-    },
-    /// Changes one optional API or host grant from the exact installed row.
-    /// The target index is resolved again against authenticated manifest data.
-    EditFocusedExtensionOptionalGrant {
-        install: ExtensionInstallId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-        expected_grant: ExtensionGrantRevision,
-        target: ExtensionGrantEditTarget,
-        granted: bool,
-    },
-    /// Pauses or resumes every extension in the focused profile.
-    SetFocusedProfileExtensionsPaused {
-        expected_policy: ExtensionProfilePolicyRevision,
-        paused: bool,
-    },
-    /// Enables or disables extensions on the focused tab's browser-derived
-    /// whole-host scope. No URL or host crosses privileged IPC.
-    SetFocusedSiteExtensionsEnabled {
-        expected_policy: ExtensionProfilePolicyRevision,
-        enabled: bool,
-    },
-    /// Installs one exact package from the latest privileged management
-    /// projection. Shell derives the focused profile and complete package
-    /// selector; chrome can choose only projected optional-entry indexes and
-    /// the two explicit browsing-scope decisions.
-    InstallFocusedExtension {
-        candidate_index: u8,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        optional_api_indices: Vec<u8>,
-        optional_host_indices: Vec<u8>,
-        file_access: bool,
-        private_access: bool,
-    },
-    /// Approves the exact changed-required-authority update retained by the
-    /// focused profile's current management subscription. The opaque review
-    /// token carries no package or permission authority.
-    ApproveFocusedExtensionUpdate {
-        review: u64,
-    },
-    /// Removes one exact installed extension from the focused profile after
-    /// the extension service proves regular/private native absence.
-    UninstallFocusedExtension {
-        install: ExtensionInstallId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-    },
-    /// Opens the exact declared options page for one currently projected
-    /// active install. Shell rejoins all authority from its visible catalog.
-    OpenFocusedExtensionOptions {
-        install: ExtensionInstallId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-    },
-    /// Opens or closes the focused profile's lazy privileged management
-    /// subscription. Opening performs one explicit authenticated read; closing
-    /// invalidates late callbacks and retains no polling work.
-    SetExtensionManagementVisible(bool),
-    /// Browser-owned response to the exact currently projected native
-    /// optional-grant prompt. Public composition wraps this durable mutation
-    /// in `Operation`; all identities are stale-resistant echo tokens.
-    RespondToExtensionRuntimeGrantPrompt {
-        runtime: ExtensionRuntimeInstance,
-        request: ExtensionRuntimeGrantRequestId,
-        allow: bool,
-    },
     /// Browser-owned response to the exact currently projected foreground
     /// page request. Public composition wraps this in `Operation`.
     RespondToPagePermissionPrompt {
@@ -614,37 +340,41 @@ pub enum Command {
         item: ItemId,
         request: zephium_core::permissions::PagePermissionRequestId,
     },
-    /// Internal exactly-once handoff from an admitted extension-service
-    /// management callback. It is never accepted through public operation
-    /// dispatch.
-    ExtensionManagementSettled {
-        request: u64,
-        completion: ExtensionManagementCompletion,
-    },
-    /// Internal exactly-once handoff for one admitted catalog read.
-    ExtensionManagementCatalogSettled {
-        request: u64,
+    /// Replaces the extensions a profile runs.
+    SetWebExtensions {
         profile: ProfileId,
-        outcome: ExtensionManagementCatalogOutcome,
+        extensions: Vec<zephium_core::ports::engine::WebExtensionLoad>,
     },
-    /// Internal exactly-once callback from the serialized grant transaction.
-    ExtensionRuntimeGrantSettled {
-        runtime: ExtensionRuntimeInstance,
-        request: ExtensionRuntimeGrantRequestId,
-        settlement: Box<ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>>,
+    /// Opens an extension's options page in a tab.
+    OpenWebExtensionOptions {
+        profile: ProfileId,
+        extension_id: String,
     },
-    /// Internal exactly-once callback from one bounded repository-maintenance
-    /// turn. It is never accepted through public operation dispatch.
-    ExtensionRepositoryMaintenanceSettled(ExtensionRepositoryMaintenanceOutcome),
-    /// Internal move-only package handoff from the product distribution
-    /// worker. Public operation dispatch never admits this command.
-    ProvisionAcquiredExtensionPackage(AcquiredExtensionPackageSubmission),
-    /// Internal source-free catalog activation handoff from the product
-    /// distribution worker. Public operation dispatch never admits it.
-    ActivateAcquiredExtensionCatalog(AcquiredExtensionCatalogSubmission),
-    /// Latest redacted state from the explicitly constructed product
-    /// distribution worker. This is replaceable observation, not authority.
-    ExtensionDistributionStatusChanged(ExtensionDistributionStatus),
+    /// The user's answer to an extension's run-time access request.
+    AnswerWebExtensionAccess {
+        profile: ProfileId,
+        request: u64,
+        allowed: bool,
+    },
+    /// Uninstalls one extension, erasing what it stored.
+    RemoveWebExtension {
+        profile: ProfileId,
+        extension: Box<zephium_core::ports::engine::WebExtensionLoad>,
+    },
+    /// The profile an installation from `tab` would go to.
+    ResolveWebExtensionTarget {
+        tab: Option<ItemId>,
+        reply: SyncSender<Option<crate::shell::WebExtensionTarget>>,
+    },
+    WebExtensionStatus {
+        profile: ProfileId,
+        reply: SyncSender<
+            Vec<(
+                zephium_core::ids::ExtensionInstallId,
+                crate::shell::WebExtensionStatus,
+            )>,
+        >,
+    },
     SearchSupplementaryFinished {
         context: Box<zephium_ipc::SearchContext>,
         query: String,
@@ -691,6 +421,15 @@ pub enum Command {
     /// pending until both the exact durable CAS and native policy generation
     /// settle.
     SetFocusedContentBlockerEnabled(bool),
+    ElementPicker {
+        context: Box<zephium_ipc::BlockerSiteContext>,
+        action: zephium_ipc::BlockerPickerAction,
+        reply: SyncSender<Option<zephium_ipc::BlockerPickerView>>,
+    },
+    ChangeBlockerSite {
+        context: Box<zephium_ipc::BlockerSiteContext>,
+        action: zephium_ipc::BlockerSiteAction,
+    },
     /// Retries the focused profile's exact failed generation without exposing
     /// a profile selector to privileged IPC.
     RetryFocusedContentPolicy {
@@ -708,6 +447,10 @@ pub enum Command {
     /// Read-only privileged-chrome reconciliation query. The actor chooses the
     /// focused profile and assigns the projection revision; IPC callers cannot
     /// enumerate or select another profile.
+    BlockerStatistics {
+        profile: ProfileId,
+        reply: SyncSender<Option<zephium_ipc::BlockerStatsView>>,
+    },
     FocusedContentPolicyStatus {
         reply: SyncSender<BlockerStatusView>,
     },

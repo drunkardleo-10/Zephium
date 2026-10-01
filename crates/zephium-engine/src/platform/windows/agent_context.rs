@@ -6,12 +6,11 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
-//! Extension-isolated hidden WebView2 construction for owned agent contexts.
+//! Hidden WebView2 construction for owned agent contexts.
 //!
-//! The adapter reuses one already-proven extension-enabled environment. The
-//! Wry startup fence runs against the exact controller profile before WebView
-//! initialization or the bootstrap navigation. It either rejoins the selected
-//! empty profile or a deterministic extension-free automation subprofile.
+//! Extension-enabled human environments use a deterministic automation
+//! subprofile. The pre-initialization gate attests its exact binding and
+//! extension-free inventory before the host arms any navigation.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -50,10 +49,6 @@ pub(crate) use crate::platform::agent_navigation::{
     AgentNavigationCommit, AgentNavigationTerminal,
 };
 
-use super::{
-    profile_inventory_is_empty, WindowsNativeExtensionFailure, WindowsNativeExtensionProfile,
-};
-
 const PROFILE_NAME_UTF16_LIMIT: usize = 64;
 const PROFILE_NAME_UTF8_LIMIT: usize = 64;
 
@@ -62,7 +57,7 @@ const PROFILE_NAME_UTF8_LIMIT: usize = 64;
 pub(crate) enum AgentOwnedViewConstructionError {
     /// The selected environment, profile name, or private-mode bit diverged.
     Storage,
-    /// Extension-enabled empty-inventory proof could not be established.
+    /// The controller profile or the isolated semantic world could not be proven.
     ExtensionIsolation,
     /// Wry/WebView2 refused construction, hardening, callbacks, or hidden state.
     Native,
@@ -71,15 +66,11 @@ pub(crate) enum AgentOwnedViewConstructionError {
 /// Exact profile authority selected before one controller is constructed.
 #[derive(Clone)]
 pub(crate) enum AgentOwnedProfile {
-    Selected(WindowsNativeExtensionProfile),
+    Selected,
     Automation { name: String },
 }
 
 impl AgentOwnedProfile {
-    pub(crate) const fn selected(profile: WindowsNativeExtensionProfile) -> Self {
-        Self::Selected(profile)
-    }
-
     pub(crate) fn automation(profile: ProfileId) -> Self {
         Self::Automation {
             name: format!("agent-{profile}"),
@@ -88,9 +79,7 @@ impl AgentOwnedProfile {
 
     pub(crate) const fn proof(&self) -> ContextConstructionProof {
         match self {
-            Self::Selected(_) => {
-                ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory
-            }
+            Self::Selected => ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory,
             Self::Automation { .. } => {
                 ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory
             }
@@ -312,14 +301,13 @@ impl AgentOwnedView {
         self.is_suspended().map(|suspended| !suspended)
     }
 
-    pub(crate) fn attest(&self, deadline: Instant) -> Result<(), AgentOwnedViewConstructionError> {
-        attest_profile_before_initialization(
+    pub(crate) fn attest(&self) -> Result<(), AgentOwnedViewConstructionError> {
+        attest_profile(
             &self.profile,
             &self.view.environment(),
             &self.view.webview(),
             self.storage_class,
             &self.expected_user_data_folder,
-            deadline,
         )?;
         if !self
             .semantic()
@@ -333,13 +321,12 @@ impl AgentOwnedView {
     /// Returns the exact automation-subprofile cookie mutation authority.
     ///
     /// The selected/default profile is deliberately unrepresentable here: it
-    /// is a read-only source for this bridge, never a destination. Inventory,
-    /// hidden ownership, active suspension state, controller profile, and the
+    /// is a read-only source for this bridge, never a destination. Hidden
+    /// ownership, active suspension state, controller profile, and the
     /// original environment are re-attested before either COM owner escapes.
     pub(crate) fn cookie_destination(
         &self,
         expected_environment: &ICoreWebView2Environment,
-        deadline: Instant,
     ) -> Result<(ICoreWebView2CookieManager, ICoreWebView2Profile2), AgentOwnedViewConstructionError>
     {
         if !matches!(self.profile, AgentOwnedProfile::Automation { .. }) {
@@ -348,7 +335,7 @@ impl AgentOwnedView {
         if !super::same_environment(&self.view.environment(), expected_environment) {
             return Err(AgentOwnedViewConstructionError::Storage);
         }
-        self.attest(deadline)?;
+        self.attest()?;
         if self.attest_suspension_state()? {
             return Err(AgentOwnedViewConstructionError::Native);
         }
@@ -525,59 +512,44 @@ fn expected_physical_extent(logical: u16, dpi: u32) -> Option<i32> {
     i32::try_from(scaled).ok().filter(|extent| *extent > 0)
 }
 
-fn attest_profile_before_initialization(
+fn attest_profile(
     binding: &AgentOwnedProfile,
     environment: &ICoreWebView2Environment,
     core: &ICoreWebView2,
     storage_class: ContextProfileStorageClass,
     expected_user_data_folder: &Path,
-    deadline: Instant,
 ) -> Result<(), AgentOwnedViewConstructionError> {
     super::attest_environment(environment, expected_user_data_folder)
         .map_err(|_| AgentOwnedViewConstructionError::Storage)?;
     if !controller_environment_matches(environment, core) {
         return Err(AgentOwnedViewConstructionError::Storage);
     }
+    let profile = controller_profile(core)
+        .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
     match binding {
-        AgentOwnedProfile::Selected(profile) => {
-            if storage_class != ContextProfileStorageClass::Durable {
+        AgentOwnedProfile::Selected => {
+            if storage_class != ContextProfileStorageClass::Durable
+                || profile_is_private(&profile) != Ok(false)
+            {
                 return Err(AgentOwnedViewConstructionError::Storage);
             }
-            profile
-                .attest_controller(environment, core, deadline, &[])
-                .map_err(map_inventory_failure)
         }
         AgentOwnedProfile::Automation { name } => {
             if name.len() > PROFILE_NAME_UTF8_LIMIT
                 || !name.is_ascii()
                 || !name.starts_with("agent-")
-            {
-                return Err(AgentOwnedViewConstructionError::Storage);
-            }
-            let profile = controller_profile(core)
-                .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
-            if profile_name(&profile).as_deref() != Ok(name.as_str())
+                || profile_name(&profile).as_deref() != Ok(name.as_str())
                 || profile_is_private(&profile)
                     != Ok(storage_class == ContextProfileStorageClass::Ephemeral)
             {
                 return Err(AgentOwnedViewConstructionError::Storage);
             }
-            match profile_inventory_is_empty(&profile, deadline) {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(AgentOwnedViewConstructionError::ExtensionIsolation),
-                Err(failure) => Err(map_inventory_failure(failure)),
-            }
         }
     }
+    Ok(())
 }
 
-const fn map_inventory_failure(
-    _failure: WindowsNativeExtensionFailure,
-) -> AgentOwnedViewConstructionError {
-    AgentOwnedViewConstructionError::ExtensionIsolation
-}
-
-/// Builds one initially hidden, extension-isolated selected-profile WebView2.
+/// Builds one initially hidden selected-profile or automation WebView2.
 ///
 /// The only initial document is `about:blank`. No page-world script, IPC
 /// handler, popup callback, generic native bridge, selector, or model-facing
@@ -600,6 +572,7 @@ pub(crate) fn build_owned_agent_view<
     storage_class: ContextProfileStorageClass,
     expected_user_data_folder: &Path,
     deadline: Instant,
+    extensions_enabled: bool,
     callbacks: AgentOwnedViewCallbacks<
         Navigation,
         Location,
@@ -712,36 +685,53 @@ where
         builder = builder.with_incognito(true);
     }
 
-    let automation_name = match &profile {
-        AgentOwnedProfile::Selected(_) => None,
-        AgentOwnedProfile::Automation { name } => Some(name.clone()),
-    };
-    if let Some(name) = automation_name {
-        builder = builder.with_profile_name(name);
+    if let AgentOwnedProfile::Automation { name } = &profile {
+        builder = builder.with_profile_name(name.clone());
     }
-    let expected_path = expected_user_data_folder.to_owned();
-    let gate_profile = profile.clone();
-    let gate = move |environment: &ICoreWebView2Environment, core: &ICoreWebView2| {
-        attest_profile_before_initialization(
-            &gate_profile,
-            environment,
-            core,
-            storage_class,
-            &expected_path,
-            deadline,
-        )
-        .map_err(|_| {
-            windows_core::Error::new(
-                windows::Win32::Foundation::E_ACCESSDENIED,
-                "owned WebView2 profile isolation gate failed",
+
+    if extensions_enabled {
+        if !matches!(&profile, AgentOwnedProfile::Automation { .. }) {
+            return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
+        }
+        let expected_environment = environment.clone();
+        let expected_path = expected_user_data_folder.to_owned();
+        let expected_profile = profile.clone();
+        builder = builder.with_browser_extension_startup_gate(move |environment, core| {
+            if !super::same_environment(&expected_environment, environment) {
+                return Err(windows::Win32::Foundation::E_ACCESSDENIED.into());
+            }
+            attest_profile(
+                &expected_profile,
+                environment,
+                core,
+                storage_class,
+                &expected_path,
             )
-        })
-    };
-    builder = builder.with_browser_extension_startup_gate(gate);
+            .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_ACCESSDENIED))?;
+            let profile = super::extensions::profile(core)?;
+            let items = super::extensions::list(&profile).map_err(|_| {
+                windows::core::Error::from(windows::Win32::Foundation::E_ACCESSDENIED)
+            })?;
+            for item in items {
+                let id = super::extensions::extension_id(&item)?;
+                if !super::extensions::is_runtime_component(&id) {
+                    return Err(windows::Win32::Foundation::E_ACCESSDENIED.into());
+                }
+            }
+            Ok(())
+        });
+    }
 
     let view = builder
         .build_as_child(parent)
         .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+    attest_profile(
+        &profile,
+        &view.environment(),
+        &view.webview(),
+        storage_class,
+        expected_user_data_folder,
+    )?;
     let semantic = semantic_plan
         .bind(&view.webview(), semantic_invariant, semantic_panic)
         .map_err(|_| AgentOwnedViewConstructionError::Native)?;

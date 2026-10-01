@@ -758,6 +758,10 @@ struct WebViewAttributes<'a> {
   #[cfg(any(target_os = "macos", target_os = "ios"))]
   pub apple_navigation_action_handler:
     Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
+  /// Accepted main-frame navigation attempts, before a document commits.
+  /// The callback is observational and must not grant page authority.
+  #[cfg(target_os = "macos")]
+  pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
 
   /// A download started handler to manage incoming downloads.
   ///
@@ -1005,6 +1009,8 @@ impl Default for WebViewAttributes<'_> {
       navigation_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
+      #[cfg(target_os = "macos")]
+      main_frame_navigation_attempt_handler: None,
       download_started_handler: Some(Box::new(|_, _| true)),
       download_completed_handler: None,
       download_policy: DownloadPolicy::UseHandlers,
@@ -1509,6 +1515,17 @@ impl<'a> WebViewBuilder<'a> {
     callback: impl Fn(String, AppleNavigationAction) -> bool + 'static,
   ) -> Self {
     self.attrs.apple_navigation_action_handler = Some(Box::new(callback));
+    self
+  }
+
+  /// Observe an admitted macOS main-frame request before its document commits.
+  /// This does not change navigation policy or report a committed page URL.
+  #[cfg(target_os = "macos")]
+  pub fn with_main_frame_navigation_attempt_handler(
+    mut self,
+    callback: impl Fn(String) + 'static,
+  ) -> Self {
+    self.attrs.main_frame_navigation_attempt_handler = Some(Box::new(callback));
     self
   }
 
@@ -2999,6 +3016,20 @@ impl WebViewExtDarwin for WebView {
 /// Additional methods on `WebView` that are specific to macOS.
 #[cfg(target_os = "macos")]
 pub trait WebViewExtMacOS {
+  /// Observes only the exact host-owned subscription rule list. Returns false
+  /// if the optional private WebKit action class/getter is unavailable.
+  fn set_content_block_counter(
+    &self,
+    identifier: &str,
+    aggregate: std::sync::Arc<(
+      std::sync::atomic::AtomicU64,
+      std::sync::atomic::AtomicBool,
+      std::sync::atomic::AtomicBool,
+    )>,
+  ) -> bool;
+  /// Transfers the plain per-view counter without inspecting request metadata.
+  fn collect_content_block_counter(&self, reset: bool);
+
   /// Returns WKWebView handle
   fn webview(&self) -> Retained<WryWebView>;
   /// Returns WKWebView manager [(userContentController)](https://developer.apple.com/documentation/webkit/wkscriptmessagehandler/1396222-usercontentcontroller) handle
@@ -3030,6 +3061,78 @@ pub trait WebViewExtMacOS {
 
 #[cfg(target_os = "macos")]
 impl WebViewExtMacOS for WebView {
+  fn set_content_block_counter(
+    &self,
+    identifier: &str,
+    aggregate: std::sync::Arc<(
+      std::sync::atomic::AtomicU64,
+      std::sync::atomic::AtomicBool,
+      std::sync::atomic::AtomicBool,
+    )>,
+  ) -> bool {
+    use objc2::{msg_send, sel, DefinedClass};
+    let Some(class) = objc2::runtime::AnyClass::get(c"_WKContentRuleListAction") else {
+      aggregate
+        .2
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+      return false;
+    };
+    let available: bool =
+      unsafe { msg_send![class, instancesRespondToSelector: sel!(blockedLoad)] };
+    if !available {
+      aggregate
+        .2
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+      return false;
+    }
+    let mut slot = self
+      .webview
+      .navigation_policy_delegate
+      .ivars()
+      .blocked_loads
+      .borrow_mut();
+    let identifier = objc2_foundation::NSString::from_str(identifier);
+    if slot.as_ref().is_some_and(|c| {
+      c.identifier.isEqualToString(&identifier) && std::sync::Arc::ptr_eq(&c.aggregate, &aggregate)
+    }) {
+      return true;
+    }
+    let previous_identifier = slot
+      .as_ref()
+      .filter(|c| std::sync::Arc::ptr_eq(&c.aggregate, &aggregate))
+      .map(|c| c.identifier.clone());
+    *slot = Some(crate::wkwebview::BlockedLoadCounter {
+      identifier,
+      previous_identifier,
+      count: Default::default(),
+      aggregate,
+    });
+    drop(slot);
+    // WebKit caches optional delegate capabilities when this property is set.
+    unsafe {
+      self
+        .webview
+        .webview
+        .setNavigationDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
+          &*self.webview.navigation_policy_delegate,
+        )));
+    }
+    true
+  }
+  fn collect_content_block_counter(&self, reset: bool) {
+    use objc2::DefinedClass;
+    if let Some(counter) = self
+      .webview
+      .navigation_policy_delegate
+      .ivars()
+      .blocked_loads
+      .borrow()
+      .as_ref()
+    {
+      counter.flush(reset);
+    }
+  }
+
   fn webview(&self) -> Retained<WryWebView> {
     self.webview.webview.clone()
   }

@@ -1,17 +1,15 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
 mod blocker;
+mod blocker_sites;
+mod blocker_statistics;
 mod bootstrap;
 mod effects;
 mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
-mod extension_compatibility_broker;
-mod extension_distribution;
-mod extension_management;
-mod extension_repository_maintenance;
-mod extension_runtime_grants;
+mod extension_store;
 mod favicon_probe;
 mod favicons;
 mod history;
@@ -26,6 +24,8 @@ mod search;
 mod tabs;
 mod user_content_status;
 mod view_lifecycle;
+mod webext;
+pub use webext::{WebExtensionStatus, WebExtensionTarget};
 mod window_layout;
 mod work_authoring;
 mod zoom;
@@ -33,8 +33,6 @@ mod zoom;
 use effects::{mutation_result, operation_result, NativeWork};
 use extension_actions::ExtensionActionState;
 use extension_browser_surface::ExtensionBrowserSurfaceState;
-use extension_management::ExtensionManagementState;
-use extension_runtime_grants::ExtensionRuntimeGrantPromptState;
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
@@ -67,8 +65,8 @@ use crate::api::AgentLifecycle;
 use crate::api::PagePermissionPromptDecision;
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
-    EmitFn, ExtensionLifecycle, ExtensionManagementCompletion, SharedBlocker, SharedChrome,
-    SharedEngine, SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
+    EmitFn, SharedBlocker, SharedChrome, SharedEngine, SharedStore, ShellTerminalFailure,
+    ShellTerminalFailureCallback, ShutdownOutcome,
 };
 #[cfg(test)]
 use crate::api::{ChromePresentationCallback, PresentationChrome};
@@ -89,7 +87,6 @@ use zephium_core::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
     ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
     ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
-    ExtensionNativeNamespaceScope,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
@@ -105,13 +102,6 @@ use zephium_core::ports::engine::Engine;
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, EngineEvent, NativeAction, NativeDispatch,
     NavigationPresentationId, Partition, ProfileDataErasureOutcome, StageMotion, ZoomRequestId,
-};
-use zephium_core::ports::extensions::{
-    ExtensionDistributionState, ExtensionDistributionStatus, ExtensionManagementCompatibility,
-    ExtensionManagementGrantState, ExtensionManagementLimitation, ExtensionManagementProvenance,
-    ExtensionManagementRuntimeState, ExtensionManagementSource,
-    ExtensionProfileRetirementDisposition, ExtensionServiceShutdownOutcome,
-    ExtensionServiceStartupOutcome,
 };
 #[cfg(test)]
 use zephium_core::ports::store::Store;
@@ -130,16 +120,7 @@ use zephium_ipc::{
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
     BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
     ExtensionActionFailure, ExtensionActionRuntimeView, ExtensionActionShortcutView,
-    ExtensionActionsView, ExtensionDistributionFailureReasonView,
-    ExtensionDistributionFailureStageView, ExtensionDistributionStateView,
-    ExtensionDistributionView, ExtensionInstallCandidateView,
-    ExtensionManagementAvailabilityChangedView, ExtensionManagementAvailabilityView,
-    ExtensionManagementCompatibilityView, ExtensionManagementEntryView,
-    ExtensionManagementGrantView, ExtensionManagementLimitationView, ExtensionManagementPhase,
-    ExtensionManagementProvenanceView, ExtensionManagementRuntimeView,
-    ExtensionManagementSourceView, ExtensionManagementView, ExtensionProfilePolicyView,
-    ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView,
-    ExtensionUpdateConsentView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
+    ExtensionActionsView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
     OperationReason, PagePermissionKindView, PagePermissionPromptEntryView,
     PagePermissionPromptView, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
     RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
@@ -153,16 +134,8 @@ const MAX_VISIBLE_PANES: usize = 8;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(not(test))]
-const EXTENSION_STARTUP_SETTLEMENT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(200);
-#[cfg(test)]
-const EXTENSION_STARTUP_SETTLEMENT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(5);
-const EXTENSION_STARTUP_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
-const EXTENSION_STARTUP_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
-// extension-service settlement, native teardown, and thread joins consume
+// native teardown, and thread joins consume
 // this one caller-owned deadline.
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
@@ -239,8 +212,10 @@ pub struct Shell {
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     window_visible: bool,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
+    browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
+    browser_return_ready: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
@@ -249,6 +224,8 @@ pub struct Shell {
     crash: CrashState,
     bootstrapped: bool,
     native_openers: std::collections::HashMap<ItemId, NativeOpener>,
+    #[cfg(debug_assertions)]
+    bootstrap_started: Option<std::time::Instant>,
     persistence: PersistenceState,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
@@ -258,26 +235,13 @@ pub struct Shell {
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
     blocker: blocker::BlockerCoordinator,
+    blocker_statistics: std::collections::HashMap<ProfileId, blocker_statistics::Statistics>,
     #[cfg(feature = "agentic-browser")]
     agent_lifecycle: AgentLifecycleOwner,
-    extension_service: Option<ExtensionLifecycle>,
-    extension_startup_ready: bool,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
+    web_extensions: webext::WebExtensionState,
     extension_actions: ExtensionActionState,
-    extension_management: ExtensionManagementState,
-    extension_runtime_grants: ExtensionRuntimeGrantPromptState,
-    extension_distribution_status: Option<ExtensionDistributionStatus>,
     page_permissions: PagePermissionPromptState,
-    /// A terminal maintenance settlement disables further periodic repository
-    /// work until process restart; transient refusals retain the ordinary
-    /// heartbeat retry path.
-    extension_repository_maintenance_failed_closed: bool,
-    /// Any terminal extension lifecycle failure permanently closes bootstrap
-    /// and profile-deletion progress for this process while the desktop
-    /// composition root converges on orderly shutdown.
-    extension_lifecycle_terminal: bool,
-    extension_startup_retry_exponent: u8,
-    extension_startup_not_before: Option<std::time::Instant>,
     terminal_failure: Option<ShellTerminalFailureCallback>,
     terminal_failure_handoff_panicked: bool,
     engine: SharedEngine,
@@ -296,7 +260,6 @@ pub(super) struct ShellPorts {
     blocker: SharedBlocker,
     #[cfg(feature = "agentic-browser")]
     agent_lifecycle: Option<AgentLifecycle>,
-    extension_service: ExtensionLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
@@ -307,7 +270,6 @@ impl ShellPorts {
         engine: SharedEngine,
         store: SharedStore,
         blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
         terminal_failure: ShellTerminalFailureCallback,
         chrome: SharedChrome,
         emit: EmitFn,
@@ -318,7 +280,6 @@ impl ShellPorts {
             blocker,
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle: None,
-            extension_service,
             terminal_failure,
             chrome,
             emit,
@@ -345,7 +306,6 @@ impl Shell {
                 engine,
                 store,
                 Arc::new(tests::ImmediateAllowAllCompiler),
-                tests::clean_extension_lifecycle(),
                 Box::new(|_| {}),
                 chrome,
                 emit,
@@ -364,60 +324,23 @@ impl Shell {
         emit: EmitFn,
     ) -> Self {
         Self::with_store_reads(
-            ShellPorts::new(
-                engine,
-                store,
-                blocker,
-                tests::clean_extension_lifecycle(),
-                Box::new(|_| {}),
-                chrome,
-                emit,
-            ),
+            ShellPorts::new(engine, store, blocker, Box::new(|_| {}), chrome, emit),
             None,
             false,
         )
     }
 
     #[cfg(test)]
-    pub(super) fn new_with_extension_lifecycle(
+    pub(super) fn new_with_failure(
         engine: SharedEngine,
         store: SharedStore,
         blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
-        chrome: SharedChrome,
-        emit: EmitFn,
-    ) -> Self {
-        Self::new_with_extension_lifecycle_and_failure(
-            engine,
-            store,
-            blocker,
-            extension_service,
-            Box::new(|_| {}),
-            chrome,
-            emit,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_with_extension_lifecycle_and_failure(
-        engine: SharedEngine,
-        store: SharedStore,
-        blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
         terminal_failure: ShellTerminalFailureCallback,
         chrome: SharedChrome,
         emit: EmitFn,
     ) -> Self {
         Self::with_store_reads(
-            ShellPorts::new(
-                engine,
-                store,
-                blocker,
-                extension_service,
-                terminal_failure,
-                chrome,
-                emit,
-            ),
+            ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit),
             None,
             true,
         )
@@ -428,22 +351,13 @@ impl Shell {
         engine: SharedEngine,
         store: SharedStore,
         blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
         agent_lifecycle: AgentLifecycle,
         chrome: SharedChrome,
         emit: EmitFn,
     ) -> Self {
         Self::with_store_reads(
-            ShellPorts::new(
-                engine,
-                store,
-                blocker,
-                extension_service,
-                Box::new(|_| {}),
-                chrome,
-                emit,
-            )
-            .with_agent_lifecycle(Some(agent_lifecycle)),
+            ShellPorts::new(engine, store, blocker, Box::new(|_| {}), chrome, emit)
+                .with_agent_lifecycle(Some(agent_lifecycle)),
             None,
             true,
         )
@@ -467,8 +381,8 @@ impl Shell {
 
     /// Builds only actor-owned state and does not enter any external port.
     /// The actor installs `ShellExitGuard` before completing catalog admission,
-    /// so a panic cannot drop the move-only extension lifecycle or strand the
-    /// Store/native/blocker cleanup graph outside an observable terminal path.
+    /// so a panic cannot strand the Store/native/blocker cleanup graph outside
+    /// an observable terminal path.
     pub(super) fn with_store_reads_deferred_blocker_catalog(
         ports: ShellPorts,
         store_reads: impl Into<Option<StoreReadQueue>>,
@@ -480,7 +394,6 @@ impl Shell {
             blocker,
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle,
-            extension_service,
             terminal_failure,
             chrome,
             emit,
@@ -510,8 +423,10 @@ impl Shell {
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
             browser_page: None,
+            browser_page_projected: None,
             browser_return_revision: 0,
             browser_after_return: None,
+            browser_return_ready: false,
             browser_return: None,
             work_pane: None,
             work_pane_generation: 0,
@@ -520,12 +435,15 @@ impl Shell {
             crash: CrashState::default(),
             bootstrapped: false,
             native_openers: std::collections::HashMap::new(),
+            #[cfg(debug_assertions)]
+            bootstrap_started: None,
             persistence: PersistenceState::default(),
             shutdown_result: None,
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
+            blocker_statistics: std::collections::HashMap::new(),
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
             #[cfg(feature = "work-execution")]
@@ -540,18 +458,10 @@ impl Shell {
             retained_page_runtime: None,
             #[cfg(feature = "work-execution")]
             retained_graveyard: Vec::new(),
-            extension_service: Some(extension_service),
-            extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
+            web_extensions: webext::WebExtensionState::default(),
             extension_actions: ExtensionActionState::default(),
-            extension_management: ExtensionManagementState::default(),
-            extension_runtime_grants: ExtensionRuntimeGrantPromptState::default(),
-            extension_distribution_status: None,
             page_permissions: PagePermissionPromptState::default(),
-            extension_repository_maintenance_failed_closed: false,
-            extension_lifecycle_terminal: false,
-            extension_startup_retry_exponent: 0,
-            extension_startup_not_before: None,
             terminal_failure: Some(terminal_failure),
             terminal_failure_handoff_panicked: false,
             engine,
@@ -682,41 +592,6 @@ impl Shell {
                     return;
                 }
                 let command = *command;
-                if matches!(
-                    &command,
-                    Command::InstallFocusedExtension { .. }
-                        | Command::ApproveFocusedExtensionUpdate { .. }
-                        | Command::EditFocusedExtensionOptionalGrant { .. }
-                        | Command::SetFocusedProfileExtensionsPaused { .. }
-                        | Command::SetFocusedSiteExtensionsEnabled { .. }
-                        | Command::SetFocusedExtensionEnabled { .. }
-                        | Command::UninstallFocusedExtension { .. }
-                ) {
-                    if let Some(mut completion) =
-                        self.begin_extension_management(operation_id.clone(), command)
-                    {
-                        completion.operation_id = operation_id;
-                        (self.emit)(Projection::OperationProcessed(completion));
-                    }
-                    return;
-                }
-                if let Command::RespondToExtensionRuntimeGrantPrompt {
-                    runtime,
-                    request,
-                    allow,
-                } = &command
-                {
-                    if let Some(mut completion) = self.begin_extension_runtime_grant_response(
-                        operation_id.clone(),
-                        *runtime,
-                        *request,
-                        *allow,
-                    ) {
-                        completion.operation_id = operation_id;
-                        (self.emit)(Projection::OperationProcessed(completion));
-                    }
-                    return;
-                }
                 if let Command::RespondToPagePermissionPrompt {
                     profile,
                     item,
@@ -762,6 +637,15 @@ impl Shell {
                     }
                     return;
                 }
+                if let Command::ChangeBlockerSite { context, action } = &command {
+                    if let Some(mut completion) =
+                        self.begin_blocker_site_mutation(operation_id.clone(), context, action)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if matches!(&command, Command::RefreshContentBlockerSources) {
                     if let Some(mut completion) =
                         self.begin_blocker_catalog_refresh(operation_id.clone())
@@ -776,6 +660,36 @@ impl Shell {
                 (self.emit)(Projection::OperationProcessed(completion));
             }
             Command::Bootstrap => self.bootstrap(),
+            Command::SetWebExtensions {
+                profile,
+                extensions,
+            } => self.set_web_extensions(profile, extensions),
+            Command::OpenWebExtensionOptions {
+                profile,
+                extension_id,
+            } => {
+                let _ = self
+                    .engine
+                    .open_web_extension_options(profile, extension_id);
+            }
+            Command::AnswerWebExtensionAccess {
+                profile,
+                request,
+                allowed,
+            } => {
+                let _ = self
+                    .engine
+                    .answer_web_extension_access(profile, request, allowed);
+            }
+            Command::RemoveWebExtension { profile, extension } => {
+                self.remove_web_extension(profile, *extension)
+            }
+            Command::ResolveWebExtensionTarget { tab, reply } => {
+                let _ = reply.try_send(self.web_extension_target(tab));
+            }
+            Command::WebExtensionStatus { profile, reply } => {
+                let _ = reply.try_send(self.web_extension_status(profile));
+            }
             Command::Open => {
                 let _ = self.operation_open();
             }
@@ -1034,21 +948,8 @@ impl Shell {
             Command::Run(id) => {
                 let _ = self.operation_run_command(&id);
             }
-            Command::OpenFocusedExtensionOptions {
-                install,
-                expected_catalog,
-                expected_install,
-            } => self.open_focused_extension_options(install, expected_catalog, expected_install),
             // This privileged mutation must carry a desktop operation id.
-            Command::InvokeExtensionAction { .. }
-            | Command::InstallFocusedExtension { .. }
-            | Command::ApproveFocusedExtensionUpdate { .. }
-            | Command::EditFocusedExtensionOptionalGrant { .. }
-            | Command::SetFocusedProfileExtensionsPaused { .. }
-            | Command::SetFocusedSiteExtensionsEnabled { .. }
-            | Command::SetFocusedExtensionEnabled { .. }
-            | Command::UninstallFocusedExtension { .. } => {}
-            Command::RespondToExtensionRuntimeGrantPrompt { .. } => {}
+            Command::InvokeExtensionAction { .. } => {}
             Command::RespondToPagePermissionPrompt { .. } => {}
             Command::PagePermissionCatalogLoaded {
                 profile,
@@ -1067,35 +968,6 @@ impl Shell {
                 item,
                 request,
             } => self.on_page_permission_timeout(profile, item, request),
-            Command::SetExtensionManagementVisible(visible) => {
-                self.set_extension_management_visible(visible)
-            }
-            Command::ExtensionManagementSettled {
-                request,
-                completion,
-            } => self.settle_extension_management(request, completion),
-            Command::ExtensionManagementCatalogSettled {
-                request,
-                profile,
-                outcome,
-            } => self.settle_extension_management_catalog(request, profile, outcome),
-            Command::ExtensionRuntimeGrantSettled {
-                runtime,
-                request,
-                settlement,
-            } => self.settle_extension_runtime_grant(runtime, request, *settlement),
-            Command::ExtensionRepositoryMaintenanceSettled(outcome) => {
-                self.settle_extension_repository_maintenance(outcome)
-            }
-            Command::ProvisionAcquiredExtensionPackage(submission) => {
-                self.provision_acquired_extension_package(submission)
-            }
-            Command::ActivateAcquiredExtensionCatalog(submission) => {
-                self.activate_acquired_extension_catalog(submission)
-            }
-            Command::ExtensionDistributionStatusChanged(status) => {
-                self.observe_extension_distribution_status(status)
-            }
             Command::Search(query) => {
                 self.search.context = None;
                 self.search(&query);
@@ -1124,6 +996,7 @@ impl Shell {
             Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }
             | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::ChangeBlockerSite { .. }
             | Command::RetryFocusedContentPolicy { .. }
             | Command::RefreshContentBlockerSources => {}
             Command::ContentPolicyStatus { profile, reply } => {
@@ -1133,6 +1006,14 @@ impl Shell {
                     .map(ContentPolicyStatusQueryOutcome::Found)
                     .unwrap_or(ContentPolicyStatusQueryOutcome::UnknownProfile);
                 let _ = reply.send(outcome);
+            }
+            Command::ElementPicker {
+                context,
+                action,
+                reply,
+            } => self.element_picker(&context, action, reply),
+            Command::BlockerStatistics { profile, reply } => {
+                self.query_blocker_statistics(profile, reply)
             }
             Command::FocusedContentPolicyStatus { reply } => {
                 self.maintain_blocker_catalog();
@@ -1178,7 +1059,10 @@ impl Shell {
                 self.consume_profile_deletion_outcome(profile)
             }
             Command::BlockerReady(profile) => self.consume_blocker_compile_result(profile),
-            Command::BlockerStoreReady(profile) => self.consume_blocker_store_result(profile),
+            Command::BlockerStoreReady(profile) => {
+                self.consume_blocker_store_result(profile);
+                self.consume_blocker_site_result(profile);
+            }
             Command::BlockerPreferenceRetry { profile, token } => {
                 self.on_blocker_preference_reconciliation_retry(profile, token)
             }
@@ -1207,6 +1091,7 @@ impl Shell {
                         return;
                     }
                 }
+                self.maintain_blocker_statistics();
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
                 self.drive_blocker_preference_reconciliations();
@@ -1222,7 +1107,6 @@ impl Shell {
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
-                self.maintain_extension_repository();
                 if self.maintain_views() {
                     self.project_items();
                 }
@@ -1544,7 +1428,7 @@ impl Shell {
         }
 
         // Preserve retryability only while every earlier boundary is still
-        // known-good and before the unique extension owner is consumed.
+        // known-good.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.flush_until(deadline)
         })) {
@@ -1567,7 +1451,6 @@ impl Shell {
         let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
         #[cfg(not(feature = "agentic-browser"))]
         let agent_lifecycle_clean = true;
-        let extension_service_clean = self.shutdown_extension_service_until(deadline);
         // Fold every result already published before Store's terminal
         // barrier while ordinary Store/native admission is still valid. Any
         // follow-up reconciliation is then ordered ahead of Store shutdown.
@@ -1586,14 +1469,16 @@ impl Shell {
         } else {
             true
         };
+        if !pre_store_coordination_clean {
+            crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
+        }
+        terminal_clean &= self.flush_blocker_statistics_until(deadline);
         let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.shutdown_until(deadline)
         })) {
             Ok(StoreShutdownOutcome::Clean) => true,
             Ok(StoreShutdownOutcome::RetryableFailure) => {
-                crate::diagnostic!(
-                    "shutdown: storage rejected terminal teardown after extension-service shutdown"
-                );
+                crate::diagnostic!("shutdown: storage rejected terminal teardown");
                 false
             }
             Ok(StoreShutdownOutcome::Unclean) => {
@@ -1633,7 +1518,6 @@ impl Shell {
 
         let clean = terminal_clean
             && agent_lifecycle_clean
-            && extension_service_clean
             && storage_clean
             && coordination_clean
             && reads_stopped
@@ -1710,7 +1594,6 @@ impl Shell {
         let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
         #[cfg(not(feature = "agentic-browser"))]
         let agent_lifecycle_clean = true;
-        let extension_clean = self.shutdown_extension_service_until(deadline);
         let storage_clean = matches!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.store.shutdown_until(deadline)
@@ -1726,7 +1609,6 @@ impl Shell {
         reads_quiesced
             && reads_stopped
             && agent_lifecycle_clean
-            && extension_clean
             && storage_clean
             && native_clean
             && blocker_clean
@@ -1828,155 +1710,6 @@ impl Shell {
         }
     }
 
-    /// Consumes the unique extension-service owner exactly once.
-    ///
-    /// Returning `false` is terminal: there is no truthful in-process
-    /// reconstruction path for the consumed Store/native authority.
-    pub(super) fn shutdown_extension_service_until(
-        &mut self,
-        deadline: std::time::Instant,
-    ) -> bool {
-        let Some(service) = self.extension_service.take() else {
-            crate::diagnostic!("shutdown: extension-service lifecycle owner is missing");
-            return false;
-        };
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            service.shutdown_until(deadline)
-        })) {
-            Ok(ExtensionServiceShutdownOutcome::Clean) => true,
-            Ok(ExtensionServiceShutdownOutcome::Unclean) => {
-                crate::diagnostic!(
-                    "shutdown: extension-service worker termination was not proven before the deadline"
-                );
-                false
-            }
-            Err(_) => {
-                crate::diagnostic!("shutdown: extension-service shutdown panicked");
-                false
-            }
-        }
-    }
-
-    /// Settles extension startup away from the native event-loop thread before
-    /// any recovered deletion or raw content view can be admitted.
-    pub(super) fn extension_service_ready_for_bootstrap(&mut self) -> bool {
-        if self.extension_lifecycle_terminal {
-            return false;
-        }
-        if self.extension_startup_ready {
-            return true;
-        }
-        let now = std::time::Instant::now();
-        if let Some(not_before) = self
-            .extension_startup_not_before
-            .filter(|not_before| now < *not_before)
-        {
-            // Bootstrap is callable by privileged chrome and by the periodic
-            // maintenance path. Neither may bypass the actor-owned retry
-            // schedule and turn a transient service outage into a hot loop.
-            // Re-arm the exact opportunity as well: a stale timer wake can be
-            // consumed before this command reaches the actor, and queue
-            // saturation can transiently publish an earlier replacement.
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_extension_startup(not_before);
-            }
-            return false;
-        }
-        // Consume this exact due opportunity before entering the lifecycle
-        // port. A transient outcome installs the next one; Ready and terminal
-        // outcomes leave no stale retry authority behind.
-        self.extension_startup_not_before = None;
-        let Some(service) = self.extension_service.as_mut() else {
-            crate::diagnostic!("bootstrap: extension-service lifecycle owner is missing");
-            self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupLifecycleMissing);
-            return false;
-        };
-        let deadline = now
-            .checked_add(EXTENSION_STARTUP_SETTLEMENT_TIMEOUT)
-            .unwrap_or(now);
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            service.settle_startup_until(deadline)
-        }));
-        match outcome {
-            Ok(ExtensionServiceStartupOutcome::Ready(active_profiles)) => {
-                if !self.extension_browser_surfaces.activate(active_profiles) {
-                    crate::diagnostic!(
-                        "bootstrap: extension-service active profile projection changed after settlement"
-                    );
-                    self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupFailedClosed);
-                    return false;
-                }
-                self.extension_startup_ready = true;
-                self.extension_startup_retry_exponent = 0;
-                self.extension_startup_not_before = None;
-                if let Some(queue) = &self.self_queue {
-                    queue.cancel_extension_startup();
-                }
-                true
-            }
-            Ok(
-                ExtensionServiceStartupOutcome::Unavailable
-                | ExtensionServiceStartupOutcome::TimedOut
-                | ExtensionServiceStartupOutcome::RetryableNotAdmitted,
-            ) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service startup is temporarily unsettled; retaining all extension-sensitive work"
-                );
-                self.schedule_extension_startup_retry();
-                false
-            }
-            Ok(ExtensionServiceStartupOutcome::CleanupRequired) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service cleanup remains required; refusing extension-sensitive initialization"
-                );
-                self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupCleanupRequired);
-                false
-            }
-            Ok(ExtensionServiceStartupOutcome::FailedClosed) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service startup failed closed; refusing extension-sensitive initialization"
-                );
-                self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupFailedClosed);
-                false
-            }
-            Err(_) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service startup lifecycle panicked; refusing extension-sensitive initialization"
-                );
-                self.fail_extension_startup(
-                    ShellTerminalFailure::ExtensionStartupLifecyclePanicked,
-                );
-                false
-            }
-        }
-    }
-
-    fn fail_extension_startup(&mut self, failure: ShellTerminalFailure) {
-        self.extension_lifecycle_terminal = true;
-        self.extension_startup_not_before = None;
-        if let Some(queue) = &self.self_queue {
-            queue.cancel_extension_startup();
-        }
-        self.report_terminal_failure(failure);
-    }
-
-    fn schedule_extension_startup_retry(&mut self) {
-        let shift = self.extension_startup_retry_exponent.min(4);
-        let factor = 1_u32 << shift;
-        let delay = EXTENSION_STARTUP_RETRY_BASE
-            .checked_mul(factor)
-            .unwrap_or(EXTENSION_STARTUP_RETRY_MAX)
-            .min(EXTENSION_STARTUP_RETRY_MAX);
-        self.extension_startup_retry_exponent =
-            self.extension_startup_retry_exponent.saturating_add(1);
-        let now = std::time::Instant::now();
-        let deadline = now.checked_add(delay).unwrap_or(now);
-        self.extension_startup_not_before = Some(deadline);
-        if let Some(queue) = &self.self_queue {
-            queue.schedule_extension_startup(deadline);
-        }
-    }
-
     fn retryable_shutdown_failure(&mut self, ack: SyncSender<ShutdownOutcome>) {
         let recovered = self
             .self_queue
@@ -1990,31 +1723,13 @@ impl Shell {
         for command in recovered {
             self.handle(command);
         }
-        let restore_extension_startup =
-            !self.extension_startup_ready && !self.extension_lifecycle_terminal;
         let now = std::time::Instant::now();
-        let extension_retry_deadline = restore_extension_startup.then(|| {
-            // Preserve the actor's exact outstanding opportunity. The timer
-            // may still hold it, or may have consumed it immediately before
-            // its Bootstrap command was rejected by the sealed queue. A
-            // missing opportunity means startup had not yet been attempted,
-            // so it is eligible immediately after reopening.
-            let deadline = self.extension_startup_not_before.unwrap_or(now);
-            self.extension_startup_not_before = Some(deadline);
-            deadline
-        });
         if let Some(queue) = &self.self_queue {
             // A timer wake removes its entry before trying to enter the actor.
             // If it raced the shutdown barrier it was truthfully rejected as
             // sealed, so explicitly restore every still-live exact reveal
             // obligation when the retryable barrier reopens. Both maps remain
             // bounded to one entry per logical item.
-            if let Some(deadline) = extension_retry_deadline {
-                // Extension timer wakes consume their exact entry before
-                // queue admission. A wake rejected by the sealed shutdown
-                // barrier must be restored when that retryable barrier opens.
-                queue.schedule_extension_startup(deadline);
-            }
             for (id, pending) in &self.presentation.pending_presentations {
                 queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
             }
@@ -2056,11 +1771,6 @@ impl Shell {
                 query,
                 hits,
             } => self.on_history_read(generation, profile, query, hits),
-            StoreReadResult::ExtensionRecentHistory {
-                runtime,
-                request,
-                hits,
-            } => self.on_extension_recent_history_read(runtime, request, hits),
             StoreReadResult::Favicon {
                 generation,
                 id,

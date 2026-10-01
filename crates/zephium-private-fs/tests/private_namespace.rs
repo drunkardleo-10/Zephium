@@ -12,6 +12,7 @@ use zephium_private_fs::{
     ByteLimit, OpenedPrivateDirectory, PrivateChildKind, PrivateEntryName,
     PrivateFsTransitionError, StreamingFileLength, StreamingWriteError, MAX_IN_MEMORY_FILE_BYTES,
 };
+#[cfg(not(all(target_os = "windows", feature = "windows-namespace-validation")))]
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2724,7 +2725,7 @@ fn rejects_extended_acl_not_visible_in_mode_bits() {
     );
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "windows-namespace-validation")))]
 #[test]
 fn windows_namespace_activation_is_deterministically_unavailable() {
     // Platform admission runs before path parsing or mutation. The relative

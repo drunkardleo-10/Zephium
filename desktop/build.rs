@@ -9,10 +9,6 @@ mod navigation_probe_config;
 
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
-const EXTENSIONS_STAGING_PRODUCT_NAME: &str = "Zephium Extensions Staging";
-const EXTENSIONS_STAGING_IDENTIFIER: &str = "app.zephium.extensions-staging";
-const EXTENSION_LAB_PRODUCT_NAME: &str = "Zephium Extension Lab";
-const EXTENSION_LAB_IDENTIFIER: &str = "app.zephium.extension-lab";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
 const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
 const LEGAL_RESOURCES: [(&str, &str); 3] = [
@@ -32,7 +28,22 @@ fn main() {
         eprintln!("Tauri privileged-window ownership check failed: {error}");
         std::process::exit(1);
     }
-    tauri_build::build()
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        // Tauri's default manifest is this Common Controls dependency, but its
+        // resource library only reaches bin targets. Emit it through the linker
+        // for standalone unit tests too, without embedding a duplicate in bins.
+        tauri_build::try_build(
+            tauri_build::Attributes::new()
+                .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest()),
+        )
+        .expect("Tauri Windows build configuration");
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
+    } else {
+        tauri_build::build();
+    }
 }
 
 fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
@@ -60,8 +71,10 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => None,
         Err(error) => return Err(Box::new(error)),
     };
-    let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
-    let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
+    let adblock_qa = env::var_os("CARGO_FEATURE_ADBLOCK_QA").is_some();
+    if adblock_qa && env::var("OPT_LEVEL").as_deref() == Ok("0") {
+        return Err("protection QA must be optimized: set CARGO_PROFILE_DEV_OPT_LEVEL=2".into());
+    }
     let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let work_integration_qa = env::var_os("CARGO_FEATURE_WORK_INTEGRATION_QA").is_some();
     let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
@@ -79,8 +92,6 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
             || env::var("PROFILE").as_deref() != Ok("debug")
             || rendering_probe
-            || extensions_staging
-            || extension_lab
         {
             return Err(
                 "navigation qualification is an isolated macOS debug-only application".into(),
@@ -92,27 +103,45 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 .ok_or("navigation qualification requires its isolated configuration override")?,
         )?;
     }
-    if [resource_ui_qa, work_integration_qa, file_workflows_qa]
-        .into_iter()
-        .filter(|enabled| *enabled)
-        .count()
+    let webext_qa = env::var_os("CARGO_FEATURE_WEBEXT_QA").is_some();
+    if webext_qa {
+        let config = config_override
+            .as_ref()
+            .ok_or("the extensions QA app requires its isolated configuration override")?;
+        if config.get("identifier").and_then(Value::as_str) != Some("app.zephium.webext-qa")
+            || config.get("productName").and_then(Value::as_str) != Some("Zephium Extensions QA")
+        {
+            return Err("the extensions QA app must use its exact isolated identity".into());
+        }
+    }
+    if [
+        resource_ui_qa,
+        work_integration_qa,
+        file_workflows_qa,
+        adblock_qa,
+        webext_qa,
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count()
         > 1
     {
-        return Err("resource, Work and file workflow QA identities are mutually exclusive".into());
+        return Err("product QA identities are mutually exclusive".into());
     }
-    if isolated_ui_qa {
+    if isolated_ui_qa || adblock_qa {
         let target = env::var("CARGO_CFG_TARGET_OS")?;
-        let supported_target = target == "macos" || (file_workflows_qa && target == "windows");
+        let supported_target =
+            target == "macos" || ((file_workflows_qa || adblock_qa) && target == "windows");
         if !supported_target
             || env::var("PROFILE").as_deref() != Ok("debug")
-            || extensions_staging
-            || extension_lab
             || rendering_probe
             || navigation_probe
         {
             return Err("product UI QA requires an isolated supported-platform debug build".into());
         }
-        let (qa_id, qa_name) = if file_workflows_qa {
+        let (qa_id, qa_name) = if adblock_qa {
+            ("app.zephium.protection-qa", "Zephium Protection QA")
+        } else if file_workflows_qa {
             (
                 "app.zephium.files-integration-qa",
                 "Zephium Files Integration QA",
@@ -146,8 +175,6 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         }
         if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
             || env::var("PROFILE").as_deref() != Ok("debug")
-            || extensions_staging
-            || extension_lab
             || env::var_os("CARGO_FEATURE_MACOS_WORK").is_some()
         {
             return Err("the rendering probe is an isolated macOS debug-only application".into());
@@ -158,28 +185,6 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 .ok_or("the rendering probe requires its isolated configuration override")?,
         )?;
     }
-    if extensions_staging && extension_lab {
-        return Err("the extension staging catalog and private lab are mutually exclusive".into());
-    }
-    if extensions_staging {
-        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-            return Err("the extension staging catalog may be built only for macOS".into());
-        }
-        let override_config = config_override.as_ref().ok_or(
-            "the extension staging feature requires its isolated Tauri configuration override",
-        )?;
-        validate_extensions_staging_override(override_config)?;
-    }
-    if extension_lab {
-        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-            return Err("the private extension lab may be built only for macOS".into());
-        }
-        let override_config = config_override.as_ref().ok_or(
-            "the private extension lab feature requires its isolated Tauri configuration override",
-        )?;
-        validate_extension_lab_override(override_config)?;
-    }
-
     for target in [Target::MacOS, Target::Linux, Target::Windows] {
         let (mut config, paths) = tauri_utils::config::parse::read_from(target, &root)?;
         for path in paths {
@@ -195,46 +200,20 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             json_patch::merge(&mut config, config_override);
             validate_target_window(target, "effective", &config)?;
             validate_legal_resources("effective", &config, &root)?;
+            // The override is supplied for the current build target. A Windows
+            // measurement identity does not rename the Linux desktop package;
+            // the repository Linux identity was validated independently above.
             if matches!(target, Target::Linux)
-                && !extensions_staging
-                && !extension_lab
+                && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
                 && !rendering_probe
                 && !navigation_probe
                 && !isolated_ui_qa
+                && !webext_qa
+                && !adblock_qa
             {
                 validate_linux_identity("effective", &config, &root)?;
             }
         }
-    }
-    Ok(())
-}
-
-fn validate_extension_lab_override(config: &Value) -> io::Result<()> {
-    if config.get("productName").and_then(Value::as_str) != Some(EXTENSION_LAB_PRODUCT_NAME)
-        || config.get("identifier").and_then(Value::as_str) != Some(EXTENSION_LAB_IDENTIFIER)
-        || config
-            .pointer("/app/windows/0/title")
-            .and_then(Value::as_str)
-            != Some(EXTENSION_LAB_PRODUCT_NAME)
-    {
-        return Err(io::Error::other(
-            "the private extension lab must use its exact isolated product identity",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_extensions_staging_override(config: &Value) -> io::Result<()> {
-    if config.get("productName").and_then(Value::as_str) != Some(EXTENSIONS_STAGING_PRODUCT_NAME)
-        || config.get("identifier").and_then(Value::as_str) != Some(EXTENSIONS_STAGING_IDENTIFIER)
-        || config
-            .pointer("/app/windows/0/title")
-            .and_then(Value::as_str)
-            != Some(EXTENSIONS_STAGING_PRODUCT_NAME)
-    {
-        return Err(io::Error::other(
-            "the extension staging build must use its exact isolated product identity",
-        ));
     }
     Ok(())
 }

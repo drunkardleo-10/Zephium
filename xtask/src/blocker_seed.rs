@@ -151,6 +151,19 @@ struct CompileGolden {
     sources: Vec<SourceGolden>,
     runtime: Option<RuntimeGolden>,
     webkit: Option<WebKitGolden>,
+    cosmetics: Option<CosmeticGolden>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CosmeticGolden {
+    accepted_rules: usize,
+    rejected_rules: usize,
+    generic_hide_controls: usize,
+    policy_sha256: String,
+    policy_bytes: usize,
+    native_artifact_sha256: Option<String>,
+    native_json_bytes: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -303,7 +316,7 @@ fn check_inner(repository: &Path, webkit_output: Option<&Path>) -> Result<(), St
     {
         return Err("blocker seed manifest identities do not match exact bytes".into());
     }
-    if quality.schema_version != 1
+    if quality.schema_version != 2
         || quality.package_revision != catalog.revision
         || quality.license_file != LICENSE_FILE
         || quality.license_sha256 != LICENSE_SHA256
@@ -388,7 +401,7 @@ pub(crate) fn update(
     let source_paths = write_compile_inputs(compile_directory.path(), &sources)?;
     let compilers = compile_all(repository, &source_paths, None)?;
     let quality = QualityManifest {
-        schema_version: 1,
+        schema_version: 2,
         package_revision: catalog.revision,
         catalog_manifest_sha256: hex_sha256(&catalog_bytes),
         release_seed_manifest_sha256: hex_sha256(&seed_bytes),
@@ -1428,6 +1441,22 @@ pub(crate) fn compile_hidden(
             .map(|entry| (webkit_drop_name(entry.reason()).to_owned(), entry.count()))
             .collect(),
     });
+    let cosmetics = compiled
+        .cosmetic_policy()
+        .map(|policy| {
+            let encoded = policy.encode().map_err(|error| error.to_string())?;
+            let report = policy.report();
+            Ok::<_, String>(CosmeticGolden {
+                accepted_rules: report.accepted,
+                rejected_rules: report.rejected,
+                generic_hide_controls: report.generic_controls,
+                policy_sha256: hex_sha256(&encoded),
+                policy_bytes: encoded.len(),
+                native_artifact_sha256: None,
+                native_json_bytes: None,
+            })
+        })
+        .transpose()?;
     let golden = CompileGolden {
         target: expected_target,
         feature_graph: expected_target.argument().into(),
@@ -1461,6 +1490,7 @@ pub(crate) fn compile_hidden(
         sources: source_reports,
         runtime,
         webkit,
+        cosmetics,
     };
     let encoded = canonical_json(&golden)?;
     println!(

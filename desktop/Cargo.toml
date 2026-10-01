@@ -54,10 +54,14 @@ macos-work-retained-notion-write-probe = [
     "macos-work-retained-product-probe",
     "zephium-work-composition/retained-notion-write-qualification",
 ]
+# Isolated actual-product protection QA; never a shipping application.
+adblock-qa = ["tauri/custom-protocol"]
 # Isolated actual-product file workflow verification, never a shipping app.
 file-workflows-qa = ["tauri/custom-protocol"]
 # Isolated user-resource UI verification; never a shipping application.
 resource-ui-qa = ["tauri/custom-protocol"]
+# The extension runtime in an isolated, bundled QA application.
+webext-qa = ["tauri/custom-protocol"]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",
@@ -101,32 +105,6 @@ macos-work-lifetime-diagnostic = [
 # Explicit release-gate forwarding only. Default product builds remain
 # deny-only until the packaged WKWebView/TCC gate is recorded as passing.
 macos-page-permission-prompts = ["zephium-app/macos-page-permission-prompts"]
-# Product-only curated acquisition. The default desktop graph deliberately
-# excludes its HTTP client, async runtime, and updater worker.
-curated-extension-distribution = [
-    "dep:url",
-    "dep:zephium-extension-authority",
-    "dep:zephium-extension-distribution",
-    "dep:zephium-extension-updater",
-    "zephium-extension-service/acquired-packages",
-]
-# Explicit local product gate. This embeds one reviewed public catalog and its
-# immutable objects; it is never enabled by the ordinary or release feature
-# set and accepts no runtime configuration.
-staging-extension-catalog = [
-    "curated-extension-distribution",
-    "zephium-extension-authority/staging-extension-catalog",
-    "zephium-extension-distribution/staging-extension-catalog",
-]
-# Private candidate validation in the real Zephium shell. Exact authority and
-# object bytes are generated beneath target/ and remain outside source control.
-local-extension-lab = [
-    "curated-extension-distribution",
-    "zephium-engine/native-extension-lab-diagnostics",
-    "zephium-extension-service/local-extension-lab",
-    "zephium-extension-authority/local-extension-lab",
-    "zephium-extension-distribution/local-extension-lab",
-]
 
 [lib]
 name = "zephium_desktop_lib"
@@ -142,6 +120,7 @@ json-patch = "3"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico", "bmp"], optional = true }
 tokio = { workspace = true, features = ["time"] }
+getrandom = "=0.3.4"
 tauri.workspace = true
 zephium-core.workspace = true
 zephium-ipc.workspace = true
@@ -152,14 +131,9 @@ zephium-agent-controller = { workspace = true, optional = true }
 zephium-agent-runtime = { workspace = true, optional = true }
 zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-engine.workspace = true
-zephium-extension-service.workspace = true
-url = { workspace = true, optional = true }
-zephium-extension-authority = { workspace = true, optional = true }
-zephium-extension-distribution = { workspace = true, optional = true }
-zephium-extension-updater = { workspace = true, optional = true }
 zephium-store.workspace = true
 zephium-notes.workspace = true
-zephium-blocker-service.workspace = true
+zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true
 window-vibrancy = "=0.8.0"
 serde.workspace = true
@@ -168,20 +142,16 @@ specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
 tauri-plugin-dialog = "2"
+base64.workspace = true
+zephium-webext = { path = "../crates/zephium-webext", version = "=0.1.0" }
 
 [dev-dependencies]
 async-io = "=2.6.0"
 futures-lite = "=2.6.1"
-getrandom = "=0.3.4"
 tempfile.workspace = true
 x11rb = { version = "=0.13.2", features = ["xkb"] }
 xkeysym = "=0.2.1"
 zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
-
-[lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = [
-    "cfg(zephium_internal_repository_e2e)",
-] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 zephium-blocker = { workspace = true, features = ["runtime"] }
@@ -197,7 +167,6 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 async-io = "=2.6.0"
 futures-lite = "=2.6.1"
-getrandom = "=0.3.4"
 x11rb = { version = "=0.13.2", features = ["xkb"] }
 xkeysym = "=0.2.1"
 zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
@@ -207,6 +176,7 @@ tauri-plugin-global-shortcut.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }
+zephium-webext-macos = { path = "../crates/zephium-webext-macos", version = "=0.1.0" }
 zephium-blocker = { workspace = true, features = ["webkit"] }
 block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }

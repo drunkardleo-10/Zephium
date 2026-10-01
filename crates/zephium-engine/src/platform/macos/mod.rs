@@ -27,6 +27,8 @@ mod agentic_semantic_probe;
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod content_filter;
 mod credentials;
+mod native;
+mod navigation;
 #[cfg(feature = "agentic-browser")]
 mod semantic_action;
 #[cfg(feature = "agentic-browser")]
@@ -47,35 +49,19 @@ pub(crate) use work_human_presentation::WorkHumanPresentation;
 pub(crate) use work_observation_presentation::retained_page_hidden;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use work_observation_presentation::{PresentationState, WorkObservationPresentation};
-// Pure policy translation and the profile-scoped native extension lifecycle.
-mod extensions;
-mod native;
-mod navigation;
 mod stage;
-#[cfg(feature = "native-web-extension-probes")]
-mod web_extensions;
+mod webext_action_icon;
 
-pub(crate) use extensions::{
-    begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
-    schedule_authorization_retry, ControllerActionPopupPreparation,
-    ControllerBrowserRequestSettlement, ControllerCommandDispatch,
-    ControllerCompatibilityBrokerSettlement, ControllerErasureSettlement, ControllerErasureTicket,
-    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
-    ControllerRuntimeGrantSettlement, MacosNativeActionFailure, MacosNativeRuntimeActivation,
-    MacosNativeRuntimeFailure, MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity,
-    MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement, NativeHostWorkerEvent,
-    PersistentControllerRegistry, ProfileControllerErasure, PublisherNativeMessagingAuthorization,
-    PublisherNativeMessagingRequestId,
-};
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use extensions::{ControllerSurfaceApplication, ProbeControllerPreparation};
+pub(crate) use webext_action_icon::rasterize_action_icon;
 
+#[cfg(feature = "agentic-browser")]
+pub(crate) use content_filter::install_on_view as install_content_policy_on_view;
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
-    install_on_view as install_content_policy_on_view, remove_content_policy_cache_identifier,
-    same_policy as same_content_policy, ContentPolicyCacheMaintenanceCancellation,
-    ContentPolicyCachePage, ContentPolicyCompilationCancellation, ContentPolicyRegistration,
-    NativeContentPolicy,
+    install_scoped_on_view as install_scoped_content_policy_on_view,
+    remove_content_policy_cache_identifier, same_policy as same_content_policy,
+    ContentPolicyCacheMaintenanceCancellation, ContentPolicyCachePage,
+    ContentPolicyCompilationCancellation, ContentPolicyRegistration, NativeContentPolicy,
 };
 pub use credentials::{
     passkey_authorization_state, request_passkey_authorization,
@@ -84,7 +70,7 @@ pub use credentials::{
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use std::{cell::Cell, cell::RefCell, rc::Rc};
+use std::{cell::Cell, rc::Rc};
 
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
@@ -144,41 +130,10 @@ pub use native::{
     add_user_script, configure, query_document_activity, stop_loading, user_script_refusal,
     user_style_refusal,
 };
-pub(crate) use navigation::signal_same_document_navigation;
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
 use objc2_web_kit::{WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
 pub use stage::ContentStage;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_bitwarden_core_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_extension_compatibility_fixture_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_onepassword_compatibility_artifact_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_onepassword_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_representative_extension_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_representative_stock_extension_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_resource_transport_probe as run_web_extension_resource_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_stock_password_manager_compatibility_artifact_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_stock_password_manager_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_vimium_compatibility_artifact_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_alarm_delivery_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_permission_callback_cohort_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_permission_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_permission_replacement_settlement_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_probe;
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
 
 pub(crate) struct ContentPolicyTimeout {
@@ -367,6 +322,11 @@ pub(crate) fn new_configuration_with_data_store(
     // SAFETY: `mtm` proves AppKit/WebKit main-thread affinity. `new` returns
     // an owned Objective-C object and has no additional preconditions.
     let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+    unsafe {
+        configuration.setApplicationNameForUserAgent(Some(&objc2_foundation::NSString::from_str(
+            zephium_webext_macos::application_name(),
+        )));
+    }
     unsafe { configuration.setWebsiteDataStore(store) };
     let configured_store = unsafe { configuration.websiteDataStore() };
     if Retained::as_ptr(&configured_store) != Retained::as_ptr(store) {
@@ -390,7 +350,6 @@ struct ProfileErasure {
     profile: zephium_core::ids::ProfileId,
     completion: Arc<crate::erasure::Completion>,
     attempt: Arc<AtomicBool>,
-    controller_ticket: Option<ControllerErasureTicket>,
 }
 
 impl ProfileErasure {
@@ -402,16 +361,6 @@ impl ProfileErasure {
             profile,
             attempt: completion.attempt_flag(),
             completion,
-            controller_ticket: None,
-        }
-    }
-
-    fn with_controller_ticket(&self, ticket: ControllerErasureTicket) -> Self {
-        Self {
-            profile: self.profile,
-            completion: self.completion.clone(),
-            attempt: self.attempt.clone(),
-            controller_ticket: Some(ticket),
         }
     }
 
@@ -421,11 +370,7 @@ impl ProfileErasure {
             // `finish` first marks this exact attempt inactive. The host then
             // generation-checks the Arc before releasing its last strong
             // store handle, so a late callback cannot erase a retry's proof.
-            crate::host::release_macos_erasure_obligation(
-                self.profile,
-                self.attempt.clone(),
-                self.controller_ticket,
-            );
+            crate::host::release_macos_erasure_obligation(self.profile, self.attempt.clone());
         }
     }
 
@@ -487,16 +432,10 @@ fn settle_ephemeral_obligation(
     }
 }
 
-fn apply_ephemeral_cohort_progress(
-    progress: EphemeralCohortProgress,
-    erasure: ProfileErasure,
-    controller_erasure: Rc<RefCell<Option<ProfileControllerErasure>>>,
-) {
+fn apply_ephemeral_cohort_progress(progress: EphemeralCohortProgress, erasure: ProfileErasure) {
     match progress {
         EphemeralCohortProgress::Duplicate | EphemeralCohortProgress::Pending => {}
-        EphemeralCohortProgress::LastVerified => {
-            erase_extension_controller_data(erasure, controller_erasure);
-        }
+        EphemeralCohortProgress::LastVerified => erase_named_profile_data(erasure),
         EphemeralCohortProgress::LastFailed | EphemeralCohortProgress::CounterInvalid => {
             // An ephemeral store has no durable identifier that a later
             // attempt can rediscover. Keep process-lifetime debt occupied;
@@ -514,28 +453,20 @@ fn apply_ephemeral_cohort_progress(
 pub(crate) fn erase_profile_data(
     profile: zephium_core::ids::ProfileId,
     mut ephemeral_stores: Vec<WebsiteDataStore>,
-    controller_erasure: ProfileControllerErasure,
     completion: Arc<crate::erasure::Completion>,
 ) {
     let erasure = ProfileErasure::new(profile, completion);
-    let controller_erasure = Rc::new(RefCell::new(Some(controller_erasure)));
     let mut seen = std::collections::HashSet::new();
     ephemeral_stores.retain(|store| seen.insert(Retained::as_ptr(store) as usize));
     if ephemeral_stores.is_empty() {
-        erase_extension_controller_data(erasure, controller_erasure);
+        erase_named_profile_data(erasure);
         return;
     }
 
     let remaining = Arc::new(AtomicUsize::new(ephemeral_stores.len()));
     let failed = Arc::new(AtomicBool::new(false));
     for store in ephemeral_stores {
-        clear_and_verify_ephemeral_store(
-            store,
-            remaining.clone(),
-            failed.clone(),
-            erasure.clone(),
-            controller_erasure.clone(),
-        );
+        clear_and_verify_ephemeral_store(store, remaining.clone(), failed.clone(), erasure.clone());
     }
 }
 
@@ -544,14 +475,13 @@ fn clear_and_verify_ephemeral_store(
     remaining: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
     erasure: ProfileErasure,
-    controller_erasure: Rc<RefCell<Option<ProfileControllerErasure>>>,
 ) {
     use objc2_foundation::{MainThreadMarker, NSDate};
 
     let gate = Rc::new(EphemeralStoreCallbackGate::default());
     let Some(mtm) = MainThreadMarker::new() else {
         let progress = settle_ephemeral_obligation(&gate, &remaining, &failed, false);
-        apply_ephemeral_cohort_progress(progress, erasure, controller_erasure);
+        apply_ephemeral_cohort_progress(progress, erasure);
         return;
     };
     let data_types = unsafe { WKWebsiteDataStore::allWebsiteDataTypes(mtm) };
@@ -570,7 +500,6 @@ fn clear_and_verify_ephemeral_store(
         let remaining = remaining.clone();
         let failed = failed.clone();
         let erasure = erasure.clone();
-        let controller_erasure = controller_erasure.clone();
         let terminal_gate = removal_gate.clone();
         let fetched = block2::RcBlock::new(
             move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
@@ -580,11 +509,7 @@ fn clear_and_verify_ephemeral_store(
                 let _ = &retained_store;
                 let progress =
                     settle_ephemeral_obligation(&terminal_gate, &remaining, &failed, empty);
-                apply_ephemeral_cohort_progress(
-                    progress,
-                    erasure.clone(),
-                    controller_erasure.clone(),
-                );
+                apply_ephemeral_cohort_progress(progress, erasure.clone());
             },
         );
         unsafe {
@@ -593,34 +518,6 @@ fn clear_and_verify_ephemeral_store(
     });
     unsafe {
         store.removeDataOfTypes_modifiedSince_completionHandler(&data_types, &epoch, &removed);
-    }
-}
-
-fn erase_extension_controller_data(
-    erasure: ProfileErasure,
-    controller_erasure: Rc<RefCell<Option<ProfileControllerErasure>>>,
-) {
-    let controller_erasure = controller_erasure
-        .try_borrow_mut()
-        .ok()
-        .and_then(|mut controller_erasure| controller_erasure.take());
-    let Some(controller_erasure) = controller_erasure else {
-        // Losing the move-only controller plan would let a duplicate callback
-        // skip native cleanup. Keep this attempt occupied for process life.
-        erasure.report_unsettled(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
-        return;
-    };
-    match controller_erasure {
-        ProfileControllerErasure::NamespaceNotRequired => erase_named_profile_data(erasure),
-        ProfileControllerErasure::ControllerAlreadyReleased(ticket) => {
-            erase_named_profile_data(erasure.with_controller_ticket(ticket));
-        }
-        ProfileControllerErasure::Pending(controller) => {
-            let completion = erasure.completion.clone();
-            controller.start(completion, move |ticket| {
-                erase_named_profile_data(erasure.with_controller_ticket(ticket));
-            });
-        }
     }
 }
 
@@ -766,9 +663,6 @@ mod tests {
         apply_ephemeral_cohort_progress(
             progress,
             ProfileErasure::new(zephium_core::ids::ProfileId::from(7), completion),
-            Rc::new(RefCell::new(Some(
-                ProfileControllerErasure::NamespaceNotRequired,
-            ))),
         );
 
         assert_eq!(
@@ -784,7 +678,7 @@ mod tests {
         let failed = AtomicBool::new(false);
         let first = EphemeralStoreCallbackGate::default();
         let second = EphemeralStoreCallbackGate::default();
-        let mut controller_starts = 0;
+        let mut terminal_actions = 0;
 
         assert!(first.admit_removal());
         assert!(!first.admit_removal());
@@ -803,10 +697,10 @@ mod tests {
         assert!(second.admit_removal());
         let last = settle_ephemeral_obligation(&second, &remaining, &failed, true);
         if last == EphemeralCohortProgress::LastVerified {
-            controller_starts += 1;
+            terminal_actions += 1;
         }
         assert_eq!(last, EphemeralCohortProgress::LastVerified);
-        assert_eq!(controller_starts, 1);
+        assert_eq!(terminal_actions, 1);
         assert_eq!(remaining.load(Ordering::Acquire), 0);
 
         // A late failing callback from either native store is a duplicate. It
@@ -815,11 +709,11 @@ mod tests {
         for gate in [&first, &second] {
             let duplicate = settle_ephemeral_obligation(gate, &remaining, &failed, false);
             if duplicate == EphemeralCohortProgress::LastVerified {
-                controller_starts += 1;
+                terminal_actions += 1;
             }
             assert_eq!(duplicate, EphemeralCohortProgress::Duplicate);
         }
-        assert_eq!(controller_starts, 1);
+        assert_eq!(terminal_actions, 1);
         assert_eq!(remaining.load(Ordering::Acquire), 0);
         assert!(!failed.load(Ordering::Acquire));
     }

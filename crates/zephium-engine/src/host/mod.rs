@@ -2,8 +2,10 @@
 mod agent_context;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
 mod agent_cookie_source;
+mod blocker_statistics;
 mod construction;
 mod content_rules;
+mod content_styles;
 mod discard;
 mod dispatch;
 #[cfg(target_os = "macos")]
@@ -13,15 +15,10 @@ mod download_files;
 mod download_files;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) mod downloads;
+mod element_picker;
 #[cfg(target_os = "macos")]
 mod extension_action;
 mod extension_browser_surface;
-#[cfg(target_os = "macos")]
-mod extension_commands;
-#[cfg(target_os = "macos")]
-mod extension_context_menu;
-pub(crate) mod extension_runtime;
-mod extensions;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod lifecycle;
@@ -36,6 +33,11 @@ mod profiles;
 mod resources;
 mod scripts;
 mod stages;
+mod style_worker;
+#[cfg(target_os = "macos")]
+mod webext;
+#[cfg(target_os = "windows")]
+mod webext_windows;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 pub(crate) mod work_frames;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
@@ -47,19 +49,13 @@ pub(crate) use work_resource::notify_work_resource;
 
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
-#[cfg(target_os = "macos")]
-pub(crate) use dispatch::try_dispatch_macos_extension_command;
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
 ))]
 pub(crate) use dispatch::try_with_agent_context_terminal;
 #[cfg(target_os = "macos")]
-pub(crate) use dispatch::with_extension_action_popup_terminal;
-#[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
-#[cfg(target_os = "macos")]
-pub(crate) use dispatch::with_extension_runtime_grant_terminal;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_page_permission_terminal;
 #[cfg(feature = "agentic-browser")]
@@ -67,24 +63,15 @@ pub(crate) use dispatch::{agent_context_terminal_depth_for_audit, try_with_agent
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };
-#[cfg(target_os = "macos")]
-pub(crate) use extension_action::ExtensionActionInvocationOutcome;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) use profiles::release_linux_erasure_obligations;
 #[cfg(target_os = "macos")]
 pub(crate) use profiles::release_macos_erasure_obligation;
-#[cfg(all(
-    target_os = "macos",
-    any(
-        feature = "native-web-extension-probes",
-        feature = "agentic-browser-qa"
-    )
-))]
+#[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub(crate) use scripts::protected_script_specs_for_native_probe;
 
 #[cfg(target_os = "windows")]
 use dispatch::queue_windows_cleanup_debt;
-use extensions::ExtensionDocumentAuthority;
 use permits::{EventPermit, Sink};
 use profiles::ProfilePersistenceClass;
 pub(crate) use resources::NativeResourceLease;
@@ -138,6 +125,8 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    site_scope: Rc<content_styles::ViewSiteScope>,
+    content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
     // A current layout may request a view before its first document commits
@@ -330,6 +319,7 @@ struct NavigationSnapshot {
 
 struct AppliedContentPolicy {
     generation: ContentPolicyGeneration,
+    cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     native: Rc<crate::platform::imp::NativeContentPolicy>,
     #[cfg(not(target_os = "windows"))]
     digest: Option<[u8; 32]>,
@@ -337,6 +327,7 @@ struct AppliedContentPolicy {
 
 struct CompilingContentPolicy {
     generation: ContentPolicyGeneration,
+    cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     superseded: bool,
 }
 
@@ -348,7 +339,7 @@ struct QueuedContentPolicy {
 #[cfg(not(target_os = "windows"))]
 struct DeclarativeContentPolicyJob {
     digest: [u8; 32],
-    rules: Arc<zephium_core::blocker::ContentRules>,
+    encoded: Arc<str>,
     encoded_bytes: usize,
 }
 
@@ -397,278 +388,6 @@ struct ProfileContentPolicy {
     previous_known_good_digest: Option<[u8; 32]>,
 }
 
-#[cfg(any(target_os = "windows", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowsExtensionEnvironmentState {
-    Disabled,
-    ExtensionPreparing,
-    ExtensionReady,
-    ExtensionFailed,
-}
-
-#[cfg(any(target_os = "windows", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowsExtensionEnvironmentPreflight {
-    Create,
-    Ready,
-    RestartRequired,
-    InvariantFailed,
-}
-
-#[cfg(any(target_os = "windows", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowsExtensionContentAdmission {
-    CreateDisabled,
-    ReuseDisabled,
-    Enabled,
-    RestartRequired,
-    InvariantFailed,
-}
-
-/// Exact process-local binding between WebView2's immutable environment mode
-/// and the independently attested extension profile object.
-///
-/// A failed or interrupted bootstrap is sticky until the exact browser
-/// process exits. Environment-map presence alone can therefore never be
-/// reinterpreted as the ordinary extension-disabled mode.
-#[cfg(any(target_os = "windows", test))]
-struct WindowsExtensionEnvironmentRegistry {
-    states: [Option<(ProfileId, WindowsExtensionEnvironmentState)>;
-        profiles::MAX_NATIVE_PROFILE_PROCESS_GROUPS],
-}
-
-#[cfg(any(target_os = "windows", test))]
-impl Default for WindowsExtensionEnvironmentRegistry {
-    fn default() -> Self {
-        Self {
-            states: [None; profiles::MAX_NATIVE_PROFILE_PROCESS_GROUPS],
-        }
-    }
-}
-
-#[cfg(any(target_os = "windows", test))]
-#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
-impl WindowsExtensionEnvironmentRegistry {
-    fn preflight(
-        &self,
-        profile: ProfileId,
-        environment_present: bool,
-        profile_authority_present: bool,
-    ) -> WindowsExtensionEnvironmentPreflight {
-        match (
-            self.state(profile),
-            environment_present,
-            profile_authority_present,
-        ) {
-            (None, false, false) => WindowsExtensionEnvironmentPreflight::Create,
-            (Some(WindowsExtensionEnvironmentState::Disabled), true, false) => {
-                WindowsExtensionEnvironmentPreflight::RestartRequired
-            }
-            (Some(WindowsExtensionEnvironmentState::ExtensionReady), true, true) => {
-                WindowsExtensionEnvironmentPreflight::Ready
-            }
-            (
-                Some(
-                    WindowsExtensionEnvironmentState::ExtensionPreparing
-                    | WindowsExtensionEnvironmentState::ExtensionFailed,
-                ),
-                _,
-                _,
-            ) => WindowsExtensionEnvironmentPreflight::RestartRequired,
-            (None, _, _)
-            | (Some(WindowsExtensionEnvironmentState::Disabled), _, _)
-            | (Some(WindowsExtensionEnvironmentState::ExtensionReady), _, _) => {
-                WindowsExtensionEnvironmentPreflight::InvariantFailed
-            }
-        }
-    }
-
-    fn content_admission(
-        &self,
-        profile: ProfileId,
-        environment_present: bool,
-        profile_authority_present: bool,
-    ) -> WindowsExtensionContentAdmission {
-        match (
-            self.state(profile),
-            environment_present,
-            profile_authority_present,
-        ) {
-            (None, false, false) => WindowsExtensionContentAdmission::CreateDisabled,
-            (Some(WindowsExtensionEnvironmentState::Disabled), true, false) => {
-                WindowsExtensionContentAdmission::ReuseDisabled
-            }
-            (Some(WindowsExtensionEnvironmentState::ExtensionReady), true, true) => {
-                WindowsExtensionContentAdmission::Enabled
-            }
-            (
-                Some(
-                    WindowsExtensionEnvironmentState::ExtensionPreparing
-                    | WindowsExtensionEnvironmentState::ExtensionFailed,
-                ),
-                _,
-                _,
-            ) => WindowsExtensionContentAdmission::RestartRequired,
-            (None, _, _)
-            | (Some(WindowsExtensionEnvironmentState::Disabled), _, _)
-            | (Some(WindowsExtensionEnvironmentState::ExtensionReady), _, _) => {
-                WindowsExtensionContentAdmission::InvariantFailed
-            }
-        }
-    }
-
-    fn begin(&mut self, profile: ProfileId) -> bool {
-        if self.state(profile).is_some() {
-            return false;
-        }
-        let Some(slot) = self.states.iter_mut().find(|slot| slot.is_none()) else {
-            return false;
-        };
-        *slot = Some((
-            profile,
-            WindowsExtensionEnvironmentState::ExtensionPreparing,
-        ));
-        true
-    }
-
-    fn record_disabled(&mut self, profile: ProfileId) -> bool {
-        match self.state(profile) {
-            None => {
-                let Some(slot) = self.states.iter_mut().find(|slot| slot.is_none()) else {
-                    return false;
-                };
-                *slot = Some((profile, WindowsExtensionEnvironmentState::Disabled));
-                true
-            }
-            Some(WindowsExtensionEnvironmentState::Disabled) => true,
-            Some(
-                WindowsExtensionEnvironmentState::ExtensionPreparing
-                | WindowsExtensionEnvironmentState::ExtensionReady
-                | WindowsExtensionEnvironmentState::ExtensionFailed,
-            ) => false,
-        }
-    }
-
-    fn publish(&mut self, profile: ProfileId) -> bool {
-        let Some((_, state)) = self
-            .states
-            .iter_mut()
-            .flatten()
-            .find(|(existing, _)| *existing == profile)
-        else {
-            return false;
-        };
-        if *state != WindowsExtensionEnvironmentState::ExtensionPreparing {
-            return false;
-        }
-        *state = WindowsExtensionEnvironmentState::ExtensionReady;
-        true
-    }
-
-    fn is_extension_ready(&self, profile: ProfileId) -> bool {
-        self.state(profile) == Some(WindowsExtensionEnvironmentState::ExtensionReady)
-    }
-
-    fn fail(&mut self, profile: ProfileId) {
-        if let Some((_, state)) = self
-            .states
-            .iter_mut()
-            .flatten()
-            .find(|(existing, _)| *existing == profile)
-        {
-            *state = WindowsExtensionEnvironmentState::ExtensionFailed;
-            return;
-        }
-        if let Some(slot) = self.states.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some((profile, WindowsExtensionEnvironmentState::ExtensionFailed));
-        }
-    }
-
-    fn remove(&mut self, profile: ProfileId) {
-        if let Some(slot) = self.states.iter_mut().find(|slot| {
-            slot.as_ref()
-                .is_some_and(|(existing, _)| *existing == profile)
-        }) {
-            *slot = None;
-        }
-    }
-
-    fn has_unsettled(&self) -> bool {
-        self.states.iter().flatten().any(|(_, state)| {
-            matches!(
-                state,
-                WindowsExtensionEnvironmentState::ExtensionPreparing
-                    | WindowsExtensionEnvironmentState::ExtensionFailed
-            )
-        })
-    }
-
-    fn profile_allows_erasure(&self, profile: ProfileId) -> bool {
-        !matches!(
-            self.state(profile),
-            Some(
-                WindowsExtensionEnvironmentState::ExtensionPreparing
-                    | WindowsExtensionEnvironmentState::ExtensionFailed
-            )
-        )
-    }
-
-    fn profile_binding_is_consistent(
-        &self,
-        profile: ProfileId,
-        environment_present: bool,
-        profile_authority_present: bool,
-    ) -> bool {
-        matches!(
-            self.content_admission(profile, environment_present, profile_authority_present),
-            WindowsExtensionContentAdmission::CreateDisabled
-                | WindowsExtensionContentAdmission::ReuseDisabled
-                | WindowsExtensionContentAdmission::Enabled
-        )
-    }
-
-    #[cfg(target_os = "windows")]
-    fn bindings_are_consistent(
-        &self,
-        environments: &HashMap<ProfileId, ICoreWebView2Environment>,
-        profiles: &HashMap<ProfileId, crate::platform::imp::WindowsNativeExtensionProfile>,
-    ) -> bool {
-        !self.has_unsettled()
-            && self
-                .states
-                .iter()
-                .flatten()
-                .all(|(profile, state)| match state {
-                    WindowsExtensionEnvironmentState::Disabled => {
-                        environments.contains_key(profile) && !profiles.contains_key(profile)
-                    }
-                    WindowsExtensionEnvironmentState::ExtensionReady => {
-                        environments.contains_key(profile) && profiles.contains_key(profile)
-                    }
-                    WindowsExtensionEnvironmentState::ExtensionPreparing
-                    | WindowsExtensionEnvironmentState::ExtensionFailed => false,
-                })
-            && environments
-                .keys()
-                .all(|profile| self.state(*profile).is_some())
-            && profiles.keys().all(|profile| {
-                self.state(*profile) == Some(WindowsExtensionEnvironmentState::ExtensionReady)
-                    && environments.contains_key(profile)
-            })
-    }
-
-    fn clear(&mut self) {
-        self.states = [None; profiles::MAX_NATIVE_PROFILE_PROCESS_GROUPS];
-    }
-
-    fn state(&self, profile: ProfileId) -> Option<WindowsExtensionEnvironmentState> {
-        self.states
-            .iter()
-            .flatten()
-            .find_map(|(existing, state)| (*existing == profile).then_some(*state))
-    }
-}
-
 pub(crate) struct EngineHost {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     parent: ParentHandle,
@@ -705,8 +424,6 @@ pub(crate) struct EngineHost {
     #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
     agent_cookie_quarantined_profiles: HashSet<ProfileId>,
     native_resources: NativeResourceLedger,
-    extension_runtime_registry: extension_runtime::ExtensionRuntimeRegistry,
-    extension_document_authority: ExtensionDocumentAuthority,
     // Allocates only after an explicit Shell publication. Ordinary inert
     // startup retains the empty map and creates no native delegate graph.
     extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
@@ -724,6 +441,19 @@ pub(crate) struct EngineHost {
     // relax this binding and therefore cannot resurrect a UDF in private mode.
     profile_persistence_classes: HashMap<ProfileId, ProfilePersistenceClass>,
     content_policies: HashMap<ProfileId, ProfileContentPolicy>,
+    style_worker: Option<style_worker::StyleWorker>,
+    main_dispatch: crate::MainThreadDispatch,
+    #[cfg(not(target_os = "windows"))]
+    content_rule_preflight: Option<(
+        [u8; 32],
+        zephium_core::ports::engine::ContentRuleValidationCompletion,
+    )>,
+    #[cfg(not(target_os = "windows"))]
+    preflight_cache_digests: std::collections::VecDeque<[u8; 32]>,
+    blocker_statistics: HashMap<ProfileId, zephium_core::blocker::BlockedLoadCounter>,
+    blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    picker: Option<Arc<element_picker::PickerSession>>,
+    next_picker: u64,
     // Declarative native objects are content-addressed by the SHA-256 of the
     // exact encoded JSON. Weak entries let identical policy generations and
     // profiles share one compiled 10–30 MiB object without pinning stale
@@ -780,12 +510,10 @@ pub(crate) struct EngineHost {
     /// never a URL, path or page fact.
     #[cfg(target_os = "macos")]
     work_site_loads: HashMap<(ProfileId, String), u64>,
-    // Native-extension controllers are independently bounded and
-    // profile-scoped. Startup hydration is the only product path that may
-    // populate this registry before Shell constructs profile views; retaining
-    // it here establishes exact construction, erasure, and shutdown ownership.
     #[cfg(target_os = "macos")]
-    macos_extension_controllers: crate::platform::imp::PersistentControllerRegistry,
+    webext: webext::WebextHost,
+    #[cfg(target_os = "windows")]
+    windows_extensions: webext_windows::WindowsExtensions,
     // Off-screen views carrying the low-memory hint, and the subset the
     // shell's idle policy asked WebView2 to suspend.
     #[cfg(target_os = "windows")]
@@ -798,6 +526,9 @@ pub(crate) struct EngineHost {
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     suspend_failed: std::collections::HashSet<ItemId>,
+    // Dormant views that skipped a cosmetic refresh, owed one when they wake.
+    #[cfg(target_os = "windows")]
+    styles_missed: std::collections::HashSet<ItemId>,
     #[cfg(not(target_os = "macos"))]
     web_contexts: HashMap<ProfileId, wry::WebContext>,
     // Native managers outlive every associated view/context until a profile
@@ -814,15 +545,6 @@ pub(crate) struct EngineHost {
     browser_version_observers: HashMap<ProfileId, crate::platform::imp::BrowserVersionObserver>,
     #[cfg(target_os = "windows")]
     environments: HashMap<ProfileId, ICoreWebView2Environment>,
-    // Exact profile objects admitted through Wry's pre-initialization
-    // extension startup gate. Presence means the matching environment was
-    // created extension-enabled and every later content controller must pass
-    // a complete native-inventory comparison before initialization.
-    #[cfg(target_os = "windows")]
-    windows_extension_profiles:
-        HashMap<ProfileId, crate::platform::imp::WindowsNativeExtensionProfile>,
-    #[cfg(target_os = "windows")]
-    windows_extension_environments: WindowsExtensionEnvironmentRegistry,
     #[cfg(target_os = "windows")]
     browser_processes: HashMap<ProfileId, crate::platform::imp::BrowserProcess>,
     #[cfg(target_os = "windows")]

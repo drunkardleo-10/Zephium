@@ -25,6 +25,7 @@ macos-page-permission-prompts = []
 serde_json = { workspace = true, optional = true }
 sha2 = { version = "=0.10.9", optional = true }
 tokio = { workspace = true, optional = true, features = ["time", "process", "io-util"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 zephium-agentic = { workspace = true, optional = true }
 zephium-agent-controller = { workspace = true, optional = true, features = ["provider-transport"] }
 zephium-agent-runtime = { workspace = true, optional = true }
@@ -52,8 +53,3 @@ zephium-agent-model-catalog.workspace = true
 serde_json.workspace = true
 zephium-store = { workspace = true, features = ["work-execution"] }
 tempfile.workspace = true
-
-[lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = [
-    "cfg(zephium_internal_repository_e2e)",
-] }

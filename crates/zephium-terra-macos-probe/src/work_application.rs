@@ -150,19 +150,6 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
             .map_err(|_| Error::Authority)?,
     )
     .map_err(|_| Error::Runtime)?;
-    let extension = zephium_extension_service::prepare_extension_service_boot(
-        store
-            .claim_extension_service_store_authority()
-            .map_err(|_| Error::Authority)?,
-        zephium_extension_service::ExtensionRepositoryRoot::from_app_data_directory(
-            data.path().to_owned(),
-        )
-        .map_err(|_| Error::Authority)?,
-    )
-    .map_err(|_| Error::Authority)?;
-    let zephium_extension_service::ExtensionServiceBootPlan::Inert(extension) = extension else {
-        return Err(Error::Authority);
-    };
     let request = TrustedWorkRequest::new(
         input,
         AgentWorkApplicationConfig::new(
@@ -179,7 +166,6 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
             engine.clone(),
             store.clone(),
             blocker,
-            extension,
             Box::new(move |_| {
                 fail_sink.store(true, Ordering::Release);
             }),

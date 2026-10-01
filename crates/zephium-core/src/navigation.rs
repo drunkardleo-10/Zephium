@@ -72,7 +72,7 @@ fn classify_input(s: &str) -> InputKind {
     if s.contains("://") || Url::parse(s).is_ok() {
         return Url::parse(s)
             .ok()
-            .filter(is_allowed)
+            .filter(is_browser_target)
             .map_or(InputKind::Rejected, InputKind::Direct);
     }
 
@@ -119,6 +119,29 @@ pub fn is_allowed(url: &Url) -> bool {
 /// Gate for page-initiated navigations (the engine hands us a resolved URL).
 pub fn is_allowed_str(url: &str) -> bool {
     Url::parse(url).map(|u| is_allowed(&u)).unwrap_or(false)
+}
+
+/// Syntactic browser-tab target. Windows extension documents additionally
+/// require the engine's live, profile-specific installation grant. This is not
+/// permission to load an extension or to expose its resources to web pages.
+pub fn is_browser_target(url: &Url) -> bool {
+    is_allowed(url) || (cfg!(target_os = "windows") && extension_document_id(url).is_some())
+}
+
+pub fn is_browser_target_str(target: &str) -> bool {
+    Url::parse(target).is_ok_and(|url| is_browser_target(&url))
+}
+
+pub fn extension_document_id(url: &Url) -> Option<&str> {
+    let id = url.host_str()?;
+    (url.scheme() == "chrome-extension"
+        && id.len() == 32
+        && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.as_str().len() <= MAX_URL_BYTES)
+        .then_some(id)
 }
 
 fn looks_like_host(s: &str) -> bool {

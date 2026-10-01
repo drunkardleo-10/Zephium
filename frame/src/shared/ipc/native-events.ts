@@ -15,10 +15,6 @@ import type {
   ExtensionActionFailed,
   ExtensionActionShortcut,
   ExtensionActionsChanged,
-  ExtensionManagementAvailabilityChanged,
-  ExtensionManagementChanged,
-  ExtensionDistributionChanged,
-  ExtensionRuntimeGrantPromptChanged,
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
@@ -27,6 +23,7 @@ import type {
   SearchChanged,
   TabChanged,
   UiCommand,
+  WebExtensionAccessRequested,
 } from "./bindings";
 
 type PayloadEvent<T> = { payload: T };
@@ -66,11 +63,9 @@ export const nativeEventNames = {
   extensionActionsChanged: "zephium:extension-actions",
   extensionActionFailed: "zephium:extension-action-failed",
   extensionActionShortcut: "zephium:extension-action-shortcut",
-  extensionManagementAvailabilityChanged: "zephium:extension-management-availability",
-  extensionManagementChanged: "zephium:extension-management",
-  extensionDistributionChanged: "zephium:extension-distribution",
-  extensionRuntimeGrantPromptChanged: "zephium:extension-runtime-grant-prompt",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
+  webExtensionAccessRequested: "zephium:web-extension-access",
+  webExtensionDropped: "zephium:web-extension-dropped",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
   uiCommand: "zephium:ui-command",
@@ -111,21 +106,14 @@ export const events = {
   extensionActionShortcut: scopedEvent<ExtensionActionShortcut>(
     nativeEventNames.extensionActionShortcut,
   ),
-  extensionManagementAvailabilityChanged: scopedEvent<ExtensionManagementAvailabilityChanged>(
-    nativeEventNames.extensionManagementAvailabilityChanged,
-  ),
-  extensionManagementChanged: scopedEvent<ExtensionManagementChanged>(
-    nativeEventNames.extensionManagementChanged,
-  ),
-  extensionDistributionChanged: scopedEvent<ExtensionDistributionChanged>(
-    nativeEventNames.extensionDistributionChanged,
-  ),
-  extensionRuntimeGrantPromptChanged: scopedEvent<ExtensionRuntimeGrantPromptChanged>(
-    nativeEventNames.extensionRuntimeGrantPromptChanged,
-  ),
   pagePermissionPromptChanged: scopedEvent<PagePermissionPromptChanged>(
     nativeEventNames.pagePermissionPromptChanged,
   ),
+  webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
+    nativeEventNames.webExtensionAccessRequested,
+  ),
+  /** The path of an extension package dropped on the browser. */
+  webExtensionDropped: scopedEvent<string>(nativeEventNames.webExtensionDropped),
   browserReturn: scopedEvent<ItemsChanged>(nativeEventNames.browserReturn),
   presentationTab: scopedEvent<PresentationTab>(nativeEventNames.presentationTab),
   uiCommand: scopedEvent<UiCommand>(nativeEventNames.uiCommand),

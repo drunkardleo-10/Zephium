@@ -11,12 +11,14 @@ use zephium_ipc::{
 };
 pub const PANEL_LABEL: &str = "panel";
 pub const PANEL_SIZE: (f64, f64) = geometry::DEFAULT;
+#[cfg(target_os = "macos")]
 pub const PANEL_RADIUS: u16 = model::RADIUS;
 pub const EVENT_STATE: &str = "zephium:panel-state";
 #[derive(Default)]
 pub struct ContextCache(Mutex<Option<Owner>>);
 struct State {
     model: Model,
+    pending_document: Option<tauri::Url>,
     geometry: Option<geometry::Geometry>,
     persisted_geometry: Option<geometry::Geometry>,
     positioned: bool,
@@ -35,7 +37,7 @@ pub struct Overlay {
     state: Arc<Mutex<State>>,
 }
 impl Overlay {
-    pub fn new(window: WebviewWindow) -> Self {
+    pub fn new(window: WebviewWindow, pending_document: Option<tauri::Url>) -> Self {
         let owner = window
             .app_handle()
             .try_state::<ContextCache>()
@@ -46,6 +48,7 @@ impl Overlay {
             window,
             state: Arc::new(Mutex::new(State {
                 model,
+                pending_document,
                 geometry: None,
                 persisted_geometry: None,
                 positioned: false,
@@ -226,16 +229,32 @@ impl Overlay {
     }
     fn present(&self, focus: bool) {
         let snapshot = self.snapshot();
-        self.publish();
-        if !self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .model
-            .ready
-        {
+        let (ready, document) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let document = if snapshot.visible && !state.model.ready {
+                state.pending_document.take()
+            } else {
+                None
+            };
+            (state.model.ready, document)
+        };
+        // Windows keeps the hardened native panel at about:blank until the
+        // first real request. Loading an unused second application graph at
+        // startup competes with the main surface and retains renderer state.
+        // The authoritative model keeps the latest route/owner while loading;
+        // panel_ready returns that snapshot before the first native reveal.
+        if let Some(document) = document {
+            if let Err(error) = self.window.navigate(document) {
+                crate::request_startup_failure(
+                    self.window.app_handle(),
+                    format_args!("could not load trusted panel document: {error}"),
+                );
+            }
+        }
+        if !ready {
             return;
         }
+        self.publish();
         if !snapshot.visible {
             self.persist_geometry();
             do_hide(&self.window);

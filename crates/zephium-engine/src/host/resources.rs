@@ -10,17 +10,15 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
-
-/// The process-wide hard ceiling for native webview-like resources.
-///
-/// The current product still admits at most 32 tab views and one warm spare.
-/// The remaining slots are reserved now, before extension runtimes can exist,
-/// so future features cannot silently consume tab or teardown capacity.
+/// The process-wide hard ceiling for native webview-like resources: the sum
+/// of every class budget, so no feature can silently consume tab or teardown
+/// capacity.
 #[cfg(feature = "agentic-browser")]
-pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 56;
+pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
+    51 + if cfg!(target_os = "windows") { 9 } else { 0 };
 #[cfg(not(feature = "agentic-browser"))]
-pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 48;
+pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
+    43 + if cfg!(target_os = "windows") { 9 } else { 0 };
 pub(super) const MAX_NATIVE_TEARDOWN_DEBTS: usize = 8;
 #[cfg(feature = "agentic-browser")]
 pub(super) const MAX_AGENT_CONTEXT_RESOURCES: usize = 8;
@@ -32,38 +30,26 @@ pub(super) enum NativeResourceClass {
     Tab,
     WarmSpare,
     TeardownDebt,
-    ExtensionBackground,
-    ExtensionPopup,
-    ReconciliationController,
     #[cfg(feature = "agentic-browser")]
     AgentContext,
+    #[cfg(target_os = "windows")]
+    Extension,
     TransientConstruction,
 }
 
 impl NativeResourceClass {
     #[cfg(feature = "agentic-browser")]
-    const COUNT: usize = 8;
+    const COUNT: usize = 5 + cfg!(target_os = "windows") as usize;
     #[cfg(not(feature = "agentic-browser"))]
-    const COUNT: usize = 7;
-    #[cfg(feature = "agentic-browser")]
+    const COUNT: usize = 4 + cfg!(target_os = "windows") as usize;
     const ALL: [Self; Self::COUNT] = [
         Self::Tab,
         Self::WarmSpare,
         Self::TeardownDebt,
-        Self::ExtensionBackground,
-        Self::ExtensionPopup,
-        Self::ReconciliationController,
+        #[cfg(feature = "agentic-browser")]
         Self::AgentContext,
-        Self::TransientConstruction,
-    ];
-    #[cfg(not(feature = "agentic-browser"))]
-    const ALL: [Self; Self::COUNT] = [
-        Self::Tab,
-        Self::WarmSpare,
-        Self::TeardownDebt,
-        Self::ExtensionBackground,
-        Self::ExtensionPopup,
-        Self::ReconciliationController,
+        #[cfg(target_os = "windows")]
+        Self::Extension,
         Self::TransientConstruction,
     ];
 
@@ -72,21 +58,11 @@ impl NativeResourceClass {
             Self::Tab => 0,
             Self::WarmSpare => 1,
             Self::TeardownDebt => 2,
-            Self::ExtensionBackground => 3,
-            Self::ExtensionPopup => 4,
-            Self::ReconciliationController => 5,
             #[cfg(feature = "agentic-browser")]
-            Self::AgentContext => 6,
-            Self::TransientConstruction => {
-                #[cfg(feature = "agentic-browser")]
-                {
-                    7
-                }
-                #[cfg(not(feature = "agentic-browser"))]
-                {
-                    6
-                }
-            }
+            Self::AgentContext => 3,
+            #[cfg(target_os = "windows")]
+            Self::Extension => Self::COUNT - 2,
+            Self::TransientConstruction => Self::COUNT - 1,
         }
     }
 
@@ -95,11 +71,12 @@ impl NativeResourceClass {
             Self::Tab => 32,
             Self::WarmSpare => 1,
             Self::TeardownDebt => MAX_NATIVE_TEARDOWN_DEBTS,
-            Self::ExtensionBackground => MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES,
-            Self::ExtensionPopup => 1,
-            Self::ReconciliationController => 1,
             #[cfg(feature = "agentic-browser")]
             Self::AgentContext => MAX_AGENT_CONTEXT_RESOURCES,
+            // Eight observer pages and one foreground popup. This pool never
+            // borrows tab, Work, warm-spare, or cleanup-debt capacity.
+            #[cfg(target_os = "windows")]
+            Self::Extension => 9,
             Self::TransientConstruction => 2,
         }
     }
@@ -122,18 +99,10 @@ pub(super) enum NativeResourceAdmissionError {
     AccountingInvariant,
 }
 
+#[derive(Default)]
 struct NativeResourceState {
     counts: [usize; NativeResourceClass::COUNT],
     total: usize,
-}
-
-impl Default for NativeResourceState {
-    fn default() -> Self {
-        Self {
-            counts: [0; NativeResourceClass::COUNT],
-            total: 0,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -350,12 +319,6 @@ mod tests {
         assert_eq!(NativeResourceClass::Tab.limit(), 32);
         assert_eq!(NativeResourceClass::WarmSpare.limit(), 1);
         assert_eq!(NativeResourceClass::TeardownDebt.limit(), 8);
-        assert_eq!(
-            NativeResourceClass::ExtensionBackground.limit(),
-            MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
-        );
-        assert_eq!(NativeResourceClass::ExtensionPopup.limit(), 1);
-        assert_eq!(NativeResourceClass::ReconciliationController.limit(), 1);
         #[cfg(feature = "agentic-browser")]
         assert_eq!(
             NativeResourceClass::AgentContext.limit(),
@@ -569,17 +532,15 @@ mod tests {
     fn explicit_double_release_poisoning_never_creates_capacity() {
         let ledger = NativeResourceLedger::default();
         let mut lease = ledger
-            .try_acquire(NativeResourceClass::ExtensionPopup)
-            .expect("popup");
+            .try_acquire(NativeResourceClass::WarmSpare)
+            .expect("warm spare");
         assert_eq!(lease.release_once(), Ok(()));
         assert_eq!(ledger.total(), Some(0));
         assert_eq!(lease.release_once(), Err(()));
         assert_eq!(ledger.total(), Some(0));
         assert!(!ledger.is_healthy());
         assert_eq!(
-            ledger
-                .try_acquire(NativeResourceClass::ExtensionPopup)
-                .err(),
+            ledger.try_acquire(NativeResourceClass::WarmSpare).err(),
             Some(NativeResourceAdmissionError::AccountingInvariant)
         );
     }
@@ -588,8 +549,8 @@ mod tests {
     fn reentrant_release_fails_closed_without_panicking_or_reissuing_capacity() {
         let ledger = NativeResourceLedger::default();
         let lease = ledger
-            .try_acquire(NativeResourceClass::ExtensionPopup)
-            .expect("popup");
+            .try_acquire(NativeResourceClass::WarmSpare)
+            .expect("warm spare");
         let state_borrow = ledger.shared.state.borrow_mut();
         drop(lease);
         assert!(ledger.shared.invariant_failed.get());
@@ -597,9 +558,7 @@ mod tests {
         drop(state_borrow);
         assert_eq!(ledger.total(), Some(1));
         assert_eq!(
-            ledger
-                .try_acquire(NativeResourceClass::ExtensionPopup)
-                .err(),
+            ledger.try_acquire(NativeResourceClass::WarmSpare).err(),
             Some(NativeResourceAdmissionError::AccountingInvariant)
         );
     }
@@ -621,14 +580,14 @@ mod tests {
     fn forgotten_ownership_cannot_be_reissued() {
         let ledger = NativeResourceLedger::default();
         let lease = ledger
-            .try_acquire(NativeResourceClass::ExtensionPopup)
-            .expect("popup");
+            .try_acquire(NativeResourceClass::WarmSpare)
+            .expect("warm spare");
         std::mem::forget(lease);
         assert_eq!(ledger.total(), Some(1));
         assert!(matches!(
-            ledger.try_acquire(NativeResourceClass::ExtensionPopup),
+            ledger.try_acquire(NativeResourceClass::WarmSpare),
             Err(NativeResourceAdmissionError::ClassExhausted(
-                NativeResourceClass::ExtensionPopup
+                NativeResourceClass::WarmSpare
             ))
         ));
     }

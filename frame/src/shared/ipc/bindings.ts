@@ -112,42 +112,54 @@ export const commands = {
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**
-	 *  Opens or closes the one focused-profile management subscription.
-	 *  This is deliberately an explicit, non-polling visibility signal: the Shell
-	 *  retains authenticated management metadata only while privileged chrome is
-	 *  displaying it and performs no extension repository work at browser startup.
+	 *  Downloads and verifies the extension on the active store page, and
+	 *  returns what the user is asked to approve.
 	 */
-	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
+	webExtensionPrepare: (tabId: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_prepare", { tabId })),
+	webExtensionConfirm: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_confirm", { id })),
+	webExtensionCancel: () => __TAURI_INVOKE<void>("web_extension_cancel"),
+	webExtensionList: () => typedError<WebExtensionView[], string>(__TAURI_INVOKE("web_extension_list")),
+	webExtensionSetEnabled: (id: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_enabled", { id, enabled })),
+	webExtensionUninstall: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_uninstall", { id })),
 	/**
-	 *  Requests the one product-sealed extension catalog synchronization. The
-	 *  caller supplies no URL, profile, package, runtime target, or selection;
-	 *  those authorities were bound immutably before the worker was launched.
+	 *  Answers an extension's run-time request for access; granted access is
+	 *  kept for the next launch.
 	 */
-	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
-	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
+	webExtensionAnswerAccess: (request: WebExtensionAccessRequestView, allowed: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_answer_access", { request, allowed })),
 	/**
-	 *  Approves only the exact changed-authority replacement retained by Shell's
-	 *  current focused-profile subscription. Package identity and permission names
-	 *  never cross this IPC boundary.
+	 *  Chooses which sites an extension may use: `all` it asked for, only on
+	 *  `click`, or the listed `sites`.
 	 */
-	extensionManagementApproveUpdate: (reviewId: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_approve_update", { reviewId }),
-	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
+	webExtensionSetAccess: (id: string, mode: string, sites: string[]) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_access", { id, mode, sites })),
+	webExtensionOpenOptions: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_open_options", { id })),
 	/**
-	 *  Mutates only one bounded optional declaration from the exact installed
-	 *  management projection. Permission text never crosses this IPC boundary.
+	 *  Lets the user pick a `.crx` or `.zip` file, or with `folder` an unpacked
+	 *  extension, and returns what they are asked to approve; `None` when they
+	 *  cancel the picker.
 	 */
-	extensionManagementEditOptionalGrant: (installId: string, catalogRevision: string, installRevision: string, grantRevision: string, kind: ExtensionOptionalGrantKindInput, index: number, granted: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_edit_optional_grant", { installId, catalogRevision, installRevision, grantRevision, kind, index, granted }),
-	extensionManagementSetProfilePaused: (policyRevision: string, paused: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_profile_paused", { policyRevision, paused }),
-	extensionManagementSetCurrentSiteEnabled: (policyRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_current_site_enabled", { policyRevision, enabled }),
-	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
-	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
+	webExtensionChooseFile: (folder: boolean) => typedError<{
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	warnings: string[],
+	icon: string | null,
+	update: boolean,
+	/**  Installed from a file, so not checked against the Web Store. */
+	from_file: boolean,
+} | null, string>(__TAURI_INVOKE("web_extension_choose_file", { folder })),
+	/**  Reviews an extension file dropped on the browser. */
+	webExtensionPrepareFile: (path: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_prepare_file", { path })),
 	/**
-	 *  Answers only the exact Shell-projected native permission prompt. The four
-	 *  identities are short-lived stale fences; permission names never cross this
-	 *  command boundary and the actor remains the sole owner of the retained
-	 *  request payload.
+	 *  Reviews the newest store version of an extension whose update waits for
+	 *  the user's approval.
 	 */
-	extensionRuntimeGrantRespond: (profileId: string, installId: string, runtimeGeneration: string, requestId: string, allow: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", { profileId, installId, runtimeGeneration, requestId, allow }),
+	webExtensionReviewUpdate: (id: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_review_update", { id })),
+	/**
+	 *  A recommended extension's icon as a data URL, or `None` while the store
+	 *  can't be reached.
+	 */
+	webExtensionCatalogIcon: (token: string) => typedError<string | null, string>(__TAURI_INVOKE("web_extension_catalog_icon", { token })),
 	/**
 	 *  Reads only platform capability state. It never enumerates credentials,
 	 *  relying parties, or extension-owned vault data and never opens native UI.
@@ -166,7 +178,14 @@ export const commands = {
 	 */
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
+	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
+	blockerSiteChange: (context: BlockerSiteContext, action: BlockerSiteAction) => __TAURI_INVOKE<OperationAdmission>("blocker_site_change", { context, action }),
+	blockerPicker: (context: BlockerSiteContext, action: BlockerPickerAction) => typedError<{
+	session: string,
+	active: boolean,
+	selection: BlockerSelectionView | null,
+} | null, null>(__TAURI_INVOKE("blocker_picker", { context, action })),
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
 	blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
 	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
@@ -198,7 +217,7 @@ export const commands = {
 	addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
 	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
-	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
+	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide }),
 	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
 	/**
 	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
@@ -248,10 +267,6 @@ export const events = {
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
-	extensionDistributionChanged: makeEvent<ExtensionDistributionChanged>("extension-distribution-changed"),
-	extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>("extension-management-availability-changed"),
-	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
-	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
 	faviconsChanged: makeEvent<FaviconsChanged>("favicons-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
@@ -264,6 +279,7 @@ export const events = {
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
+	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
@@ -276,9 +292,18 @@ export const events = {
  *  Stable diagnostics classification. Native/parser text and filter content
  *  never cross the privileged IPC boundary.
  */
-export type BlockerFailure = "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
+export type BlockerFailure = "site_preferences_unavailable" | "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
 
 export type BlockerPhase = "unavailable" | "uninitialized" | "compiling" | "installing" | "ready" | "failed" | "retired";
+
+/**  Host-initiated picker controls, available only to privileged main chrome. */
+export type BlockerPickerAction = { kind: "start" } | { kind: "read"; session: string } | { kind: "preview"; session: string; enabled: boolean } | { kind: "stop"; session: string };
+
+export type BlockerPickerView = {
+	session: string,
+	active: boolean,
+	selection: BlockerSelectionView | null,
+};
 
 /**
  *  Authority of the focused profile's durable blocker preference.
@@ -328,6 +353,32 @@ export type BlockerRuntimeDiagnostics = {
 	evaluation_errors: string,
 };
 
+export type BlockerSelectionView = {
+	identity: string,
+	label: string,
+	count: number,
+	positional: boolean,
+};
+
+export type BlockerSiteAction = { kind: "save_selection"; session: string; selection: string } | { kind: "retry" } | { kind: "pause"; paused: boolean } | { kind: "set_hide_enabled"; id: string; enabled: boolean } | { kind: "remove_hide"; id: string };
+
+/**  Exact privileged site-control context; never accepted from ordinary page IPC. */
+export type BlockerSiteContext = {
+	profile: string,
+	tab: string,
+	site: string,
+	revision: string,
+};
+
+export type BlockerSiteView = {
+	context: BlockerSiteContext,
+	paused: boolean,
+	private_session: boolean,
+	ready: boolean,
+	busy: boolean,
+	hides: PersonalHideView[],
+};
+
 /**
  *  Stable package-refresh failure category. Endpoint, parser, and native
  *  strings are intentionally never forwarded to privileged JavaScript.
@@ -350,17 +401,18 @@ export type BlockerSourceIdentities = {
 export type BlockerSourcePhase = "not_configured" | "durable_activation_unsupported" | "storage_unavailable" | "clock_unsafe" | "idle" | "fresh" | "stale" | "refreshing" | "failed" | "shutdown";
 
 /**  Authority which admitted the displayed filter package. */
-export type BlockerSourceProvenance = "release_bundle" | "tuf_repository";
+export type BlockerSourceProvenance = "release_bundle" | "tuf_repository" | "official_https";
+
+export type BlockerStatsView = {
+	today: number | null,
+	last7Days: number | null,
+	days: (number | null)[],
+};
 
 export type BlockerStatusChanged = BlockerStatusView;
 
-/**
- *  Read-only, focused-profile diagnostics delivered only to privileged main
- *  chrome. It deliberately contains no profile selector, URL, origin, request
- *  metadata, native error string, or filter-list text. Runtime health is
- *  represented only by volatile aggregate counters.
- */
 export type BlockerStatusView = {
+	site: BlockerSiteView | null,
 	projection_revision: string,
 	protection: BlockerProtection,
 	phase: BlockerPhase,
@@ -636,235 +688,6 @@ export type ExtensionActionsView = {
 	profile_id: string,
 	tab_id: string | null,
 	actions: ExtensionActionView[],
-};
-
-export type ExtensionDistributionChanged = ExtensionDistributionView;
-
-/**
- *  Redacted product-distribution failure reason. Network and native error
- *  strings never cross the privileged IPC boundary.
- */
-export type ExtensionDistributionFailureReasonView = "acquisition" | "busy" | "service_unavailable" | "service_rejected" | "service_failed_closed" | "settlement_timed_out" | "settlement_lost" | "submission_panicked" | "outcome_unresolved" | "activation_rejected" | "accounting";
-
-/**  Stable distribution failure stage exposed only to privileged chrome. */
-export type ExtensionDistributionFailureStageView = { type: "catalog" } | { type: "package_fetch"; index: number } | { type: "package_provision"; index: number } | { type: "catalog_activation" };
-
-/**
- *  Closed response for the argument-free product update trigger. This is an
- *  admission result, not completion; authoritative progress and settlement
- *  continue to arrive through `ExtensionDistributionChanged`.
- */
-export type ExtensionDistributionRefreshAdmissionView = "accepted" | "busy" | "quarantined" | "unavailable" | "shutting_down";
-
-/**  Exact replacement state for the dormant product distribution worker. */
-export type ExtensionDistributionStateView = { phase: "idle" } | { phase: "synchronizing" } | { phase: "ready"; package_count: number; materialized_packages: number; reused_packages: number; exact_retries: number; newly_activated: boolean } | { phase: "failed"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "quarantined"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "shutdown" };
-
-/**  Shell-revisioned product-distribution status for privileged extension UI. */
-export type ExtensionDistributionView = {
-	projection_revision: string,
-	state: ExtensionDistributionStateView,
-};
-
-/**
- *  One authenticated package offered by Zephium's current curated catalog.
- *  `candidate_index` is an opaque, short-lived selector into the exact
- *  revisioned catalog retained by Shell. Privileged chrome may only echo it;
- *  it conveys no package, repository, profile, or permission authority.
- */
-export type ExtensionInstallCandidateView = {
-	candidate_index: number,
-	name: string,
-	description: string | null,
-	author: string | null,
-	version: string,
-	source: ExtensionManagementSourceView,
-	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
-	verified_catalog_unix: string | null,
-	provenance: ExtensionManagementProvenanceView | null,
-	required_api: string[],
-	required_hosts: string[],
-	/**
-	 *  Canonically ordered optional API grants. The frontend returns only
-	 *  selected array indexes; Shell rejoins them to its retained candidate.
-	 */
-	optional_api: string[],
-	/**  Canonically ordered optional host grants. */
-	optional_hosts: string[],
-	supports_file_access: boolean,
-	file_access_available: boolean,
-	private_access_available: boolean,
-	compatibility: ExtensionManagementCompatibilityView,
-	limitations: ExtensionManagementLimitationView[],
-};
-
-/**
- *  Installs only a candidate from Shell's latest authenticated, retained
- *  management catalog. The frontend supplies no profile, package path,
- *  manifest declaration, or permission-name authority.
- */
-export type ExtensionInstallGrantSelectionInput = {
-	optional_api_indices: number[],
-	optional_host_indices: number[],
-	file_access: boolean,
-	private_access: boolean,
-};
-
-export type ExtensionManagementAvailabilityChanged = ExtensionManagementAvailabilityChangedView;
-
-/**  Actor-ordered projection of extension-management product availability. */
-export type ExtensionManagementAvailabilityChangedView = {
-	projection_revision: string,
-	availability: ExtensionManagementAvailabilityView,
-};
-
-/**
- *  Process-immutable product availability for the extension-management UX.
- *  This is a non-authorizing presentation fact. It carries no catalog,
- *  package, profile, repository, or runtime identity.
- */
-export type ExtensionManagementAvailabilityView = "configured" | "not_configured" | "unavailable";
-
-export type ExtensionManagementChanged = ExtensionManagementView;
-
-/**  Reviewed compatibility of the exact authenticated manifest. */
-export type ExtensionManagementCompatibilityView = "compatible" | "degraded";
-
-/**  One authenticated installed extension in browser-owned management UI. */
-export type ExtensionManagementEntryView = {
-	install_id: string,
-	install_revision: string,
-	name: string,
-	description: string | null,
-	author: string | null,
-	version: string,
-	has_options_page: boolean,
-	source: ExtensionManagementSourceView,
-	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
-	verified_catalog_unix: string | null,
-	provenance: ExtensionManagementProvenanceView | null,
-	runtime: ExtensionManagementRuntimeView,
-	/**  Present only when `runtime` is `active`. */
-	runtime_generation: string | null,
-	grants: ExtensionManagementGrantView,
-	/**
-	 *  Canonically ordered optional API declarations. Mutations return only
-	 *  the array index plus the exact grant revision.
-	 */
-	optional_api: string[],
-	/**  Canonically ordered optional host declarations. */
-	optional_hosts: string[],
-	compatibility: ExtensionManagementCompatibilityView,
-	limitations: ExtensionManagementLimitationView[],
-};
-
-/**  Non-authorizing summary of the atomic grant row joined to an install. */
-export type ExtensionManagementGrantView = {
-	initialized: boolean,
-	revision: string | null,
-	api_permissions: string[],
-	host_permissions: string[],
-	file_access: boolean,
-	private_access: boolean,
-};
-
-/**  One browser-owned explanation for a reviewed platform degradation. */
-export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" } | { type: "options_page" } | { type: "declarative_net_request" };
-
-/**  Settlement of the focused profile's lazy installed-extension projection. */
-export type ExtensionManagementPhase = "loading" | "ready" | "not_configured" | "catalog_not_synchronized" | "update_consent_required" | "unavailable" | "rejected" | "failed_closed";
-
-/**  Browser-authenticated, inert upstream identity for extension management UI. */
-export type ExtensionManagementProvenanceView = {
-	source_url: string,
-	upstream_version: string,
-	license_expression: string,
-	attribution: string,
-};
-
-/**  Process-local regular-runtime state for one installed extension. */
-export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "profile_paused" | "active";
-
-/**  Browser-authenticated acquisition/support lane for extension management UI. */
-export type ExtensionManagementSourceView = "zephium_verified" | "external_compatibility" | "developer_local";
-
-/**
- *  Exact replacement management cohort for the focused profile.
- *  Loading and failure phases always carry no catalog revision or rows, so a
- *  delayed failure cannot leave stale selectors actionable in privileged UI.
- */
-export type ExtensionManagementView = {
-	projection_revision: string,
-	profile_id: string,
-	phase: ExtensionManagementPhase,
-	catalog_revision: string | null,
-	/**  Present only while `phase` is `ready`. */
-	profile_policy: ExtensionProfilePolicyView | null,
-	entries: ExtensionManagementEntryView[],
-	candidates: ExtensionInstallCandidateView[],
-	/**  Present only while `phase` is `update_consent_required`. */
-	pending_update: ExtensionUpdateConsentView | null,
-};
-
-export type ExtensionOptionalGrantKindInput = "api" | "host";
-
-export type ExtensionProfilePolicyView = {
-	revision: string,
-	paused: boolean,
-	denied_site_count: number,
-	current_site_available: boolean,
-	current_site_denied: boolean,
-};
-
-export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView;
-
-/**
- *  One browser-owned optional-permission consent surface. Every identity is a
- *  short-lived echo token only; the Shell rejoins it to its retained native
- *  request before a user response can reach the serialized grant service.
- */
-export type ExtensionRuntimeGrantPromptEntryView = {
-	profile_id: string,
-	install_id: string,
-	runtime_generation: string,
-	request_id: string,
-	extension_name: string,
-	api_permissions: string[],
-	host_permissions: string[],
-	private_context: boolean,
-	/**
-	 *  True after an Allow gesture while the durable grant transaction is in
-	 *  flight. Chrome must disable both response buttons until replacement.
-	 */
-	processing: boolean,
-};
-
-/**
- *  Exact replacement for the process-wide permission prompt surface. `None`
- *  closes any prior prompt; Shell serializes the bounded native cohort so the
- *  frame never chooses request ordering.
- */
-export type ExtensionRuntimeGrantPromptView = {
-	projection_revision: string,
-	prompt: ExtensionRuntimeGrantPromptEntryView | null,
-};
-
-/**
- *  One exact authenticated replacement awaiting changed-authority or newly
- *  degraded compatibility review. `review_id` is an opaque,
- *  subscription-local echo token; no package identity or permission name is
- *  accepted back from privileged chrome.
- */
-export type ExtensionUpdateConsentView = {
-	review_id: string,
-	name: string,
-	version: string,
-	source: ExtensionManagementSourceView,
-	verified_catalog_unix: string | null,
-	provenance: ExtensionManagementProvenanceView | null,
-	added_required_api: string[],
-	added_required_hosts: string[],
-	compatibility: ExtensionManagementCompatibilityView,
-	limitations: ExtensionManagementLimitationView[],
 };
 
 /**
@@ -1156,7 +979,7 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "extension_enablement_pending" | "extension_activation_pending" | "extension_restart_required" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and
@@ -1215,6 +1038,12 @@ export type PanelState = {
 	error: boolean,
 	corner_radius: number,
 	position_restorable: boolean,
+};
+
+export type PersonalHideView = {
+	id: string,
+	label: string,
+	enabled: boolean,
 };
 
 export type ProfileId = string;
@@ -1593,6 +1422,12 @@ export type SplitGroupView = {
 
 export type TabChanged = TabView;
 
+/**
+ *  Browser chrome's bounded tab renderer choice. Future extension-owned
+ *  documents can add a separate variant without treating them as page URLs.
+ */
+export type TabContentView = "web" | "settings" | "extensions" | "extension_owned";
+
 export type TabView = {
 	id: string,
 	/**
@@ -1604,6 +1439,8 @@ export type TabView = {
 	projection_revision: string,
 	title: string,
 	url: string | null,
+	/**  Explicit content owner. Internal pages never carry a navigable URL. */
+	content?: TabContentView,
 	loading: boolean,
 	popup_blocked?: boolean,
 	can_go_back: boolean,
@@ -1718,6 +1555,51 @@ export type UiCommand = string;
 
 export type UiInfo = {
 	material: Material,
+};
+
+/**  An extension's run-time request for access, awaiting the user's answer. */
+export type WebExtensionAccessRequestView = {
+	profile_id: string,
+	request: string,
+	extension_id: string,
+	warnings: string[],
+	permissions: string[],
+	patterns: string[],
+};
+
+export type WebExtensionAccessRequested = WebExtensionAccessRequestView;
+
+export type WebExtensionReview = {
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	warnings: string[],
+	icon: string | null,
+	update: boolean,
+	/**  Installed from a file, so not checked against the Web Store. */
+	from_file: boolean,
+};
+
+export type WebExtensionView = {
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	enabled: boolean,
+	icon: string | null,
+	/**  `running`, `starting`, `failed` or `off`. */
+	state: string,
+	error: string | null,
+	warnings: string[],
+	/**  `all`, `click` or `sites`; meaningful only when `site_scoped`. */
+	access: string,
+	sites: string[],
+	/**  Whether the extension asked for access to websites at all. */
+	site_scoped: boolean,
+	has_options: boolean,
+	held_update: string | null,
+	sideloaded: boolean,
 };
 
 /**

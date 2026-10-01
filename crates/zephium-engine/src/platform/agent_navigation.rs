@@ -237,6 +237,51 @@ mod tests {
     }
 
     #[test]
+    fn native_cancellation_settles_only_its_exact_navigation_once() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/exact").unwrap();
+        gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        gate.observe(event(
+            8,
+            wry::NavigationEventPhase::Started,
+            target.as_url().as_str(),
+        ))
+        .unwrap();
+        assert!(gate
+            .observe(event(
+                9,
+                wry::NavigationEventPhase::Cancelled,
+                target.as_url().as_str()
+            ))
+            .unwrap()
+            .is_none());
+        let terminal = gate
+            .observe(event(
+                8,
+                wry::NavigationEventPhase::Cancelled,
+                target.as_url().as_str(),
+            ))
+            .unwrap()
+            .expect("one cancellation terminal");
+        assert_eq!(terminal.operation(), operation);
+        assert_eq!(
+            terminal.into_outcome(),
+            Err(zephium_agentic::ContextPortFailure::NativeRefused)
+        );
+        assert!(gate
+            .observe(event(
+                8,
+                wry::NavigationEventPhase::Committed,
+                target.as_url().as_str()
+            ))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn armed_navigation_matches_exact_target_and_native_id_once() {
         let gate = super::AgentNavigationController::default();
         let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
@@ -1291,7 +1336,9 @@ impl AgentNavigationController {
                 if committed.native_id == event.id
                     && matches!(
                         event.phase,
-                        wry::NavigationEventPhase::Finished | wry::NavigationEventPhase::Failed
+                        wry::NavigationEventPhase::Finished
+                            | wry::NavigationEventPhase::Failed
+                            | wry::NavigationEventPhase::Cancelled
                     )
                 {
                     if event.phase != wry::NavigationEventPhase::Finished || committed.finished {
@@ -1412,7 +1459,9 @@ impl AgentNavigationController {
         }
         if !matches!(
             event.phase,
-            wry::NavigationEventPhase::Committed | wry::NavigationEventPhase::Failed
+            wry::NavigationEventPhase::Committed
+                | wry::NavigationEventPhase::Failed
+                | wry::NavigationEventPhase::Cancelled
         ) || armed.native_id != Some(event.id)
         {
             return Ok(AgentNavigationObservation::none());

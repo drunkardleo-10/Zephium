@@ -328,9 +328,7 @@ fn verify_private_directory(file: &File) -> Result<(), DownloadError> {
     }
 }
 fn dispose(file: &File) -> Result<(), DownloadError> {
-    let value = FILE_DISPOSITION_INFO {
-        DeleteFile: true.into(),
-    };
+    let value = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: this exact opened object is marked for deletion, never a path traversal.
     unsafe {
         SetFileInformationByHandle(
@@ -621,6 +619,68 @@ pub(super) fn recover_staging(record: &DownloadRecord) -> Result<(), DownloadErr
     dispose(&directory)
 }
 
+pub(super) fn writer_for_process(process: u32) -> Result<DownloadWriter, DownloadError> {
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    if process == 0 {
+        return Err(DownloadError::Unavailable);
+    }
+    // SAFETY: query/synchronize only; the returned handle identifies one exact incarnation.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            process,
+        )
+    }
+    .map_err(win)?;
+    let file = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+    Ok(DownloadWriter {
+        process,
+        created: process_created(HANDLE(file.as_raw_handle()))?,
+    })
+}
+fn process_created(process: HANDLE) -> Result<u64, DownloadError> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+    let mut created = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: live process handle with query rights and four correctly sized outputs.
+    unsafe { GetProcessTimes(process, &mut created, &mut exit, &mut kernel, &mut user) }
+        .map_err(win)?;
+    let value = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    if value == 0 {
+        Err(DownloadError::Unavailable)
+    } else {
+        Ok(value)
+    }
+}
+fn writer_exited(owner: &DownloadWriter) -> bool {
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    let raw = match unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            owner.process,
+        )
+    } {
+        Ok(handle) => handle,
+        Err(error) => return error.code().0 as u32 & 0xffff == 87,
+    };
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+    let process = HANDLE(handle.as_raw_handle());
+    let Ok(created) = process_created(process) else {
+        return false;
+    };
+    created != owner.created
+        || unsafe { WaitForSingleObject(process, 0) } == windows::Win32::Foundation::WAIT_OBJECT_0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,66 +765,4 @@ mod tests {
         assert!(recover_staging(&record).is_err());
         assert_eq!(fs::read(pending.payload()).unwrap(), b"keep");
     }
-}
-
-pub(super) fn writer_for_process(process: u32) -> Result<DownloadWriter, DownloadError> {
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    };
-    if process == 0 {
-        return Err(DownloadError::Unavailable);
-    }
-    // SAFETY: query/synchronize only; the returned handle identifies one exact incarnation.
-    let raw = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-            false,
-            process,
-        )
-    }
-    .map_err(win)?;
-    let file = unsafe { OwnedHandle::from_raw_handle(raw.0) };
-    Ok(DownloadWriter {
-        process,
-        created: process_created(HANDLE(file.as_raw_handle()))?,
-    })
-}
-fn process_created(process: HANDLE) -> Result<u64, DownloadError> {
-    use windows::Win32::Foundation::FILETIME;
-    use windows::Win32::System::Threading::GetProcessTimes;
-    let mut created = FILETIME::default();
-    let mut exit = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    // SAFETY: live process handle with query rights and four correctly sized outputs.
-    unsafe { GetProcessTimes(process, &mut created, &mut exit, &mut kernel, &mut user) }
-        .map_err(win)?;
-    let value = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-    if value == 0 {
-        Err(DownloadError::Unavailable)
-    } else {
-        Ok(value)
-    }
-}
-fn writer_exited(owner: &DownloadWriter) -> bool {
-    use windows::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    };
-    let raw = match unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-            false,
-            owner.process,
-        )
-    } {
-        Ok(handle) => handle,
-        Err(error) => return error.code().0 as u32 & 0xffff == 87,
-    };
-    let handle = unsafe { OwnedHandle::from_raw_handle(raw.0) };
-    let process = HANDLE(handle.as_raw_handle());
-    let Ok(created) = process_created(process) else {
-        return false;
-    };
-    created != owner.created
-        || unsafe { WaitForSingleObject(process, 0) } == windows::Win32::Foundation::WAIT_OBJECT_0
 }

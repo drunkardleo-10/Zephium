@@ -1,0 +1,58 @@
+[package]
+name = "zephium-webext-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Standalone WebKit extension harness; never part of the browser build.
+lab = []
+
+[[bin]]
+name = "webext-lab"
+path = "src/bin/webext-lab.rs"
+required-features = ["lab"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "WKContentWorld",
+    "WKFrameInfo",
+    "WKNavigation",
+    "WKNavigationAction",
+    "WKNavigationDelegate",
+    "WKPreferences",
+    "WKUIDelegate",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKWebExtension",
+    "WKWebExtensionAction",
+    "WKWebExtensionCommand",
+    "WKWebExtensionContext",
+    "WKWebExtensionController",
+    "WKWebExtensionControllerConfiguration",
+    "WKWebExtensionControllerDelegate",
+    "WKWebExtensionDataRecord",
+    "WKWebExtensionDataType",
+    "WKWebExtensionMatchPattern",
+    "WKWebExtensionMessagePort",
+    "WKWebExtensionPermission",
+    "WKWebExtensionTab",
+    "WKWebExtensionTabConfiguration",
+    "WKWebExtensionWindow",
+    "WKWebExtensionWindowConfiguration",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataRecord",
+    "WKWebsiteDataStore",
+] }
+base64.workspace = true
+dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
+serde_json.workspace = true
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }

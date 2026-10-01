@@ -58,6 +58,7 @@ pub(crate) fn content_policy_digest(policy: &NativeContentPolicy) -> Option<[u8;
 pub(crate) struct ContentPolicyRegistration {
     manager: Option<webkit2gtk::UserContentManager>,
     filter: Option<Rc<UserContentFilter>>,
+    _pause: Option<crate::platform::content_pause::PauseRegistration>,
 }
 
 pub(crate) struct ContentPolicyCompilationCancellation(webkit2gtk::gio::Cancellable);
@@ -92,6 +93,7 @@ impl ContentPolicyRegistration {
         Self {
             manager: None,
             filter: None,
+            _pause: None,
         }
     }
 
@@ -103,6 +105,7 @@ impl ContentPolicyRegistration {
 
 impl Drop for ContentPolicyRegistration {
     fn drop(&mut self) {
+        self._pause.take();
         if let (Some(manager), Some(filter)) = (&self.manager, &self.filter) {
             unsafe {
                 webkit2gtk::ffi::webkit_user_content_manager_remove_filter(
@@ -114,9 +117,10 @@ impl Drop for ContentPolicyRegistration {
     }
 }
 
-pub(crate) fn install_on_view(
+pub(crate) fn install_scoped_on_view(
     view: &wry::WebView,
     policy: &NativeContentPolicy,
+    pause: &crate::platform::content_pause::ContentPause,
 ) -> Result<ContentPolicyRegistration, ContentRuleApplyFailure> {
     let NativeContentPolicy::Declarative { filter, .. } = policy else {
         return Ok(ContentPolicyRegistration::allow_all());
@@ -125,15 +129,27 @@ pub(crate) fn install_on_view(
         .webview()
         .user_content_manager()
         .ok_or(ContentRuleApplyFailure::NativeInstallation)?;
-    unsafe {
-        webkit2gtk::ffi::webkit_user_content_manager_add_filter(
-            manager.to_glib_none().0,
-            filter.0.as_ptr(),
-        );
-    }
+    let callback_manager = manager.clone();
+    let callback_filter = filter.clone();
+    let registration = pause
+        .register(move |paused| unsafe {
+            if paused {
+                webkit2gtk::ffi::webkit_user_content_manager_remove_filter(
+                    callback_manager.to_glib_none().0,
+                    callback_filter.0.as_ptr(),
+                );
+            } else {
+                webkit2gtk::ffi::webkit_user_content_manager_add_filter(
+                    callback_manager.to_glib_none().0,
+                    callback_filter.0.as_ptr(),
+                );
+            }
+        })
+        .ok_or(ContentRuleApplyFailure::NativeInstallation)?;
     Ok(ContentPolicyRegistration {
         manager: Some(manager),
         filter: Some(filter.clone()),
+        _pause: Some(registration),
     })
 }
 
@@ -478,7 +494,7 @@ where
 
 pub(crate) fn compile<F>(
     cache: &Path,
-    rules: Arc<ContentRules>,
+    encoded: Arc<str>,
     artifact_digest: [u8; 32],
     done: F,
 ) -> ContentPolicyCompilationCancellation
@@ -490,17 +506,6 @@ where
     let owner_context = glib::MainContext::ref_thread_default();
     if !owner_context.is_owner() {
         done(Err(ContentRuleApplyFailure::NativeCompilation));
-        return cancellation_handle;
-    }
-    let ContentRulesPayload::Declarative {
-        format, encoded, ..
-    } = rules.payload()
-    else {
-        done(Err(ContentRuleApplyFailure::UnsupportedArtifact));
-        return cancellation_handle;
-    };
-    if *format != DeclarativeRuleFormat::WebKitContentBlockerV1 {
-        done(Err(ContentRuleApplyFailure::UnsupportedArtifact));
         return cancellation_handle;
     }
     let Some(cache) = cache.to_str() else {
@@ -1065,9 +1070,17 @@ mod tests {
         let callback_result = result.clone();
         let timed_out = Rc::new(Cell::new(false));
         let timeout_fired = timed_out.clone();
-        let cancellation = compile(cache, rules, artifact_digest, move |outcome| {
-            *callback_result.borrow_mut() = Some(outcome);
-        });
+        let cancellation = compile(
+            cache,
+            match rules.payload() {
+                ContentRulesPayload::Declarative { encoded, .. } => encoded.clone(),
+                _ => panic!("declarative fixture"),
+            },
+            artifact_digest,
+            move |outcome| {
+                *callback_result.borrow_mut() = Some(outcome);
+            },
+        );
         let timeout = crate::platform::linux::schedule_content_policy_timeout(
             Duration::from_secs(120),
             move || timeout_fired.set(true),

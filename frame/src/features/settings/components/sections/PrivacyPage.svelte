@@ -5,6 +5,7 @@
   import { tabs } from "$domain/tabs";
   import * as preview from "../../lib/preview.svelte";
   import PreviewNotice from "../PreviewNotice.svelte";
+  import ProtectionControls from "../ProtectionControls.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import PreviewSelect from "../PreviewSelect.svelte";
   import PreviewToggle from "../PreviewToggle.svelte";
@@ -23,11 +24,10 @@
   }
 </script>
 
+<ProtectionControls />
 <PreviewNotice />
-<SettingsGroup title={m.settings_protection()}
-  ><PreviewToggle id="privacy.blocking" /><PreviewSelect id="privacy.cookies" /><PreviewToggle
-    id="privacy.https"
-  /></SettingsGroup
+<SettingsGroup title="Other privacy preferences"
+  ><PreviewSelect id="privacy.cookies" /><PreviewToggle id="privacy.https" /></SettingsGroup
 >
 <SettingsGroup title={m.settings_site_permissions()}
   ><PreviewSelect id="privacy.camera" /><PreviewSelect id="privacy.microphone" /><PreviewSelect

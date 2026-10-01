@@ -1,11 +1,14 @@
 use std::{
   collections::{hash_map::Entry, HashMap, VecDeque},
-  sync::Mutex,
+  sync::{Mutex, OnceLock},
 };
 
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::{DeclaredClass, Message};
-use objc2_foundation::{MainThreadMarker, NSError, NSHTTPURLResponse, NSObjectProtocol, NSString};
+use objc2_foundation::{
+  MainThreadMarker, NSError, NSHTTPURLResponse, NSObjectProtocol, NSString,
+  NSURLErrorFailingURLErrorKey, NSURL,
+};
 use objc2_web_kit::{
   WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationResponse,
   WKNavigationResponsePolicy, WKNavigationType,
@@ -27,6 +30,34 @@ use super::class::wry_navigation_delegate::WryNavigationDelegate;
 const ACTIVE_APPLE_NAVIGATION_LIMIT: usize = 64;
 const APPLE_REDIRECT_EVENT_LIMIT: usize = 32;
 const WEB_EXTENSION_URL_PREFIX: &str = "webkit-extension://";
+
+#[cfg(target_os = "macos")]
+fn extension_tab_trace_enabled() -> bool {
+  static ENABLED: OnceLock<bool> = OnceLock::new();
+  *ENABLED.get_or_init(|| std::env::var("ZEPHIUM_EXTENSION_TAB_TRACE").as_deref() == Ok("1"))
+}
+
+#[cfg(target_os = "macos")]
+fn navigation_origin_category(value: &str) -> &'static str {
+  let Ok(url) = url::Url::parse(value) else {
+    return "invalid";
+  };
+  if url.scheme() == "https"
+    && url.host_str().is_some_and(|host| {
+      host
+        .strip_suffix(".chromiumapp.org")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| matches!(byte, b'a'..=b'p')))
+    })
+  {
+    "chromiumapp_shaped"
+  } else if url.scheme() == "https" {
+    "other_https"
+  } else if url.scheme() == "http" {
+    "other_http"
+  } else {
+    "other_scheme"
+  }
+}
 
 fn native_web_extension_subframe_owns_policy(
   url: &str,
@@ -602,6 +633,7 @@ pub(crate) fn did_fail_navigation(
   webview: &WKWebView,
   navigation: &WKNavigation,
   error: &NSError,
+  stage: &'static str,
 ) {
   let domain = bounded_nsstring(
     &error.domain(),
@@ -611,6 +643,40 @@ pub(crate) fn did_fail_navigation(
     },
   );
   let phase = navigation_error_phase(domain.as_deref(), error.code());
+  if phase == NavigationEventPhase::Failed {
+    let domain_kind = match domain.as_deref() {
+      Some("NSURLErrorDomain") => "NSURLErrorDomain",
+      Some("WebKitErrorDomain") => "WebKitErrorDomain",
+      _ => "other",
+    };
+    #[cfg(target_os = "macos")]
+    if extension_tab_trace_enabled() {
+      let failing_category = error
+        .userInfo()
+        .objectForKey(unsafe { NSURLErrorFailingURLErrorKey })
+        .and_then(|value| {
+          value
+            .downcast_ref::<NSURL>()
+            .and_then(|url| url.absoluteString())
+        })
+        .and_then(|value| bounded_nsstring(&value, PAGE_URL_LIMIT))
+        .map_or("unavailable", |value| navigation_origin_category(&value));
+      eprintln!(
+        "extension-tab-trace: native-failure stage={stage} domain={domain_kind} code={} origin={failing_category}",
+        error.code()
+      );
+    } else {
+      eprintln!(
+        "view-create: WebKit navigation failure stage={stage} domain={domain_kind} code={}",
+        error.code()
+      );
+    }
+    #[cfg(not(target_os = "macos"))]
+    eprintln!(
+      "view-create: WebKit navigation failure stage={stage} domain={domain_kind} code={}",
+      error.code()
+    );
+  }
   let update = with_navigation_state(&this.ivars().navigation_event_state, |state| {
     state.terminal(navigation_key(navigation), phase)
   });
@@ -790,6 +856,24 @@ pub(crate) fn navigation_policy(
           target_is_main_frame,
         },
       );
+      #[cfg(target_os = "macos")]
+      if extension_tab_trace_enabled() {
+        let frame = match target_is_main_frame {
+          Some(true) => "main",
+          Some(false) => "subframe",
+          None => "targetless",
+        };
+        eprintln!(
+          "extension-tab-trace: native-policy origin={} frame={frame} admitted={policy_allows}",
+          navigation_origin_category(&url)
+        );
+      }
+      #[cfg(target_os = "macos")]
+      if policy_allows && target_is_main_frame == Some(true) {
+        if let Some(observe) = &this.ivars().main_frame_navigation_attempt_handler {
+          observe(url.clone());
+        }
+      }
       match policy_allows {
         true => (*handler).call((WKNavigationActionPolicy::Allow,)),
         false => (*handler).call((WKNavigationActionPolicy::Cancel,)),

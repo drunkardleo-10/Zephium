@@ -19,15 +19,10 @@ use crate::store_reads::{run as run_store_reader, StoreReadQueue, StoreReaderSto
 #[cfg(feature = "agentic-browser")]
 use crate::AgentLifecycle;
 use crate::{
-    Command, ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, SharedBlocker,
-    SharedChrome, SharedEngine, SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
+    Command, ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
+    SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 use zephium_core::ids::{ItemId, ProfileId};
-use zephium_core::ports::extensions::{
-    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationRequest,
-    ExtensionAcquiredPackageProvisioningCallback, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionDistributionStatus, ExtensionManagementAdmission,
-};
 use zephium_ipc::BlockerStatusView;
 
 const FAILED_SPAWN_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -39,12 +34,7 @@ trait PendingAgentLifecycle: Send + 'static {
     #[cfg(feature = "agentic-browser")]
     fn into_shell_lifecycle(self) -> Option<AgentLifecycle>;
 
-    fn into_spawn_failure(
-        self,
-        error: SpawnError,
-        extension_lifecycle: ExtensionLifecycle,
-        worker_cleanup_proven: bool,
-    ) -> Self::Failure;
+    fn into_spawn_failure(self, error: SpawnError, worker_cleanup_proven: bool) -> Self::Failure;
 }
 
 struct NoAgentLifecycle;
@@ -57,13 +47,8 @@ impl PendingAgentLifecycle for NoAgentLifecycle {
         None
     }
 
-    fn into_spawn_failure(
-        self,
-        error: SpawnError,
-        extension_lifecycle: ExtensionLifecycle,
-        worker_cleanup_proven: bool,
-    ) -> Self::Failure {
-        SpawnFailure::new(error, extension_lifecycle, worker_cleanup_proven)
+    fn into_spawn_failure(self, error: SpawnError, worker_cleanup_proven: bool) -> Self::Failure {
+        SpawnFailure::new(error, worker_cleanup_proven)
     }
 }
 
@@ -78,13 +63,8 @@ impl PendingAgentLifecycle for PendingAgentBrowserLifecycle {
         Some(self.0)
     }
 
-    fn into_spawn_failure(
-        self,
-        error: SpawnError,
-        extension_lifecycle: ExtensionLifecycle,
-        worker_cleanup_proven: bool,
-    ) -> Self::Failure {
-        AgenticSpawnFailure::new(error, extension_lifecycle, self.0, worker_cleanup_proven)
+    fn into_spawn_failure(self, error: SpawnError, worker_cleanup_proven: bool) -> Self::Failure {
+        AgenticSpawnFailure::new(error, self.0, worker_cleanup_proven)
     }
 }
 
@@ -92,7 +72,6 @@ struct ShellHandoff<Agent = NoAgentLifecycle> {
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
-    extension_service: ExtensionLifecycle,
     agent_lifecycle: Agent,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
@@ -278,30 +257,17 @@ pub enum SpawnError {
     StoreReader(std::io::Error),
 }
 
-/// Lossless application-composition failure.
-///
-/// Worker construction can fail on a native setup thread, where waiting on
-/// extension recovery or teardown would deadlock platforms that must service
-/// that work from the same event loop. The move-only lifecycle owner is
-/// therefore returned untouched to the composition root, together with proof
-/// of whether the helper workers that were admitted before the failure were
-/// reaped inside the bounded cleanup budget.
-#[must_use = "recover and explicitly dispose the returned extension lifecycle owner"]
+/// Application-composition failure, with proof of whether the helper workers
+/// admitted before the failure were reaped inside the bounded cleanup budget.
 pub struct SpawnFailure {
     error: SpawnError,
-    extension_lifecycle: ExtensionLifecycle,
     worker_cleanup_proven: bool,
 }
 
 impl SpawnFailure {
-    fn new(
-        error: SpawnError,
-        extension_lifecycle: ExtensionLifecycle,
-        worker_cleanup_proven: bool,
-    ) -> Self {
+    fn new(error: SpawnError, worker_cleanup_proven: bool) -> Self {
         Self {
             error,
-            extension_lifecycle,
             worker_cleanup_proven,
         }
     }
@@ -314,12 +280,6 @@ impl SpawnFailure {
     /// observed exited and joined before the rollback deadline.
     pub fn worker_cleanup_proven(&self) -> bool {
         self.worker_cleanup_proven
-    }
-
-    /// Recovers the concrete failure and the unique, never-settled lifecycle
-    /// owner. Callers decide how to dispose it away from any native UI thread.
-    pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle) {
-        (self.error, self.extension_lifecycle)
     }
 }
 
@@ -345,51 +305,16 @@ impl std::error::Error for SpawnFailure {
     }
 }
 
-/// Move-only lifecycle pair transferred into an agentic Shell composition.
-///
-/// Pairing these two unique owners keeps the public spawn boundary within a
-/// small fixed argument surface and makes their joint rollback obligation
-/// explicit.
-#[cfg(feature = "agentic-browser")]
-#[must_use = "both lifecycle owners must be transferred or explicitly recovered"]
-pub struct AgenticLifecycles {
-    extension: ExtensionLifecycle,
-    agent: AgentLifecycle,
-}
-
-#[cfg(feature = "agentic-browser")]
-impl AgenticLifecycles {
-    /// Pairs the exact extension and agent lifecycle owners for Shell transfer.
-    pub fn new(extension: ExtensionLifecycle, agent: AgentLifecycle) -> Self {
-        Self { extension, agent }
-    }
-
-    /// Recovers both unique owners before they are transferred to a Shell.
-    pub fn into_parts(self) -> (ExtensionLifecycle, AgentLifecycle) {
-        (self.extension, self.agent)
-    }
-}
-
-#[cfg(feature = "agentic-browser")]
-impl std::fmt::Debug for AgenticLifecycles {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("AgenticLifecycles")
-            .finish_non_exhaustive()
-    }
-}
-
 /// Lossless agentic application-composition failure.
 ///
 /// This is distinct from [`SpawnFailure`] so the ordinary spawn API cannot
-/// accidentally acquire or discard an agent lifecycle. Both move-only owners
-/// are returned untouched; the composition root must consume them away from a
+/// accidentally acquire or discard an agent lifecycle. The move-only owner is
+/// returned untouched; the composition root must consume it away from a
 /// native UI/event-loop thread.
 #[cfg(feature = "agentic-browser")]
-#[must_use = "recover and explicitly dispose both returned lifecycle owners"]
+#[must_use = "recover and explicitly dispose the returned agent lifecycle owner"]
 pub struct AgenticSpawnFailure {
     error: SpawnError,
-    extension_lifecycle: ExtensionLifecycle,
     agent_lifecycle: AgentLifecycle,
     worker_cleanup_proven: bool,
 }
@@ -398,13 +323,11 @@ pub struct AgenticSpawnFailure {
 impl AgenticSpawnFailure {
     fn new(
         error: SpawnError,
-        extension_lifecycle: ExtensionLifecycle,
         agent_lifecycle: AgentLifecycle,
         worker_cleanup_proven: bool,
     ) -> Self {
         Self {
             error,
-            extension_lifecycle,
             agent_lifecycle,
             worker_cleanup_proven,
         }
@@ -420,9 +343,9 @@ impl AgenticSpawnFailure {
         self.worker_cleanup_proven
     }
 
-    /// Recovers the failure and both unique, never-settled lifecycle owners.
-    pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle, AgentLifecycle) {
-        (self.error, self.extension_lifecycle, self.agent_lifecycle)
+    /// Recovers the failure and the unique, never-settled agent lifecycle owner.
+    pub fn into_parts(self) -> (SpawnError, AgentLifecycle) {
+        (self.error, self.agent_lifecycle)
     }
 }
 
@@ -684,66 +607,6 @@ impl CallbackHandle {
         };
         CommandQueue { inner }.try_push(command).is_ok()
     }
-
-    /// Transfers one authenticated acquired package into the Shell actor
-    /// without blocking the caller or exposing the Shell-owned lifecycle.
-    ///
-    /// `Accepted` means the actor owns both the request and callback. Queue
-    /// refusal consumes both without invoking the callback, matching the
-    /// extension-distribution port contract.
-    #[must_use = "admission determines acquired-package callback ownership"]
-    pub fn begin_provision_acquired_extension_package(
-        &self,
-        request: ExtensionAcquiredPackageProvisioningRequest,
-        deadline: std::time::Instant,
-        done: ExtensionAcquiredPackageProvisioningCallback,
-    ) -> ExtensionManagementAdmission {
-        let Some(inner) = self.queue.upgrade() else {
-            drop((request, done));
-            return ExtensionManagementAdmission::Unavailable;
-        };
-        let command = Command::ProvisionAcquiredExtensionPackage(
-            crate::api::AcquiredExtensionPackageSubmission::new(request, deadline, done),
-        );
-        match (CommandQueue { inner }).try_push(command) {
-            Ok(()) => ExtensionManagementAdmission::Accepted,
-            Err(TryPushError::Full(_) | TryPushError::Sealed(_) | TryPushError::Closed(_)) => {
-                ExtensionManagementAdmission::Unavailable
-            }
-        }
-    }
-
-    /// Transfers one source-free catalog activation into the Shell actor.
-    #[must_use = "admission determines acquired-catalog callback ownership"]
-    pub fn begin_activate_acquired_extension_catalog(
-        &self,
-        request: ExtensionAcquiredCatalogActivationRequest,
-        deadline: std::time::Instant,
-        done: ExtensionAcquiredCatalogActivationCallback,
-    ) -> ExtensionManagementAdmission {
-        let Some(inner) = self.queue.upgrade() else {
-            drop((request, done));
-            return ExtensionManagementAdmission::Unavailable;
-        };
-        let command = Command::ActivateAcquiredExtensionCatalog(
-            crate::api::AcquiredExtensionCatalogSubmission::new(request, deadline, done),
-        );
-        match (CommandQueue { inner }).try_push(command) {
-            Ok(()) => ExtensionManagementAdmission::Accepted,
-            Err(TryPushError::Full(_) | TryPushError::Sealed(_) | TryPushError::Closed(_)) => {
-                ExtensionManagementAdmission::Unavailable
-            }
-        }
-    }
-
-    /// Publishes one monotonic, redacted distribution status replacement.
-    /// Queue coalescing makes this non-blocking under rapid state transitions.
-    pub fn publish_extension_distribution_status(
-        &self,
-        status: ExtensionDistributionStatus,
-    ) -> bool {
-        self.dispatch(Command::ExtensionDistributionStatusChanged(status))
-    }
 }
 
 impl Clone for Handle {
@@ -877,6 +740,47 @@ impl Handle {
         }
     }
 
+    pub fn web_extension_target(
+        &self,
+        tab: Option<zephium_core::ids::ItemId>,
+    ) -> std::sync::mpsc::Receiver<Option<crate::shell::WebExtensionTarget>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::ResolveWebExtensionTarget { tab, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
+    pub fn web_extension_status(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+    ) -> std::sync::mpsc::Receiver<
+        Vec<(
+            zephium_core::ids::ExtensionInstallId,
+            crate::shell::WebExtensionStatus,
+        )>,
+    > {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::WebExtensionStatus { profile, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     #[cfg(test)]
     pub(super) fn new(queue: CommandQueue) -> Self {
         Self::with_workers(
@@ -972,6 +876,44 @@ impl Handle {
 
     /// Requests the focused profile's revisioned diagnostics without exposing
     /// a caller-selected profile identity.
+    pub fn element_picker(
+        &self,
+        context: zephium_ipc::BlockerSiteContext,
+        action: zephium_ipc::BlockerPickerAction,
+    ) -> Receiver<Option<zephium_ipc::BlockerPickerView>> {
+        let (reply, receiver) = sync_channel(1);
+        let command = Command::ElementPicker {
+            context: Box::new(context),
+            action,
+            reply,
+        };
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(command)
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+    pub fn blocker_statistics(
+        &self,
+        profile: ProfileId,
+    ) -> std::sync::mpsc::Receiver<Option<zephium_ipc::BlockerStatsView>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::BlockerStatistics { profile, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
     pub fn focused_content_policy_status(&self) -> FocusedContentPolicyStatusRequest {
         let (reply, receiver) = sync_channel(1);
         let command = Command::FocusedContentPolicyStatus { reply };
@@ -1188,6 +1130,12 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         Command::ContentPolicyStatus { reply, .. } => {
             let _ = reply.send(ContentPolicyStatusQueryOutcome::Unavailable);
         }
+        Command::ElementPicker { reply, .. } => {
+            let _ = reply.try_send(None);
+        }
+        Command::BlockerStatistics { reply, .. } => {
+            let _ = reply.try_send(None);
+        }
         Command::FocusedContentPolicyStatus { reply } => {
             let _ = reply.send(BlockerStatusView::unavailable());
         }
@@ -1195,11 +1143,11 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         Command::WorkProfileBinding { reply } => {
             let _ = reply.send(crate::AgentWorkProfileReadiness::Unavailable);
         }
-        Command::ProvisionAcquiredExtensionPackage(submission) => {
-            submission.settle_unavailable();
+        Command::ResolveWebExtensionTarget { reply, .. } => {
+            let _ = reply.try_send(None);
         }
-        Command::ActivateAcquiredExtensionCatalog(submission) => {
-            submission.settle_unavailable();
+        Command::WebExtensionStatus { reply, .. } => {
+            let _ = reply.try_send(Vec::new());
         }
         _ => {}
     }
@@ -1226,20 +1174,13 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::Run(_)
             | Command::RunSearchAction { .. }
             | Command::InvokeExtensionAction { .. }
-            | Command::InstallFocusedExtension { .. }
-            | Command::ApproveFocusedExtensionUpdate { .. }
-            | Command::EditFocusedExtensionOptionalGrant { .. }
-            | Command::SetFocusedProfileExtensionsPaused { .. }
-            | Command::SetFocusedSiteExtensionsEnabled { .. }
-            | Command::SetFocusedExtensionEnabled { .. }
-            | Command::UninstallFocusedExtension { .. }
-            | Command::RespondToExtensionRuntimeGrantPrompt { .. }
             | Command::RespondToPagePermissionPrompt { .. }
             | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
             | Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }
             | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::ChangeBlockerSite { .. }
             | Command::RetryFocusedContentPolicy { .. }
             | Command::RefreshContentBlockerSources
     )
@@ -1307,20 +1248,11 @@ pub fn spawn(
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
-    extension_service: ExtensionLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
 ) -> Result<Handle, SpawnFailure> {
-    let handle = spawn_suspended(
-        engine,
-        store,
-        blocker,
-        extension_service,
-        terminal_failure,
-        chrome,
-        emit,
-    )?;
+    let handle = spawn_suspended(engine, store, blocker, terminal_failure, chrome, emit)?;
     let admitted = handle.admit_startup();
     debug_assert!(admitted, "new Shell startup gate must be pending");
     let committed = handle.commit_startup_admission();
@@ -1337,7 +1269,7 @@ pub fn spawn_agentic(
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
-    lifecycles: AgenticLifecycles,
+    agent_lifecycle: AgentLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
@@ -1346,7 +1278,7 @@ pub fn spawn_agentic(
         engine,
         store,
         blocker,
-        lifecycles,
+        agent_lifecycle,
         terminal_failure,
         chrome,
         emit,
@@ -1358,7 +1290,7 @@ pub fn spawn_agentic(
     Ok(handle)
 }
 
-/// Starts helper workers and transfers the move-only lifecycle into a guarded
+/// Starts helper workers and transfers the composition ports into a guarded
 /// Shell while keeping every external actor port suspended.
 ///
 /// The composition root must publish the returned Handle, clear every
@@ -1369,7 +1301,6 @@ pub fn spawn_suspended(
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
-    extension_service: ExtensionLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
@@ -1379,7 +1310,6 @@ pub fn spawn_suspended(
             engine,
             store,
             blocker,
-            extension_service,
             agent_lifecycle: NoAgentLifecycle,
             terminal_failure,
             chrome,
@@ -1389,10 +1319,10 @@ pub fn spawn_suspended(
     )
 }
 
-/// Starts a guarded Shell and transfers both move-only lifecycle owners while
+/// Starts a guarded Shell and transfers the move-only agent lifecycle while
 /// keeping every external actor port suspended.
 ///
-/// Every construction refusal returns both owners through
+/// Every construction refusal returns the owner through
 /// [`AgenticSpawnFailure`]. After success the Shell consumes the agent
 /// lifecycle before terminal Store and engine teardown.
 #[cfg(feature = "agentic-browser")]
@@ -1400,18 +1330,16 @@ pub fn spawn_agentic_suspended(
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
-    lifecycles: AgenticLifecycles,
+    agent_lifecycle: AgentLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
 ) -> Result<Handle, AgenticSpawnFailure> {
-    let (extension_service, agent_lifecycle) = lifecycles.into_parts();
     spawn_suspended_with_worker_spawner(
         ShellHandoff {
             engine,
             store,
             blocker,
-            extension_service,
             agent_lifecycle: PendingAgentBrowserLifecycle(agent_lifecycle),
             terminal_failure,
             chrome,
@@ -1459,7 +1387,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         engine,
         store,
         blocker,
-        extension_service,
         agent_lifecycle,
         terminal_failure,
         chrome,
@@ -1483,11 +1410,9 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         Ok(worker) => worker,
         Err(error) => {
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
-            return Err(agent_lifecycle.into_spawn_failure(
-                SpawnError::StoreReader(error),
-                extension_service,
-                cleanup_proven,
-            ));
+            return Err(
+                agent_lifecycle.into_spawn_failure(SpawnError::StoreReader(error), cleanup_proven)
+            );
         }
     };
     workers.install_store_reader(store_reader);
@@ -1506,21 +1431,12 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
             engine,
             store,
             blocker,
-            extension_service,
             agent_lifecycle,
             terminal_failure,
             chrome,
             emit,
         } = handoff;
-        let ports = ShellPorts::new(
-            engine,
-            store,
-            blocker,
-            extension_service,
-            terminal_failure,
-            chrome,
-            emit,
-        );
+        let ports = ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit);
         #[cfg(feature = "agentic-browser")]
         let ports = ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle());
         #[cfg(not(feature = "agentic-browser"))]
@@ -1563,11 +1479,9 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         Err(error) => {
             drop(shell_handoff);
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
-            return Err(agent_lifecycle.into_spawn_failure(
-                SpawnError::Actor(error),
-                extension_service,
-                cleanup_proven,
-            ));
+            return Err(
+                agent_lifecycle.into_spawn_failure(SpawnError::Actor(error), cleanup_proven)
+            );
         }
     };
     workers.install_actor(actor);
@@ -1591,13 +1505,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                         Err(TryPushError::Closed(_)) => break,
                     }
                 }
-                TimerWake::ExtensionStartup => match timer_queue.try_push(Command::Bootstrap) {
-                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
-                    Err(TryPushError::Full(_)) => timer_queue.schedule_extension_startup(
-                        std::time::Instant::now() + std::time::Duration::from_millis(25),
-                    ),
-                    Err(TryPushError::Closed(_)) => break,
-                },
                 TimerWake::Persist => match timer_queue.try_push(Command::Persist) {
                     Ok(()) | Err(TryPushError::Sealed(_)) => {}
                     Err(TryPushError::Full(_)) => timer_queue.schedule_persist(
@@ -1710,15 +1617,13 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
     let timer = match worker_spawner("zephium-timer", timer_task) {
         Ok(timer) => timer,
         Err(error) => {
-            // Wake the actor waiter before joining it. The unique service
+            // Wake the actor waiter before joining it. Any agent lifecycle
             // owner is still local and has not crossed the handoff boundary.
             drop(shell_handoff);
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
-            return Err(agent_lifecycle.into_spawn_failure(
-                SpawnError::Timer(error),
-                extension_service,
-                cleanup_proven,
-            ));
+            return Err(
+                agent_lifecycle.into_spawn_failure(SpawnError::Timer(error), cleanup_proven)
+            );
         }
     };
     workers.install_timer(timer);
@@ -1731,7 +1636,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         engine,
         store,
         blocker,
-        extension_service,
         agent_lifecycle,
         terminal_failure,
         chrome,
@@ -1744,7 +1648,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                 engine,
                 store,
                 blocker,
-                extension_service,
                 agent_lifecycle,
                 terminal_failure,
                 chrome,
@@ -1773,7 +1676,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                     std::io::ErrorKind::BrokenPipe,
                     "shell actor exited before accepting its unique owner",
                 )),
-                extension_service,
                 cleanup_proven,
             ));
         }

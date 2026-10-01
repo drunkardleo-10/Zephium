@@ -40,21 +40,13 @@ impl Shell {
         };
         let present = tree.as_ref().is_some_and(|t| self.present(t));
         let mut l = layout::compute(win.size, win.mode, win.metrics, present);
-        // A browser-owned extension consent prompt is window-modal. Native
-        // page views are sibling views above chrome on every platform, so CSS
-        // alone cannot prevent a page from obscuring the prompt or receiving
-        // input behind it. Remove content from the native stage and expand
+        // A browser-owned consent prompt is window-modal. Native page views
+        // are sibling views above chrome on every platform, so CSS alone
+        // cannot prevent a page from obscuring the prompt or receiving input
+        // behind it. Remove content from the native stage and expand
         // privileged chrome for exactly the lifetime of the retained prompt.
-        let extension_consent_active =
-            self.extension_runtime_grants.active().is_some() || self.page_permissions.is_visible();
-        // The Extensions Center is rendered by the existing privileged chrome
-        // WebView. Expanding that same surface is materially cheaper than a
-        // second persistent privileged renderer and lets the dialog use the
-        // full window instead of the sidebar's narrow viewport. Native page
-        // siblings are removed from the stage for the exact visible lifetime.
-        let extension_center_active = self.extension_management.visible_profile().is_some();
         let privileged_overlay_active =
-            extension_consent_active || extension_center_active || browser_page_active;
+            self.page_permissions.is_visible() || self.active_browser_page().is_some();
         // `Items` marks a prospective view resident before its CreateView
         // effect is dispatched. While the profile's first explicit native
         // policy is still compiling/installing, that effect is intentionally
@@ -71,8 +63,7 @@ impl Shell {
         // chrome: the native leaf floats above the canvas inside a hole the
         // chrome draws around the applied rect. Modal prompts still win.
         let pane_admitted = browser_page_active
-            && !extension_consent_active
-            && !extension_center_active
+            && !self.page_permissions.is_visible()
             && self.window_visible
             && native_policy_available;
         let work_pane = self.work_pane_layout(pane_admitted && present);
@@ -92,7 +83,8 @@ impl Shell {
                 tree.tabs().iter().any(|id| {
                     self.items.tab(*id).is_some_and(|tab| {
                         tab.has_view()
-                            && tab.url.is_some()
+                            && (tab.url.is_some()
+                                || tab.content == zephium_core::item::TabContent::ExtensionOwned)
                             && !self.presentation.deferred_first_content_layout.contains(id)
                     })
                 })

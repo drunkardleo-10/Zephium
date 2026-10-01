@@ -300,7 +300,8 @@ pub fn load_macos_development_typesafe_credential(
 #[cfg(target_os = "macos")]
 pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(target_os = "macos")]

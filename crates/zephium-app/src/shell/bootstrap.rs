@@ -4,17 +4,13 @@ use super::*;
 
 impl Shell {
     pub(super) fn bootstrap(&mut self) {
-        // Native-owner recovery can dispatch onto the platform event loop, so
-        // this settlement runs on the shell actor rather than Tauri's setup
-        // callback. Nothing below may inspect recovered deletion authority or
-        // create a raw content view without explicit service readiness.
-        if !self.extension_service_ready_for_bootstrap() {
+        #[cfg(debug_assertions)]
+        let started = *self
+            .bootstrap_started
+            .get_or_insert_with(std::time::Instant::now);
+        if self.profile_deletion.failed_closed {
             return;
         }
-        // Product provisioning is immutable for the process. Project the
-        // non-authorizing fact on every trusted frontend bootstrap so ordinary
-        // inert builds stay silent without probing or constructing a worker.
-        self.project_extension_management_availability();
         // Runtime update state is independent of session recovery and chrome
         // reloads. Querying the sticky engine state also repairs a callback
         // that arrived before the shell callback ingress was installed.
@@ -125,16 +121,24 @@ impl Shell {
                 return;
             }
         }
-        if pending_deletions.iter().any(|deletion| {
-            deletion.native_erasure_verified && deletion.extension_native_namespace.is_some()
-        }) {
-            // Store removes the durable namespace obligation in the same
-            // transaction that records native-erasure proof. Accepting both
-            // facts would let the shell finalize an unproven namespace.
-            crate::diagnostic!(
-                "bootstrap: profile deletion carries contradictory native erasure state"
-            );
-            return;
+        // The authoritative Store must decode the earlier QA Settings-tab
+        // snapshot byte-exactly before any mutation. Settings is window-scoped
+        // again; retire only those inert typed rows before first projection.
+        let retired_settings = self.items.retired_settings_tab_ids();
+        for id in &retired_settings {
+            if active_item == Some(*id) {
+                active_item = None;
+            }
+            if splits.as_ref().is_some_and(|tree| tree.contains(*id)) {
+                splits = None;
+            }
+            let effects = self.items.remove(*id);
+            if !effects.is_empty() {
+                crate::diagnostic!(
+                    "bootstrap: retired Settings tab unexpectedly owned a native view"
+                );
+                return;
+            }
         }
         if (!pending_deletions.is_empty() && session_absent)
             || pending_deletions
@@ -161,7 +165,6 @@ impl Shell {
         for PendingProfileDeletion {
             profile,
             native_erasure_verified,
-            extension_native_namespace,
         } in pending_deletions
         {
             let phase = if native_erasure_verified {
@@ -171,12 +174,7 @@ impl Shell {
             };
             self.profile_deletion.states.insert(
                 profile,
-                ProfileDeletionState::new(
-                    phase,
-                    None,
-                    self.persistence.session_revision,
-                    extension_native_namespace,
-                ),
+                ProfileDeletionState::new(phase, None, self.persistence.session_revision),
             );
             // Normally no aggregate row remains. This defensive cleanup also
             // cancels any runtime-only work restored by a future caller.
@@ -192,7 +190,7 @@ impl Shell {
             } else {
                 self.schedule_profile_deletion_retry(profile);
             }
-            if self.extension_lifecycle_terminal {
+            if self.profile_deletion.failed_closed {
                 self.profile_deletion.batch_deadline = None;
                 crate::diagnostic!(
                     "bootstrap: recovered profile deletion failed closed; refusing native view construction"
@@ -264,7 +262,17 @@ impl Shell {
         self.apply(fx);
         let _ = self.relayout();
         self.project_items();
+        self.project_browser_page();
         self.bootstrapped = true;
+        self.apply_deferred_web_extensions();
+        if !retired_settings.is_empty() {
+            self.schedule_persist();
+        }
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "bootstrap: native session ready at {}ms",
+            started.elapsed().as_millis()
+        );
         if session_absent {
             // Register the first-run profile with Store immediately. Extension
             // management and other profile-scoped actors must never observe a

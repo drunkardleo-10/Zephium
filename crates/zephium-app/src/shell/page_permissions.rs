@@ -105,6 +105,7 @@ impl PagePermissionPromptState {
         self.visible().is_some()
     }
 
+    #[cfg(test)]
     pub(super) fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -262,7 +263,6 @@ impl Shell {
             || !PAGE_PERMISSION_PROMPTS_ENABLED
             || self.page_permissions.failed_until_restart
             || self.page_permissions.pending.is_some()
-            || self.extension_runtime_grants.active().is_some()
             || profile_kind.is_none()
             || (rememberable && self.degraded_storage_profiles.contains(&profile))
             || request_kinds(request.kind).is_empty()

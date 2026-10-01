@@ -9,49 +9,28 @@ mod agent_audit;
 mod agent_work;
 mod work_document;
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock, RwLock, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use zephium_agentic::{AgentAuditCompletion, AgentAuditDelivery};
-use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
+use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, BlockerSitePreferences};
 use zephium_core::downloads::{DownloadStoreCall, DownloadStoreReply};
-use zephium_core::extensions::{
-    ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority, ExtensionGrantDigest,
-    ExtensionGrantManifestBindings, ExtensionGrantPatch, ExtensionGrantRevision,
-    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
-    ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipKey, ExtensionProfilePolicyMutation, ExtensionProfilePolicyRevision,
-    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
-    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
-    MAX_EXTENSION_PROFILE_POLICY_MUTATION_RETAINED_BYTES,
-};
-use zephium_core::ids::{ExtensionInstallId, ProfileId};
+use zephium_core::ids::ProfileId;
 use zephium_core::item::sanitize_page_title;
 use zephium_core::navigation;
 use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPatch};
 use zephium_core::ports::store::{
-    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionGrantCohortLoadOutcome,
-    ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogLoadOutcome,
-    ExtensionInstallCatalogMutationOutcome, ExtensionInstallProvisionOutcome,
-    ExtensionInstallUpdateGrantDecision, ExtensionInstallUpdateOutcome,
-    ExtensionNativeNamespaceLoadOutcome, ExtensionNativeOwnershipActivationOutcome,
-    ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
-    ExtensionProfilePolicyLoadOutcome, ExtensionProfilePolicyMutationOutcome, HistoryHit,
-    HistoryVisit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
-    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
-    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
-    UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
-    MAX_FAVICON_BATCH_ORIGINS,
+    BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, BlockerSiteLoadOutcome,
+    BlockerSiteUpdateOutcome, HistoryHit, HistoryVisit, PagePermissionCatalogLoadOutcome,
+    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
+    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
+    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -83,88 +62,17 @@ const STORE_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING_USERSCRIPT_MUTATIONS: usize = 4;
 const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
-const MAX_PENDING_EXTENSION_INSTALL_MUTATIONS: usize = 16;
-const MAX_PENDING_EXTENSION_GRANT_REQUESTS: usize = 8;
-const MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS: usize = 16;
-const MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES: usize = checked_const_add(
-    MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
-    MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
-);
-const MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES: usize =
-    checked_const_mul(MAX_EXTENSION_MANIFEST_RETAINED_BYTES, 2);
-const MAX_EXTENSION_SERVICE_GRANT_REQUEST_RETAINED_BYTES: usize =
-    if MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES
-        > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES
-    {
-        MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES
-    } else {
-        MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES
-    };
-// Permit one worst-case cohort load plus one worst-case mutation. A second
-// worst-case cohort waits until the first permit drops instead of allowing a
-// ~64 MiB privileged mailbox spike.
-const MAX_PENDING_EXTENSION_GRANT_RETAINED_BYTES: usize = checked_const_add(
-    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
-    MAX_EXTENSION_SERVICE_GRANT_REQUEST_RETAINED_BYTES,
-);
-const MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES: usize = checked_const_mul(
-    MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS,
-    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
-);
-const EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX: usize =
-    checked_const_add(MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES, 1);
-const EXTENSION_NATIVE_OWNERSHIP_MAX_ADMISSION_STATE: usize = checked_const_add(
-    checked_const_mul(
-        MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS,
-        EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX,
-    ),
-    MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES,
-);
-const EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE: usize = usize::MAX;
-
-const _: () = assert!(EXTENSION_NATIVE_OWNERSHIP_MAX_ADMISSION_STATE < usize::MAX);
-
-const fn checked_const_add(left: usize, right: usize) -> usize {
-    match left.checked_add(right) {
-        Some(value) => value,
-        None => panic!("extension grant admission bound overflow"),
-    }
-}
-
-const fn checked_const_mul(left: usize, right: usize) -> usize {
-    match left.checked_mul(right) {
-        Some(value) => value,
-        None => panic!("extension native-ownership admission bound overflow"),
-    }
-}
 
 type PendingVisits = HashMap<(ProfileId, String), String>;
 type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
 type BlockerConfigLoadDone = Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>;
+type BlockerSiteLoadDone = Box<dyn FnOnce(BlockerSiteLoadOutcome) + Send>;
+type BlockerSiteUpdateDone = Box<dyn FnOnce(BlockerSiteUpdateOutcome) + Send>;
 type UserscriptCatalogLoadDone = Box<dyn FnOnce(UserscriptCatalogLoadOutcome) + Send>;
 type UserscriptCatalogMutationDone = Box<dyn FnOnce(UserscriptCatalogMutationOutcome) + Send>;
 type PagePermissionCatalogLoadDone = Box<dyn FnOnce(PagePermissionCatalogLoadOutcome) + Send>;
 type PagePermissionCatalogMutationDone =
     Box<dyn FnOnce(PagePermissionCatalogMutationOutcome) + Send>;
-type ExtensionInstallCatalogLoadDone = Box<dyn FnOnce(ExtensionInstallCatalogLoadOutcome) + Send>;
-type ExtensionInstallCatalogMutationDone =
-    Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>;
-type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>;
-type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
-type ExtensionProfilePolicyLoadDone = Box<dyn FnOnce(ExtensionProfilePolicyLoadOutcome) + Send>;
-type ExtensionProfilePolicyMutationDone =
-    Box<dyn FnOnce(ExtensionProfilePolicyMutationOutcome) + Send>;
-type ExtensionInstallProvisionDone = Box<dyn FnOnce(ExtensionInstallProvisionOutcome) + Send>;
-type ExtensionInstallUpdateDone = Box<dyn FnOnce(ExtensionInstallUpdateOutcome) + Send>;
-type ExtensionNativeNamespaceLoadDone = Box<dyn FnOnce(ExtensionNativeNamespaceLoadOutcome) + Send>;
-type ExtensionNativeOwnershipJournalLoadDone =
-    Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>;
-type ExtensionRuntimeStartupInventoryLoadDone =
-    Box<dyn FnOnce(ExtensionRuntimeStartupInventoryLoadOutcome) + Send>;
-type ExtensionNativeOwnershipJournalMutationDone =
-    Box<dyn FnOnce(ExtensionNativeOwnershipJournalMutationOutcome) + Send>;
-type ExtensionNativeOwnershipActivationDone =
-    Box<dyn FnOnce(ExtensionNativeOwnershipActivationOutcome) + Send>;
 
 #[derive(Default)]
 struct UserscriptMutationAdmission {
@@ -261,263 +169,6 @@ impl Drop for PagePermissionMutationPermit {
             return;
         };
         state.count = count;
-    }
-}
-
-#[derive(Default)]
-struct ExtensionInstallMutationAdmission {
-    count: usize,
-}
-
-struct ExtensionInstallMutationPermit {
-    admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
-}
-
-impl ExtensionInstallMutationPermit {
-    fn acquire(admission: &Arc<Mutex<ExtensionInstallMutationAdmission>>) -> Option<Self> {
-        let mut state = admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let next = state.count.checked_add(1)?;
-        if next > MAX_PENDING_EXTENSION_INSTALL_MUTATIONS {
-            return None;
-        }
-        state.count = next;
-        Some(Self {
-            admission: admission.clone(),
-        })
-    }
-
-    fn try_acquire(admission: &Arc<Mutex<ExtensionInstallMutationAdmission>>) -> Option<Self> {
-        let mut state = match admission.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return None,
-        };
-        let next = state.count.checked_add(1)?;
-        if next > MAX_PENDING_EXTENSION_INSTALL_MUTATIONS {
-            return None;
-        }
-        state.count = next;
-        Some(Self {
-            admission: admission.clone(),
-        })
-    }
-}
-
-impl Drop for ExtensionInstallMutationPermit {
-    fn drop(&mut self) {
-        let mut state = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(count) = state.count.checked_sub(1) else {
-            state.count = usize::MAX;
-            return;
-        };
-        state.count = count;
-    }
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ExtensionGrantRequestAdmission {
-    count: usize,
-    retained_bytes: usize,
-}
-
-struct ExtensionGrantRequestPermit {
-    admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
-    retained_bytes: usize,
-}
-
-impl ExtensionGrantRequestPermit {
-    fn acquire(
-        admission: &Arc<Mutex<ExtensionGrantRequestAdmission>>,
-        retained_bytes: usize,
-    ) -> Option<Self> {
-        let mut state = admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Self::reserve(admission, &mut state, retained_bytes)
-    }
-
-    fn try_acquire(
-        admission: &Arc<Mutex<ExtensionGrantRequestAdmission>>,
-        retained_bytes: usize,
-    ) -> Option<Self> {
-        let mut state = match admission.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return None,
-        };
-        Self::reserve(admission, &mut state, retained_bytes)
-    }
-
-    fn reserve(
-        admission: &Arc<Mutex<ExtensionGrantRequestAdmission>>,
-        state: &mut ExtensionGrantRequestAdmission,
-        retained_bytes: usize,
-    ) -> Option<Self> {
-        let next_count = state.count.checked_add(1)?;
-        let next_bytes = state.retained_bytes.checked_add(retained_bytes)?;
-        if next_count > MAX_PENDING_EXTENSION_GRANT_REQUESTS
-            || next_bytes > MAX_PENDING_EXTENSION_GRANT_RETAINED_BYTES
-        {
-            return None;
-        }
-        state.count = next_count;
-        state.retained_bytes = next_bytes;
-        Some(Self {
-            admission: admission.clone(),
-            retained_bytes,
-        })
-    }
-}
-
-impl Drop for ExtensionGrantRequestPermit {
-    fn drop(&mut self) {
-        let mut state = self
-            .admission
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (Some(count), Some(retained_bytes)) = (
-            state.count.checked_sub(1),
-            state.retained_bytes.checked_sub(self.retained_bytes),
-        ) else {
-            state.count = usize::MAX;
-            state.retained_bytes = usize::MAX;
-            return;
-        };
-        state.count = count;
-        state.retained_bytes = retained_bytes;
-    }
-}
-
-#[derive(Debug, Default)]
-struct ExtensionNativeOwnershipMutationAdmission {
-    // One CAS word keeps count and retained-byte reservation exact together.
-    // `usize::MAX` is reserved as a permanent fail-closed poison sentinel.
-    state: AtomicUsize,
-}
-
-impl ExtensionNativeOwnershipMutationAdmission {
-    const fn decode(state: usize) -> (usize, usize) {
-        (
-            state / EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX,
-            state % EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX,
-        )
-    }
-
-    fn encode(count: usize, retained_bytes: usize) -> Option<usize> {
-        count
-            .checked_mul(EXTENSION_NATIVE_OWNERSHIP_ADMISSION_RADIX)
-            .and_then(|base| base.checked_add(retained_bytes))
-    }
-
-    fn reserve(&self, retained_bytes: usize) -> bool {
-        let mut current = self.state.load(Ordering::Acquire);
-        loop {
-            if current == EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE {
-                return false;
-            }
-            let (count, bytes) = Self::decode(current);
-            let Some(next_count) = count.checked_add(1) else {
-                return false;
-            };
-            let Some(next_bytes) = bytes.checked_add(retained_bytes) else {
-                return false;
-            };
-            if next_count > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS
-                || next_bytes > MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES
-            {
-                return false;
-            }
-            let Some(next) = Self::encode(next_count, next_bytes) else {
-                return false;
-            };
-            match self.state.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    fn release(&self, retained_bytes: usize) {
-        let mut current = self.state.load(Ordering::Acquire);
-        loop {
-            if current == EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE {
-                return;
-            }
-            let (count, bytes) = Self::decode(current);
-            let Some(next_count) = count.checked_sub(1) else {
-                self.poison();
-                return;
-            };
-            let Some(next_bytes) = bytes.checked_sub(retained_bytes) else {
-                self.poison();
-                return;
-            };
-            let Some(next) = Self::encode(next_count, next_bytes) else {
-                self.poison();
-                return;
-            };
-            match self.state.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    fn poison(&self) {
-        // This branch represents an impossible accounting invariant. Racing
-        // reservations are conservatively discarded into the same permanent
-        // sentinel; no future mutation can be admitted from corrupted state.
-        self.state.store(
-            EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE,
-            Ordering::Release,
-        );
-    }
-
-    #[cfg(test)]
-    fn snapshot(&self) -> Option<(usize, usize)> {
-        let state = self.state.load(Ordering::Acquire);
-        (state != EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE).then(|| Self::decode(state))
-    }
-}
-
-struct ExtensionNativeOwnershipMutationPermit {
-    admission: Arc<ExtensionNativeOwnershipMutationAdmission>,
-    retained_bytes: usize,
-}
-
-impl ExtensionNativeOwnershipMutationPermit {
-    fn acquire(
-        admission: &Arc<ExtensionNativeOwnershipMutationAdmission>,
-        retained_bytes: usize,
-    ) -> Option<Self> {
-        if !admission.reserve(retained_bytes) {
-            return None;
-        }
-        Some(Self {
-            admission: admission.clone(),
-            retained_bytes,
-        })
-    }
-}
-
-impl Drop for ExtensionNativeOwnershipMutationPermit {
-    fn drop(&mut self) {
-        self.admission.release(self.retained_bytes);
     }
 }
 
@@ -659,6 +310,22 @@ enum Cmd {
         BlockerConfigUpdateDone,
     ),
     LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
+    LoadProfileBlockerSites(ProfileId, BlockerSiteLoadDone),
+    LoadBlockerStatistics(
+        ProfileId,
+        Box<dyn FnOnce(Option<zephium_core::blocker::BlockerStatistics>) + Send>,
+    ),
+    SaveBlockerStatistics(
+        ProfileId,
+        zephium_core::blocker::BlockerStatistics,
+        Box<dyn FnOnce(bool) + Send>,
+    ),
+    UpdateProfileBlockerSites(
+        ProfileId,
+        u64,
+        Arc<BlockerSitePreferences>,
+        BlockerSiteUpdateDone,
+    ),
     LoadUserscriptCatalog(ProfileId, UserscriptCatalogLoadDone),
     MutateUserscriptCatalog(
         ProfileId,
@@ -675,101 +342,6 @@ enum Cmd {
         PagePermissionMutationPermit,
         PagePermissionCatalogMutationDone,
     ),
-    LoadExtensionInstallCatalog(ProfileId, ExtensionInstallCatalogLoadDone),
-    LoadExtensionNativeNamespace(ProfileId, ExtensionNativeNamespaceLoadDone),
-    MutateExtensionInstallCatalog(
-        ProfileId,
-        ExtensionInstallCatalogRevision,
-        ExtensionInstallCatalogMutation,
-        ExtensionInstallMutationPermit,
-        ExtensionInstallCatalogMutationDone,
-    ),
-    LoadExtensionGrantCohort(
-        ProfileId,
-        ExtensionGrantManifestBindings,
-        ExtensionGrantRequestPermit,
-        ExtensionGrantCohortLoadDone,
-    ),
-    MutateExtensionGrants(
-        ProfileId,
-        ExtensionInstallCatalogRevision,
-        ExtensionInstallRevision,
-        ExtensionInstallId,
-        Arc<ExtensionManifestDescriptor>,
-        ExtensionGrantWrite,
-        ExtensionGrantRequestPermit,
-        ExtensionGrantMutationDone,
-    ),
-    LoadExtensionProfilePolicy(
-        ProfileId,
-        ExtensionGrantRequestPermit,
-        ExtensionProfilePolicyLoadDone,
-    ),
-    MutateExtensionProfilePolicy(
-        ProfileId,
-        ExtensionProfilePolicyRevision,
-        ExtensionProfilePolicyMutation,
-        ExtensionGrantRequestPermit,
-        ExtensionProfilePolicyMutationDone,
-    ),
-    ProvisionExtensionInstall(
-        ProfileId,
-        ExtensionInstallCatalogRevision,
-        ExtensionInstallId,
-        Arc<ExtensionManifestDescriptor>,
-        Box<ExtensionGrantAuthority>,
-        ExtensionInstallMutationPermit,
-        ExtensionGrantRequestPermit,
-        ExtensionInstallProvisionDone,
-    ),
-    UpdateExtensionInstall(
-        ProfileId,
-        ExtensionInstallCatalogRevision,
-        ExtensionInstallId,
-        ExtensionInstallRevision,
-        ExtensionGrantRevision,
-        ExtensionInstallUpdateGrantDecision,
-        Arc<ExtensionManifestDescriptor>,
-        Arc<ExtensionManifestDescriptor>,
-        ExtensionInstallMutationPermit,
-        ExtensionGrantRequestPermit,
-        ExtensionInstallUpdateDone,
-    ),
-    LoadExtensionNativeOwnershipJournal(ExtensionNativeOwnershipJournalLoadDone),
-    LoadExtensionRuntimeStartupInventory(ExtensionRuntimeStartupInventoryLoadDone),
-    MutateExtensionNativeOwnershipJournal(
-        ExtensionNativeOwnershipJournalRevision,
-        ExtensionNativeOwnershipJournalMutation,
-        ExtensionNativeOwnershipMutationPermit,
-        ExtensionNativeOwnershipJournalMutationDone,
-    ),
-    BeginExtensionNativeOwnership(
-        ExtensionNativeOwnershipJournalRevision,
-        ExtensionNativeOwnershipJournalMutation,
-        Arc<ExtensionManifestDescriptor>,
-        ExtensionGrantRequestPermit,
-        ExtensionNativeOwnershipMutationPermit,
-        ExtensionNativeOwnershipActivationDone,
-    ),
-    TransitionExtensionNativeOwnershipToMayOwn(
-        ExtensionNativeOwnershipJournalRevision,
-        ExtensionNativeOwnershipEntryCas,
-        Option<ExtensionExpectedNativeOwnershipIdentity>,
-        Arc<ExtensionManifestDescriptor>,
-        ExtensionGrantRequestPermit,
-        ExtensionNativeOwnershipMutationPermit,
-        ExtensionNativeOwnershipActivationDone,
-    ),
-    RebindExtensionNativeOwnershipGrants(
-        ExtensionNativeOwnershipJournalRevision,
-        ExtensionNativeOwnershipEntryCas,
-        ExtensionGrantRevision,
-        ExtensionGrantDigest,
-        Arc<ExtensionManifestDescriptor>,
-        ExtensionGrantRequestPermit,
-        ExtensionNativeOwnershipMutationPermit,
-        ExtensionNativeOwnershipJournalMutationDone,
-    ),
     DownloadRecoveryProfiles(Box<dyn FnOnce(DownloadStoreReply) + Send>),
     DownloadCall(
         ProfileId,
@@ -779,7 +351,6 @@ enum Cmd {
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
     RecordSearch(ProfileId, String, String),
-    RecentHistory(ProfileId, u32, Sender<Vec<HistoryHit>>),
     // Two adjacent Option<i64> bounds mean different things; name them.
     HistoryPage {
         profile: ProfileId,
@@ -819,744 +390,6 @@ struct ActorLifecycle {
     terminal_admitted: bool,
 }
 
-/// Definite result of trying to claim the process's sole extension-service
-/// storage capability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExtensionServiceStoreAuthorityClaimError {
-    /// This actor lifetime has already issued its capability. Dropping the
-    /// capability never makes its runtime snapshots or ownership journal
-    /// broadly reachable again.
-    AlreadyClaimed,
-    /// Terminal actor ownership has transferred or clean shutdown completed.
-    StoreUnavailable,
-}
-
-impl fmt::Display for ExtensionServiceStoreAuthorityClaimError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::AlreadyClaimed => "extension-service store authority already claimed",
-            Self::StoreUnavailable => "extension-service store actor is unavailable",
-        })
-    }
-}
-
-impl std::error::Error for ExtensionServiceStoreAuthorityClaimError {}
-
-/// Immutable startup classification captured before the Store actor thread is
-/// launched and before its unique extension-service capability can be claimed.
-///
-/// This is deliberately narrower than overall extension-service readiness: it
-/// reports only whether the exact durable native-ownership journal was proven
-/// empty while `SqliteStore::open` still owned SQLite synchronously. Repository
-/// residue and product provisioning remain the extension service's authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExtensionServiceStoreStartupRequirement {
-    /// The complete native-ownership journal was valid and contained no
-    /// unresolved owner at Store admission.
-    NoNativeOwnershipDebt,
-    /// At least one unresolved owner exists, or the complete journal could not
-    /// be validated. The extension-service recovery worker must arbitrate it.
-    NativeOwnershipReconciliationRequired,
-}
-
-/// Settlement of one deadline-bounded extension-service store operation.
-///
-/// Admission and observation are deliberately separate. A caller which loses
-/// its observation window after admission cannot tell whether a read completed
-/// or, for the ownership journal, whether SQLite committed a mutation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionServiceStoreCallOutcome<T> {
-    Completed(T),
-    /// The operation never entered the actor and cannot have changed durable
-    /// state. A full mailbox, exhausted retained-memory budget, expired
-    /// deadline, or terminal lifecycle all produce this definite result.
-    NotAdmitted,
-    /// The operation entered the actor but its completion was not observed by
-    /// the deadline. The callback and any retained-memory permit remain owned
-    /// by the actor until it executes or drops the command.
-    TimedOutAfterAdmission,
-}
-
-/// Complete bounded selector inventory used to hydrate enabled extension
-/// runtimes before the browser constructs profile webviews.
-///
-/// Keys are canonical, unique, and limited by the durable profile/install
-/// ceilings. They are selectors only: activation must still reauthenticate the
-/// repository package and atomically reload the exact install/grant cohort.
-/// Profiles whose ancillary store is degraded are reported explicitly and
-/// never represented by a filtered or fabricated catalog.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExtensionRuntimeStartupInventory {
-    keys: Vec<ExtensionNativeOwnershipKey>,
-    degraded_profiles: Vec<ProfileId>,
-}
-
-impl ExtensionRuntimeStartupInventory {
-    pub(crate) fn new(
-        keys: Vec<ExtensionNativeOwnershipKey>,
-        degraded_profiles: Vec<ProfileId>,
-    ) -> Self {
-        Self {
-            keys,
-            degraded_profiles,
-        }
-    }
-
-    /// Enabled regular-context runtime selectors in canonical key order.
-    pub fn keys(&self) -> &[ExtensionNativeOwnershipKey] {
-        &self.keys
-    }
-
-    /// Registered profiles whose exact extension catalog could not be read.
-    pub fn degraded_profiles(&self) -> &[ProfileId] {
-        &self.degraded_profiles
-    }
-}
-
-/// Result of the actor's complete startup-inventory read.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
-    Loaded(ExtensionRuntimeStartupInventory),
-    /// The complete registered-profile inventory could not be established.
-    Failed,
-}
-
-/// Move-only Store capability for the serialized extension service.
-///
-/// In addition to the crash-critical native-ownership journal, this is the
-/// service's only path to exact install catalogs and their atomically bound
-/// grant cohorts. The capability also exposes the fixed-size install mutation
-/// vocabulary required by the service's high-level management transactions;
-/// raw Store ownership and mutation callbacks never cross into Shell. The one
-/// install-construction operation atomically persists a disabled row and its
-/// complete initial grants. Later grant mutation crosses this boundary only as
-/// one exact bounded patch, allowing the permission coordinator to preserve
-/// native-retirement/durable-authority ordering. One concrete [`SqliteStore`]
-/// actor lifetime can mint this authority once, after which the
-/// coordinator may move it onto its single worker thread. It is `Send` but
-/// deliberately neither `Clone` nor `Sync`.
-///
-/// ```compile_fail
-/// use zephium_store::ExtensionServiceStoreAuthority;
-/// fn require_clone<T: Clone>() {}
-/// require_clone::<ExtensionServiceStoreAuthority>();
-/// ```
-///
-/// ```compile_fail
-/// use zephium_store::ExtensionServiceStoreAuthority;
-/// fn require_sync<T: Sync>() {}
-/// require_sync::<ExtensionServiceStoreAuthority>();
-/// ```
-///
-/// ```compile_fail
-/// use zephium_core::ports::store::Store;
-/// fn broad_store_cannot_load_the_journal(store: &impl Store) {
-///     store.load_extension_native_ownership_journal(Box::new(|_| {}));
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use zephium_core::extensions::{
-///     ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-/// };
-/// use zephium_core::ports::store::Store;
-/// fn broad_store_cannot_mutate_the_journal(
-///     store: &impl Store,
-///     expected: ExtensionNativeOwnershipJournalRevision,
-///     mutation: ExtensionNativeOwnershipJournalMutation,
-/// ) {
-///     store.mutate_extension_native_ownership_journal(
-///         expected,
-///         mutation,
-///         Box::new(|_| {}),
-///     );
-/// }
-/// ```
-pub struct ExtensionServiceStoreAuthority {
-    store: Arc<SqliteStore>,
-    // Cell is Send + !Sync. The marker therefore preserves move-to-worker
-    // support while preventing shared references from becoming cross-thread
-    // ambient journal authority.
-    _not_sync: PhantomData<Cell<()>>,
-}
-
-impl ExtensionServiceStoreAuthority {
-    /// Returns the exact native-ownership startup requirement captured before
-    /// the Store actor began accepting commands.
-    ///
-    /// No later broad Store operation can create native ownership, and this
-    /// move-only capability is the only runtime mutation boundary. The value
-    /// therefore cannot race a native-owner mutation before service startup.
-    pub fn startup_requirement(&self) -> ExtensionServiceStoreStartupRequirement {
-        self.store.extension_service_startup_requirement
-    }
-
-    /// Loads the exact complete reconciliation journal under one caller-owned
-    /// deadline. Corrupt or over-limit durable state is returned as the
-    /// inner load failure; it is never confused with non-admission.
-    pub fn load_native_ownership_until(
-        &self,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalLoadOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_load_extension_native_ownership_journal(deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Loads all currently enabled regular-context runtime selectors under
-    /// one serialized Store observation.
-    ///
-    /// This read deliberately returns no package or grant authority. Each key
-    /// must pass the coordinator's ordinary activation transaction, which
-    /// revalidates the current catalog, authenticated repository manifest,
-    /// grants, and native ownership immediately before use.
-    pub fn load_runtime_startup_inventory_until(
-        &self,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionRuntimeStartupInventoryLoadOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_load_extension_runtime_startup_inventory(deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Applies one exact complete-journal CAS under one caller-owned deadline.
-    /// A timeout after actor admission is uncertainty even when the inner
-    /// mutation would normally have a definite refusal outcome.
-    pub fn mutate_native_ownership_until(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        mutation: ExtensionNativeOwnershipJournalMutation,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
-        if matches!(
-            &mutation,
-            ExtensionNativeOwnershipJournalMutation::RebindGrants { .. }
-        ) {
-            return ExtensionServiceStoreCallOutcome::Completed(
-                ExtensionNativeOwnershipJournalMutationOutcome::Invalid,
-            );
-        }
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_mutate_extension_native_ownership_journal(expected, mutation, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Begins one fresh ownership operation only after the Store actor proves
-    /// the repository-produced preparation still matches the exact enabled
-    /// install and complete required grant authority.
-    ///
-    /// `mutation` must be a Begin value. The retained plan remains outside the
-    /// actor, so definite non-admission is safely retryable while an admitted
-    /// timeout still requires full journal reconciliation.
-    pub fn begin_native_ownership_until(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        mutation: ExtensionNativeOwnershipJournalMutation,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipActivationOutcome> {
-        if !matches!(&mutation, ExtensionNativeOwnershipJournalMutation::Begin(_)) {
-            return ExtensionServiceStoreCallOutcome::Completed(
-                ExtensionNativeOwnershipActivationOutcome::Invalid,
-            );
-        }
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_begin_extension_native_ownership(expected, mutation, manifest, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Revalidates the exact cohort recorded by one Preparing row and commits
-    /// `NativeMayOwn` before any ownership-changing native call.
-    ///
-    /// Native backends require `Some` exact catalog-authenticated identity;
-    /// compatibility backends require `None`. Store derives that rule from the
-    /// durable row and rejects either caller-direction mismatch.
-    pub fn transition_native_ownership_to_may_own_until(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        preparing: ExtensionNativeOwnershipEntryCas,
-        expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipActivationOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_transition_extension_native_ownership_to_may_own(
-                expected,
-                preparing,
-                expected_native_identity,
-                manifest,
-                deadline,
-                done,
-            )
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Rebinds a positively owned runtime row only after Store independently
-    /// verifies the exact newly committed install/grant cohort.
-    pub fn rebind_native_ownership_grants_until(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        owned: ExtensionNativeOwnershipEntryCas,
-        store_grant_revision: ExtensionGrantRevision,
-        grant_digest: ExtensionGrantDigest,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeOwnershipJournalMutationOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self.store.try_rebind_extension_native_ownership_grants(
-            expected,
-            owned,
-            store_grant_revision,
-            grant_digest,
-            manifest,
-            deadline,
-            done,
-        ) {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Loads one exact, complete, bounded install catalog for `profile`.
-    ///
-    /// Durable invalidity remains an inner load failure. Expiry, actor
-    /// lifecycle, and mailbox refusal stay distinguishable from an admitted
-    /// read whose result was not observed before `deadline`.
-    pub fn load_install_catalog_until(
-        &self,
-        profile: ProfileId,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogLoadOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_load_extension_install_catalog(profile, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Loads the exact profile-scoped native extension namespace obligation.
-    pub fn load_native_namespace_until(
-        &self,
-        profile: ProfileId,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeNamespaceLoadOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_load_extension_native_namespace(profile, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Atomically persists one authenticated disabled install and its complete
-    /// initial grant authority.
-    ///
-    /// This is the only install-construction capability exposed by the Store
-    /// actor. The broad [`Store`] port cannot call it, and successful
-    /// persistence does not enable or activate the extension.
-    pub fn provision_install_until(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        install: ExtensionInstallId,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        authority: Box<ExtensionGrantAuthority>,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallProvisionOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self.store.try_provision_extension_install(
-            profile,
-            expected_catalog,
-            install,
-            manifest,
-            authority,
-            deadline,
-            done,
-        ) {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Atomically replaces one installed package and reconciles its complete
-    /// grant root after the extension service has retired native ownership.
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_install_until(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        install: ExtensionInstallId,
-        expected_install: ExtensionInstallRevision,
-        expected_grant: ExtensionGrantRevision,
-        grant_decision: ExtensionInstallUpdateGrantDecision,
-        current_manifest: Arc<ExtensionManifestDescriptor>,
-        replacement_manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallUpdateOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self.store.try_update_extension_install(
-            profile,
-            expected_catalog,
-            install,
-            expected_install,
-            expected_grant,
-            grant_decision,
-            current_manifest,
-            replacement_manifest,
-            deadline,
-            done,
-        ) {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Applies one exact desired-enabled CAS for a serialized management
-    /// transaction. This capability cannot construct a new installation.
-    pub fn set_install_enabled_until(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        install: ExtensionInstallId,
-        expected_install: ExtensionInstallRevision,
-        desired_enabled: bool,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogMutationOutcome> {
-        self.mutate_install_catalog_until(
-            profile,
-            expected_catalog,
-            ExtensionInstallCatalogMutation::SetDesiredEnabled {
-                id: install,
-                expected: expected_install,
-                desired_enabled,
-            },
-            deadline,
-        )
-    }
-
-    /// Deletes one exact installation after native ownership has been proved
-    /// absent. Subordinate grant rows are removed by the same Store
-    /// transaction. This capability cannot construct a new installation.
-    pub fn delete_install_until(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        install: ExtensionInstallId,
-        expected_install: ExtensionInstallRevision,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogMutationOutcome> {
-        self.mutate_install_catalog_until(
-            profile,
-            expected_catalog,
-            ExtensionInstallCatalogMutation::Delete {
-                id: install,
-                expected: expected_install,
-            },
-            deadline,
-        )
-    }
-
-    fn mutate_install_catalog_until(
-        &self,
-        profile: ProfileId,
-        expected: ExtensionInstallCatalogRevision,
-        mutation: ExtensionInstallCatalogMutation,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallCatalogMutationOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_mutate_extension_install_catalog(profile, expected, mutation, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Loads the exact install-and-grant cohort for a prevalidated, bounded
-    /// manifest binding set.
-    ///
-    /// The request retains one Store admission permit through actor execution,
-    /// bounding both queued count and manifest bytes even if this caller's
-    /// observation deadline expires.
-    pub fn load_grant_cohort_until(
-        &self,
-        profile: ProfileId,
-        bindings: ExtensionGrantManifestBindings,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionGrantCohortLoadOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_load_extension_grant_cohort(profile, bindings, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    pub fn load_profile_policy_until(
-        &self,
-        profile: ProfileId,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionProfilePolicyLoadOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_load_extension_profile_policy(profile, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    pub fn mutate_profile_policy_until(
-        &self,
-        profile: ProfileId,
-        expected: ExtensionProfilePolicyRevision,
-        mutation: ExtensionProfilePolicyMutation,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionProfilePolicyMutationOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self
-            .store
-            .try_mutate_extension_profile_policy(profile, expected, mutation, deadline, done)
-        {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Applies one exact bounded grant patch after native ownership for the
-    /// install has been retired.
-    ///
-    /// The Store independently authenticates the exact install revision,
-    /// package-bound manifest, grant revision, and absence of unresolved
-    /// native ownership in the same serialized mutation. A semantic no-op is
-    /// acknowledged without consuming a revision and remains safe while an
-    /// owner exists; a changed patch is refused until ownership is absent.
-    /// Timeouts after admission are uncertain and require a fresh cohort read.
-    #[allow(clippy::too_many_arguments)]
-    pub fn apply_grant_patch_until(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-        install: ExtensionInstallId,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        expected_grant: ExtensionGrantRevision,
-        patch: ExtensionGrantPatch,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionGrantMutationOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self.store.try_mutate_extension_grants(
-            profile,
-            expected_catalog,
-            expected_install,
-            install,
-            manifest,
-            ExtensionGrantWrite::ApplyPatch {
-                expected: expected_grant,
-                patch,
-            },
-            deadline,
-            done,
-        ) {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-
-    /// Applies one grant-only runtime permission patch while preserving one
-    /// exact native requester.
-    ///
-    /// Store verifies the requester as the install's sole positively-owned
-    /// journal row and binds it to the exact pre-mutation grant authority.
-    /// A changed result deliberately leaves the journal on the old authority:
-    /// the serialized extension service must next commit `RebindGrants`
-    /// before allowing the native permission callback to settle. A crash or
-    /// ambiguous outcome in that interval is safe because the surviving
-    /// native owner is no more privileged than durable profile authority and
-    /// startup reconciliation retires the mismatched row.
-    #[allow(clippy::too_many_arguments)]
-    pub fn apply_live_grant_patch_until(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-        install: ExtensionInstallId,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        expected_grant: ExtensionGrantRevision,
-        patch: ExtensionGrantPatch,
-        owner: ExtensionNativeOwnershipEntryCas,
-        deadline: Instant,
-    ) -> ExtensionServiceStoreCallOutcome<ExtensionGrantMutationOutcome> {
-        if Instant::now() >= deadline {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        let (reply, result) = mpsc::sync_channel(1);
-        let done = Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        });
-        if !self.store.try_mutate_extension_grants(
-            profile,
-            expected_catalog,
-            expected_install,
-            install,
-            manifest,
-            ExtensionGrantWrite::ApplyLivePatch {
-                expected: expected_grant,
-                patch,
-                owner,
-            },
-            deadline,
-            done,
-        ) {
-            return ExtensionServiceStoreCallOutcome::NotAdmitted;
-        }
-        observe_extension_service_store_call(result, deadline)
-    }
-}
-
-fn observe_extension_service_store_call<T>(
-    result: Receiver<T>,
-    deadline: Instant,
-) -> ExtensionServiceStoreCallOutcome<T> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission;
-    }
-    match result.recv_timeout(remaining) {
-        Ok(outcome) => ExtensionServiceStoreCallOutcome::Completed(outcome),
-        // Once admitted, actor exit or callback loss is at least as uncertain
-        // as expiry. The process-boundary policy treats either as requiring a
-        // fresh-process reconciliation rather than guessing settlement.
-        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
-            ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission
-        }
-    }
-}
-
 pub struct SqliteStore {
     work_document_admission: OnceLock<Arc<AtomicUsize>>,
     resource_admission: Arc<AtomicUsize>,
@@ -1568,14 +401,9 @@ pub struct SqliteStore {
     pending_settings: Arc<Mutex<PendingSettings>>,
     userscript_mutation_admission: Arc<Mutex<UserscriptMutationAdmission>>,
     page_permission_mutation_admission: Arc<Mutex<PagePermissionMutationAdmission>>,
-    extension_install_mutation_admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
-    extension_grant_request_admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
-    extension_native_ownership_mutation_admission: Arc<ExtensionNativeOwnershipMutationAdmission>,
     agent_audit_delivery_admission: OnceLock<Arc<AtomicUsize>>,
     lifecycle: RwLock<ActorLifecycle>,
     shutdown_clean: AtomicBool,
-    extension_service_store_authority_claimed: AtomicBool,
-    extension_service_startup_requirement: ExtensionServiceStoreStartupRequirement,
 }
 
 impl SqliteStore {
@@ -1599,21 +427,6 @@ impl SqliteStore {
     }
 
     fn spawn(hub: Hub) -> rusqlite::Result<Self> {
-        let mut hub = hub;
-        let extension_service_startup_requirement =
-            match hub.load_extension_native_ownership_journal() {
-                Ok(ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal))
-                    if journal.entries().is_empty() =>
-                {
-                    ExtensionServiceStoreStartupRequirement::NoNativeOwnershipDebt
-                }
-                Ok(ExtensionNativeOwnershipJournalLoadOutcome::Loaded(_)) | Err(_) => {
-                    ExtensionServiceStoreStartupRequirement::NativeOwnershipReconciliationRequired
-                }
-                Ok(ExtensionNativeOwnershipJournalLoadOutcome::Failed) => {
-                    ExtensionServiceStoreStartupRequirement::NativeOwnershipReconciliationRequired
-                }
-            };
         let setting_keys = hub.app_setting_keys()?;
         // Session snapshots use a latest-value mailbox below. Bound every
         // remaining request too, so a compromised privileged UI cannot retain
@@ -1629,12 +442,6 @@ impl SqliteStore {
             Arc::new(Mutex::new(UserscriptMutationAdmission::default()));
         let page_permission_mutation_admission =
             Arc::new(Mutex::new(PagePermissionMutationAdmission::default()));
-        let extension_install_mutation_admission =
-            Arc::new(Mutex::new(ExtensionInstallMutationAdmission::default()));
-        let extension_grant_request_admission =
-            Arc::new(Mutex::new(ExtensionGrantRequestAdmission::default()));
-        let extension_native_ownership_mutation_admission =
-            Arc::new(ExtensionNativeOwnershipMutationAdmission::default());
         let (actor_exited, actor_exit) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("zephium-store".into())
@@ -1674,9 +481,6 @@ impl SqliteStore {
             pending_settings,
             userscript_mutation_admission,
             page_permission_mutation_admission,
-            extension_install_mutation_admission,
-            extension_grant_request_admission,
-            extension_native_ownership_mutation_admission,
             agent_audit_delivery_admission: OnceLock::new(),
             lifecycle: RwLock::new(ActorLifecycle {
                 join: Some(join),
@@ -1684,654 +488,7 @@ impl SqliteStore {
                 terminal_admitted: false,
             }),
             shutdown_clean: AtomicBool::new(false),
-            extension_service_store_authority_claimed: AtomicBool::new(false),
-            extension_service_startup_requirement,
         })
-    }
-
-    /// Mints the only public extension-service path to this actor lifetime's
-    /// runtime snapshots and native-ownership journal. The claim bit is
-    /// intentionally never reset, including when the returned capability is
-    /// dropped.
-    pub fn claim_extension_service_store_authority(
-        self: &Arc<Self>,
-    ) -> Result<ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError> {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return Err(ExtensionServiceStoreAuthorityClaimError::StoreUnavailable);
-        }
-        self.extension_service_store_authority_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| ExtensionServiceStoreAuthorityClaimError::AlreadyClaimed)?;
-        drop(lifecycle);
-        Ok(ExtensionServiceStoreAuthority {
-            store: self.clone(),
-            _not_sync: PhantomData,
-        })
-    }
-
-    fn try_load_extension_native_ownership_journal(
-        &self,
-        deadline: Instant,
-        done: ExtensionNativeOwnershipJournalLoadDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::LoadExtensionNativeOwnershipJournal(done))
-            .is_ok()
-    }
-
-    fn try_load_extension_runtime_startup_inventory(
-        &self,
-        deadline: Instant,
-        done: ExtensionRuntimeStartupInventoryLoadDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::LoadExtensionRuntimeStartupInventory(done))
-            .is_ok()
-    }
-
-    fn try_load_extension_install_catalog(
-        &self,
-        profile: ProfileId,
-        deadline: Instant,
-        done: ExtensionInstallCatalogLoadDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::LoadExtensionInstallCatalog(profile, done))
-            .is_ok()
-    }
-
-    fn try_load_extension_native_namespace(
-        &self,
-        profile: ProfileId,
-        deadline: Instant,
-        done: ExtensionNativeNamespaceLoadDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::LoadExtensionNativeNamespace(profile, done))
-            .is_ok()
-    }
-
-    fn try_load_extension_grant_cohort(
-        &self,
-        profile: ProfileId,
-        bindings: ExtensionGrantManifestBindings,
-        deadline: Instant,
-        done: ExtensionGrantCohortLoadDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some(permit) = ExtensionGrantRequestPermit::try_acquire(
-            &self.extension_grant_request_admission,
-            bindings.retained_bytes(),
-        ) else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::LoadExtensionGrantCohort(
-                profile, bindings, permit, done,
-            ))
-            .is_ok()
-    }
-
-    fn try_load_extension_profile_policy(
-        &self,
-        profile: ProfileId,
-        deadline: Instant,
-        done: ExtensionProfilePolicyLoadDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some(permit) =
-            ExtensionGrantRequestPermit::try_acquire(&self.extension_grant_request_admission, 0)
-        else {
-            return false;
-        };
-        self.tx
-            .try_send(Cmd::LoadExtensionProfilePolicy(profile, permit, done))
-            .is_ok()
-    }
-
-    fn try_mutate_extension_profile_policy(
-        &self,
-        profile: ProfileId,
-        expected: ExtensionProfilePolicyRevision,
-        mutation: ExtensionProfilePolicyMutation,
-        deadline: Instant,
-        done: ExtensionProfilePolicyMutationDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let retained_bytes = mutation.retained_bytes();
-        if retained_bytes > MAX_EXTENSION_PROFILE_POLICY_MUTATION_RETAINED_BYTES {
-            return false;
-        }
-        let Some(permit) = ExtensionGrantRequestPermit::try_acquire(
-            &self.extension_grant_request_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::MutateExtensionProfilePolicy(
-                profile, expected, mutation, permit, done,
-            ))
-            .is_ok()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_mutate_extension_grants(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-        install_id: ExtensionInstallId,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        write: ExtensionGrantWrite,
-        deadline: Instant,
-        done: ExtensionGrantMutationDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some(retained_bytes) = manifest
-            .retained_bytes()
-            .checked_add(write.retained_bytes())
-        else {
-            return false;
-        };
-        if retained_bytes > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES {
-            return false;
-        }
-        let Some(permit) = ExtensionGrantRequestPermit::try_acquire(
-            &self.extension_grant_request_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::MutateExtensionGrants(
-                profile,
-                expected_catalog,
-                expected_install,
-                install_id,
-                manifest,
-                write,
-                permit,
-                done,
-            ))
-            .is_ok()
-    }
-
-    fn try_mutate_extension_install_catalog(
-        &self,
-        profile: ProfileId,
-        expected: ExtensionInstallCatalogRevision,
-        mutation: ExtensionInstallCatalogMutation,
-        deadline: Instant,
-        done: ExtensionInstallCatalogMutationDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some(permit) =
-            ExtensionInstallMutationPermit::try_acquire(&self.extension_install_mutation_admission)
-        else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::MutateExtensionInstallCatalog(
-                profile, expected, mutation, permit, done,
-            ))
-            .is_ok()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_provision_extension_install(
-        &self,
-        profile: ProfileId,
-        expected: ExtensionInstallCatalogRevision,
-        install: ExtensionInstallId,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        authority: Box<ExtensionGrantAuthority>,
-        deadline: Instant,
-        done: ExtensionInstallProvisionDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some(retained_bytes) = manifest
-            .retained_bytes()
-            .checked_add(authority.retained_bytes())
-        else {
-            return false;
-        };
-        if retained_bytes > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES {
-            return false;
-        }
-        let Some(install_permit) =
-            ExtensionInstallMutationPermit::try_acquire(&self.extension_install_mutation_admission)
-        else {
-            return false;
-        };
-        let Some(grant_permit) = ExtensionGrantRequestPermit::try_acquire(
-            &self.extension_grant_request_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::ProvisionExtensionInstall(
-                profile,
-                expected,
-                install,
-                manifest,
-                authority,
-                install_permit,
-                grant_permit,
-                done,
-            ))
-            .is_ok()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_update_extension_install(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        install: ExtensionInstallId,
-        expected_install: ExtensionInstallRevision,
-        expected_grant: ExtensionGrantRevision,
-        grant_decision: ExtensionInstallUpdateGrantDecision,
-        current_manifest: Arc<ExtensionManifestDescriptor>,
-        replacement_manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-        done: ExtensionInstallUpdateDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some(retained_bytes) = current_manifest
-            .retained_bytes()
-            .checked_add(replacement_manifest.retained_bytes())
-        else {
-            return false;
-        };
-        if retained_bytes > MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES {
-            return false;
-        }
-        let Some(install_permit) =
-            ExtensionInstallMutationPermit::try_acquire(&self.extension_install_mutation_admission)
-        else {
-            return false;
-        };
-        let Some(grant_permit) = ExtensionGrantRequestPermit::try_acquire(
-            &self.extension_grant_request_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::UpdateExtensionInstall(
-                profile,
-                expected_catalog,
-                install,
-                expected_install,
-                expected_grant,
-                grant_decision,
-                current_manifest,
-                replacement_manifest,
-                install_permit,
-                grant_permit,
-                done,
-            ))
-            .is_ok()
-    }
-
-    fn try_mutate_extension_native_ownership_journal(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        mutation: ExtensionNativeOwnershipJournalMutation,
-        deadline: Instant,
-        done: ExtensionNativeOwnershipJournalMutationDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let retained_bytes = mutation.retained_bytes();
-        if retained_bytes > MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES {
-            return false;
-        }
-        let Some(permit) = ExtensionNativeOwnershipMutationPermit::acquire(
-            &self.extension_native_ownership_mutation_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        self.try_enqueue_extension_native_ownership_mutation(
-            expected, mutation, permit, deadline, done,
-        )
-    }
-
-    fn try_enqueue_extension_native_ownership_mutation(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        mutation: ExtensionNativeOwnershipJournalMutation,
-        permit: ExtensionNativeOwnershipMutationPermit,
-        deadline: Instant,
-        done: ExtensionNativeOwnershipJournalMutationDone,
-    ) -> bool {
-        // Reservation and failed-send release use lock-free CAS loops.
-        // Recheck after reservation so descheduling at that frontier cannot
-        // enqueue a durable mutation after the caller's absolute deadline.
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::MutateExtensionNativeOwnershipJournal(
-                expected, mutation, permit, done,
-            ))
-            .is_ok()
-    }
-
-    fn try_begin_extension_native_ownership(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        mutation: ExtensionNativeOwnershipJournalMutation,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-        done: ExtensionNativeOwnershipActivationDone,
-    ) -> bool {
-        if !matches!(&mutation, ExtensionNativeOwnershipJournalMutation::Begin(_)) {
-            return false;
-        }
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let Some((grant_permit, ownership_permit)) =
-            self.try_acquire_extension_activation_permits(&manifest, mutation.retained_bytes())
-        else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::BeginExtensionNativeOwnership(
-                expected,
-                mutation,
-                manifest,
-                grant_permit,
-                ownership_permit,
-                done,
-            ))
-            .is_ok()
-    }
-
-    fn try_transition_extension_native_ownership_to_may_own(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        preparing: ExtensionNativeOwnershipEntryCas,
-        expected_native_identity: Option<ExtensionExpectedNativeOwnershipIdentity>,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-        done: ExtensionNativeOwnershipActivationDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let mutation = match expected_native_identity {
-            Some(identity) => {
-                ExtensionNativeOwnershipJournalMutation::transition_with_expected_native_identity(
-                    preparing, identity,
-                )
-            }
-            None => ExtensionNativeOwnershipJournalMutation::transition(
-                preparing,
-                zephium_core::extensions::ExtensionNativeOwnershipIntent::Acquire,
-                zephium_core::extensions::ExtensionNativeOwnershipPhase::NativeMayOwn,
-            ),
-        };
-        let Some((grant_permit, ownership_permit)) =
-            self.try_acquire_extension_activation_permits(&manifest, mutation.retained_bytes())
-        else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::TransitionExtensionNativeOwnershipToMayOwn(
-                expected,
-                preparing,
-                expected_native_identity,
-                manifest,
-                grant_permit,
-                ownership_permit,
-                done,
-            ))
-            .is_ok()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_rebind_extension_native_ownership_grants(
-        &self,
-        expected: ExtensionNativeOwnershipJournalRevision,
-        owned: ExtensionNativeOwnershipEntryCas,
-        store_grant_revision: ExtensionGrantRevision,
-        grant_digest: ExtensionGrantDigest,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        deadline: Instant,
-        done: ExtensionNativeOwnershipJournalMutationDone,
-    ) -> bool {
-        let lifecycle = match self.lifecycle.try_read() {
-            Ok(lifecycle) => lifecycle,
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        if Instant::now() >= deadline
-            || lifecycle.terminal_admitted
-            || self.shutdown_clean.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        let mutation = ExtensionNativeOwnershipJournalMutation::rebind_grants(
-            owned,
-            store_grant_revision,
-            grant_digest,
-        );
-        let Some((grant_permit, ownership_permit)) =
-            self.try_acquire_extension_activation_permits(&manifest, mutation.retained_bytes())
-        else {
-            return false;
-        };
-        if Instant::now() >= deadline {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::RebindExtensionNativeOwnershipGrants(
-                expected,
-                owned,
-                store_grant_revision,
-                grant_digest,
-                manifest,
-                grant_permit,
-                ownership_permit,
-                done,
-            ))
-            .is_ok()
-    }
-
-    fn try_acquire_extension_activation_permits(
-        &self,
-        manifest: &ExtensionManifestDescriptor,
-        ownership_retained_bytes: usize,
-    ) -> Option<(
-        ExtensionGrantRequestPermit,
-        ExtensionNativeOwnershipMutationPermit,
-    )> {
-        if manifest.retained_bytes() > MAX_EXTENSION_MANIFEST_RETAINED_BYTES
-            || ownership_retained_bytes > MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES
-        {
-            return None;
-        }
-        let grant_permit = ExtensionGrantRequestPermit::try_acquire(
-            &self.extension_grant_request_admission,
-            manifest.retained_bytes(),
-        )?;
-        let ownership_permit = ExtensionNativeOwnershipMutationPermit::acquire(
-            &self.extension_native_ownership_mutation_admission,
-            ownership_retained_bytes,
-        )?;
-        Some((grant_permit, ownership_permit))
     }
 
     /// Waits for the latest queued session snapshot to commit, but never past
@@ -2636,6 +793,67 @@ impl Store for SqliteStore {
             .is_ok()
     }
 
+    fn load_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<zephium_core::blocker::BlockerStatistics>) + Send>,
+    ) -> bool {
+        let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadBlockerStatistics(profile, done))
+            .is_ok()
+    }
+    fn save_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        statistics: zephium_core::blocker::BlockerStatistics,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) -> bool {
+        let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::SaveBlockerStatistics(profile, statistics, done))
+            .is_ok()
+    }
+    fn load_profile_blocker_sites(&self, profile: ProfileId, done: BlockerSiteLoadDone) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadProfileBlockerSites(profile, done))
+            .is_ok()
+    }
+
+    fn update_profile_blocker_sites(
+        &self,
+        profile: ProfileId,
+        expected: u64,
+        next: Arc<BlockerSitePreferences>,
+        done: BlockerSiteUpdateDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::UpdateProfileBlockerSites(
+                profile, expected, next, done,
+            ))
+            .is_ok()
+    }
+
     fn load_userscript_catalog(&self, profile: ProfileId, done: UserscriptCatalogLoadDone) -> bool {
         let lifecycle = self
             .lifecycle
@@ -2718,168 +936,6 @@ impl Store for SqliteStore {
         self.tx
             .try_send(Cmd::MutatePagePermissionCatalog(
                 profile, expected, patch, permit, done,
-            ))
-            .is_ok()
-    }
-
-    fn load_extension_install_catalog(
-        &self,
-        profile: ProfileId,
-        done: ExtensionInstallCatalogLoadDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        self.tx
-            .try_send(Cmd::LoadExtensionInstallCatalog(profile, done))
-            .is_ok()
-    }
-
-    fn mutate_extension_install_catalog(
-        &self,
-        profile: ProfileId,
-        expected: ExtensionInstallCatalogRevision,
-        mutation: ExtensionInstallCatalogMutation,
-        done: ExtensionInstallCatalogMutationDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        let Some(permit) =
-            ExtensionInstallMutationPermit::acquire(&self.extension_install_mutation_admission)
-        else {
-            return false;
-        };
-        self.tx
-            .try_send(Cmd::MutateExtensionInstallCatalog(
-                profile, expected, mutation, permit, done,
-            ))
-            .is_ok()
-    }
-
-    fn load_extension_grant_cohort(
-        &self,
-        profile: ProfileId,
-        bindings: ExtensionGrantManifestBindings,
-        done: ExtensionGrantCohortLoadDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        let Some(permit) = ExtensionGrantRequestPermit::acquire(
-            &self.extension_grant_request_admission,
-            bindings.retained_bytes(),
-        ) else {
-            return false;
-        };
-        self.tx
-            .try_send(Cmd::LoadExtensionGrantCohort(
-                profile, bindings, permit, done,
-            ))
-            .is_ok()
-    }
-
-    fn load_extension_profile_policy(
-        &self,
-        profile: ProfileId,
-        done: ExtensionProfilePolicyLoadDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        let Some(permit) =
-            ExtensionGrantRequestPermit::acquire(&self.extension_grant_request_admission, 0)
-        else {
-            return false;
-        };
-        self.tx
-            .try_send(Cmd::LoadExtensionProfilePolicy(profile, permit, done))
-            .is_ok()
-    }
-
-    fn mutate_extension_profile_policy(
-        &self,
-        profile: ProfileId,
-        expected: ExtensionProfilePolicyRevision,
-        mutation: ExtensionProfilePolicyMutation,
-        done: ExtensionProfilePolicyMutationDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        let retained_bytes = mutation.retained_bytes();
-        let Some(permit) = ExtensionGrantRequestPermit::acquire(
-            &self.extension_grant_request_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        self.tx
-            .try_send(Cmd::MutateExtensionProfilePolicy(
-                profile, expected, mutation, permit, done,
-            ))
-            .is_ok()
-    }
-
-    fn mutate_extension_grants(
-        &self,
-        profile: ProfileId,
-        expected_catalog: ExtensionInstallCatalogRevision,
-        expected_install: ExtensionInstallRevision,
-        install_id: ExtensionInstallId,
-        manifest: Arc<ExtensionManifestDescriptor>,
-        write: ExtensionGrantWrite,
-        done: ExtensionGrantMutationDone,
-    ) -> bool {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
-            return false;
-        }
-        let Some(retained_bytes) = manifest
-            .retained_bytes()
-            .checked_add(write.retained_bytes())
-        else {
-            return false;
-        };
-        let Some(permit) = ExtensionGrantRequestPermit::acquire(
-            &self.extension_grant_request_admission,
-            retained_bytes,
-        ) else {
-            return false;
-        };
-        self.tx
-            .try_send(Cmd::MutateExtensionGrants(
-                profile,
-                expected_catalog,
-                expected_install,
-                install_id,
-                manifest,
-                write,
-                permit,
-                done,
             ))
             .is_ok()
     }
@@ -3142,25 +1198,6 @@ impl Store for SqliteStore {
             .is_ok()
     }
 
-    fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let (tx, rx) = mpsc::channel();
-        if self
-            .tx
-            .try_send(Cmd::RecentHistory(
-                profile,
-                limit.min(MAX_HISTORY_RESULTS),
-                tx,
-            ))
-            .is_err()
-        {
-            return Vec::new();
-        }
-        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
-    }
-
     fn pending_profile_deletions(&self) -> ProfileDeletionLoad {
         let (tx, rx) = mpsc::channel();
         if self.tx.try_send(Cmd::PendingProfileDeletions(tx)).is_err() {
@@ -3273,6 +1310,7 @@ fn admissible_session(session: &SessionState) -> bool {
                     && zoom.is_finite()
                     && (0.3..=3.0).contains(zoom)
             }
+            PersistedKind::BrowserTab { .. } => true,
         })
         && session.recently_closed.len() <= MAX_RECENTLY_CLOSED_TABS
         && session.recently_closed.iter().all(|entry| {
@@ -3429,6 +1467,40 @@ fn actor(
                 };
                 done(outcome);
             }
+            Some(Cmd::LoadBlockerStatistics(profile, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(None);
+                    continue;
+                }
+                done(hub.load_blocker_statistics(profile).ok());
+            }
+            Some(Cmd::SaveBlockerStatistics(profile, statistics, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(false);
+                    continue;
+                }
+                done(hub.save_blocker_statistics(profile, &statistics).is_ok());
+            }
+            Some(Cmd::LoadProfileBlockerSites(profile, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(BlockerSiteLoadOutcome::Failed);
+                    continue;
+                }
+                done(
+                    hub.profile_blocker_sites(profile)
+                        .unwrap_or(BlockerSiteLoadOutcome::Failed),
+                );
+            }
+            Some(Cmd::UpdateProfileBlockerSites(profile, expected, next, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(BlockerSiteUpdateOutcome::Failed);
+                    continue;
+                }
+                done(
+                    hub.update_profile_blocker_sites(profile, expected, next)
+                        .unwrap_or(BlockerSiteUpdateOutcome::Failed),
+                );
+            }
             Some(Cmd::LoadProfileBlockerConfig(profile, done)) => {
                 let outcome = match hub.profile_blocker_config(profile) {
                     Ok(outcome) => outcome,
@@ -3485,270 +1557,6 @@ fn actor(
                             "store: profile {profile} page-permission catalog mutation failed: {error}"
                         );
                         PagePermissionCatalogMutationOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::LoadExtensionInstallCatalog(profile, done)) => {
-                let outcome = match hub.load_extension_install_catalog(profile) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!(
-                            "store: profile {profile} extension-install catalog load failed: {error}"
-                        );
-                        ExtensionInstallCatalogLoadOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::LoadExtensionNativeNamespace(profile, done)) => {
-                let outcome = match hub.load_extension_native_namespace(profile) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!(
-                            "store: profile {profile} native extension namespace load failed: {error}"
-                        );
-                        ExtensionNativeNamespaceLoadOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::MutateExtensionInstallCatalog(
-                profile,
-                expected,
-                mutation,
-                _permit,
-                done,
-            )) => {
-                let outcome = match hub
-                    .mutate_extension_install_catalog(profile, expected, mutation)
-                {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!(
-                            "store: profile {profile} extension-install catalog mutation failed: {error}"
-                        );
-                        ExtensionInstallCatalogMutationOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::LoadExtensionGrantCohort(profile, bindings, _permit, done)) => {
-                let outcome = match hub.load_extension_grant_cohort(profile, bindings) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!(
-                            "store: profile {profile} extension-grant cohort load failed: {error}"
-                        );
-                        ExtensionGrantCohortLoadOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::LoadExtensionProfilePolicy(profile, _permit, done)) => {
-                let outcome = hub
-                    .load_extension_profile_policy(profile)
-                    .unwrap_or_else(|error| {
-                        eprintln!("store: profile {profile} extension-policy load failed: {error}");
-                        ExtensionProfilePolicyLoadOutcome::Failed
-                    });
-                done(outcome);
-            }
-            Some(Cmd::MutateExtensionProfilePolicy(profile, expected, mutation, _permit, done)) => {
-                let outcome = hub
-                    .mutate_extension_profile_policy(profile, expected, mutation)
-                    .unwrap_or_else(|error| {
-                        eprintln!(
-                            "store: profile {profile} extension-policy mutation failed: {error}"
-                        );
-                        ExtensionProfilePolicyMutationOutcome::Failed
-                    });
-                done(outcome);
-            }
-            Some(Cmd::MutateExtensionGrants(
-                profile,
-                expected_catalog,
-                expected_install,
-                install_id,
-                manifest,
-                write,
-                _permit,
-                done,
-            )) => {
-                let outcome = match hub.mutate_extension_grants(
-                    profile,
-                    expected_catalog,
-                    expected_install,
-                    install_id,
-                    manifest,
-                    write,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!(
-                            "store: profile {profile} extension-grant mutation failed: {error}"
-                        );
-                        ExtensionGrantMutationOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::ProvisionExtensionInstall(
-                profile,
-                expected_catalog,
-                install,
-                manifest,
-                authority,
-                _install_permit,
-                _grant_permit,
-                done,
-            )) => {
-                let outcome = match hub.provision_extension_install(
-                    profile,
-                    expected_catalog,
-                    install,
-                    manifest,
-                    authority,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!("store: profile {profile} extension provision failed: {error}");
-                        ExtensionInstallProvisionOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::UpdateExtensionInstall(
-                profile,
-                expected_catalog,
-                install,
-                expected_install,
-                expected_grant,
-                grant_decision,
-                current_manifest,
-                replacement_manifest,
-                _install_permit,
-                _grant_permit,
-                done,
-            )) => {
-                let outcome = match hub.update_extension_install(
-                    profile,
-                    expected_catalog,
-                    install,
-                    expected_install,
-                    expected_grant,
-                    grant_decision,
-                    current_manifest,
-                    replacement_manifest,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!("store: profile {profile} extension update failed: {error}");
-                        ExtensionInstallUpdateOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::LoadExtensionNativeOwnershipJournal(done)) => {
-                let outcome = match hub.load_extension_native_ownership_journal() {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!("store: extension native-ownership journal load failed: {error}");
-                        ExtensionNativeOwnershipJournalLoadOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::LoadExtensionRuntimeStartupInventory(done)) => {
-                let outcome = match hub.load_extension_runtime_startup_inventory() {
-                    Ok(inventory) => ExtensionRuntimeStartupInventoryLoadOutcome::Loaded(inventory),
-                    Err(error) => {
-                        eprintln!(
-                            "store: extension runtime startup inventory load failed: {error}"
-                        );
-                        ExtensionRuntimeStartupInventoryLoadOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::MutateExtensionNativeOwnershipJournal(expected, mutation, _permit, done)) => {
-                let outcome =
-                    match hub.mutate_extension_native_ownership_journal(expected, mutation) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            eprintln!(
-                            "store: extension native-ownership journal mutation failed: {error}"
-                        );
-                            ExtensionNativeOwnershipJournalMutationOutcome::Failed
-                        }
-                    };
-                done(outcome);
-            }
-            Some(Cmd::BeginExtensionNativeOwnership(
-                expected,
-                mutation,
-                manifest,
-                _grant_permit,
-                _ownership_permit,
-                done,
-            )) => {
-                let outcome = match hub
-                    .begin_extension_native_ownership(expected, mutation, manifest)
-                {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!("store: extension native-ownership fenced begin failed: {error}");
-                        ExtensionNativeOwnershipActivationOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::TransitionExtensionNativeOwnershipToMayOwn(
-                expected,
-                preparing,
-                expected_native_identity,
-                manifest,
-                _grant_permit,
-                _ownership_permit,
-                done,
-            )) => {
-                let outcome = match hub.transition_extension_native_ownership_to_may_own(
-                    expected,
-                    preparing,
-                    expected_native_identity,
-                    manifest,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!(
-                            "store: extension native-ownership fenced MayOwn transition failed: {error}"
-                        );
-                        ExtensionNativeOwnershipActivationOutcome::Failed
-                    }
-                };
-                done(outcome);
-            }
-            Some(Cmd::RebindExtensionNativeOwnershipGrants(
-                expected,
-                owned,
-                store_grant_revision,
-                grant_digest,
-                manifest,
-                _grant_permit,
-                _ownership_permit,
-                done,
-            )) => {
-                let outcome = match hub.rebind_extension_native_ownership_grants(
-                    expected,
-                    owned,
-                    store_grant_revision,
-                    grant_digest,
-                    manifest,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        eprintln!("store: extension native-ownership grant rebind failed: {error}");
-                        ExtensionNativeOwnershipJournalMutationOutcome::Failed
                     }
                 };
                 done(outcome);
@@ -3820,9 +1628,6 @@ fn actor(
             }
             Some(Cmd::AmendVisitTitle(profile, url, title)) => {
                 hub.amend_visit_title(profile, &url, &title);
-            }
-            Some(Cmd::RecentHistory(profile, limit, reply)) => {
-                let _ = reply.send(hub.recent_history(profile, limit));
             }
             Some(Cmd::FaviconAge(profile, origin, reply)) => {
                 let _ = reply.send(hub.favicon_age(profile, &origin));

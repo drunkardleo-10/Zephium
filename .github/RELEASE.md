@@ -164,7 +164,7 @@ repositories, verified with `rpm -V`, and recorded as exact NEVRAs in the RPM
 audit. Node is fixed to 24.18.0 and Syft to 1.44.0 rather than following moving
 major or latest-release aliases. The separate hostile WebKitWebProcess
 confinement job runs in the official Fedora 44 OCI index pinned by digest and
-rejects an engine outside the reviewed WebKitGTK 2.52.x line or below 2.52.5.
+rejects an engine outside the reviewed WebKitGTK 2.52.x line or below 2.52.6.
 That non-artifact job may explicitly consume Fedora's signed updates-testing
 WebKitGTK/JSC transaction while the security update awaits promotion. The RPM
 publisher remains stable-repository-only and therefore blocks rather than

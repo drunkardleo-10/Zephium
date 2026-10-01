@@ -1,9 +1,9 @@
 //! Linear high-level private-tree removal.
 
 use super::OpenedPrivateDirectory;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use super::{terminal_settlement_error, verify_core_boundary, verify_parent_authority};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::platform::{self, DirectoryMode, TreeRemovalFaults};
 use crate::{PrivateFsError, PrivateFsTransitionError};
 
@@ -123,7 +123,7 @@ impl OpenedPrivateDirectory {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn remove_tree_bounded_platform(
     directory: OpenedPrivateDirectory,
     _limits: TreeRemovalLimits,
@@ -134,7 +134,7 @@ fn remove_tree_bounded_platform(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn remove_tree_bounded_platform(
     directory: OpenedPrivateDirectory,
     limits: TreeRemovalLimits,

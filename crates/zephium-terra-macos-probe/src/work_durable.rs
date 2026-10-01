@@ -500,19 +500,6 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             .map_err(|_| Error::Authority)?,
     )
     .map_err(|_| Error::Runtime)?;
-    let extension = zephium_extension_service::prepare_extension_service_boot(
-        store
-            .claim_extension_service_store_authority()
-            .map_err(|_| Error::Authority)?,
-        zephium_extension_service::ExtensionRepositoryRoot::from_app_data_directory(
-            data.path().to_owned(),
-        )
-        .map_err(|_| Error::Authority)?,
-    )
-    .map_err(|_| Error::Authority)?;
-    let zephium_extension_service::ExtensionServiceBootPlan::Inert(extension) = extension else {
-        return Err(Error::Authority);
-    };
     // Credentials never enter Work, model context, diagnostics or serialized reports.
     let planning_key = load_macos_probe_openai_credential().map_err(|_| Error::Keychain)?;
     let browser_keys = (0..if matches!(
@@ -592,7 +579,6 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                 engine.clone(),
                 owner_store.clone(),
                 blocker,
-                extension,
                 Box::new(|_| {}),
                 Arc::new(super::work_application::NoChrome),
                 Box::new(|_| {}),

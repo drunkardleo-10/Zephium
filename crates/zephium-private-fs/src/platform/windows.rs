@@ -1,56 +1,37 @@
-//! Win32 identity, ACL, durable rename, and file-lock primitives.
+//! Handle-relative Windows private namespace adapter. Shipping admission stays
+//! gated until the Windows validation campaign has established live behavior.
 
 #![allow(unsafe_code)]
 
-use std::ffi::c_void;
+mod native;
+mod security;
+#[cfg(test)]
+mod tests;
+
 use std::fs::{File, Metadata};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
-
-use windows::Win32::Foundation::{
-    GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_LOCK_VIOLATION,
-    ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, HLOCAL,
-};
-use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
-use windows::Win32::Security::{
-    EqualSid, GetAce, GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, ACCESS_ALLOWED_ACE,
-    ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    PSID, TOKEN_QUERY, TOKEN_USER,
-};
+use std::path::{Component, Path, Prefix};
+use windows::Win32::Foundation::{GetLastError, ERROR_LOCK_VIOLATION};
 use windows::Win32::Storage::FileSystem::{
-    FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, LockFileEx, MoveFileExW,
-    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
-    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, WRITE_DAC, WRITE_OWNER,
+    FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, LockFileEx,
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_INFO, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::IO::OVERLAPPED;
 
 use super::{DirectoryMode, RegularMode};
 use crate::PrivateFsError;
-
-const FILE_ATTRIBUTE_REPARSE_POINT_RAW: u32 = 0x400;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RawIdentity {
     volume_serial_number: u64,
     file_id: [u8; 16],
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-// The common namespace layer must be able to describe successful inspection,
-// while the current Windows backend deliberately refuses namespace admission
-// before either successful variant can be constructed.
-#[allow(dead_code)]
 pub(crate) enum RawChildKind {
     Regular(RawIdentity),
     Directory(RawIdentity),
 }
-
 #[derive(Clone, Copy)]
 pub(crate) enum OpenPurpose {
     Read,
@@ -59,661 +40,533 @@ pub(crate) enum OpenPurpose {
 }
 
 pub(crate) fn admit_namespace_support() -> Result<(), PrivateFsError> {
-    // Win32 path APIs cannot provide descriptor-relative create, enumerate,
-    // unlink, and rename as one coherent boundary. Do not expose the private
-    // NT API implementation until it has a dedicated live-Windows proof.
-    Err(PrivateFsError::PrimitiveUnavailable)
+    if cfg!(feature = "windows-namespace-validation") {
+        Ok(())
+    } else {
+        Err(PrivateFsError::PrimitiveUnavailable)
+    }
+}
+
+fn identity(file: &File, directory: Option<bool>) -> Result<(RawIdentity, bool), PrivateFsError> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(native::handle(file), &raw mut info) }
+        .map_err(|_| PrivateFsError::Unsafe)?;
+    let is_directory = info.dwFileAttributes & 0x10 != 0;
+    if info.dwFileAttributes & 0x400 != 0
+        || directory.is_some_and(|kind| kind != is_directory)
+        || (!is_directory && info.nNumberOfLinks != 1)
+    {
+        return Err(PrivateFsError::Unsafe);
+    }
+    let mut id = FILE_ID_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            native::handle(file),
+            FileIdInfo,
+            (&raw mut id).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    }
+    .map_err(|_| PrivateFsError::PrimitiveUnavailable)?;
+    Ok((
+        RawIdentity {
+            volume_serial_number: id.VolumeSerialNumber,
+            file_id: id.FileId.Identifier,
+        },
+        is_directory,
+    ))
+}
+
+fn open_child(
+    parent: &File,
+    name: &str,
+    directory: bool,
+    access: u32,
+    share: u32,
+) -> Result<(File, RawIdentity, bool), PrivateFsError> {
+    let file = native::open(
+        parent,
+        name,
+        Some(directory),
+        access,
+        share,
+        native::OPEN,
+        None,
+    )?;
+    let id = identity(&file, Some(directory))?.0;
+    native::exact_name(&file, name)?;
+    let sealed = security::mode(&file)?;
+    Ok((file, id, sealed))
 }
 
 pub(crate) fn open_regular(
-    _directory: &File,
-    directory_path: &Path,
+    directory: &File,
+    _path: &Path,
     name: &str,
     purpose: OpenPurpose,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
-    let path = directory_path.join(name);
-    let before = identity_for_path(&path, NodeKind::Regular)?;
-    let mut options = std::fs::OpenOptions::new();
-    let share_mode = match purpose {
-        OpenPurpose::Read => FILE_SHARE_READ.0,
-        OpenPurpose::Mutation => (FILE_SHARE_READ | FILE_SHARE_DELETE).0,
-        // Other lockers must be able to open this node and lose at LockFileEx,
-        // while replacement/deletion remains blocked for the lock lifetime.
-        OpenPurpose::Lock => (FILE_SHARE_READ | FILE_SHARE_WRITE).0,
+    let access = match purpose {
+        OpenPurpose::Read => native::READ,
+        OpenPurpose::Mutation => native::READ | native::METADATA,
+        OpenPurpose::Lock => native::READ | native::WRITE,
     };
-    let extra_flags = if matches!(purpose, OpenPurpose::Lock) {
-        FILE_FLAG_WRITE_THROUGH.0
-    } else {
-        0
-    };
-    options
-        .read(true)
-        .write(matches!(purpose, OpenPurpose::Lock))
-        .share_mode(share_mode)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | extra_flags);
-    let file = options
-        .open(&path)
-        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    let opened = identity_for_file(&file, NodeKind::Regular)?;
-    if !private_node_acl(&file) {
+    // The exact lock is enforced by LockFileEx and identity revalidation.
+    // Share-delete is required for recovery to publish a held staging lock.
+    let (mut file, id, sealed) = open_child(directory, name, false, access, 7)?;
+    if matches!(purpose, OpenPurpose::Lock) && sealed {
         return Err(PrivateFsError::Unsafe);
     }
-    let after = identity_for_path(&path, NodeKind::Regular)
-        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    if before != opened || opened != after {
-        return Err(PrivateFsError::IdentityAmbiguous);
+    if matches!(purpose, OpenPurpose::Mutation) && !sealed {
+        file = native::reopen_writable(&file)?;
+        if identity(&file, Some(false))?.0 != id || security::mode(&file)? {
+            return Err(PrivateFsError::IdentityAmbiguous);
+        }
     }
-    Ok((file, opened))
+    Ok((file, id))
 }
 
 pub(crate) fn open_sealed_regular(
-    _directory: &File,
-    _directory_path: &Path,
-    _name: &str,
+    parent: &File,
+    _path: &Path,
+    name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+    let (file, id, sealed) = open_child(parent, name, false, native::READ | native::METADATA, 7)?;
+    if !sealed {
+        return Err(PrivateFsError::Unsafe);
+    }
+    Ok((file, id))
 }
 
 pub(crate) fn create_new_regular(
-    _directory: &File,
-    directory_path: &Path,
+    parent: &File,
+    _path: &Path,
     name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
-    let path = directory_path.join(name);
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .share_mode(FILE_SHARE_READ.0)
-        .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH).0)
-        .open(&path)
-        .map_err(|error| map_failed_create(error, &path, true))?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_regular_create();
-    let admission = (|| {
-        let identity = identity_for_file(&file, NodeKind::Regular)?;
-        if !private_node_acl(&file) || identity_for_path(&path, NodeKind::Regular)? != identity {
-            return Err(PrivateFsError::IdentityAmbiguous);
+    let sd = security::descriptor(false, false)?;
+    let file = native::open(
+        parent,
+        name,
+        Some(false),
+        native::READ | native::WRITE | native::METADATA,
+        7,
+        native::CREATE,
+        Some(sd.0),
+    )?;
+    let verified = (|| {
+        let id = identity(&file, Some(false))?.0;
+        if security::mode(&file)? {
+            return Err(PrivateFsError::Unsafe);
         }
-        Ok(identity)
+        native::exact_name(&file, name)?;
+        Ok(id)
     })();
-    match admission {
-        Ok(identity) => Ok((file, identity)),
+    match verified {
+        Ok(id) => Ok((file, id)),
         Err(_) => Err(PrivateFsError::SettlementUnknown),
     }
 }
 
 pub(crate) fn revalidate_regular(
-    _directory: &File,
-    directory_path: &Path,
+    parent: &File,
+    path: &Path,
     name: &str,
     file: &File,
     expected: RawIdentity,
 ) -> Result<(), PrivateFsError> {
-    let path = directory_path.join(name);
-    if identity_for_file(file, NodeKind::Regular)? != expected
-        || identity_for_path(&path, NodeKind::Regular)? != expected
-        || !private_node_acl(file)
-    {
+    if identity(file, Some(false))?.0 != expected {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    security::mode(file)?;
+    native::exact_name(file, name)?;
+    let (_, current) = open_regular(parent, path, name, OpenPurpose::Read)?;
+    if current != expected {
         return Err(PrivateFsError::IdentityAmbiguous);
     }
     Ok(())
 }
 
 pub(crate) fn revalidate_regular_mode(
-    _directory: &File,
-    _directory_path: &Path,
-    _name: &str,
-    _file: &File,
-    _expected: RawIdentity,
-    _mode: RegularMode,
+    parent: &File,
+    path: &Path,
+    name: &str,
+    file: &File,
+    expected: RawIdentity,
+    mode: RegularMode,
 ) -> Result<(), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+    revalidate_regular(parent, path, name, file, expected)?;
+    if security::mode(file)? != (mode == RegularMode::Sealed) {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    Ok(())
 }
 
-pub(crate) fn set_regular_mode(_file: &File, _mode: RegularMode) -> Result<(), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+pub(crate) fn set_regular_mode(file: &File, mode: RegularMode) -> Result<(), PrivateFsError> {
+    identity(file, Some(false))?;
+    security::set_mode(file, mode == RegularMode::Sealed)
 }
 
 pub(crate) fn create_directory(
-    _parent: &File,
-    parent_path: &Path,
+    parent: &File,
+    _path: &Path,
     name: &str,
 ) -> Result<bool, PrivateFsError> {
-    let path = parent_path.join(name);
-    let created = match std::fs::create_dir(&path) {
-        Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-        Err(error) => return Err(map_failed_create(error, &path, false)),
-    };
-    Ok(created)
+    let sd = security::descriptor(false, true)?;
+    match native::open(
+        parent,
+        name,
+        Some(true),
+        native::READ | native::WRITE | native::METADATA,
+        7,
+        native::CREATE,
+        Some(sd.0),
+    ) {
+        Ok(file) => {
+            if identity(&file, Some(true)).is_err()
+                || security::mode(&file) != Ok(false)
+                || native::exact_name(&file, name).is_err()
+            {
+                return Err(PrivateFsError::SettlementUnknown);
+            }
+            Ok(true)
+        }
+        Err(PrivateFsError::AlreadyExists) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn open_child_directory(
-    _parent: &File,
-    parent_path: &Path,
+    parent: &File,
+    _path: &Path,
     name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
-    open_directory(&parent_path.join(name))
+    let (file, id, sealed) = open_child(
+        parent,
+        name,
+        true,
+        native::READ | native::WRITE | native::METADATA,
+        7,
+    )?;
+    if sealed {
+        return Err(PrivateFsError::Unsafe);
+    }
+    Ok((file, id))
 }
-
 pub(crate) fn open_sealed_child_directory(
-    _parent: &File,
-    _parent_path: &Path,
-    _name: &str,
+    parent: &File,
+    _path: &Path,
+    name: &str,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+    let (file, id, sealed) = open_child(parent, name, true, native::READ | native::METADATA, 7)?;
+    if !sealed {
+        return Err(PrivateFsError::Unsafe);
+    }
+    Ok((file, id))
 }
-
 pub(crate) fn open_child_directory_any_mode(
-    _parent: &File,
-    _parent_path: &Path,
-    _name: &str,
+    parent: &File,
+    _path: &Path,
+    name: &str,
 ) -> Result<(File, RawIdentity, DirectoryMode), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+    let (file, id, sealed) = open_child(parent, name, true, native::READ | native::METADATA, 7)?;
+    let file = if sealed {
+        file
+    } else {
+        native::reopen_writable(&file)?
+    };
+    if identity(&file, Some(true))?.0 != id {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    Ok((
+        file,
+        id,
+        if sealed {
+            DirectoryMode::Sealed
+        } else {
+            DirectoryMode::Writable
+        },
+    ))
 }
-
 pub(crate) fn revalidate_child_directory(
-    _parent: &File,
-    _parent_path: &Path,
-    _name: &str,
-    _directory: &File,
-    _expected: RawIdentity,
-    _mode: DirectoryMode,
+    parent: &File,
+    path: &Path,
+    name: &str,
+    directory: &File,
+    expected: RawIdentity,
+    mode: DirectoryMode,
 ) -> Result<(), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+    if identity(directory, Some(true))?.0 != expected {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    native::exact_name(directory, name)?;
+    let (_, current, current_mode) = open_child_directory_any_mode(parent, path, name)?;
+    if current != expected
+        || current_mode != mode
+        || security::mode(directory)? != (mode == DirectoryMode::Sealed)
+    {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    Ok(())
 }
-
-pub(crate) fn set_directory_mode(_file: &File, _mode: DirectoryMode) -> Result<(), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+pub(crate) fn set_directory_mode(file: &File, mode: DirectoryMode) -> Result<(), PrivateFsError> {
+    identity(file, Some(true))?;
+    security::set_mode(file, mode == DirectoryMode::Sealed)?;
+    Ok(())
 }
 
 pub(crate) fn inspect_child(
-    _parent: &File,
-    _parent_path: &Path,
-    _name: &str,
+    parent: &File,
+    _path: &Path,
+    name: &str,
 ) -> Result<Option<RawChildKind>, PrivateFsError> {
-    // Keep the new entry-inspection surface behind the same unavailable NT
-    // descriptor-relative adapter gate as namespace activation.
-    Err(PrivateFsError::PrimitiveUnavailable)
+    let file = match native::open(parent, name, None, native::READ, 7, native::OPEN, None) {
+        Ok(file) => file,
+        Err(PrivateFsError::NotFound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let (id, dir) = identity(&file, None)?;
+    native::exact_name(&file, name)?;
+    security::mode(&file)?;
+    Ok(Some(if dir {
+        RawChildKind::Directory(id)
+    } else {
+        RawChildKind::Regular(id)
+    }))
 }
-
-pub(crate) fn verify_exact_name(_file: &File, _expected: &str) -> Result<(), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+pub(crate) fn verify_exact_name(file: &File, expected: &str) -> Result<(), PrivateFsError> {
+    native::exact_name(file, expected)
 }
-
 pub(crate) fn list_names(
-    _directory: &File,
-    directory_path: &Path,
-    max_entries: usize,
+    file: &File,
+    _path: &Path,
+    max: usize,
 ) -> Result<Vec<String>, PrivateFsError> {
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(directory_path).map_err(|_| PrivateFsError::Io)? {
-        if names.len() == max_entries {
-            return Err(PrivateFsError::BoundExceeded);
-        }
-        let entry = entry.map_err(|_| PrivateFsError::Io)?;
-        names.push(
-            entry
-                .file_name()
-                .into_string()
-                .map_err(|_| PrivateFsError::Unsafe)?,
-        );
+    native::names(file, max)
+}
+pub(crate) fn directory_is_empty(file: &File) -> Result<bool, PrivateFsError> {
+    match native::names(file, 0) {
+        Ok(_) => Ok(true),
+        Err(PrivateFsError::BoundExceeded) => Ok(false),
+        Err(error) => Err(error),
     }
-    Ok(names)
 }
-
-pub(crate) fn directory_is_empty(_directory: &File) -> Result<bool, PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+pub(crate) fn relative_name_is_absent(parent: &File, name: &str) -> bool {
+    matches!(
+        native::open(parent, name, None, native::READ, 7, native::OPEN, None),
+        Err(PrivateFsError::NotFound)
+    )
 }
-
-pub(crate) fn remove_regular(
-    _directory: &File,
-    directory_path: &Path,
+pub(crate) fn remove_regular(parent: &File, path: &Path, name: &str) -> Result<(), PrivateFsError> {
+    let (file, _) = open_regular(parent, path, name, OpenPurpose::Mutation)?;
+    native::delete(&file)?;
+    drop(file);
+    if !relative_name_is_absent(parent, name) {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    Ok(())
+}
+pub(crate) fn remove_directory(
+    parent: &File,
+    path: &Path,
     name: &str,
 ) -> Result<(), PrivateFsError> {
-    std::fs::remove_file(directory_path.join(name)).map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_regular_unlink();
+    let (file, _, _) = open_child_directory_any_mode(parent, path, name)?;
+    native::delete(&file)?;
+    drop(file);
+    if !relative_name_is_absent(parent, name) {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
     Ok(())
 }
 
-pub(crate) fn remove_directory(
-    _parent: &File,
-    _parent_path: &Path,
-    _name: &str,
-) -> Result<(), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+// Only a local drive root is opened ambiently. Every subsequent component is
+// opened against its held parent with reparse traversal disabled.
+fn absolute_directory(path: &Path, private_leaf: bool) -> Result<File, PrivateFsError> {
+    let mut components = path.components();
+    let drive = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            _ => return Err(PrivateFsError::Unsafe),
+        },
+        _ => return Err(PrivateFsError::Unsafe),
+    };
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return Err(PrivateFsError::Unsafe);
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .access_mode(native::READ | native::TRAVERSE)
+        .share_mode(7)
+        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+        .open(format!("{}:\\", char::from(drive)))
+        .map_err(|_| PrivateFsError::Unsafe)?;
+    identity(&file, Some(true))?;
+    native::require_local_ntfs(&file)?;
+    native::require_drive_root(&file, drive)?;
+    security::ancestor(&file)?;
+    let names = components
+        .map(|part| match part {
+            Component::Normal(name) => name.to_str().ok_or(PrivateFsError::Unsafe),
+            _ => Err(PrivateFsError::Unsafe),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if names.is_empty() && private_leaf {
+        return Err(PrivateFsError::Unsafe);
+    }
+    for (index, name) in names.iter().enumerate() {
+        let last = index + 1 == names.len();
+        let access = native::READ
+            | if last && private_leaf {
+                native::METADATA
+            } else {
+                0
+            };
+        file = native::open(&file, name, Some(true), access, 7, native::OPEN, None)?;
+        identity(&file, Some(true))?;
+        native::exact_name(&file, name)?;
+        if last && private_leaf {
+            security::mode(&file)?;
+        } else {
+            security::ancestor(&file)?;
+        }
+    }
+    if private_leaf && !security::mode(&file)? {
+        let id = identity(&file, Some(true))?.0;
+        file = native::reopen_writable(&file)?;
+        if identity(&file, Some(true))?.0 != id {
+            return Err(PrivateFsError::IdentityAmbiguous);
+        }
+    }
+    Ok(file)
 }
 
 pub(crate) fn open_directory(path: &Path) -> Result<(File, RawIdentity), PrivateFsError> {
-    let before = identity_for_path(path, NodeKind::Directory)?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ.0)
-        .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS).0)
-        .open(path)
-        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    let opened = identity_for_file(&file, NodeKind::Directory)?;
-    if !private_node_acl(&file) {
-        return Err(PrivateFsError::Unsafe);
-    }
-    let after = identity_for_path(path, NodeKind::Directory)
-        .map_err(|_| PrivateFsError::IdentityAmbiguous)?;
-    if before != opened || opened != after {
-        return Err(PrivateFsError::IdentityAmbiguous);
-    }
-    Ok((file, opened))
+    open_directory_with_mode(path, DirectoryMode::Writable)
 }
-
 pub(crate) fn open_directory_with_mode(
-    _path: &Path,
-    _mode: DirectoryMode,
+    path: &Path,
+    mode: DirectoryMode,
 ) -> Result<(File, RawIdentity), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+    let file = absolute_directory(path, true)?;
+    let id = identity(&file, Some(true))?.0;
+    if security::mode(&file)? != (mode == DirectoryMode::Sealed) {
+        return Err(PrivateFsError::Unsafe);
+    }
+    Ok((file, id))
 }
-
+pub(crate) fn create_private_root(path: &Path) -> Result<bool, PrivateFsError> {
+    let parent = path.parent().ok_or(PrivateFsError::Unsafe)?;
+    let directory = absolute_directory(parent, false)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(PrivateFsError::Unsafe)?;
+    create_directory(&directory, parent, name)
+}
 pub(crate) fn same_open_identity(file: &File, expected: RawIdentity) -> bool {
-    identity_for_file(file, NodeKind::Directory)
-        .or_else(|_| identity_for_file(file, NodeKind::Regular))
-        .is_ok_and(|identity| identity == expected)
+    identity(file, None).is_ok_and(|(id, _)| id == expected)
 }
-
 pub(crate) fn validate_private_directory_node(
-    _path: &Path,
+    path: &Path,
     metadata: &Metadata,
 ) -> Result<(), PrivateFsError> {
-    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT_RAW != 0 {
+    if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
+        return Err(PrivateFsError::Unsafe);
+    }
+    let file = absolute_directory(path, true)?;
+    if security::mode(&file)? {
         return Err(PrivateFsError::Unsafe);
     }
     Ok(())
 }
-
 pub(crate) fn validate_ancestor_node(
-    _path: &Path,
+    path: &Path,
     metadata: &Metadata,
 ) -> Result<(), PrivateFsError> {
-    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT_RAW != 0 {
+    if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
         return Err(PrivateFsError::Unsafe);
     }
-    Ok(())
+    absolute_directory(path, false).map(|_| ())
 }
-
 pub(crate) fn lock_exclusive(file: &File) -> Result<(), PrivateFsError> {
     let mut overlapped = OVERLAPPED::default();
-    // SAFETY: `file` owns a valid synchronous handle; the nonblocking call
-    // borrows the live OVERLAPPED only for this invocation. Closing the file
-    // releases the full-range lock.
-    let result = unsafe {
+    if unsafe {
         LockFileEx(
-            HANDLE(file.as_raw_handle()),
+            native::handle(file),
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
             None,
             u32::MAX,
             u32::MAX,
             &raw mut overlapped,
         )
-    };
-    if result.is_ok() {
+    }
+    .is_ok()
+    {
         return Ok(());
     }
-    // SAFETY: queried immediately after the failed Win32 call on this thread.
-    let error = unsafe { GetLastError() };
-    if error == ERROR_LOCK_VIOLATION {
+    if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
         Err(PrivateFsError::LockUnavailable)
     } else {
         Err(PrivateFsError::Io)
     }
 }
 
+fn rename(
+    parent: &File,
+    source: &str,
+    destination_parent: &File,
+    destination: &str,
+    replace: bool,
+) -> Result<(), PrivateFsError> {
+    let file = native::open(
+        parent,
+        source,
+        None,
+        native::READ | native::METADATA,
+        7,
+        native::OPEN,
+        None,
+    )?;
+    identity(&file, None)?;
+    security::mode(&file)?;
+    native::exact_name(&file, source)?;
+    native::rename(&file, destination_parent, destination, replace)?;
+    Ok(())
+}
 pub(crate) fn atomic_replace(
-    _directory: &File,
-    directory_path: &Path,
+    parent: &File,
+    _path: &Path,
     source: &str,
     destination: &str,
 ) -> Result<(), PrivateFsError> {
-    move_file(
-        &directory_path.join(source),
-        &directory_path.join(destination),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-    )
+    rename(parent, source, parent, destination, true)
 }
-
 pub(crate) fn atomic_publish_noreplace(
-    _directory: &File,
-    directory_path: &Path,
+    parent: &File,
+    _path: &Path,
     source: &str,
     destination: &str,
 ) -> Result<(), PrivateFsError> {
-    match move_file(
-        &directory_path.join(source),
-        &directory_path.join(destination),
-        MOVEFILE_WRITE_THROUGH,
-    ) {
-        Ok(()) => Ok(()),
-        Err(PrivateFsError::AlreadyExists) => Err(PrivateFsError::AlreadyExists),
-        Err(_) => Err(PrivateFsError::Io),
-    }
+    rename(parent, source, parent, destination, false)
 }
-
 pub(crate) fn atomic_publish_noreplace_between(
-    _source_directory: &File,
-    _source_directory_path: &Path,
-    _source: &str,
-    _destination_directory: &File,
-    _destination_directory_path: &Path,
-    _destination: &str,
+    parent: &File,
+    _path: &Path,
+    source: &str,
+    target: &File,
+    _target_path: &Path,
+    destination: &str,
 ) -> Result<(), PrivateFsError> {
-    Err(PrivateFsError::PrimitiveUnavailable)
+    rename(parent, source, target, destination, false)
 }
-
-pub(crate) fn sync_directory(_file: &File) -> Result<(), PrivateFsError> {
-    // Payload handles are flushed and replacement uses WRITE_THROUGH. Win32
-    // does not document FlushFileBuffers as a directory durability primitive.
+pub(crate) fn sync_directory(file: &File) -> Result<(), PrivateFsError> {
+    identity(file, Some(true))?;
+    native::flush(file)?;
     Ok(())
 }
-
-pub(crate) fn sync_ancestor_directory(_path: &Path) -> Result<(), PrivateFsError> {
-    Ok(())
+pub(crate) fn sync_regular(file: &File) -> Result<(), PrivateFsError> {
+    identity(file, Some(false))?;
+    native::flush(file)
 }
-
-#[derive(Clone, Copy)]
-enum NodeKind {
-    Regular,
-    Directory,
-}
-
-fn identity_for_path(path: &Path, kind: NodeKind) -> Result<RawIdentity, PrivateFsError> {
-    let extra_flags = if matches!(kind, NodeKind::Directory) {
-        FILE_FLAG_BACKUP_SEMANTICS.0
-    } else {
-        0
-    };
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | extra_flags)
-        .open(path)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                PrivateFsError::NotFound
-            } else {
-                PrivateFsError::Unsafe
-            }
-        })?;
-    identity_for_file(&file, kind)
-}
-
-fn identity_for_file(file: &File, kind: NodeKind) -> Result<RawIdentity, PrivateFsError> {
-    let handle = HANDLE(file.as_raw_handle());
-    let mut information = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: the borrowed File owns a valid synchronous filesystem handle and
-    // the correctly typed output remains live for the complete call.
-    unsafe { GetFileInformationByHandle(handle, &mut information) }
-        .map_err(|_| PrivateFsError::Unsafe)?;
-    let is_directory = information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
-    if is_directory != matches!(kind, NodeKind::Directory)
-        || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
-        || matches!(kind, NodeKind::Regular) && information.nNumberOfLinks != 1
-    {
-        return Err(PrivateFsError::Unsafe);
-    }
-    let mut identity = FILE_ID_INFO::default();
-    // SAFETY: the output is correctly sized/aligned for FileIdInfo and live
-    // for the complete synchronous call.
-    unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileIdInfo,
-            (&raw mut identity).cast(),
-            u32::try_from(std::mem::size_of::<FILE_ID_INFO>())
-                .map_err(|_| PrivateFsError::PrimitiveUnavailable)?,
-        )
-    }
-    .map_err(|_| PrivateFsError::Unsafe)?;
-    Ok(RawIdentity {
-        volume_serial_number: identity.VolumeSerialNumber,
-        file_id: identity.FileId.Identifier,
-    })
-}
-
-fn move_file(
-    source: &Path,
-    destination: &Path,
-    flags: windows::Win32::Storage::FileSystem::MOVE_FILE_FLAGS,
-) -> Result<(), PrivateFsError> {
-    let source = wide_path(source);
-    let destination = wide_path(destination);
-    // SAFETY: both UTF-16 paths are NUL-terminated and live for the complete
-    // synchronous call. The safe caller constrains both to one directory.
-    let result = unsafe {
-        MoveFileExW(
-            windows::core::PCWSTR(source.as_ptr()),
-            windows::core::PCWSTR(destination.as_ptr()),
-            flags,
-        )
-    };
-    if result.is_ok() {
-        #[cfg(zephium_private_fs_operation_instrumentation)]
-        crate::instrumentation::record_rename();
-        return Ok(());
-    }
-    // SAFETY: queried immediately after the failed Win32 call on this thread.
-    let error = unsafe { GetLastError() };
-    if error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS {
-        Err(PrivateFsError::AlreadyExists)
-    } else {
-        Err(PrivateFsError::Io)
-    }
-}
-
-fn map_failed_create(
-    error: std::io::Error,
-    path: &Path,
-    report_already_exists: bool,
-) -> PrivateFsError {
-    if report_already_exists && error.kind() == std::io::ErrorKind::AlreadyExists {
-        PrivateFsError::AlreadyExists
-    } else if matches!(
-        std::fs::symlink_metadata(path),
-        Err(observed) if observed.kind() == std::io::ErrorKind::NotFound
-    ) {
-        PrivateFsError::Io
-    } else {
-        PrivateFsError::SettlementUnknown
-    }
-}
-
-fn wide_path(path: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
-fn private_node_acl(file: &File) -> bool {
-    const MAX_TOKEN_INFORMATION_BYTES: u32 = 64 * 1024;
-    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-    const ACCESS_DENIED_ACE_TYPE: u8 = 1;
-
-    let current_user = match CurrentUser::open(MAX_TOKEN_INFORMATION_BYTES) {
-        Some(user) => user,
-        None => return false,
-    };
-    let current_user_sid = current_user.sid();
-    if !unsafe { IsValidSid(current_user_sid).as_bool() } {
-        return false;
-    }
-
-    let mut owner = PSID::default();
-    let mut dacl: *mut ACL = std::ptr::null_mut();
-    let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    // SAFETY: the borrowed filesystem handle stays live. All output slots are
-    // valid and the returned descriptor is released by LocalDescriptor.
-    let status = unsafe {
-        GetSecurityInfo(
-            HANDLE(file.as_raw_handle()),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            Some(&raw mut owner),
-            None,
-            Some(&raw mut dacl),
-            None,
-            Some(&raw mut descriptor),
-        )
-    };
-    if status != ERROR_SUCCESS || descriptor.0.is_null() {
-        return false;
-    }
-    let _descriptor = LocalDescriptor(descriptor);
-    if owner.is_invalid()
-        || !unsafe { IsValidSid(owner).as_bool() }
-        || unsafe { EqualSid(owner, current_user_sid) }.is_err()
-        || dacl.is_null()
-    {
-        return false;
-    }
-
-    let mutation_rights = FILE_WRITE_DATA.0
-        | FILE_APPEND_DATA.0
-        | FILE_WRITE_EA.0
-        | FILE_WRITE_ATTRIBUTES.0
-        | FILE_DELETE_CHILD.0
-        | DELETE.0
-        | WRITE_DAC.0
-        | WRITE_OWNER.0
-        | GENERIC_WRITE.0
-        | GENERIC_ALL.0;
-    // SAFETY: dacl points into the live kernel-allocated descriptor.
-    let ace_count = unsafe { (*dacl).AceCount };
-    for index in 0..u32::from(ace_count) {
-        let mut ace: *mut c_void = std::ptr::null_mut();
-        // SAFETY: the index is within the ACL's declared ACE count.
-        if unsafe { GetAce(dacl, index, &raw mut ace) }.is_err() || ace.is_null() {
-            return false;
-        }
-        // SAFETY: GetAce returned at least an ACE_HEADER.
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-        if header.AceType == ACCESS_DENIED_ACE_TYPE {
-            continue;
-        }
-        if header.AceType != ACCESS_ALLOWED_ACE_TYPE
-            || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
-        {
-            return false;
-        }
-        // SAFETY: the size check proves the fixed allow-ACE prefix.
-        let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
-        if allowed.Mask & mutation_rights == 0 {
-            continue;
-        }
-        let sid = PSID(std::ptr::addr_of!(allowed.SidStart).cast_mut().cast());
-        if !unsafe { IsValidSid(sid).as_bool() } {
-            return false;
-        }
-        // SAFETY: IsValidSid proves GetLengthSid may inspect this SID.
-        let sid_bytes = unsafe { GetLengthSid(sid) } as usize;
-        let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
-        if sid_offset
-            .checked_add(sid_bytes)
-            .is_none_or(|bytes| bytes > usize::from(header.AceSize))
-            || !trusted_writer(sid, current_user_sid)
-        {
-            return false;
-        }
-    }
-    true
-}
-
-struct LocalDescriptor(PSECURITY_DESCRIPTOR);
-
-impl Drop for LocalDescriptor {
-    fn drop(&mut self) {
-        // SAFETY: GetSecurityInfo allocated this descriptor with LocalAlloc and
-        // transferred ownership to this guard.
-        let _ = unsafe { LocalFree(Some(HLOCAL(self.0 .0))) };
-    }
-}
-
-struct CurrentUser {
-    _token: OwnedHandle,
-    information: Vec<usize>,
-}
-
-impl CurrentUser {
-    fn open(max_bytes: u32) -> Option<Self> {
-        let mut token_handle = HANDLE::default();
-        // SAFETY: the pseudo-process handle is valid and output slot is live.
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token_handle) }
-            .ok()?;
-        if token_handle.is_invalid() {
-            return None;
-        }
-        // SAFETY: OpenProcessToken transferred ownership of this handle.
-        let token = unsafe { OwnedHandle::from_raw_handle(token_handle.0) };
-        let token_handle = HANDLE(token.as_raw_handle());
-        let mut bytes = 0u32;
-        // SAFETY: a null buffer is the documented size query.
-        let _ = unsafe { GetTokenInformation(token_handle, TokenUser, None, 0, &raw mut bytes) };
-        if bytes < u32::try_from(std::mem::size_of::<TOKEN_USER>()).ok()? || bytes > max_bytes {
-            return None;
-        }
-        let words = usize::try_from(bytes)
-            .ok()?
-            .checked_add(std::mem::size_of::<usize>() - 1)?
-            / std::mem::size_of::<usize>();
-        let mut information = vec![0usize; words];
-        // SAFETY: the aligned buffer has the exact kernel-reported capacity.
-        unsafe {
-            GetTokenInformation(
-                token_handle,
-                TokenUser,
-                Some(information.as_mut_ptr().cast()),
-                bytes,
-                &raw mut bytes,
-            )
-        }
-        .ok()?;
-        Some(Self {
-            _token: token,
-            information,
-        })
-    }
-
-    fn sid(&self) -> PSID {
-        // SAFETY: successful construction populated at least TOKEN_USER and
-        // the backing aligned allocation is borrowed for this call.
-        unsafe { &*self.information.as_ptr().cast::<TOKEN_USER>() }
-            .User
-            .Sid
-    }
-}
-
-fn trusted_writer(candidate: PSID, current_user: PSID) -> bool {
-    use windows::Win32::Security::{
-        CreateWellKnownSid, WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid,
-        WinCreatorOwnerSid, WinLocalSystemSid, WELL_KNOWN_SID_TYPE,
-    };
-
-    // SAFETY: caller validated both live SIDs.
-    if unsafe { EqualSid(candidate, current_user) }.is_ok() {
-        return true;
-    }
-    [
-        WinLocalSystemSid,
-        WinBuiltinAdministratorsSid,
-        WinCreatorOwnerSid,
-        WinCreatorOwnerRightsSid,
-    ]
-    .into_iter()
-    .any(|kind: WELL_KNOWN_SID_TYPE| {
-        let mut storage = [0usize; 16];
-        let mut bytes = u32::try_from(std::mem::size_of_val(&storage)).unwrap_or(u32::MAX);
-        let trusted = PSID(storage.as_mut_ptr().cast());
-        // SAFETY: storage exceeds SECURITY_MAX_SID_SIZE and the immediate
-        // comparison borrows both live SIDs.
-        unsafe {
-            CreateWellKnownSid(kind, None, Some(trusted), &raw mut bytes).is_ok()
-                && EqualSid(candidate, trusted).is_ok()
-        }
-    })
+pub(crate) fn sync_ancestor_directory(path: &Path) -> Result<(), PrivateFsError> {
+    sync_directory(&absolute_directory(path, false)?)
 }

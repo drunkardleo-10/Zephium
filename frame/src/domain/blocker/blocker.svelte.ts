@@ -23,7 +23,7 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function boundedIpc<T>(request: Promise<T>, milliseconds: number): Promise<T> {
+export async function boundedIpc<T>(request: Promise<T>, milliseconds: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -132,7 +132,7 @@ export async function refresh(): Promise<void> {
 export type BlockerMutationResult =
   operations.OperationResolution | { state: "not_admitted" } | { state: "unavailable" };
 
-async function settleMutation(
+export async function settleMutation(
   dispatch: () => Promise<OperationAdmission>,
 ): Promise<BlockerMutationResult> {
   // Install the operation event listener before admission. The ledger query

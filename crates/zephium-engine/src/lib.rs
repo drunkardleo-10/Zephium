@@ -4,7 +4,7 @@ mod agent_context_port;
 pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(feature = "agentic-browser")]
 pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES};
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
 mod host;
@@ -105,14 +105,14 @@ pub use platform::macos::{
     MacosPasskeyAuthorizationRequestFailure, MacosPasskeyAuthorizationState,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 macro_rules! diagnostic {
     ($($argument:tt)*) => {{
         crate::diagnostics::write(format_args!($($argument)*));
     }};
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 pub(crate) use diagnostic;
 
 /// Runs one bounded macOS native-input matrix on the process main thread.
@@ -484,210 +484,6 @@ pub fn run_macos_page_permission_probe() -> Result<(), String> {
     platform::macos::run_page_permission_probe()
 }
 
-/// Runs the public WKWebExtension feasibility probe on the process main thread.
-///
-/// `Ok(true)` means the live macOS 15.4+ probe executed and passed. `Ok(false)`
-/// is an explicit unsupported-runtime skip on older macOS versions. This API is
-/// absent from ordinary product builds and does not enable extension support.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_web_extension_probe() -> Result<bool, String> {
-    platform::macos::run_web_extension_probe()
-}
-
-/// Runs the opt-in long-duration MV3 alarm delivery gate.
-///
-/// The probe arms a standards-minimum alarm, unloads and reloads the exact
-/// native context, and requires the service worker to wake and persist the
-/// delivery. It is intentionally excluded from ordinary CI and product builds.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_web_extension_alarm_delivery_probe() -> Result<bool, String> {
-    platform::macos::run_web_extension_alarm_delivery_probe()
-}
-
-/// Runs the interactive WebKit optional-permission settlement gate.
-///
-/// This feature-only probe requires three real clicks in temporary
-/// extension-origin page windows so WebKit recognizes the calls as user
-/// gestures. It is intentionally separate from unattended CI and is absent
-/// from ordinary product builds.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_web_extension_permission_probe() -> Result<bool, String> {
-    platform::macos::run_web_extension_permission_probe()
-}
-
-/// Runs the focused one-click WebKit permission callback-cohort gate.
-///
-/// The probe withholds the first API/host delegate completion and requires
-/// WebKit to deliver the peer callback first. Passing proves Zephium can form
-/// one bounded decision and durable transaction for one JavaScript request.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_web_extension_permission_callback_cohort_probe() -> Result<bool, String> {
-    platform::macos::run_web_extension_permission_callback_cohort_probe()
-}
-
-/// Tests whether an outstanding WebKit permission promise survives replacing
-/// its exact native context before delegate settlement.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_web_extension_permission_replacement_settlement_probe() -> Result<bool, String> {
-    platform::macos::run_web_extension_permission_replacement_settlement_probe()
-}
-
-/// Executes the non-product macOS extension-resource transport capability gate.
-///
-/// A successful result means the current behavior was classified exactly: the
-/// native handler preserves strict WASM MIME for an ordinary web view, while a
-/// controller-owned custom extension origin retains extension identity but
-/// bypasses the attached handler and serves private WASM as
-/// `application/octet-stream`. It does not provision a product catalog or
-/// enable extensions in release builds.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-pub fn run_macos_web_extension_resource_probe() -> Result<bool, String> {
-    platform::macos::run_web_extension_resource_probe()
-}
-
-/// Loads one finalized, explicitly non-product Bitwarden Core probe artifact
-/// through the public WKWebExtension runtime on the process main thread.
-///
-/// This debug-only API is absent from ordinary builds. It revalidates the
-/// artifact's closed tree but confers no catalog, package, or product authority.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_bitwarden_core_probe(artifact: &std::path::Path) -> Result<bool, String> {
-    platform::macos::run_bitwarden_core_probe(artifact)
-}
-
-/// Selects the exact stock-password-manager probe contract.
-///
-/// Both modes are feature-gated diagnostics. Neither mode authorizes a
-/// package for installation or exposes a production compatibility path.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MacosStockPasswordManagerProbeMode {
-    /// Executes the authenticated package without changing any resource.
-    Stock,
-    /// Materializes a private, ephemeral copy and applies only the reviewed
-    /// WebKit API-surface adapters before extension-owned scripts.
-    WebkitApiSurfaceDiagnostic,
-    /// Executes a separately materialized, package-neutral compatibility
-    /// artifact after revalidating its exact pinned source and output trees.
-    WebkitCompatibilityArtifact,
-}
-
-/// Executes an exact, stock password-manager compatibility artifact through
-/// the public macOS extension runtime.
-///
-/// This probe-only API accepts only the pinned tree encoded by its diagnostic
-/// contract. The optional compatibility mode modifies only a private temporary
-/// copy after authenticating that exact source tree. It grants no package,
-/// catalog, or product authority and is absent from ordinary builds.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_stock_password_manager_probe(
-    extension: &std::path::Path,
-    tree_index: &std::path::Path,
-    mode: MacosStockPasswordManagerProbeMode,
-) -> Result<bool, String> {
-    platform::macos::run_stock_password_manager_probe(extension, tree_index, mode)
-}
-
-/// Executes the exact authenticated stock 1Password Chrome Web Store package.
-///
-/// This feature-gated diagnostic accepts only the pinned signed tree encoded
-/// by its contract. It grants no catalog, installation, or product authority
-/// and does not modify any extension resource.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_onepassword_probe(
-    extension: &std::path::Path,
-    tree_index: &std::path::Path,
-) -> Result<bool, String> {
-    platform::macos::run_onepassword_probe(extension, tree_index)
-}
-
-/// Executes the exact non-authorizing package-neutral artifact derived from
-/// the pinned stock 1Password tree.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_onepassword_compatibility_artifact_probe(
-    artifact: &std::path::Path,
-) -> Result<bool, String> {
-    platform::macos::run_onepassword_compatibility_artifact_probe(artifact)
-}
-
-/// Executes the package-neutral compatibility artifact derived from the exact
-/// pinned stock password-manager tree.
-///
-/// This remains a feature-gated diagnostic. Artifact metadata is explicitly
-/// non-authorizing and cannot provision a product catalog or runtime.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_stock_password_manager_compatibility_artifact_probe(
-    artifact: &std::path::Path,
-) -> Result<bool, String> {
-    platform::macos::run_stock_password_manager_compatibility_artifact_probe(artifact)
-}
-
-/// Executes the exact Zephium-owned package-neutral compatibility fixture.
-///
-/// The artifact remains feature-gated, non-authorizing diagnostic evidence.
-/// Passing proves isolated content/background messaging through native WebKit;
-/// it does not provision a product package or catalog entry.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_extension_compatibility_fixture_probe(
-    artifact: &std::path::Path,
-) -> Result<bool, String> {
-    platform::macos::run_extension_compatibility_fixture_probe(artifact)
-}
-
-/// Executes the exact authenticated Vimium compatibility artifact through
-/// public WKWebExtension APIs and real AppKit keyboard routing.
-///
-/// The feature-gated gate pins both source and transformed trees and grants no
-/// package, catalog, installation, or product authority.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_vimium_compatibility_artifact_probe(
-    artifact: &std::path::Path,
-) -> Result<bool, String> {
-    platform::macos::run_vimium_compatibility_artifact_probe(artifact)
-}
-
-/// Executes one authenticated, package-neutral compatibility artifact through
-/// a representative page-theme/action workflow.
-///
-/// This feature-gated diagnostic accepts no package, catalog, installation, or
-/// product authority. It exists to evaluate exact external artifacts without
-/// adding package-specific production code or vendoring third-party bytes.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_representative_extension_probe(
-    artifact: &std::path::Path,
-) -> Result<bool, String> {
-    platform::macos::run_representative_extension_probe(artifact)
-}
-
-/// Executes one exact, indexed stock extension through the representative
-/// page-theme/action workflow without modifying any third-party byte.
-///
-/// The caller-provided canonical index closes the diagnostic input against
-/// mutation. This still grants no package, catalog, install, or product
-/// authority and is absent from ordinary builds.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-#[doc(hidden)]
-pub fn run_macos_representative_stock_extension_probe(
-    extension: &std::path::Path,
-    tree_index: &std::path::Path,
-) -> Result<bool, String> {
-    platform::macos::run_representative_stock_extension_probe(extension, tree_index)
-}
-
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -697,15 +493,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
 };
 use zephium_core::extensions::{
     ExtensionActionRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
     ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
-    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
-    ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
@@ -714,9 +508,6 @@ use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationPresentationId,
     NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, StageMotion, UserContent,
     UserContentGeneration, ZoomRequestId,
-};
-use zephium_core::ports::extensions::{
-    ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRequestId,
 };
 use zephium_core::runtime_security::RuntimeSecurityAdvisories;
 use zephium_core::split::Pane;
@@ -1182,9 +973,6 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
-            event @ EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => {
-                self.profile_is_active(runtime.profile()).then_some(event)
-            }
             event @ EngineEvent::ExtensionActionsInvalidated { profile } => {
                 self.profile_is_active(profile).then_some(event)
             }
@@ -1194,14 +982,44 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
                 self.profile_is_active(runtime.profile()).then_some(event)
             }
+            event @ EngineEvent::ExtensionCreatedTabReplied { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
+            }
             // This is an untrusted request, not a native-state fact. Deliver
             // it after profile retirement so Shell can explicitly reject the
             // retained native completion instead of waiting for its timeout.
             event @ EngineEvent::ExtensionBrowserRequested { .. }
-            | event @ EngineEvent::ExtensionCompatibilityBrokerRequested { .. }
-            | event @ EngineEvent::ExtensionRuntimeGrantRequested { .. }
-            | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. }
-            | event @ EngineEvent::PermissionRequested { .. } => Some(event),
+            | event @ EngineEvent::ExtensionPageClosed { .. }
+            | event @ EngineEvent::PermissionRequested { .. }
+            | event @ EngineEvent::WebExtensionAccessRequested(_) => Some(event),
+            EngineEvent::WebExtensionSettled {
+                profile,
+                install,
+                result,
+            } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::WebExtensionSettled {
+                    profile,
+                    install,
+                    result,
+                }),
+            EngineEvent::ExtensionPageChanged {
+                profile,
+                id,
+                title,
+                loading,
+                can_go_back,
+                can_go_forward,
+            } => self
+                .profile_is_active(profile)
+                .then(|| EngineEvent::ExtensionPageChanged {
+                    profile,
+                    id,
+                    title: zephium_core::item::sanitize_page_title(&title),
+                    loading,
+                    can_go_back,
+                    can_go_forward,
+                }),
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
             | event @ EngineEvent::PresentationPending { id, .. }
@@ -1529,7 +1347,6 @@ pub struct WebviewEngine {
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
     stage_motion: StageMotionHints,
     user_content_dispatch: Arc<UserContentDispatchGate>,
-    extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot,
     #[cfg(feature = "agentic-browser")]
     agent_context_port: agent_context_port::AgentContextPortSlot,
 }
@@ -1707,8 +1524,6 @@ pub fn install(
             fail_native_host_admission(&event_delivery, &retirement, &fatal, reason)
         }) as Arc<dyn Fn(&'static str) + Send + Sync>
     };
-    let extension_runtime_host =
-        host::extension_runtime::ExtensionRuntimeHostFactorySlot::new(dispatch.clone());
     #[cfg(feature = "agentic-browser")]
     let agent_context_port = agent_context_port::AgentContextPortSlot::new(
         dispatch.clone(),
@@ -1718,9 +1533,9 @@ pub fn install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
+        dispatch.clone(),
         initial_user_content.generation,
         initial_user_content.content,
-        extension_runtime_host.gate(),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Arc::new(NativeOpenAuthority {
             retirement: retirement.clone(),
@@ -1740,7 +1555,6 @@ pub fn install(
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
         stage_motion: StageMotionHints::default(),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-        extension_runtime_host,
         #[cfg(feature = "agentic-browser")]
         agent_context_port,
     })
@@ -1806,17 +1620,6 @@ impl WebviewEngine {
         sink: impl Fn(zephium_agentic::ContextNativeEvent) + Send + Sync + 'static,
     ) -> Option<Arc<dyn zephium_agentic::AgentBrowserPort>> {
         self.agent_context_port.take(Arc::new(sink))
-    }
-
-    /// Takes the process-unique native extension-runtime host factory.
-    ///
-    /// The factory is deliberately move-only and serialized. Exactly one
-    /// caller can acquire it, including when several startup threads race.
-    #[must_use]
-    pub fn take_extension_runtime_host_factory(
-        &self,
-    ) -> Option<zephium_extension_runtime_api::ExtensionRuntimeHostFactory> {
-        self.extension_runtime_host.take()
     }
 
     /// Feed an update signal from a privileged environment into the same
@@ -1901,6 +1704,66 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn set_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        counter: zephium_core::blocker::BlockedLoadCounter,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_blocker_statistics(profile, counter));
+        });
+    }
+    fn collect_blocker_statistics(
+        &self,
+        profile: ProfileId,
+        reset: bool,
+        done: Box<dyn FnOnce() + Send>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                host.collect_blocker_statistics(profile, reset);
+                done();
+            });
+        });
+    }
+
+    fn validate_content_rules(
+        &self,
+        rules: Arc<ContentRules>,
+        completion: zephium_core::ports::engine::ContentRuleValidationCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.validate_content_rules(rules, completion));
+        });
+    }
+
+    fn element_picker(
+        &self,
+        profile: ProfileId,
+        id: ItemId,
+        site: zephium_core::blocker::BlockerSite,
+        request: zephium_core::blocker::ElementPickerRequest,
+        completion: zephium_core::blocker::ElementPickerCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                host.element_picker(profile, id, site, request, completion)
+            });
+        });
+    }
+
+    fn set_blocker_site_preferences(
+        &self,
+        profile: ProfileId,
+        preferences: Arc<zephium_core::blocker::PreparedBlockerSites>,
+        completion: zephium_core::ports::engine::BlockerSiteCompletion,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| {
+                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+            });
+        });
+    }
     fn download_call(
         &self,
         partition: Partition,
@@ -2084,13 +1947,76 @@ impl Engine for WebviewEngine {
         }))
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn load_web_extension(
+        &self,
+        profile: ProfileId,
+        load: zephium_core::ports::engine::WebExtensionLoad,
+    ) -> NativeDispatch {
+        if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+            return NativeDispatch::Rejected;
+        }
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.load_web_extension(profile, load));
+        }))
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn unload_web_extension(
+        &self,
+        profile: ProfileId,
+        install: zephium_core::ids::ExtensionInstallId,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.unload_web_extension(profile, install));
+        }))
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn open_web_extension_options(
+        &self,
+        profile: ProfileId,
+        extension_id: String,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| {
+                host.open_web_extension_options(profile, &extension_id)
+            });
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn answer_web_extension_access(
+        &self,
+        profile: ProfileId,
+        request: u64,
+        allowed: bool,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| {
+                host.answer_web_extension_access(profile, request, allowed)
+            });
+        }))
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn remove_web_extension(
+        &self,
+        profile: ProfileId,
+        load: zephium_core::ports::engine::WebExtensionLoad,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.remove_web_extension(profile, load));
+        }))
+    }
+
     fn request_extension_actions(
         &self,
         profile: ProfileId,
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
                 return NativeDispatch::Rejected;
@@ -2129,7 +2055,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (profile, tab, surface_generation);
             NativeDispatch::Unsupported
@@ -2137,7 +2063,7 @@ impl Engine for WebviewEngine {
     }
 
     fn invoke_extension_action(&self, request: ExtensionActionRequest) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let profile = request.runtime().profile();
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
@@ -2152,17 +2078,14 @@ impl Engine for WebviewEngine {
                 let request_id = request.id();
                 let application_sink = sink.clone();
                 let admitted = host::try_with(move |host| {
-                    if let host::ExtensionActionInvocationOutcome::Settled(settlement) =
-                        host.invoke_extension_action(request)
-                    {
-                        application_sink(EngineEventIngress::global(
-                            EngineEvent::ExtensionActionSettled {
-                                profile,
-                                request: request_id,
-                                settlement,
-                            },
-                        ));
-                    }
+                    let settlement = host.invoke_extension_action(request);
+                    application_sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionActionSettled {
+                            profile,
+                            request: request_id,
+                            settlement,
+                        },
+                    ));
                 });
                 if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
                 {
@@ -2178,53 +2101,9 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = request;
-            NativeDispatch::Unsupported
-        }
-    }
-
-    fn open_extension_options(&self, runtime: ExtensionRuntimeInstance) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
-        {
-            let profile = runtime.profile();
-            if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
-                return NativeDispatch::Rejected;
-            }
-            let queued_retirement = self.retirement.clone();
-            let sink = self.sink.clone();
-            NativeDispatch::from_scheduled(self.run(move || {
-                if !lock_retirement_gate(&queued_retirement).profile_is_active(profile) {
-                    return;
-                }
-                let application_sink = sink.clone();
-                let admitted = host::try_with(move |host| {
-                    let settlement = host.open_extension_options(runtime);
-                    application_sink(EngineEventIngress::global(
-                        EngineEvent::ExtensionOptionsPageSettled {
-                            runtime,
-                            settlement,
-                        },
-                    ));
-                });
-                if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
-                {
-                    sink(EngineEventIngress::global(
-                        EngineEvent::ExtensionOptionsPageSettled {
-                            runtime,
-                            settlement:
-                                zephium_core::extensions::ExtensionOptionsPageSettlement::Rejected(
-                                    ExtensionActionRejection::NativeAdmissionFailed,
-                                ),
-                        },
-                    ));
-                }
-            }))
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = runtime;
             NativeDispatch::Unsupported
         }
     }
@@ -2234,68 +2113,67 @@ impl Engine for WebviewEngine {
         profile: ProfileId,
         request: ExtensionBrowserRequestId,
         settlement: ExtensionBrowserRequestSettlement,
+        first_url_after_reply: Option<(
+            std::sync::Arc<str>,
+            zephium_core::ports::engine::NavigationRequestId,
+        )>,
     ) -> NativeDispatch {
         #[cfg(target_os = "macos")]
         {
-            // Settlement is cleanup of an already-authorized native callback,
-            // so it must remain admissible after retirement. The registry
-            // treats a cleared/timed-out correlation as an inert stale reply.
-            NativeDispatch::from_scheduled(self.run(move || {
-                let _ = host::with_extension_browser_request_terminal(move |host| {
-                    let _ = host.settle_extension_browser_request(profile, request, settlement);
+            let page = match settlement {
+                ExtensionBrowserRequestSettlement::Applied(zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized { tab, .. }) => Some(tab),
+                _ => None,
+            };
+            let token = page
+                .and_then(|id| lock_retirement_gate(&self.retirement).reserve_item(id, profile));
+            if page.is_some() && token.is_none() {
+                self.run(move || {
+                    let _ = host::with_extension_browser_request_terminal(move |host| {
+                        let _ = host.settle_extension_browser_request(profile, request, ExtensionBrowserRequestSettlement::Rejected(zephium_core::extensions::ExtensionBrowserRequestRejection::NativeAdmissionFailed), None, None);
+                    });
                 });
-            }))
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (profile, request, settlement);
-            NativeDispatch::Unsupported
-        }
-    }
-
-    fn settle_extension_compatibility_broker_request(
-        &self,
-        runtime: ExtensionRuntimeInstance,
-        request: ExtensionCompatibilityBrokerRequestId,
-        settlement: ExtensionCompatibilityBrokerSettlement,
-    ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
-        {
-            NativeDispatch::from_scheduled(self.run(move || {
-                let _ = host::with_extension_browser_request_terminal(move |host| {
-                    let _ = host.settle_extension_compatibility_broker_request(
-                        runtime, request, settlement,
+                return NativeDispatch::Rejected;
+            }
+            let queued_token = token.clone();
+            let retirement = self.retirement.clone();
+            let sink = self.sink.clone();
+            let scheduled = self.run(move || {
+                let settlement = if page.zip(queued_token.as_ref()).is_some_and(|(id, token)| {
+                    !lock_retirement_gate(&retirement).allows_reserved_item(id, profile, token)
+                }) {
+                    ExtensionBrowserRequestSettlement::Rejected(
+                        zephium_core::extensions::ExtensionBrowserRequestRejection::InvalidContext,
+                    )
+                } else {
+                    settlement
+                };
+                let admitted = host::with_extension_browser_request_terminal(move |host| {
+                    let _ = host.settle_extension_browser_request(
+                        profile,
+                        request,
+                        settlement,
+                        queued_token,
+                        first_url_after_reply,
                     );
                 });
-            }))
+                if !admitted {
+                    if let Some(id) = page {
+                        sink(EngineEventIngress::global(
+                            EngineEvent::ExtensionPageClosed { profile, id },
+                        ));
+                    }
+                }
+            });
+            if !scheduled {
+                if let Some((id, token)) = page.zip(token) {
+                    lock_retirement_gate(&self.retirement).forget_item_if_token(id, &token);
+                }
+            }
+            NativeDispatch::from_scheduled(scheduled)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (runtime, request, settlement);
-            NativeDispatch::Unsupported
-        }
-    }
-
-    fn settle_extension_runtime_grant_prompt(
-        &self,
-        runtime: ExtensionRuntimeInstance,
-        request: ExtensionRuntimeGrantRequestId,
-        settlement: ExtensionRuntimeGrantPromptSettlement,
-    ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
-        {
-            // This is terminal cleanup for native callbacks already retained
-            // by the delegate, so retirement cannot revoke its dispatch path.
-            NativeDispatch::from_scheduled(self.run(move || {
-                let _ = host::with_extension_runtime_grant_terminal(move |host| {
-                    let _ =
-                        host.settle_extension_runtime_grant_prompt(runtime, request, settlement);
-                });
-            }))
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (runtime, request, settlement);
+            let _ = (profile, request, settlement, first_url_after_reply);
             NativeDispatch::Unsupported
         }
     }
@@ -2716,7 +2594,6 @@ impl Engine for WebviewEngine {
     fn erase_profile_data(
         &self,
         profile: ProfileId,
-        extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     ) {
         // This is the public retirement linearization point. It deliberately
@@ -2794,7 +2671,7 @@ impl Engine for WebviewEngine {
         if !self.run(move || {
             let for_host = dispatched.clone();
             if !host::try_with_profile_erasure(move |host| {
-                host.erase_profile_data(profile, extension_native_namespace, for_host)
+                host.erase_profile_data(profile, for_host)
             }) {
                 // Host unavailability or exhaustion of the dedicated erasure
                 // band is terminal for content access: native controllers may
@@ -2831,10 +2708,6 @@ impl Engine for WebviewEngine {
     }
 
     fn shutdown(&self, done: Box<dyn FnOnce(bool) + Send>) {
-        // Seal process-local extension reservations before queuing the native
-        // teardown barrier. A racing service bind can therefore never appear
-        // behind shutdown even when the event-loop dispatch is delayed.
-        self.extension_runtime_host.seal();
         #[cfg(feature = "agentic-browser")]
         self.agent_context_port.seal();
         let completion = Arc::new(std::sync::Mutex::new(Some(done)));
@@ -2876,7 +2749,47 @@ mod tests {
         Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
     }
 
-    fn engine_with_extension_runtime_factory() -> WebviewEngine {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extension_guest_admission_reserves_layout_identity_and_rolls_back_rejected_dispatch() {
+        let mut engine = test_engine();
+        let profile = ProfileId::from(900);
+        let id = ItemId::from(901);
+        let request = ExtensionBrowserRequestId::new(1).unwrap();
+        let settlement = ExtensionBrowserRequestSettlement::Applied(
+            zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized {
+                tab: id,
+                window: 1,
+            },
+        );
+        assert_eq!(
+            engine.settle_extension_browser_request(profile, request, settlement, None),
+            NativeDispatch::Rejected
+        );
+        assert!(!lock_retirement_gate(&engine.retirement).allows_item(id));
+        engine.dispatch = Arc::new(|_| true);
+        assert_eq!(
+            engine.settle_extension_browser_request(profile, request, settlement, None),
+            NativeDispatch::Scheduled
+        );
+        assert_eq!(
+            lock_retirement_gate(&engine.retirement).active_profile(id),
+            Some(profile)
+        );
+        assert_eq!(
+            engine.set_content(1, Some(Pane::leaf(id)), Some(Rect::new(0., 0., 800., 600.))),
+            NativeDispatch::Scheduled
+        );
+        assert_eq!(
+            engine.settle_extension_browser_request(profile, request, settlement, None),
+            NativeDispatch::Rejected
+        );
+        assert_eq!(engine.close(id), NativeDispatch::Scheduled);
+        assert!(!lock_retirement_gate(&engine.retirement).allows_item(id));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_engine() -> WebviewEngine {
         WebviewEngine {
             dispatch: Arc::new(|_| false),
             sink: Arc::new(|_| {}),
@@ -2887,44 +2800,9 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot::new(
-                Arc::new(|_| false),
-            ),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         }
-    }
-
-    #[test]
-    fn extension_runtime_host_factory_is_taken_exactly_once() {
-        let engine = engine_with_extension_runtime_factory();
-        assert!(engine.take_extension_runtime_host_factory().is_some());
-        assert!(engine.take_extension_runtime_host_factory().is_none());
-    }
-
-    #[test]
-    fn concurrent_extension_runtime_factory_take_has_one_winner() {
-        let engine = Arc::new(engine_with_extension_runtime_factory());
-        let start = Arc::new(std::sync::Barrier::new(9));
-        let winners = Arc::new(AtomicUsize::new(0));
-        let mut workers = Vec::new();
-        for _ in 0..8 {
-            let engine = Arc::clone(&engine);
-            let start = Arc::clone(&start);
-            let winners = Arc::clone(&winners);
-            workers.push(std::thread::spawn(move || {
-                start.wait();
-                if engine.take_extension_runtime_host_factory().is_some() {
-                    winners.fetch_add(1, Ordering::Relaxed);
-                }
-            }));
-        }
-        start.wait();
-        for worker in workers {
-            worker.join().expect("factory-take worker must not panic");
-        }
-        assert_eq!(winners.load(Ordering::Relaxed), 1);
-        assert!(engine.take_extension_runtime_host_factory().is_none());
     }
 
     #[test]
@@ -3031,8 +2909,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: gate.clone(),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
@@ -3079,8 +2955,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
@@ -3165,18 +3039,12 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
         let profile = ProfileId::from(88);
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(
-            profile,
-            None,
-            Box::new(move |outcome| tx.send(outcome).unwrap()),
-        );
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),
@@ -3207,15 +3075,12 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         engine.erase_profile_data(
             ProfileId::from(89),
-            None,
             Box::new(move |_| {
                 done_entered_tx.send(()).unwrap();
                 let (lock, changed) = &*blocked_release;
@@ -3295,8 +3160,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
@@ -3312,11 +3175,7 @@ mod tests {
 
         reject.store(true, Ordering::Release);
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(
-            profile,
-            None,
-            Box::new(move |outcome| tx.send(outcome).unwrap()),
-        );
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),
@@ -3667,17 +3526,11 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(
-            profile,
-            None,
-            Box::new(move |outcome| tx.send(outcome).unwrap()),
-        );
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),
@@ -3990,8 +3843,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
@@ -4026,8 +3877,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
@@ -4097,8 +3946,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
@@ -4149,8 +3996,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
@@ -4216,8 +4061,6 @@ mod tests {
             layout_updates: test_layout_updates(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
-            extension_runtime_host:
-                host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
             #[cfg(feature = "agentic-browser")]
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };

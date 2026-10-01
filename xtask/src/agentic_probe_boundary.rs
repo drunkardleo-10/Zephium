@@ -1801,10 +1801,9 @@ fn validate_engine_windows_agent_context_boundary(
         "with_permission_handler(|_|wry::PermissionResponse::Deny)",
         "with_download_policy(DownloadPolicy::DenyWithoutMetadata)",
         "with_environment(environment.clone())",
-        "with_browser_extension_startup_gate(gate)",
-        "builder.with_profile_name(name)",
+        "builder.with_profile_name(name.clone())",
         "builder.with_incognito(true)",
-        "profile_inventory_is_empty(&profile,deadline)",
+        "attest_profile(&profile,&view.environment(),&view.webview(),",
         "super::attest_environment(environment,expected_user_data_folder)",
         "controller_environment_matches(environment,core)",
         "profile_is_private(&profile)",
@@ -1822,13 +1821,19 @@ fn validate_engine_windows_agent_context_boundary(
         "pub(crate)fncookie_destination(",
         "matches!(self.profile,AgentOwnedProfile::Automation{..})",
         "super::same_environment(&self.view.environment(),expected_environment)",
-        "self.attest(deadline)?",
+        "self.attest()?",
         "ifself.attest_suspension_state()?",
         "core.CookieManager()",
         "profile.cast::<ICoreWebView2Profile2>()",
         "pub(crate)fnclose(&mutself)->Result<(),wry::WebView2CleanupDebt>",
         "ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory",
         "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
+        "ifextensions_enabled{if!matches!(&profile,AgentOwnedProfile::Automation{..}){returnErr(AgentOwnedViewConstructionError::ExtensionIsolation);}",
+        "builder.with_browser_extension_startup_gate(move|environment,core|{",
+        "if!super::same_environment(&expected_environment,environment){returnErr(windows::Win32::Foundation::E_ACCESSDENIED.into());}",
+        "attest_profile(&expected_profile,environment,core,storage_class,&expected_path,)",
+        "letitems=super::extensions::list(&profile)",
+        "if!super::extensions::is_runtime_component(&id){returnErr(windows::Win32::Foundation::E_ACCESSDENIED.into());}",
     ] {
         if !adapter.contains(required) {
             return Err(format!(
@@ -1880,7 +1885,7 @@ fn validate_engine_windows_agent_context_boundary(
 
     let host = compact(host);
     for required in [
-        "ensure_windows_extension_profile_at_path",
+        "ensure_windows_profile_environment_at_path",
         "browser_process(view.view())",
         "install_content_policy_on_view(view.view(),&content_policy)",
         "resource.reclassify(NativeResourceClass::AgentContext)",
@@ -1900,7 +1905,7 @@ fn validate_engine_windows_agent_context_boundary(
         "self.agent_cookie_transfers.len()>=MAX_PENDING_COOKIE_TRANSFERS",
         "pending.destination_profile==destination_profile",
         "self.selected_profile_cookie_source(",
-        ".cookie_destination(&expected_environment,terminal_deadline)",
+        ".cookie_destination(&expected_environment)",
         "map_cookie_transfer_deadline(request.window(),admitted_at,Instant::now(),)",
         "schedule_content_policy_timeout(watchdog_duration",
         "fnfinish_windows_agent_cookie_transfer",
@@ -1942,6 +1947,19 @@ fn validate_engine_windows_agent_context_boundary(
         ("navigation gate", navigation.as_str()),
         ("host", host.as_str()),
     ] {
+        // Extension-enabled environments require Wry's pre-navigation gate even
+        // for Work's separate, extension-free automation subprofile. Admit only
+        // this adapter's one attestation hook; never extension loading or enablement.
+        let expected_gates = usize::from(label == "adapter");
+        if source
+            .matches("with_browser_extension_startup_gate")
+            .count()
+            != expected_gates
+        {
+            return Err(format!(
+                "production Windows agent-context {label} changed its startup gate authority"
+            ));
+        }
         for forbidden in [
             "with_ipc_handler",
             "with_initialization_script",
@@ -1953,6 +1971,11 @@ fn validate_engine_windows_agent_context_boundary(
             "keybd_event",
             "CGEvent",
             "native-agentic-input-probe",
+            "with_browser_extensions_enabled",
+            "extensions::add(",
+            "extensions::enable(",
+            "extensions::remove(",
+            "AddBrowserExtension",
         ] {
             if source.contains(forbidden) {
                 return Err(format!(
@@ -3877,7 +3900,6 @@ fn validate_windows_semantic_probe(
         ".with_incognito(true)",
         ".with_visible(false)",
         ".with_focused(false)",
-        ".with_browser_extensions_enabled(true)",
         "ContextProfileStorageClass::Ephemeral",
         "ContextOwnedViewport::STANDARD",
         "AgentOwnedProfile::automation(profile_id)",
@@ -8548,7 +8570,7 @@ fn validate_agent_app_lifecycle(
 
     let root = compact_without_line_comments(root);
     for required in [
-        "#[cfg(feature=\"agentic-browser\")]pubuseactor::{spawn_agentic,spawn_agentic_suspended,AgenticLifecycles,AgenticSpawnFailure};",
+        "#[cfg(feature=\"agentic-browser\")]pubuseactor::{spawn_agentic,spawn_agentic_suspended,AgenticSpawnFailure};",
         "#[cfg(feature=\"agentic-browser\")]pubuseapi::AgentLifecycle;",
     ] {
         if !root.contains(required) {
@@ -8575,14 +8597,12 @@ fn validate_agent_app_lifecycle(
         "typeFailure=AgenticSpawnFailure;",
         "structShellHandoff<Agent=NoAgentLifecycle>",
         "agent_lifecycle:Agent,",
-        "pubstructAgenticLifecycles{extension:ExtensionLifecycle,agent:AgentLifecycle,}",
-        "pubfninto_parts(self)->(ExtensionLifecycle,AgentLifecycle)",
-        "pubstructAgenticSpawnFailure{error:SpawnError,extension_lifecycle:ExtensionLifecycle,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
-        "pubfninto_parts(self)->(SpawnError,ExtensionLifecycle,AgentLifecycle)",
+        "pubstructAgenticSpawnFailure{error:SpawnError,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
+        "pubfninto_parts(self)->(SpawnError,AgentLifecycle)",
         "pubfnspawn_agentic_suspended(",
         "agent_lifecycle:PendingAgentBrowserLifecycle(agent_lifecycle),",
         "#[cfg_attr(not(test),deny(clippy::panic,clippy::unreachable,clippy::unwrap_used))]fnspawn_suspended_with_worker_spawner",
-        "lethandoff=ShellHandoff{engine,store,blocker,extension_service,agent_lifecycle,terminal_failure,chrome,emit,};",
+        "lethandoff=ShellHandoff{engine,store,blocker,agent_lifecycle,terminal_failure,chrome,emit,};",
         "ShellHandoff<Agent>",
         "ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle())",
     ] {
@@ -8598,9 +8618,7 @@ fn validate_agent_app_lifecycle(
         );
     }
     for forbidden in [
-        "letmutextension_service=Some(extension_service)",
         "letmutagent_lifecycle=Some(agent_lifecycle)",
-        "expect(\"pendingextension-serviceownerisunique\")",
         "expect(\"pendingagentlifecycleownerisunique\")",
     ] {
         if actor.contains(forbidden) {
@@ -8645,18 +8663,15 @@ fn validate_agent_app_lifecycle(
     let agent = ordered
         .find("self.shutdown_agent_lifecycle_until(deadline)")
         .ok_or_else(|| "application agent lifecycle shutdown is missing".to_owned())?;
-    let extension = ordered
-        .find("self.shutdown_extension_service_until(deadline)")
-        .ok_or_else(|| "application extension lifecycle shutdown is missing".to_owned())?;
     let store = ordered
         .find("self.store.shutdown_until(deadline)")
         .ok_or_else(|| "application terminal Store shutdown is missing".to_owned())?;
     let engine = ordered
         .rfind("self.shutdown_native_and_blocker_until(deadline)")
         .ok_or_else(|| "application terminal engine shutdown is missing".to_owned())?;
-    if !(flush < agent && agent < extension && extension < store && store < engine) {
+    if !(flush < agent && agent < store && store < engine) {
         return Err(
-            "agent lifecycle must follow retryable durability preflight and precede extension, Store, and engine teardown"
+            "agent lifecycle must follow retryable durability preflight and precede Store and engine teardown"
                 .to_owned(),
         );
     }
@@ -8671,7 +8686,6 @@ fn validate_agent_app_lifecycle(
     let unexpected = &shell[unexpected_start..unexpected_end];
     for required in [
         "self.shutdown_agent_lifecycle_until(deadline)",
-        "self.shutdown_extension_service_until(deadline)",
         "self.store.shutdown_until(deadline)",
         "self.shutdown_native_and_blocker_until(deadline)",
     ] {
@@ -9767,16 +9781,16 @@ mod tests {
                 .is_err()
         );
         let invalid_actor = actor.replace(
-            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle, AgentLifecycle)",
-            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle)",
+            "pub fn into_parts(self) -> (SpawnError, AgentLifecycle)",
+            "pub fn into_parts(self) -> SpawnError",
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
                 .is_err()
         );
         let invalid_actor = actor.replace(
-            "        extension_service,\n        agent_lifecycle,\n        terminal_failure,",
-            "        extension_service: Some(extension_service)\n            .take()\n            .expect(\"pending extension-service owner is unique\"),\n        agent_lifecycle,\n        terminal_failure,",
+            "        blocker,\n        agent_lifecycle,\n        terminal_failure,",
+            "        blocker,\n        agent_lifecycle: Some(agent_lifecycle)\n            .take()\n            .expect(\"pending agent lifecycle owner is unique\"),\n        terminal_failure,",
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
@@ -9792,8 +9806,8 @@ mod tests {
                 .is_err()
         );
         let invalid_shell = shell.replacen(
-            "let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let extension_service_clean = self.shutdown_extension_service_until(deadline);",
-            "let extension_service_clean = self.shutdown_extension_service_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);",
+            "self.shutdown_agent_lifecycle_until(deadline)",
+            "self.shutdown_agent_lifecycle_after_store(deadline)",
             1,
         );
         assert!(
@@ -14299,6 +14313,23 @@ mod tests {
             include_str!("../../crates/zephium-engine/src/host/agent_cookie_source.rs");
         validate_engine_windows_agent_context_boundary(module, adapter, timeout, navigation, host)
             .expect("closed Windows production owner");
+        for mutation in [
+            adapter.replace(
+                "if !super::extensions::is_runtime_component(&id)",
+                "if false",
+            ),
+            adapter.replace(
+                "if !matches!(&profile, AgentOwnedProfile::Automation { .. })",
+                "if false",
+            ),
+            format!("{adapter}\nsuper::extensions::add();"),
+            format!("{adapter}\nwith_browser_extension_startup_gate();"),
+        ] {
+            assert!(validate_engine_windows_agent_context_boundary(
+                module, &mutation, timeout, navigation, host,
+            )
+            .is_err());
+        }
         validate_engine_windows_agent_suspension_boundary(
             platform_module,
             adapter,

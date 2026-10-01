@@ -93,7 +93,7 @@ fn assert_terminal_store_callback_cannot_reenter_store(
     case: &str,
     outcome: impl FnOnce(ProfileId) -> BlockerConfigUpdateOutcome,
 ) {
-    let store = Arc::new(FakeStore::default());
+    let store = super::blocker::opted_out_store();
     store
         .hold_blocker_updates
         .store(true, std::sync::atomic::Ordering::Release);
@@ -161,7 +161,7 @@ fn terminal_store_callbacks_cannot_reenter_store_after_shutdown() {
 
 #[test]
 fn pre_terminal_store_result_reconciles_before_store_shutdown() {
-    let store = Arc::new(FakeStore::default());
+    let store = super::blocker::opted_out_store();
     store
         .hold_blocker_updates
         .store(true, std::sync::atomic::Ordering::Release);
@@ -206,10 +206,7 @@ fn pre_terminal_store_result_reconciles_before_store_shutdown() {
 #[test]
 fn shutdown_deadline_includes_time_spent_waiting_before_actor_processing() {
     let store = Arc::new(FakeStore::default());
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
-    let (mut shell, _engine, _screen) =
-        setup_with_extension_lifecycle(store.clone(), extension_service);
+    let (mut shell, _engine, _screen) = setup_with(store.clone());
     shell.handle(Command::Bootstrap);
     store.events.lock().unwrap().clear();
     let (ack, done) = sync_channel(1);
@@ -222,12 +219,6 @@ fn shutdown_deadline_includes_time_spent_waiting_before_actor_processing() {
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
     assert!(shell.shutdown_result.is_none());
     assert!(store.events.lock().unwrap().is_empty());
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
 
     let (ack, done) = sync_channel(1);
     shell.handle(Command::Shutdown {
@@ -238,7 +229,7 @@ fn shutdown_deadline_includes_time_spent_waiting_before_actor_processing() {
 }
 
 #[test]
-fn store_read_quiescence_failure_keeps_extension_lifecycle_retryable() {
+fn store_read_quiescence_failure_keeps_shutdown_retryable() {
     let store = Arc::new(FakeStore::default());
     store
         .history_delay_ms
@@ -264,14 +255,11 @@ fn store_read_quiescence_failure_keeps_extension_lifecycle_retryable() {
         .history_started
         .load(std::sync::atomic::Ordering::Acquire));
 
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
     let mut shell = Shell::with_store_reads(
         ShellPorts::new(
             Arc::new(FakeEngine::default()),
             store,
             Arc::new(ImmediateAllowAllCompiler),
-            extension_service,
             Box::new(|_| {}),
             Arc::new(FakeChrome),
             Box::new(|_| {}),
@@ -286,12 +274,6 @@ fn store_read_quiescence_failure_keeps_extension_lifecycle_retryable() {
         ack,
     });
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
 
     assert!(reads.quiesce_until(std::time::Instant::now() + std::time::Duration::from_secs(2)));
     let (ack, done) = sync_channel(1);
@@ -300,12 +282,6 @@ fn store_read_quiescence_failure_keeps_extension_lifecycle_retryable() {
         ack,
     });
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        1
-    );
     reader
         .join()
         .expect("real Store reader exits after shutdown");
@@ -316,10 +292,7 @@ fn store_read_quiescence_failure_keeps_extension_lifecycle_retryable() {
 fn failed_shutdown_barrier_keeps_state_live_for_retry() {
     let store = Arc::new(FakeStore::default());
     *store.flush_result.lock().unwrap() = Some(false);
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
-    let (mut shell, _engine, screen) =
-        setup_with_extension_lifecycle(store.clone(), extension_service);
+    let (mut shell, _engine, screen) = setup_with(store.clone());
     shell.handle(Command::Bootstrap);
 
     let (ack, done) = sync_channel(1);
@@ -328,13 +301,6 @@ fn failed_shutdown_barrier_keeps_state_live_for_retry() {
         ack,
     });
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        0,
-        "preflight failure must leave the unique service owner live"
-    );
 
     let before = last(&screen).tabs.len();
     shell.handle(Command::Open);
@@ -347,134 +313,6 @@ fn failed_shutdown_barrier_keeps_state_live_for_retry() {
         ack,
     });
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        1
-    );
-}
-
-#[test]
-fn retryable_shutdown_restores_a_startup_wake_rejected_while_sealed() {
-    use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{Ready, Unavailable};
-
-    let store = Arc::new(FakeStore::default());
-    *store.flush_result.lock().unwrap() = Some(false);
-    let (extension_service, _extension_state) = extension_lifecycle_with_startup_outcomes([
-        Unavailable,
-        Ready(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
-    ]);
-    let mut shell = Shell::new_with_extension_lifecycle(
-        Arc::new(FakeEngine::default()),
-        store.clone(),
-        Arc::new(ImmediateAllowAllCompiler),
-        extension_service,
-        Arc::new(FakeChrome),
-        Box::new(|_| {}),
-    );
-    let queue = CommandQueue::new();
-    shell.self_queue = Some(queue.clone());
-    let _handle = Handle::new(queue.clone());
-
-    shell.handle(Command::Bootstrap);
-    assert!(queue.has_extension_startup_deadline_for_test());
-    let original_not_before = shell
-        .extension_startup_not_before
-        .expect("transient startup publishes an actor-owned retry deadline");
-    assert_eq!(
-        queue.extension_startup_deadline_for_test(),
-        Some(original_not_before)
-    );
-    // Model TimerWake::ExtensionStartup consuming its exact deadline before
-    // Command::Bootstrap is rejected by the sealed shutdown queue.
-    queue.cancel_extension_startup();
-    assert!(!queue.has_extension_startup_deadline_for_test());
-
-    let (ack, done) = sync_channel(1);
-    queue
-        .try_push(Command::Shutdown {
-            deadline: test_shutdown_deadline(),
-            ack,
-        })
-        .ok()
-        .unwrap();
-    shell.handle(queue.try_recv().expect("shutdown barrier is queued"));
-
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
-    assert_eq!(
-        shell.extension_startup_not_before,
-        Some(original_not_before),
-        "retryable shutdown must not extend or replace the admitted opportunity"
-    );
-    assert_eq!(
-        queue.extension_startup_deadline_for_test(),
-        Some(original_not_before),
-        "a wake consumed before sealed admission must be restored exactly"
-    );
-
-    // A subsequent Ready settlement cancels the restored wake and permits
-    // normal bootstrap rather than waiting for the 60-second maintenance tick.
-    shell.extension_startup_not_before = Some(std::time::Instant::now());
-    shell.handle(Command::Bootstrap);
-    assert!(shell.bootstrapped);
-    assert!(!queue.has_extension_startup_deadline_for_test());
-
-    *store.flush_result.lock().unwrap() = Some(true);
-    let (ack, done) = sync_channel(1);
-    shell.handle(Command::Shutdown {
-        deadline: test_shutdown_deadline(),
-        ack,
-    });
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
-}
-
-#[test]
-fn retryable_store_refusal_after_extension_consumption_is_terminal() {
-    let store = Arc::new(FakeStore::default());
-    *store.shutdown_outcome.lock().unwrap() = Some(StoreShutdownOutcome::RetryableFailure);
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
-    let (mut shell, engine, screen) = setup_with_extension_lifecycle(store, extension_service);
-    shell.handle(Command::Bootstrap);
-    let before = last(&screen).tabs.len();
-
-    let (ack, done) = sync_channel(1);
-    shell.handle(Command::Shutdown {
-        deadline: test_shutdown_deadline(),
-        ack,
-    });
-
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        1
-    );
-    assert_eq!(
-        engine
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        1,
-        "terminal Store refusal must not skip native teardown"
-    );
-    shell.handle(Command::Open);
-    assert_eq!(last(&screen).tabs.len(), before);
-
-    let (ack, repeated) = sync_channel(1);
-    shell.handle(Command::Shutdown {
-        deadline: test_shutdown_deadline(),
-        ack,
-    });
-    assert_eq!(repeated.recv().unwrap(), ShutdownOutcome::Unclean);
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        1,
-        "sticky terminal shutdown must not consume the lifecycle twice"
-    );
 }
 
 #[test]
@@ -499,48 +337,6 @@ fn uncertain_store_termination_still_initiates_native_teardown() {
     );
 }
 
-#[test]
-fn extension_failure_is_terminal_but_does_not_skip_later_teardown_barriers() {
-    let order = Arc::new(Mutex::new(Vec::new()));
-    let store = Arc::new(FakeStore::default());
-    *store.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
-    let engine = Arc::new(FakeEngine::default());
-    *engine.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
-    let blocker = Arc::new(OrderedShutdownBlocker {
-        order: Arc::clone(&order),
-        panic_on_shutdown: false,
-    });
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Unclean);
-    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
-    let requested_deadline = test_shutdown_deadline();
-    let mut shell = Shell::new_with_extension_lifecycle(
-        engine,
-        store,
-        blocker,
-        extension_service,
-        Arc::new(FakeChrome),
-        Box::new(|_| {}),
-    );
-
-    let (ack, done) = sync_channel(1);
-    shell.handle(Command::Shutdown {
-        deadline: requested_deadline,
-        ack,
-    });
-
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
-    assert_eq!(
-        extension_state.deadlines.lock().unwrap().as_slice(),
-        &[requested_deadline],
-        "every barrier must consume the caller-owned absolute deadline"
-    );
-    assert_eq!(
-        order.lock().unwrap().as_slice(),
-        &["extensions", "store", "engine", "blocker"]
-    );
-}
-
 #[cfg(feature = "agentic-browser")]
 #[test]
 fn clean_agent_lifecycle_proof_precedes_every_terminal_owner() {
@@ -553,9 +349,6 @@ fn clean_agent_lifecycle_proof_precedes_every_terminal_owner() {
         order: Arc::clone(&order),
         panic_on_shutdown: false,
     });
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
-    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
     let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(true);
     *agent_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
     let deadline = test_shutdown_deadline();
@@ -563,7 +356,6 @@ fn clean_agent_lifecycle_proof_precedes_every_terminal_owner() {
         engine,
         store,
         blocker,
-        extension_service,
         agent_lifecycle,
         Arc::new(FakeChrome),
         Box::new(|_| {}),
@@ -575,7 +367,7 @@ fn clean_agent_lifecycle_proof_precedes_every_terminal_owner() {
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
     assert_eq!(
         order.lock().unwrap().as_slice(),
-        &["agent", "extensions", "store", "engine", "blocker"]
+        &["agent", "store", "engine", "blocker"]
     );
     assert_eq!(
         agent_state.deadlines.lock().unwrap().as_slice(),
@@ -597,14 +389,11 @@ fn clean_agent_lifecycle_proof_precedes_every_terminal_owner() {
 fn unclean_agent_lifecycle_is_terminal_but_does_not_skip_cleanup() {
     let store = Arc::new(FakeStore::default());
     let engine = Arc::new(FakeEngine::default());
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
     let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(false);
     let mut shell = Shell::new_with_agent_lifecycle(
         engine.clone(),
         store.clone(),
         Arc::new(ImmediateAllowAllCompiler),
-        extension_service,
         agent_lifecycle,
         Arc::new(FakeChrome),
         Box::new(|_| {}),
@@ -619,12 +408,6 @@ fn unclean_agent_lifecycle_is_terminal_but_does_not_skip_cleanup() {
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
     assert_eq!(
         agent_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        1
-    );
-    assert_eq!(
-        extension_state
             .shutdown_calls
             .load(std::sync::atomic::Ordering::Acquire),
         1
@@ -648,14 +431,11 @@ fn unclean_agent_lifecycle_is_terminal_but_does_not_skip_cleanup() {
 fn retryable_preflight_preserves_agent_lifecycle_for_one_later_consumption() {
     let store = Arc::new(FakeStore::default());
     *store.flush_result.lock().unwrap() = Some(false);
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
     let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(true);
     let mut shell = Shell::new_with_agent_lifecycle(
         Arc::new(FakeEngine::default()),
         store.clone(),
         Arc::new(ImmediateAllowAllCompiler),
-        extension_service,
         agent_lifecycle,
         Arc::new(FakeChrome),
         Box::new(|_| {}),
@@ -669,12 +449,6 @@ fn retryable_preflight_preserves_agent_lifecycle_for_one_later_consumption() {
     assert_eq!(first.recv().unwrap(), ShutdownOutcome::RetryableFailure);
     assert_eq!(
         agent_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
-    assert_eq!(
-        extension_state
             .shutdown_calls
             .load(std::sync::atomic::Ordering::Acquire),
         0
@@ -707,9 +481,6 @@ fn panicking_agent_lifecycle_is_contained_and_later_barriers_run() {
         order: Arc::clone(&order),
         panic_on_shutdown: false,
     });
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
-    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
     let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(true);
     *agent_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
     agent_state
@@ -719,7 +490,6 @@ fn panicking_agent_lifecycle_is_contained_and_later_barriers_run() {
         engine,
         store,
         blocker,
-        extension_service,
         agent_lifecycle,
         Arc::new(FakeChrome),
         Box::new(|_| {}),
@@ -734,7 +504,7 @@ fn panicking_agent_lifecycle_is_contained_and_later_barriers_run() {
     assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
     assert_eq!(
         order.lock().unwrap().as_slice(),
-        &["agent", "extensions", "store", "engine", "blocker"]
+        &["agent", "store", "engine", "blocker"]
     );
 }
 
@@ -749,14 +519,11 @@ fn every_panicking_terminal_barrier_runs_and_acknowledges_unclean_once() {
         order: Arc::clone(&order),
         panic_on_shutdown: true,
     });
-    let (extension_service, extension_state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
-    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
-    let mut shell = Shell::new_with_extension_lifecycle(
+    let mut shell = Shell::new_with_failure(
         engine.clone(),
         store.clone(),
         blocker,
-        extension_service,
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(|_| {}),
     );
@@ -770,9 +537,6 @@ fn every_panicking_terminal_barrier_runs_and_acknowledges_unclean_once() {
         .panic_on_flush
         .store(true, std::sync::atomic::Ordering::Release);
     store
-        .panic_on_shutdown
-        .store(true, std::sync::atomic::Ordering::Release);
-    extension_state
         .panic_on_shutdown
         .store(true, std::sync::atomic::Ordering::Release);
     engine
@@ -796,17 +560,10 @@ fn every_panicking_terminal_barrier_runs_and_acknowledges_unclean_once() {
         &[
             "persist",
             "store-preflight",
-            "extensions",
             "store-final",
             "engine",
             "blocker",
         ]
-    );
-    assert_eq!(
-        extension_state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire),
-        1
     );
     assert_eq!(
         store
