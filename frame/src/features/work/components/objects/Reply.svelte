@@ -2,6 +2,7 @@
   import type { ReplyView } from "../../lib/board/types";
   import DocumentView from "$shared/ui/data/Artifact/DocumentView.svelte";
   import Inline from "./Inline.svelte";
+  import Shimmer from "$shared/ui/presence/Shimmer.svelte";
   /** The answer, set on the canvas like a caption: a headline, a few lines, the figures. */
   let {
     object,
@@ -16,7 +17,7 @@
 <article class="reply" class:waiting={object.state === "pending"} aria-label={object.headline}>
   {#if object.state === "pending"}
     <!-- Still coming: one quiet line where the answer will stand, never set as its headline. -->
-    <p class="pending" role="status">{object.headline}</p>
+    <p class="pending" role="status"><Shimmer text={object.headline} /></p>
   {:else}
     <h2>{object.headline}</h2>
     {#if object.text}<p class="text"><Inline text={object.text} /></p>{/if}
@@ -139,10 +140,15 @@
     content: "";
   }
 
+  /* The answer's place while it is written: one line a light passes along,
+     the island's own voice; still once off screen, gone once the answer lands. */
   .pending {
+    --shimmer-rest: var(--color-faint);
+    --shimmer-lit: var(--color-text);
+
     margin: 0;
-    color: var(--color-faint);
     font-size: var(--text-reading);
+    font-weight: 500;
     line-height: 1.4;
   }
 
