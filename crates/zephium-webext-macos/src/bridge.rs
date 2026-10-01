@@ -55,6 +55,7 @@ pub(crate) fn handle(
             .unwrap_or_default();
         let reply = reply.copy();
         offscreen::create(
+            shared,
             context,
             url,
             Box::new(move |result| match result {
@@ -91,12 +92,12 @@ pub(crate) fn handle(
             if crate::tracing() {
                 eprintln!("webext-trace: worker of {id} started");
             }
-            crate::worker_gone(&id);
+            crate::worker_gone(shared, &id);
             crate::lifetime::started(shared, &id);
             Ok(Value::Null)
         }
-        Some("offscreen.close") => Ok(Value::Bool(offscreen::close(&extension(context)))),
-        Some("offscreen.has") => Ok(Value::Bool(offscreen::has(&extension(context)))),
+        Some("offscreen.close") => Ok(Value::Bool(offscreen::close(shared, &extension(context)))),
+        Some("offscreen.has") => Ok(Value::Bool(offscreen::has(shared, &extension(context)))),
         Some("clipboard.write")
             if permitted(context, unsafe { WKWebExtensionPermissionClipboardWrite }) =>
         {

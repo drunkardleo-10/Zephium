@@ -22,9 +22,9 @@ struct Batch {
     answers: Vec<Answer>,
 }
 
-thread_local! {
-    static BATCHES: RefCell<HashMap<String, Batch>> = RefCell::new(HashMap::new());
-}
+/// A profile's requests still gathering their second callback.
+#[derive(Default)]
+pub(crate) struct Batches(RefCell<HashMap<String, Batch>>);
 
 /// Long enough for WebKit's second callback of the same request.
 const GATHER_SECONDS: f64 = 0.05;
@@ -36,15 +36,15 @@ pub(crate) fn request(
     patterns: Vec<String>,
     answer: Answer,
 ) {
-    let first = BATCHES.with(|batches| {
-        let mut batches = batches.borrow_mut();
+    let first = {
+        let mut batches = shared.access.0.borrow_mut();
         let first = !batches.contains_key(extension);
         let batch = batches.entry(extension.to_string()).or_default();
         batch.permissions.extend(permissions);
         batch.patterns.extend(patterns);
         batch.answers.push(answer);
         first
-    });
+    };
     if !first {
         return;
     }
@@ -57,7 +57,10 @@ pub(crate) fn request(
 }
 
 fn ask(shared: &RcWeak<Shared>, extension: &str) {
-    let Some(batch) = BATCHES.with(|batches| batches.borrow_mut().remove(extension)) else {
+    let Some(shared) = shared.upgrade() else {
+        return;
+    };
+    let Some(batch) = shared.access.0.borrow_mut().remove(extension) else {
         return;
     };
     let answers = batch.answers;
@@ -72,8 +75,5 @@ fn ask(shared: &RcWeak<Shared>, extension: &str) {
         permissions: batch.permissions,
         patterns: batch.patterns,
     };
-    match shared.upgrade() {
-        Some(shared) => shared.host().prompt_access(request, settle),
-        None => settle(false),
-    }
+    shared.host().prompt_access(request, settle);
 }

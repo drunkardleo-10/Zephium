@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -14,6 +15,8 @@ use objc2_foundation::{NSError, NSObjectProtocol, NSRect, NSString, NSTimer, NSU
 use objc2_web_kit::{
     WKContentWorld, WKNavigation, WKNavigationDelegate, WKWebExtensionContext, WKWebView,
 };
+
+use crate::runtime::Shared;
 
 type Loaded = Box<dyn FnOnce(Result<(), String>)>;
 
@@ -59,9 +62,9 @@ impl Page {
     }
 }
 
-thread_local! {
-    static DOCUMENTS: RefCell<HashMap<String, Page>> = RefCell::new(HashMap::new());
-}
+/// A profile's offscreen documents, one per extension.
+#[derive(Default)]
+pub(crate) struct Documents(RefCell<HashMap<String, Page>>);
 
 pub(crate) struct Ivars {
     loaded: RefCell<Option<Loaded>>,
@@ -124,32 +127,38 @@ impl LoadDelegate {
 
 /// Creates the extension's offscreen document. As in Chrome, `done` runs once
 /// the document has loaded and can receive messages.
-pub(crate) fn create(context: &WKWebExtensionContext, path: &str, done: Loaded) {
+pub(crate) fn create(
+    shared: &Rc<Shared>,
+    context: &WKWebExtensionContext,
+    path: &str,
+    done: Loaded,
+) {
     let extension = unsafe { context.uniqueIdentifier() }.to_string();
-    if has(&extension) {
+    if has(shared, &extension) {
         return done(Err(
             "Only a single offscreen document may be created.".into()
         ));
     }
+    let owner = Rc::downgrade(shared);
     let failed = extension.clone();
     let loaded: Loaded = Box::new(move |result| {
-        if result.is_err() {
-            close(&failed);
+        if let (Err(_), Some(shared)) = (&result, owner.upgrade()) {
+            close(&shared, &failed);
         }
         done(result);
     });
     if let Some(page) = Page::open(context, path, loaded) {
-        DOCUMENTS.with(|documents| documents.borrow_mut().insert(extension, page));
+        shared.offscreen.0.borrow_mut().insert(extension, page);
     }
 }
 
-pub(crate) fn close(extension: &str) -> bool {
-    let page = DOCUMENTS.with(|documents| documents.borrow_mut().remove(extension));
+pub(crate) fn close(shared: &Shared, extension: &str) -> bool {
+    let page = shared.offscreen.0.borrow_mut().remove(extension);
     page.inspect(Page::close).is_some()
 }
 
-pub(crate) fn has(extension: &str) -> bool {
-    DOCUMENTS.with(|documents| documents.borrow().contains_key(extension))
+pub(crate) fn has(shared: &Shared, extension: &str) -> bool {
+    shared.offscreen.0.borrow().contains_key(extension)
 }
 
 /// Clears the website data of the extension's origin (IndexedDB,
@@ -169,7 +178,7 @@ pub(crate) fn clear_origin(context: &WKWebExtensionContext, done: Box<dyn FnOnce
         } catch {}\n\
         try { await Promise.all((await caches.keys()).map((key) => caches.delete(key))); } catch {}";
     let page: RefCell<Option<Page>> = RefCell::new(None);
-    let page = std::rc::Rc::new(page);
+    let page = Rc::new(page);
     let opened = page.clone();
     let loaded: Loaded = Box::new(move |result| {
         let Some(view) = opened.borrow().as_ref().map(|page| page.view.clone()) else {
@@ -204,7 +213,7 @@ pub(crate) fn clear_origin(context: &WKWebExtensionContext, done: Box<dyn FnOnce
     *page.borrow_mut() = opened;
 }
 
-fn linger(page: std::rc::Rc<RefCell<Option<Page>>>) {
+fn linger(page: Rc<RefCell<Option<Page>>>) {
     let release = RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
         if let Some(page) = page.borrow_mut().take() {
             page.close();

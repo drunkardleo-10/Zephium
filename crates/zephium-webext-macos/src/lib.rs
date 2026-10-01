@@ -132,9 +132,9 @@ pub trait Host {
 /// left open from a previous worker ends up carrying messages into an
 /// unrelated port of the next one (the next WebSocket's first message was an
 /// old connection's ping).
-pub(crate) fn worker_gone(extension: &str) {
-    socket::close_extension(extension);
-    native::close_extension(extension);
+pub(crate) fn worker_gone(shared: &runtime::Shared, extension: &str) {
+    socket::close_extension(shared, extension);
+    native::close_extension(shared, extension);
 }
 
 /// Diagnostics for development builds: `ZEPHIUM_WEBEXT_TRACE=1` prints how

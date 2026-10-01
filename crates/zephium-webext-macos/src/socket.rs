@@ -36,6 +36,7 @@ thread_local! {
 struct Socket {
     key: usize,
     extension: String,
+    owner: RcWeak<Shared>,
     port: Retained<WKWebExtensionMessagePort>,
     session: RefCell<Option<Retained<NSURLSession>>>,
     task: RefCell<Option<Retained<NSURLSessionWebSocketTask>>>,
@@ -51,6 +52,7 @@ pub(crate) fn connect(
     let socket = Rc::new(Socket {
         key: port as *const _ as usize,
         extension: unsafe { context.uniqueIdentifier() }.to_string(),
+        owner: Rc::downgrade(shared),
         port: port.retain(),
         session: RefCell::new(None),
         task: RefCell::new(None),
@@ -242,13 +244,15 @@ impl Socket {
     }
 }
 
-/// Closes every WebSocket an extension's worker opened.
-pub(crate) fn close_extension(extension: &str) {
+/// Closes every WebSocket an extension's worker opened in one profile.
+pub(crate) fn close_extension(shared: &Shared, extension: &str) {
     let open: Vec<_> = SOCKETS.with(|sockets| {
         sockets
             .borrow()
             .values()
-            .filter(|socket| socket.extension == extension)
+            .filter(|socket| {
+                socket.extension == extension && std::ptr::eq(socket.owner.as_ptr(), shared)
+            })
             .cloned()
             .collect()
     });

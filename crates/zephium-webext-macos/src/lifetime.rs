@@ -11,7 +11,8 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::rc::{Rc, Weak};
+use std::ptr::NonNull;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -34,9 +35,11 @@ struct Worker {
     held_since: Option<Instant>,
 }
 
-thread_local! {
-    static WORKERS: RefCell<HashMap<String, Worker>> = RefCell::new(HashMap::new());
-    static TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
+/// A profile's workers and the timer that keeps its held ones loaded.
+#[derive(Default)]
+pub(crate) struct Workers {
+    workers: RefCell<HashMap<String, Worker>>,
+    timer: RefCell<Option<Retained<NSTimer>>>,
 }
 
 /// Records one start; true when the last few came quickly enough.
@@ -58,8 +61,8 @@ fn restless(starts: &mut VecDeque<Instant>, now: Instant) -> bool {
 
 /// An extension's worker started.
 pub(crate) fn started(shared: &Rc<Shared>, extension: &str) {
-    let hold = WORKERS.with(|workers| {
-        let mut workers = workers.borrow_mut();
+    let hold = {
+        let mut workers = shared.workers.workers.borrow_mut();
         let worker = workers.entry(extension.to_owned()).or_default();
         if worker.held_since.is_none() && restless(&mut worker.starts, Instant::now()) {
             worker.held_since = Some(Instant::now());
@@ -67,33 +70,38 @@ pub(crate) fn started(shared: &Rc<Shared>, extension: &str) {
         } else {
             false
         }
-    });
+    };
     if hold {
         if crate::tracing() {
             eprintln!("webext-trace: holding the worker of {extension}");
         }
-        schedule(Rc::downgrade(shared));
+        schedule(shared);
     }
 }
 
-pub(crate) fn forget(extension: &str) {
-    WORKERS.with(|workers| workers.borrow_mut().remove(extension));
+pub(crate) fn forget(shared: &Shared, extension: &str) {
+    shared.workers.workers.borrow_mut().remove(extension);
 }
 
-fn schedule(shared: Weak<Shared>) {
-    if TIMER.with(|timer| timer.borrow().is_some()) {
+fn schedule(shared: &Rc<Shared>) {
+    if shared.workers.timer.borrow().is_some() {
         return;
     }
-    let touch = RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| touch(&shared));
+    let weak = Rc::downgrade(shared);
+    let touch = RcBlock::new(move |timer: NonNull<NSTimer>| match weak.upgrade() {
+        Some(shared) => touch(&shared),
+        // The run loop keeps the timer alive past its profile.
+        None => unsafe { timer.as_ref() }.invalidate(),
+    });
     let timer = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_repeats_block(TOUCH_SECONDS, true, &touch)
     };
-    TIMER.with(|slot| *slot.borrow_mut() = Some(timer));
+    *shared.workers.timer.borrow_mut() = Some(timer);
 }
 
-fn touch(shared: &Weak<Shared>) {
-    let held: Vec<String> = WORKERS.with(|workers| {
-        let mut workers = workers.borrow_mut();
+fn touch(shared: &Shared) {
+    let held: Vec<String> = {
+        let mut workers = shared.workers.workers.borrow_mut();
         for worker in workers.values_mut() {
             if worker
                 .held_since
@@ -107,13 +115,13 @@ fn touch(shared: &Weak<Shared>) {
             .filter(|(_, worker)| worker.held_since.is_some())
             .map(|(id, _)| id.clone())
             .collect()
-    });
-    let Some(shared) = shared.upgrade().filter(|_| !held.is_empty()) else {
-        if let Some(timer) = TIMER.with(|slot| slot.borrow_mut().take()) {
+    };
+    if held.is_empty() {
+        if let Some(timer) = shared.workers.timer.borrow_mut().take() {
             timer.invalidate();
         }
         return;
-    };
+    }
     let loaded = shared.loaded.borrow();
     for id in held {
         if let Some(loaded) = loaded.get(&id) {

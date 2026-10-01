@@ -59,10 +59,16 @@ pub(crate) struct Loaded {
     pub(crate) context: Retained<WKWebExtensionContext>,
 }
 
+/// One profile's state. WebKit gives an extension the same identifier in
+/// every profile, so anything kept per extension lives here rather than in a
+/// process-wide table.
 pub(crate) struct Shared {
     host: Rc<dyn Host>,
     pub(crate) graph: RefCell<Graph>,
     pub(crate) loaded: RefCell<HashMap<String, Loaded>>,
+    pub(crate) offscreen: crate::offscreen::Documents,
+    pub(crate) workers: crate::lifetime::Workers,
+    pub(crate) access: crate::access::Batches,
     pub(crate) mtm: MainThreadMarker,
 }
 
@@ -125,6 +131,9 @@ impl Runtime {
             host,
             graph: RefCell::new(Graph::default()),
             loaded: RefCell::new(HashMap::new()),
+            offscreen: Default::default(),
+            workers: Default::default(),
+            access: Default::default(),
             mtm,
         });
         let delegate = Delegate::new(mtm, Rc::downgrade(&shared));
@@ -660,9 +669,9 @@ fn unload(shared: &Shared, controller: &WKWebExtensionController, id: &str) -> b
     let Some(loaded) = shared.loaded.borrow_mut().remove(id) else {
         return false;
     };
-    crate::offscreen::close(id);
-    crate::worker_gone(id);
-    crate::lifetime::forget(id);
+    crate::offscreen::close(shared, id);
+    crate::worker_gone(shared, id);
+    crate::lifetime::forget(shared, id);
     unsafe { controller.unloadExtensionContext_error(&loaded.context) }.is_ok()
 }
 

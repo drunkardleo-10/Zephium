@@ -112,7 +112,7 @@ fn open(
         connections
             .borrow()
             .values()
-            .filter(|connection| connection.extension == extension)
+            .filter(|connection| connection.belongs_to(shared, &extension))
             .count()
     });
     if running >= MAX_HOSTS_PER_EXTENSION {
@@ -147,6 +147,10 @@ fn open(
 }
 
 impl Connection {
+    fn belongs_to(&self, shared: &Shared, extension: &str) -> bool {
+        self.extension == extension && std::ptr::eq(self.shared.as_ptr(), shared)
+    }
+
     fn forward(&self, message: &Value) {
         let Ok(frame) = serde_json::to_vec(message) else {
             return;
@@ -211,13 +215,13 @@ impl Connection {
     }
 }
 
-/// Ends every host an extension started.
-pub(crate) fn close_extension(extension: &str) {
+/// Ends every host an extension started in one profile.
+pub(crate) fn close_extension(shared: &Shared, extension: &str) {
     let open: Vec<_> = CONNECTIONS.with(|connections| {
         connections
             .borrow()
             .values()
-            .filter(|connection| connection.extension == extension)
+            .filter(|connection| connection.belongs_to(shared, extension))
             .cloned()
             .collect()
     });
