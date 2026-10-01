@@ -25,9 +25,10 @@
   });
 
   let blockedToday = $state<number | null>(null);
+  // Keyed to the profile string: `site` is a new object on every status event.
+  let profile = $derived(site?.context.profile);
   $effect(() => {
     void opened;
-    const profile = site?.context.profile;
     if (!profile) return;
     let current = true;
     void commands
