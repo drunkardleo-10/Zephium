@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -319,11 +319,12 @@ impl Runtime {
                     window
                 });
             window.set_frame(snapshot.frame);
+            let reordered = reordered(snapshot, &previous_tabs);
             let mut tabs = Vec::with_capacity(snapshot.tabs.len());
-            for (index, tab_snapshot) in snapshot.tabs.iter().enumerate() {
+            for tab_snapshot in &snapshot.tabs {
                 let tab = match previous_tabs.get(&tab_snapshot.id) {
                     Some((tab, window_id, old_index)) => {
-                        if *window_id != snapshot.id || *old_index != index {
+                        if *window_id != snapshot.id || reordered.contains(&tab_snapshot.id) {
                             moved.push((tab.clone(), *old_index, *window_id));
                         }
                         tab.clone()
@@ -469,6 +470,44 @@ impl Runtime {
             .tab(tab)
             .map(ProtocolObject::from_retained)
     }
+}
+
+/// Tabs of `snapshot` whose order changed among the tabs that stayed in that
+/// window. Opening or closing a tab shifts every later index but moves none
+/// of them; reporting those would wake every `tabs.onMoved` listener.
+fn reordered(
+    snapshot: &WindowSnapshot,
+    previous: &HashMap<u64, (Retained<Tab>, u64, usize)>,
+) -> HashSet<u64> {
+    let after: Vec<u64> = snapshot
+        .tabs
+        .iter()
+        .map(|tab| tab.id)
+        .filter(|id| {
+            previous
+                .get(id)
+                .is_some_and(|(_, window, _)| *window == snapshot.id)
+        })
+        .collect();
+    let mut before = after.clone();
+    before.sort_by_key(|id| previous.get(id).map_or(0, |(_, _, index)| *index));
+    moved_between(&before, &after)
+}
+
+fn moved_between(before: &[u64], after: &[u64]) -> HashSet<u64> {
+    let predecessors = |order: &[u64]| -> HashMap<u64, Option<u64>> {
+        order
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index.checked_sub(1).map(|p| order[p])))
+            .collect()
+    };
+    let (old, new) = (predecessors(before), predecessors(after));
+    after
+        .iter()
+        .copied()
+        .filter(|id| old.get(id) != new.get(id))
+        .collect()
 }
 
 fn activate(
@@ -665,4 +704,17 @@ fn erase_storage(controller: &Retained<WKWebExtensionController>, host: &Rc<dyn 
         };
     });
     unsafe { controller.fetchDataRecordsOfTypes_completionHandler(&types, &fetched) };
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::moved_between;
+
+    #[test]
+    fn only_a_real_reorder_counts_as_a_move() {
+        assert!(moved_between(&[1, 2, 3], &[1, 2, 3]).is_empty());
+        let mut moved: Vec<_> = moved_between(&[1, 2, 3], &[2, 3, 1]).into_iter().collect();
+        moved.sort_unstable();
+        assert_eq!(moved, [1, 2]);
+    }
 }
