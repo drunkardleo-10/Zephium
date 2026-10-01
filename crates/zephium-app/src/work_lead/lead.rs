@@ -28,6 +28,10 @@ use crate::work_agent::{WorkAgentBrowseRequest, WorkBrowserOutcome};
 use crate::work_runtime::{WorkAttemptProbe, WorkNodeAttempt};
 
 /// The lead stops making calls below this much budget and asks first.
+/// Output one lead turn may produce: tool calls and a reply, never an essay.
+const LEAD_TURN_OUTPUT: u32 = 8_000;
+/// Said to the lead after a turn ran past its output limit.
+const RAN_LONG: &str = "Your last turn ran past its length limit and was discarded. Act now: call the tools you need, with short arguments, and keep any reply brief.";
 const FLOOR_COST: u32 = 40_000;
 const FLOOR_TOKENS: u32 = 24_000;
 /// Consecutive turns that call no tool before the run closes with what it
@@ -222,6 +226,8 @@ where
         let mut idle = 0u8;
         let mut stuck = 0u8;
         let mut failed_calls = 0u8;
+        // A turn that ran out of output is asked again once, briefly.
+        let mut ran_long = false;
         loop {
             if self.run.cancelled().await {
                 return Ok(WorkAttemptStatus::Cancelled);
@@ -242,12 +248,12 @@ where
                 system: system.clone(),
                 tools: tools.clone(),
                 messages: messages.clone(),
-                max_output_tokens: model.entry.max_output.clamp(4_096, 16_000),
-                reasoning: model
-                    .entry
-                    .supports
-                    .reasoning
-                    .then_some(WorkModelReasoning::Medium),
+                max_output_tokens: model.entry.max_output.clamp(4_096, LEAD_TURN_OUTPUT),
+                reasoning: model.entry.supports.reasoning.then_some(if ran_long {
+                    WorkModelReasoning::Low
+                } else {
+                    WorkModelReasoning::Medium
+                }),
                 native_search: false,
                 parallel_tools: true,
             };
@@ -288,6 +294,14 @@ where
                 }
             };
             failed_calls = 0;
+            if outcome.stop == WorkModelStop::MaxTokens && !ran_long {
+                ran_long = true;
+                self.turn_step(None, usage, None).await;
+                messages.push(WorkModelMessage::User(vec![WorkModelPart::Text(
+                    RAN_LONG.into(),
+                )]));
+                continue;
+            }
             let text = call::text(&outcome.assistant);
             let calls = call::tool_calls(&outcome.assistant);
             self.turn_step(None, usage, call::say_line(&text)).await;
