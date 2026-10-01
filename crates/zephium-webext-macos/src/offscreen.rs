@@ -17,6 +17,7 @@ use objc2_web_kit::{
 };
 
 use crate::runtime::Shared;
+use crate::LogLevel;
 
 type Loaded = Box<dyn FnOnce(Result<(), String>)>;
 
@@ -66,8 +67,11 @@ impl Page {
 #[derive(Default)]
 pub(crate) struct Documents(RefCell<HashMap<String, Page>>);
 
+type Gone = Box<dyn FnOnce(&WKWebView)>;
+
 pub(crate) struct Ivars {
     loaded: RefCell<Option<Loaded>>,
+    gone: RefCell<Option<Gone>>,
 }
 
 define_class!(
@@ -99,6 +103,15 @@ define_class!(
         ) {
             self.failed(error);
         }
+
+        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
+        fn did_terminate(&self, view: &WKWebView) {
+            self.settle(Err("The page's process ended.".into()));
+            let gone = self.ivars().gone.borrow_mut().take();
+            if let Some(gone) = gone {
+                gone(view);
+            }
+        }
     }
 );
 
@@ -106,6 +119,7 @@ impl LoadDelegate {
     fn new(mtm: MainThreadMarker, loaded: Loaded) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars {
             loaded: RefCell::new(Some(loaded)),
+            gone: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -147,9 +161,33 @@ pub(crate) fn create(
         }
         done(result);
     });
-    if let Some(page) = Page::open(context, path, loaded) {
-        shared.offscreen.0.borrow_mut().insert(extension, page);
-    }
+    let Some(page) = Page::open(context, path, loaded) else {
+        return;
+    };
+    // A crashed document would otherwise count as open forever, and every
+    // later createDocument would fail.
+    let owner = Rc::downgrade(shared);
+    let crashed = extension.clone();
+    *page.delegate.ivars().gone.borrow_mut() = Some(Box::new(move |view| {
+        let Some(shared) = owner.upgrade() else {
+            return;
+        };
+        let current = shared
+            .offscreen
+            .0
+            .borrow()
+            .get(&crashed)
+            .is_some_and(|page| std::ptr::eq(&*page.view, view));
+        if current {
+            close(&shared, &crashed);
+            shared.host().log(
+                &crashed,
+                LogLevel::Warning,
+                "the offscreen document's process ended",
+            );
+        }
+    }));
+    shared.offscreen.0.borrow_mut().insert(extension, page);
 }
 
 pub(crate) fn close(shared: &Shared, extension: &str) -> bool {
