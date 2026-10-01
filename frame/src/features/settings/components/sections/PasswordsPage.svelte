@@ -4,8 +4,10 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import PreviewToggle from "../PreviewToggle.svelte";
   import CollectionEditor from "../CollectionEditor.svelte";
+  import PasskeysGroup from "../PasskeysGroup.svelte";
 </script>
 
+<PasskeysGroup />
 <PreviewNotice />
 <SettingsGroup title={m.section_passwords()}
   ><PreviewToggle id="passwords.offer" /><PreviewToggle id="passwords.fill" /></SettingsGroup

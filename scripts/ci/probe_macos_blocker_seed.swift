@@ -5,13 +5,13 @@ import WebKit
 
 private let maximumArtifactBytes: Int64 = 32 * 1024 * 1024
 private let nativeDeadlineSeconds: TimeInterval = 170
-private let productionColdCompileBudgetSeconds: TimeInterval = 120
+private let productionColdCompileBudgetSeconds: TimeInterval = 15
 private let duplicateCallbackDrainSeconds: TimeInterval = 0.25
 private let identifierPrefix = "app.zephium.rules.v1."
 private let artifactDigestDomain = Data("zephium-webkit-content-rules".utf8)
-private let artifactFormatVersion: UInt32 = 3
+private let artifactFormatVersion: UInt32 = 4
 private let expectedReleaseArtifactDigest =
-    "013ba907e71408a63231b458c48858021c1aff559937ce20de6ed431aeed7a6a"
+    "46ae68d21f9f81cb816c113d9cd4d4246fe61e9b13c26f8db314e42a67186a29"
 
 private enum ProbeFailure: Error, CustomStringConvertible {
     case message(String)

@@ -128,6 +128,7 @@ fn result_handoff_is_one_shot_phase_gated_and_separate_from_diagnostics() {
         AgentWorkApplicationPhase::NeedsReview,
         AgentWorkApplicationPhase::Recovery,
         AgentWorkApplicationPhase::PersistenceUncertain,
+        AgentWorkApplicationPhase::WaitingForHuman,
     ] {
         lock(&actor.projection).snapshot.phase = phase;
         assert!(handle.take_extraction().is_none());
@@ -643,10 +644,10 @@ fn pump(actor: &mut ApplicationWork, predicate: impl Fn(&ApplicationWork) -> boo
 
 fn start(actor: &mut ApplicationWork, journal: &Journal, staged: PreparedAgentWork) {
     actor.initialize();
-    actor.admit(WorkSubmission(
-        Arc::new(Mutex::new(Some(staged))),
-        actor.projection.clone(),
-    ));
+    actor.admit(
+        WorkSubmission(Arc::new(Mutex::new(Some(staged))), actor.projection.clone()),
+        None,
+    );
     journal.settle(|_| {
         Ok(AgentWorkJournalReply::Claimed {
             owner: AgentWorkIncarnation::generate(),
@@ -658,6 +659,97 @@ fn start(actor: &mut ApplicationWork, journal: &Journal, staged: PreparedAgentWo
     actor.poll();
     journal.commit();
     actor.poll();
+}
+
+#[test]
+fn browser_profile_binding_rejects_substitution_and_stale_actor_admission_before_native_start() {
+    use crate::{AgentWorkProfileBinding as Binding, AgentWorkProfileReadiness as Readiness};
+    use zephium_core::profiles::{Profile, ProfileKind};
+    let _serial = lock(&SERIAL);
+    for case in 0..8 {
+        let journal = Arc::new(Journal::default());
+        let (mut actor, _owner, _) = coordinator(journal.clone());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let factories = Arc::new(AtomicUsize::new(0));
+        let staged = prepared(
+            journal.clone(),
+            Fault::None,
+            calls.clone(),
+            factories.clone(),
+        );
+        let (profile, storage) = staged.controller.profile_storage_binding().unwrap();
+        let kind = if storage == ContextProfileStorageClass::Durable {
+            ProfileKind::Default
+        } else {
+            ProfileKind::Incognito
+        };
+        let binding = Binding::from_profile(&Profile {
+            id: profile,
+            kind,
+            name: String::new(),
+        });
+        let other = Binding::from_profile(&Profile {
+            id: zephium_core::ids::ProfileId::generate(),
+            kind,
+            name: String::new(),
+        });
+        if case >= 6 {
+            let wrong = if case == 6 {
+                other
+            } else {
+                Binding::from_profile(&Profile {
+                    id: profile,
+                    kind: if kind == ProfileKind::Incognito {
+                        ProfileKind::Default
+                    } else {
+                        ProfileKind::Incognito
+                    },
+                    name: String::new(),
+                })
+            };
+            assert!(matches!(
+                staged.with_browser_profile(wrong),
+                Err(AgentWorkFailure::Contract)
+            ));
+            assert_eq!(factories.load(Ordering::Acquire), 0);
+            continue;
+        }
+        let staged = staged.with_browser_profile(binding).unwrap();
+        let readiness = match case {
+            0 => Readiness::ProfileMissing,
+            1 => Readiness::PolicyMissing,
+            2 => Readiness::PolicyFailed,
+            3 => Readiness::Unavailable,
+            4 => Readiness::PolicyPending(binding),
+            _ => Readiness::Ready(other),
+        };
+        actor.initialize();
+        actor.admit(
+            WorkSubmission(Arc::new(Mutex::new(Some(staged))), actor.projection.clone()),
+            Some(readiness),
+        );
+        journal.settle(|_| {
+            Ok(AgentWorkJournalReply::Claimed {
+                owner: AgentWorkIncarnation::generate(),
+                records: Vec::new(),
+            })
+        });
+        actor.poll();
+        journal.commit();
+        actor.poll();
+        journal.commit();
+        actor.poll();
+        assert_eq!(factories.load(Ordering::Acquire), 0);
+        assert!(lock(&calls).is_empty());
+        assert_eq!(
+            lock(&actor.projection).snapshot.failure,
+            Some(AgentWorkFailure::Contract)
+        );
+        assert_eq!(
+            actor.record.unwrap().disposition(),
+            AgentWorkDisposition::FailedClosed
+        );
+    }
 }
 
 #[test]
@@ -673,15 +765,26 @@ fn native_creation_waits_for_both_exact_durable_admission_acknowledgements() {
         calls.clone(),
         factories.clone(),
     );
+    let (profile, storage) = staged.controller.profile_storage_binding().unwrap();
+    let binding = crate::AgentWorkProfileBinding::from_profile(&zephium_core::profiles::Profile {
+        id: profile,
+        kind: if storage == ContextProfileStorageClass::Durable {
+            zephium_core::profiles::ProfileKind::Default
+        } else {
+            zephium_core::profiles::ProfileKind::Incognito
+        },
+        name: String::new(),
+    });
+    let staged = staged.with_browser_profile(binding).unwrap();
     assert_eq!(
         format!("{staged:?}"),
         "PreparedAgentWork([owned, redacted])"
     );
     actor.initialize();
-    actor.admit(WorkSubmission(
-        Arc::new(Mutex::new(Some(staged))),
-        actor.projection.clone(),
-    ));
+    actor.admit(
+        WorkSubmission(Arc::new(Mutex::new(Some(staged))), actor.projection.clone()),
+        Some(crate::AgentWorkProfileReadiness::Ready(binding)),
+    );
     assert_eq!(factories.load(Ordering::Acquire), 0);
     journal.settle(|_| {
         Ok(AgentWorkJournalReply::Claimed {
@@ -724,15 +827,18 @@ fn uncertain_admission_retains_exact_intent_and_never_starts_without_explicit_re
     let calls = Arc::new(Mutex::new(Vec::new()));
     let factories = Arc::new(AtomicUsize::new(0));
     actor.initialize();
-    actor.admit(WorkSubmission(
-        Arc::new(Mutex::new(Some(prepared(
-            journal.clone(),
-            Fault::None,
-            calls,
-            factories.clone(),
-        )))),
-        actor.projection.clone(),
-    ));
+    actor.admit(
+        WorkSubmission(
+            Arc::new(Mutex::new(Some(prepared(
+                journal.clone(),
+                Fault::None,
+                calls,
+                factories.clone(),
+            )))),
+            actor.projection.clone(),
+        ),
+        None,
+    );
     journal.settle(|_| {
         Ok(AgentWorkJournalReply::Claimed {
             owner: AgentWorkIncarnation::generate(),
@@ -1432,10 +1538,10 @@ fn cancelled_or_expired_admission_never_invokes_the_native_factory() {
         if reason.is_none() {
             staged.deadline = Instant::now();
         }
-        actor.admit(WorkSubmission(
-            Arc::new(Mutex::new(Some(staged))),
-            actor.projection.clone(),
-        ));
+        actor.admit(
+            WorkSubmission(Arc::new(Mutex::new(Some(staged))), actor.projection.clone()),
+            None,
+        );
         if let Some(reason) = reason {
             actor.control(WorkCommand {
                 projection: actor.projection.clone(),
@@ -1645,10 +1751,10 @@ fn mismatched_durable_and_audit_owners_are_refused_before_runtime_creation() {
         if foreign_engine {
             staged.engine = Arc::new(crate::shell::tests::FakeEngine::default());
         }
-        actor.admit(WorkSubmission(
-            Arc::new(Mutex::new(Some(staged))),
-            actor.projection.clone(),
-        ));
+        actor.admit(
+            WorkSubmission(Arc::new(Mutex::new(Some(staged))), actor.projection.clone()),
+            None,
+        );
         assert_eq!(
             lock(&actor.projection).snapshot.failure,
             Some(AgentWorkFailure::Contract)

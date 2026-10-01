@@ -32,12 +32,11 @@ imports are relative. Dependencies flow downward. The utility host has an explic
 entity-composition exception; entity features do not depend on Work. Architecture,
 module roles, types, styles and unused code are checked by the frame toolchain.
 
-The normal IPC binding is `frame/src/shared/ipc/bindings.ts`, generated from Rust.
-The copied `crates/zephium-ipc/bindings/work-v1.ts` has been removed. It was reference
-material from the separate runtime machine, never a frontend build dependency.
-There is no replacement Work wire schema in this frontend stream.
+The normal IPC binding is `frame/src/shared/ipc/bindings.ts`, generated from Rust,
+including Work operations. `crates/zephium-ipc/bindings/work-v1.ts` remains a generated
+runtime reference; the frontend does not import it or maintain a second wire schema.
 
-## Native browser and empty Work host
+## Native browser and Work host
 
 The sidebar Browse/Work switch requests `browser.work` or `browser.return` through
 the existing command transport. Rust's `BrowserPage::Work` borrows the established
@@ -46,10 +45,12 @@ surface is active. Returning to Browse uses the existing synchronous chrome
 restoration and exact tab-identity checks. The mode control follows native
 projection, not command admission alone.
 
-`app/browser/WorkWorkspace.svelte` mounts only an empty lazy canvas with pan/zoom
-controls. It has no Notes/Tasks composition, resource queries, authoring controls,
-profile arrangement cache or execution state. Notes and Tasks remain independent
-browser tools. The native shell unmounts the canvas when leaving Work.
+`app/browser/WorkWorkspace.svelte` now mounts lazy Work home/detail views over the
+profile-bound Rust services: creation/reopening, clarification, editable plans,
+model planning, historical execution/plan joins and seven semantic artifact kinds.
+`domain/work` retains exact pending commands and revision-bound drafts across mode
+changes. Rust owns bounded keyed operations independently of UI observation and
+joins workers before Shell/Store shutdown. Notes and Tasks remain independent.
 
 The standalone Work demo, preview HTML entry and separate preview build are
 removed. Trip, research and interruption scenarios exist only under Work tests;
@@ -79,8 +80,8 @@ are available to a host with real data.
 `WorkSurfaceView` and its intent/request types are presentation values, not copies
 of Work IPC. The reusable surface includes objective and clarification controls,
 artifact inspection, explicit action confirmation, and pending/rejected/conflict/
-unknown/resynchronizing states. These blocks are not mounted in the empty native
-canvas. Action meaning, exact scope and request outcomes come from its host.
+unknown/resynchronizing states. The native Work host now mounts these components.
+Action meaning, exact scope and request outcomes come from its host.
 A fulfilled callback or animation does not establish durable completion.
 
 The surface releases callback observations and unmounts heavy children when
@@ -208,12 +209,10 @@ Not implemented here: reminders (there is no notification plugin in the tree, so
 a due time does not notify), recurrence, any grouping beyond scopes and search,
 and a keyboard equivalent for board reordering — cards move by pointer only.
 
-Resource persistence appends **profile migration 14** in this checkout. The
-separate runtime stream may have its own later migrations; version/order agreement
-is not established by this handoff. Shared merge areas include core/store ports,
-Store actor and migrations, app API, IPC exports and desktop dispatch/close hooks.
-The normal generated bindings reflect this checkout's Rust source, not a merged
-runtime implementation.
+The integration baseline profile schema was **18**; the integrated tree is at **20**
+(19 adds Work environments, 20 the bounded checkpoint replay window). Frontend-only
+development databases that used migration 14 for resources are incompatible; do not
+silently accept them.
 
 ## Performance and native boundaries
 
@@ -223,6 +222,20 @@ measurements appear in `frame/dist/bootstrap-report.json` (onboarding, a separat
 build, in `bootstrap-report.onboarding.json`). Complete static graph
 sizes may include already-loaded shared/browser chunks, so they are not incremental
 activation download sizes.
+
+The first production artifact composition adds shared runtime/IPC code: measured
+Browse/panel static JS is 293,953/136,712 bytes. Reviewed limits are 295,000/138,000;
+affected existing lazy graphs allow the same shared increase. Work home/detail and
+chart activation have explicit budgets. The gate also rejects `domain/work` from
+startup. Charts retain LayerChart's standard SVG bar component. CSS blur is allowed
+where useful and performance-appropriate; unused library styling does not require
+a custom chart implementation. Execution approval and semantic artifact editing
+bring the Work detail static graph to 121,330 JS / 14,479 CSS bytes; reviewed
+limits are 123,000 / 16,000. These features remain outside Browse startup.
+The 2026-09-25 extension store UI integration adds 147 bytes to shared lazy
+graphs: NotesPage measures 290,005 versus 289,858 bytes and the notes domain
+149,522 versus 149,375. Their JS caps were reviewed at 290,500 and 150,000;
+browser startup remains at the 24-request cap without a new eager feature.
 
 Native chrome/page separation, synchronous tab-presentation sentinels, fixed-raster
 favicons, scoped event transport and production CSP remain in place. Appearance,
@@ -262,8 +275,9 @@ and string UI commands remain transitional; the unified typed Browse surface/lay
 migration is not complete. `knip-migration.ts` and `stylelint-migration.js` retain
 explicit legacy exceptions. None of these is silently marked finished here.
 
-Live Work projection admission, revision/request reconciliation, artifact effects,
-evidence access, browser promotion and agent-resource authorization are absent from
-this stream. The independent runtime owns those semantics. The delivered frontend
-provides reusable UI capabilities and a native host, not the final Work product
-composition. No commit, push or runtime-branch merge is implied by this document.
+Integration verification so far: frame check (168 tests), desktop library (106
+passed, two environment skips), eight Work WebKit tests, chart rendering, build and
+emitted-style checks pass. Native live qualification is still outstanding.
+Public-discovery approval, transient activity ownership, browser promotion/takeover,
+durable draft checkpoints, artifact editing and account workflows remain unfinished;
+this checkpoint does not claim the complete Work product or end-to-end success.

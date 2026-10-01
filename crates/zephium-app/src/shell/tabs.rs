@@ -58,7 +58,6 @@ impl Shell {
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
-        self.reproject_extension_site_policy_if_visible(profile);
         self.items.ensure_view(id)
     }
 
@@ -67,6 +66,11 @@ impl Shell {
             return NativeWork::default();
         }
         self.native_openers.remove(&id);
+        let closed_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+            .filter(|ms| (1_000..=9_007_199_254_740_991).contains(ms));
         let closed = self.windows.focused().and_then(|window| {
             self.items.tab(id).and_then(|tab| {
                 tab.url
@@ -77,12 +81,18 @@ impl Shell {
                         url: url.to_string(),
                         title: tab.title.clone(),
                         zoom: tab.zoom,
+                        session_id: closed_at_ms
+                            .map(|_| zephium_core::ids::ClosedSessionId::generate()),
+                        closed_at_ms,
                     })
             })
         });
         self.cancel_page_permission_for_item(id);
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
+        if self.work_pane.as_ref().is_some_and(|pane| pane.tab == id) {
+            self.clear_work_pane();
+        }
         if matches!(
             self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Closing { .. })
@@ -122,11 +132,77 @@ impl Shell {
             if let (Some(pos), false) = (pos, tabs.is_empty()) {
                 fx.extend(self.focus_tab(tabs[pos.min(tabs.len() - 1)]));
             }
-            if let Some(profile) = self.windows.focused().map(|window| window.profile) {
-                self.reproject_extension_site_policy_if_visible(profile);
-            }
         }
         self.commit(fx)
+    }
+
+    /// Folds a trusted native guest teardown back into the logical tab tree.
+    /// The profile join prevents a stale or cross-profile callback from
+    /// removing any ordinary tab or a replacement extension tab.
+    pub(super) fn close_extension_owned_marker(&mut self, profile: ProfileId, id: ItemId) {
+        if self.profile_of_item(id) != Some(profile)
+            || !self
+                .items
+                .tab(id)
+                .is_some_and(|tab| tab.content == zephium_core::item::TabContent::ExtensionOwned)
+        {
+            return;
+        }
+        self.close_in_any_space(id);
+    }
+
+    /// Closes a tab even when it is in a space no window is showing.
+    /// Extensions see every space of their profile, so their requests must
+    /// reach those tabs too.
+    pub(super) fn close_in_any_space(&mut self, id: ItemId) {
+        if self.item_in_focused_scope(id) {
+            let _ = self.close(id);
+            return;
+        }
+        let affected = self
+            .windows
+            .iter()
+            .filter(|window| {
+                window.active == Some(id)
+                    || window.splits.as_ref().is_some_and(|tree| tree.contains(id))
+            })
+            .map(|window| (window.id, window.space, window.active == Some(id)))
+            .collect::<Vec<_>>();
+        self.native_openers.remove(&id);
+        self.cancel_page_permission_for_item(id);
+        self.cancel_pending_presentation(id);
+        self.cancel_favicon_attempt(id);
+        if matches!(
+            self.residency.discard_probes.get(&id),
+            Some(PendingDiscardProbe::Closing { .. })
+        ) {
+            // As in `close`: native destruction is already admitted.
+            self.items.mark_view_discarded(id);
+            self.residency.discard_probes.remove(&id);
+            if let Some(queue) = &self.self_queue {
+                queue.cancel_discard_probe(id);
+            }
+        } else {
+            self.cancel_discard_probe(id);
+        }
+        let effects = self.items.remove(id);
+        for (window_id, space, was_active) in affected {
+            let replacement = was_active
+                .then(|| self.today_tabs(space).into_iter().next())
+                .flatten();
+            if let Some(window) = self.windows.get_mut(window_id) {
+                if let Some(tree) = window.splits.take() {
+                    window.splits = tree.remove(id);
+                }
+                if was_active {
+                    window.active = replacement;
+                }
+            }
+            if let Some(replacement) = replacement {
+                self.items.set_lifecycle(replacement, Lifecycle::Active);
+            }
+        }
+        let _ = self.commit(effects);
     }
 
     /// Restores the newest closed tab owned by the focused profile and space.
@@ -162,7 +238,7 @@ impl Shell {
             let _ = self.items.remove(id);
             return None;
         }
-        self.items.set_title(id, entry.title);
+        self.items.set_title(id, entry.title.clone());
         self.items.set_zoom(id, entry.zoom);
         self.recently_closed.remove(position);
         let effects = self.focus_tab(id);
@@ -226,6 +302,16 @@ impl Shell {
             || !self.item_in_scope(dropped, profile, space)
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if [target, dropped].into_iter().any(|id| {
+            self.items
+                .tab(id)
+                .is_some_and(|tab| tab.content != zephium_core::item::TabContent::Web)
+        }) {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
         }
         if target == dropped {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);

@@ -1,0 +1,443 @@
+Zephium release merge handoff — 2026-10-01
+
+STATUS: BLOCKED — required release gates are not all green.
+Updated after the narrowly approved main-baseline and CI compatibility follow-up.
+Worktree: /Users/crynta/Dev/Zephium-release
+Branch: release/merge-main
+Work parent: 6fe131f52eb0e5738654e78bbb653cf33984b7e7
+Main parent: 607cd1afc86abb8d94626a2323e5357fae3f4e8e
+
+LATEST FOLLOW-UP: UNTOUCHED MAIN EXTENSION BASELINE
+Checkout: /Users/crynta/Dev/Zephium-main-qualification (607cd1afc86abb8d94626a2323e5357fae3f4e8e); Detached, source clean
+All41 CRX packages have identical SHA-256 hashes to the merge-suite inputs.
+33 passed, Keeper known timeout,7 failures. Entire main suite summary is byte-for-byte identical to the original merge suite summary.
+All7 are confirmed known limitations of main607cd1af; no main-pass/merge-fail case found. No extension runtime fixes or suite expectation changes made.
+  ColorZilla: timeout and empty popup
+  Dark Reader: no page effect on example.com
+  Ghostery: chrome.action.getUserSettings missing
+  Google Translate: timeout and empty popup
+  Grammarly: cookie destructuring from null/undefined
+  MetaMask: timeout
+  Zotero Connector: timeout
+Log: /tmp/zephium-main-webext-suite.log
+
+APPROVED FOLLOW-UP CHANGES
+- Snapshot boundary expects exactly Click, Fill, Select, Press, Scroll (five kinds); mutation tests reject a missing/replaced Press or a sixth action.
+- Controller content scanner admits .as_str() only in the exact full 16-node says_loading boolean classifier. Mutation tests reject wider/missing bounds, broader phrases/reads and unrelated content reads.
+- Provider shutdown check admits exactly one40ms Inaccessible retry in each of load_keychain_login_credential and lead/keys.rs read, under their existing lock. Full function shapes are pinned; mutation tests reject changed delay, duplicate/looped/misplaced sleeps, different error arm and removed lock. Other shutdown-proof guards retained.
+- Requested cargo update initially could not resolve against zephium-agentic's exact=2.1.230 requirement. Changed that manifest requirement to exact=2.1.220, then ran cargo update -p psl --precise2.1.220. Cargo.lock changed only psl version/checksum. Fork lock untouched.
+- No production Rust implementation changed in this follow-up; only two boundary-check files, the exact PSL manifest requirement, workspace lock and this report.
+- WebView2 floor and all18 advisory exceptions left unchanged as requested.
+
+COMMITS
+6e51070c merge: main's extensions and ad blocker into Work mode
+87398642 fix(probe): seed enabled protection before Work qualification
+507305bc fix(engine): admit the pinned Work runtime in Windows contexts
+4846366b test(frame): optimize diagram worker before component runs
+5c6a314e fix(wry): preserve declared compiler compatibility for Work hooks
+4526e087 docs: record release merge validation and blockers
+16827df0 fix(ci): recognize exact Work action and credential boundaries
+85eebb9d fix(deps): align workspace psl with reviewed adblock pin
+Current report-update commit: recorded in the final handoff message.
+
+CONSTRAINTS
+Nothing pushed, rebased, amended, reset or stashed. Original checkouts/branches untouched.
+Separate detached main qualification checkout created only after explicit user authorization.
+No live profile database opened or modified. Upgrade tests used fixtures.
+No Tauri application built or launched; requested desktop tests were compiled and run.
+Cargo target: /Users/crynta/Dev/Zephium/target
+Probe signed after every build and verified before Keychain-reading runs.
+Requested Node PATH and pnpm install used.
+
+CONFLICT RESOLUTIONS (37 files)
+1. Cargo.lock
+   Regenerated from the combined manifests with cargo metadata; both dependency graphs retained and obsolete extension crates absent.
+
+2. crates/zephium-app/Cargo.toml
+   Work execution and composition dependencies/features retained alongside main's chrono and new webext dependencies.
+
+3. crates/zephium-app/src/actor/mod.rs
+   Retained Work commands, authoring/query/runtime handling and wake behavior; retained main's web-extension target/status and shutdown replies; removed obsolete acquired-extension provisioning.
+
+4. crates/zephium-app/src/actor/tests.rs
+   Retained Work retained-wake coverage and main's actor behavior; removed tests of deleted extension provisioning.
+
+5. crates/zephium-app/src/api.rs
+   Retained Rect and Work API imports; removed obsolete ExtensionInstallId.
+
+6. crates/zephium-app/src/lib.rs
+   Retained work_context and Work exports; exposed main's WebExtensionStatus/WebExtensionTarget with Shell.
+
+7. crates/zephium-app/src/shell/browser_pages.rs
+   Combined Work-disabled settings guard with new Extensions page routing.
+
+8. crates/zephium-app/src/shell/mod.rs
+   Retained Work panes, page/graveyard state and favicon probe; retained new extension store and blocker shutdown flush; removed old extension service modules and fields.
+
+9. crates/zephium-app/src/shell/operations.rs
+   Combined Work handback to Browse and Work pane navigation exemption with main's browser_return_ready and non-web-tab safety.
+
+10. crates/zephium-app/src/shell/tests/mod.rs
+   Registered both reject_settings and work_disabled coverage.
+
+11. crates/zephium-app/src/shell/window_layout.rs
+   Retained Work pane geometry and permission-modal precedence; removed obsolete extension consent/center layout states.
+
+12. crates/zephium-app/src/store_reads.rs
+   Retained main's browser read arbitration and removed obsolete extension history queue; Work favicon probe remains supported.
+
+13. crates/zephium-engine/src/host/mod.rs
+   Kept anonymous Work stores and Work site loads alongside new extension host state; QA script export now uses agentic-browser-qa only.
+
+14. crates/zephium-engine/src/host/profiles.rs
+   Kept anonymous Work store cleanup with main's profile cleanup; removed old extension controller erasure-ticket machinery.
+
+15. crates/zephium-engine/src/host/scripts.rs
+   Combined Work QA script descriptors with main's immutable OnceLock script buffers.
+
+16. crates/zephium-engine/src/platform/agent_navigation.rs
+   Retained Work navigation cancellation semantics with main's navigation changes.
+
+17. crates/zephium-engine/src/platform/macos/mod.rs
+   Retained all Work passive, presentation and capture modules; old extension module remains removed.
+
+18. crates/zephium-store/src/actor.rs
+   Retained Work store APIs and lifecycle RwLock, adapted main blocker reads to read guards; removed old extension authority/load/mutation services.
+
+19. crates/zephium-store/src/actor/tests.rs
+   Preserved retained store behavior coverage; removed deleted extension service tests.
+
+20. crates/zephium-store/src/hub/deletion.rs
+   Kept Work memories FTS secure deletion and Work/environment/consent cleanup; removed old extension table cleanup and fixtures.
+
+21. crates/zephium-store/src/hub/mod.rs
+   Retained Work media/storage modules; removed old native_ownership extension storage module.
+
+22. crates/zephium-store/src/lib.rs
+   Retained Work frames and migration_v2 exports; removed old extension exports.
+
+23. crates/zephium-store/src/migrations.rs
+   Kept main's profile 22-24 and appended Work as 25-32; exact-schema bridge preserves legacy Work QA 22-29; meta history retained through 23. Fixture upgrades validate both lineages.
+
+24. desktop/Cargo.toml
+   Combined Work dependencies/features with new extension dependencies; old extension crates remain removed.
+
+25. desktop/build.rs
+   Combined Work, extension and ad-block QA identities; retained Work navigation/render validation and removed obsolete extension lab/staging references.
+
+26. desktop/src/lib.rs
+   Retained Work runtime/modules/favicons/cleanup and main's APP_STARTED/new extension restore/manage. Unified native drop handler for Work files and Browse extension packages, with frontend mode gating.
+
+27. docs/frontend-handoff.md
+   Retained both Work mode handoff requirements and new extension/blocker handoff notes.
+
+28. frame/bundle-budgets.json
+   Union of entries and higher existing ceilings/reasons; only measured combined-build overages raised to the next 100 bytes.
+
+29. frame/messages/en.json
+   Union of all keys; verified no competing changed values were lost.
+
+30. frame/src/app/browser/Shell.svelte
+   Work stays compact with no Browse address/install rail. Browse keeps StoreInstallRail, extension tray/prompts and refreshed blocker controls; sidebar continues compact in Work.
+
+31. frame/src/features/dock/components/Dock.svelte
+   Retained Work tools visibility and main's extension snippet by passing extensions into ToolShelf only when tools are allowed.
+
+32. frame/src/shared/ipc/bindings.ts
+   Selected a side then regenerated via export_typescript_bindings; no manual merge. Also regenerated Work v1 export.
+
+33. frame/vitest.config.ts
+   Retained Work wildcard hugeicons preoptimization covering main's explicit icons; added elkjs diagram worker preoptimization after standalone component failures.
+
+34. vendor/wry/src/lib.rs
+   Retained both Work apple_navigation_action_handler and main main_frame_navigation_attempt_handler attributes/builders; later replaced newer-than-MSRV helper calls.
+
+35. vendor/wry/src/wkwebview/class/wry_navigation_delegate.rs
+   Combined Work provenance/navigation policy delegation with main extension observation and Foundation URL-error handling; preserved declared MSRV.
+
+36. vendor/wry/src/wkwebview/mod.rs
+   Passed both navigation handlers into native delegates, retained agent page policy and main extension hooks; preserved declared MSRV.
+
+37. vendor/wry/src/wkwebview/navigation.rs
+   Kept Work page provenance/policy decisions and main's extension navigation behavior and Foundation URL-error bindings.
+
+WORK / EXTENSION ISOLATION
+- Shared extension_tab_in_scope predicate excludes Work-owned and borrowed pane tabs, agent IDs and invalid/quarantined profile tabs from query and active-tab IDs.
+- Activate/close/load/reload/back/forward/deferred creation and web-extension target listing use the same scope predicate. Ordinary same-profile cross-space tabs remain available.
+- Regression test extensions_cannot_query_or_mutate_work_owned_borrowed_or_agent_tabs covers query invisibility, absent active ID, rejected mutations, surviving tabs and visibility after release.
+- macOS actual WKWebView configuration attests no extension controller. Windows automation profile, path/environment binding and extension inventory checks remain in place alongside Work construction attestation.
+- Windows hash-pinned semantic runtime installation has a dedicated 192 KiB parameter cap for the current 137737-byte payload. General control command cap remains 128 KiB; invocation bounds unchanged.
+
+REMOVED EXTENSION STACK
+Searches across specified Work directories found no remaining removed-stack crate/service references. No tracked crates/zephium-extension-* files remain. Historical extension SQL remains only to support migration validation and upgrades.
+
+crates/zephium-app/src/actor/mod.rs, crates/zephium-app/src/api.rs, crates/zephium-app/src/shell/mod.rs, crates/zephium-app/src/store_reads.rs
+  Removed: ExtensionAcquired types, old provisioning/service state, ExtensionInstallId and old history queue
+  Replacement: New webext status/target/store path and ordinary browser read arbitration; Work commands retained.
+
+crates/zephium-store/src/actor.rs, crates/zephium-store/src/actor/tests.rs, crates/zephium-store/src/hub/mod.rs, crates/zephium-store/src/lib.rs
+  Removed: ExtensionService authority APIs, old extension store exports and native_ownership module
+  Replacement: New runtime registry outside database; obsolete APIs/tests deleted.
+
+crates/zephium-store/src/hub/deletion.rs, crates/zephium-store/src/migrations.rs
+  Removed: Latest-schema extension install/grant/native ownership tables and corresponding cleanup/test fixtures
+  Replacement: Main's drop migrations retained; historical migration tests kept on historical schemas. Work FTS and profile cleanup retained.
+
+crates/zephium-engine/src/host/profiles.rs, crates/zephium-engine/src/host/mod.rs, crates/zephium-engine/src/platform/macos/mod.rs
+  Removed: Old extension erasure tickets/controller cleanup, native-web-extension-probes feature, old macOS extension module
+  Replacement: New platform extension lifecycle and agentic-browser-qa export gate; Work anonymous store cleanup and isolation attestation retained.
+
+desktop/src/lib.rs, desktop/build.rs, desktop/Cargo.toml
+  Removed: Old distribution bootstrap/shutdown and extension_lab/extensions_staging
+  Replacement: New webext manager and restore path alongside Work startup/shutdown.
+
+crates/zephium-terra-macos-probe/Cargo.toml, crates/zephium-terra-macos-probe/src/work_application.rs, crates/zephium-terra-macos-probe/src/work_durable.rs
+  Removed: zephium_extension_service, claim_extension_service_store_authority, ExtensionRepositoryRoot, ExtensionServiceBootPlan::Inert and obsolete spawn_suspended extension argument
+  Replacement: Modern shell startup with no user extension controller; authenticated embedded blocker seed preserves main's enabled-by-default policy.
+
+crates/zephium-store/src/hub/resources/tests.rs, crates/zephium-store/src/hub/work_document_tests.rs, crates/zephium-store/src/hub/work_environment/tests.rs
+  Removed: Old Work migration index assumptions
+  Replacement: Fixture indices shifted by three to canonical Work migrations25-32.
+
+MIGRATION ORDER
+Profile:
+  1-21 unchanged common/release history
+  22 extension provenance (main)
+  23 drop old extension profile tables (main)
+  24 blocker_statistics (main)
+  25 work_schema_v1 (formerly Work22)
+  26 work_migration_v2 (formerly Work23)
+  27 work_runtime_schema_v1 (formerly Work24)
+  28 work_authoring_commands_v1 (formerly Work25)
+  29 work_environment_schema_v1 (formerly Work26)
+  30 work_environment_checkpoints_v1 (formerly Work27)
+  31 user_resources_v28 (formerly Work28)
+  32 work_personal_v29 (formerly Work29)
+Meta:
+  1-15 prior history unchanged
+  16 agent audit
+  17 Work ownership/runs
+  18 Work artifacts
+  19-20 native source ownership history
+  21 drop old extension ownership tables
+  22 blocker sites
+  23 one-time default protection opt-in
+QA upgrade: Exact full-schema recognition of legacy Work22-29; transaction applies missing main22-24, validates canonical schema and advances user_version by3 before remaining migrations. Work29 becomes32 without discarding data.
+Validation: In-memory/temporary fixtures: schema13, main24 and Work29 upgrade; history/objective/memory preserved and repeat upgrade idempotent; injected schema rejected before writes. No real profile opened or modified.
+Authorization: User confirmed nothing shipped and renumbering allowed.
+
+BUDGETS (bytes; union baseline -> measured -> ceiling)
+ProtectionMenu JS: 313000 -> 324010 -> 324100. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
+ProtectionMenu CSS: 95500 -> 105232 -> 105300. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
+WebExtensionManager JS: 430500 -> 441957 -> 442000. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
+WebExtensionManager CSS: 103000 -> 113336 -> 113400. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
+WorkEnvironmentWorkspace CSS: 143600 -> 145355 -> 145400. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
+WorkResultInspector JS: 270300 -> 270332 -> 270400. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
+WorkSubjectInspector JS: 214000 -> 214007 -> 214100. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
+Other entries retain the union, higher ceiling and both reasons. Combined build passed.
+
+GATE RESULTS (latest result per command; original broader gates retained where unaffected)
+PASS  cargo test -p zephium-core --lib
+  290 passed
+  Log: /tmp/zephium-core-test.log
+
+PASS  cargo test -p zephium-store --features work-execution --lib
+  283 passed; 2 ignored
+  Log: /tmp/zephium-store-test.log
+
+PASS  cargo test -p zephium-app --features work-execution --lib
+  426 passed
+  Log: /tmp/zephium-app-test.log
+
+PASS  cargo test -p zephium-agentic --features provider-transport,probe-harness --lib
+  929 passed with pinned psl2.1.220.
+  Log: /tmp/zephium-agentic-psl220-test.log
+
+PASS  cargo test -p zephium-agent-controller
+  Pass; default feature set has no tests. Supplemental provider-transport,probe-harness: 86 unit +6 integration passed
+  Log: /tmp/zephium-agent-controller-test.log
+
+PASS  cargo test -p zephium-work-composition --features durable-runtime --lib
+  50 passed
+  Log: /tmp/zephium-composition-test.log
+
+PASS  cargo test -p zephium-engine --lib
+  211 passed; supplemental feature-enabled run:426 passed
+  Log: /tmp/zephium-engine-test.log
+
+PASS  cargo test -p zephium-desktop
+  137 unit passed,2 ignored;16 integration passed
+  Log: /tmp/zephium-desktop-test.log
+
+PASS  cargo test -p zephium-webext -p zephium-webext-macos -p zephium-webext-windows
+  53 common +5 macOS +1 integration passed;1 ignored; native Windows tests not exercised on Mac
+  Log: /tmp/zephium-webext-test.log
+
+PASS  cargo test --manifest-path vendor/wry/Cargo.toml --all-targets
+  74 passed
+  Log: /tmp/zephium-wry-test.log
+
+FAIL  cargo test -p xtask
+  168 passed,1 failed. All3 approved compatibility checks and new mutation tests pass. current_controller_boundary_is_valid now reaches a separate account-refresh check expecting26 sampling calls; existing Work has28. Left unchanged outside narrow approval.
+  Log: /tmp/zephium-xtask-approved-test.log
+
+PASS  cargo clippy --workspace --all-targets --features zephium-app/work-execution,zephium-agentic/provider-transport,zephium-agentic/probe-harness,zephium-work-composition/durable-runtime -- -D warnings
+  Log: /tmp/zephium-clippy-final.log
+
+PASS  cargo clippy -p zephium-terra-macos-probe --all-targets --features durable-runtime -- -D warnings
+  Log: /tmp/zephium-probe-clippy.log
+
+PASS  cargo clippy --manifest-path vendor/wry/Cargo.toml --all-targets -- -D warnings
+  Log: /tmp/zephium-wry-clippy.log
+
+PASS  cargo fmt --all --check; cargo fmt --manifest-path vendor/wry/Cargo.toml --all --check
+  Log: /tmp/zephium-fmt-check.log
+  Log: /tmp/zephium-wry-fmt-check.log
+
+PASS  cargo xtask check-agent-model-catalog-boundary
+  Log: /tmp/zephium-approved-check-agent-model-catalog-boundary.log
+
+PASS  cargo xtask check-agent-runtime-boundary
+  Log: /tmp/zephium-approved-check-agent-runtime-boundary.log
+
+FAIL  cargo xtask check-agent-controller-boundary
+  Loading classifier approved fix passes; separate account-refresh cardinality check expects26 but existing unchanged Work has28 calls. Other sampled-control assertions remain present.
+  Log: /tmp/zephium-approved-check-agent-controller-boundary.log
+
+FAIL  cargo xtask check-agentic-probe-boundary
+  Approved snapshot/Keychain checks pass their tests. Full command stops at a separate manifest check hard-coding exact psl2.1.230, incompatible with the requested2.1.220 pin. This additional validator expectation was not changed.
+  Log: /tmp/zephium-approved-check-agentic-probe-boundary.log
+
+FAIL  cargo xtask check-security-fork-locks
+  PSL now matches reviewed fork. Comparison advances to a second mismatch: workspace rand0.8.8 versus fork rand0.8.7 at graph row26. No rand or fork-lock change authorized/applied.
+  Log: /tmp/zephium-approved-check-security-fork-locks.log
+
+FAIL  cargo xtask check-blocker-security-fork
+  PSL now matches reviewed fork. Comparison advances to a second mismatch: workspace rand0.8.8 versus fork rand0.8.7 at graph row26. No rand or fork-lock change authorized/applied.
+  Log: /tmp/zephium-approved-check-blocker-security-fork.log
+
+FAIL  cargo xtask check-engine-floors
+  WebView2 hard/latest152.0.4191.66 review expired2026-09-18. Requires actual upstream review.
+  Log: /tmp/zephium-approved-check-engine-floors.log
+
+FAIL  cargo xtask check-advisory-exceptions
+  18 security-owned advisory exceptions expired2026-09-30; first expired entry stops the command.
+  Log: /tmp/zephium-approved-check-advisory-exceptions.log
+
+FAIL  cargo xtask check-release-engine-security
+  Stops at hard-coded agentic PSL expectation; account-refresh count, rand graph mismatch and expired security policies also fail independently.
+  Log: /tmp/zephium-approved-check-release-engine-security.log
+
+PASS  cargo xtask materialize-blocker-seed-webkit --output /tmp/zephium-merged-webkit-rules.json
+  Embedded seed202609300903 verified offline,3568061 source bytes; Runtime and WebKit goldens exact.
+
+PASS  pnpm install
+
+PASS  pnpm -C frame run check
+  Typecheck/lint/stylelint/format/knip pass;107 unit files,592 tests passed. Final rerun after Vitest config change passed.
+  Log: /tmp/zephium-frame-check-final.log
+
+PASS  pnpm -C frame build
+  All merged budgets passed after measured adjustments.
+  Log: /tmp/zephium-frame-build.log
+
+PASS  pnpm -C frame run check:styles
+  101 emitted CSS files checked.
+  Log: /tmp/zephium-frame-styles.log
+
+PASS  One-file-at-a-time component tests under features/work,features/settings,features/webext,features/extensions,app
+  80 files;78 passed first run, WorkAccountScope and WorkBoards passed individually after focus-fixture/worker preoptimization corrections.
+  Log: /tmp/zephium-component-logs/results.json
+  Log: /tmp/zephium-component-account-rerun.log
+  Log: /tmp/zephium-component-boards-rerun.log
+
+PASS  cargo test -p zephium-desktop export_typescript_bindings
+  Log: /tmp/zephium-export.log
+
+PASS  cargo run -p zephium-ipc --example export_work -- crates/zephium-ipc/bindings/work-v1.ts
+  Log: /tmp/zephium-export-work.log
+
+PASS  cargo build -p zephium-terra-macos-probe --features durable-runtime; scripts/sign-work-probe.sh; codesign verification
+  Signed before any Keychain-reading probe execution.
+  Log: /tmp/zephium-probe-build.log
+  Log: /tmp/zephium-probe-sign.log
+  Log: /tmp/zephium-probe-build-final.log
+  Log: /tmp/zephium-probe-sign-final.log
+
+FAIL  ./target/debug/macos-terra-agentic-probe --loopback-site all
+  All22 scenarios executed:21 passed, Autopost content assertion failed while posts remained0. Host then failed durable_shutdown with retained lost-page debt first recorded after Leave. Changed-price safety passed after540107ms; no booking posted. Not release-qualified.
+  Log: /tmp/zephium-loopback-all.log
+
+PASS_ON_RERUN  ./target/debug/macos-terra-agentic-probe --loopback-site writes
+  Final signed probe complete-suite rerun passed all4 checks (SlackWrite, SlackEnter, LinearWrite, NotionWrite), exit0. Initial run failed Notion exact text; isolated Notion rerun and full rerun both passed.
+  Log: /tmp/zephium-loopback-writes.log
+  Log: /tmp/zephium-loopback-writes-rerun.log
+
+KNOWN_MAIN_LIMITATIONS  cargo xtask webext-suite
+  41 extensions:33 pass, Keeper predeclared known timeout,7 fail. All7 reproduced on untouched detached main607cd1af with identical packages and identical summary. Suite exits1 on both branches; no new exemptions added.
+  ColorZilla: Timeout, empty popup
+  Dark Reader: No page effect on example.com
+  Ghostery: Missing chrome.action.getUserSettings
+  Google Translate: Timeout, empty popup
+  Grammarly: Cannot destructure cookie from null/undefined
+  MetaMask: Timeout
+  Zotero Connector: Timeout
+  Log: /tmp/zephium-webext-suite.log
+
+PASS  Signed final probe: --loopback-site autopost (isolated rerun)
+  Content assertion passed; posts=0. Initial combined-run content failure appears intermittent; full all run still failed.
+  Log: /tmp/zephium-loopback-autopost-rerun.log
+
+PASS  Signed final probe: --loopback-site notionwrite (isolated rerun)
+  2 saves; exact requested text present; AllowedForRun confirmation succeeded.
+  Log: /tmp/zephium-loopback-notion-rerun.log
+
+PASS  Signed final probe: --loopback-site leave (isolated rerun)
+  Off-site navigation blocked, no landing requests/cookies, expected failed page status. Process exited0 despite diagnostic lost-page count1; combined-suite shutdown failure not reproduced alone.
+  Log: /tmp/zephium-loopback-leave-rerun.log
+
+KNOWN_MAIN_LIMITATIONS  cargo xtask webext-suite on detached origin/main607cd1af (run before follow-up edits)
+  33 passed, Keeper known timeout,7 failures. Entire main suite summary is byte-for-byte identical to the original merge suite summary.
+  Log: /tmp/zephium-main-webext-suite.log
+
+PASS  cargo clippy -p xtask -p zephium-agentic --all-targets --features zephium-agentic/provider-transport,zephium-agentic/probe-harness -- -D warnings
+  Log: /tmp/zephium-approved-clippy.log
+
+PASS  cargo fmt --all --check (approved follow-up)
+  Log: /tmp/zephium-approved-fmt.log
+
+WINDOWS PASS
+Windows was not compiled on this Mac.
+Native files imported from main (unchanged against607cd1af):
+  crates/zephium-engine/src/platform/windows/agent_context.rs
+  crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs
+  crates/zephium-engine/src/platform/windows/content_filter.rs
+  crates/zephium-engine/src/platform/windows/content_filter_qualification.rs
+  crates/zephium-engine/src/platform/windows/extensions/mod.rs
+  crates/zephium-engine/src/platform/windows/extensions/native.rs
+  crates/zephium-engine/src/platform/windows/mod.rs
+  crates/zephium-engine/src/platform/windows/stage.rs
+Shared files with merge resolutions/fixups or Windows cfg surfaces:
+  crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs
+  crates/zephium-engine/src/platform/agent_navigation.rs
+  crates/zephium-engine/src/host/agent_context.rs
+  crates/zephium-engine/src/host/mod.rs
+  crates/zephium-engine/src/host/profiles.rs
+  crates/zephium-engine/src/host/scripts.rs
+  desktop/build.rs
+  desktop/src/lib.rs
+  vendor/wry/src/lib.rs
+  xtask/src/agentic_probe_boundary.rs
+
+REMAINING DECISIONS FOR THE LEAD
+1. Next scoped approval: should the account-refresh source check be updated from26 to the existing28 calls, with mutation tests preserving per-admission attestation? Work source is unchanged from6fe131f5.
+2. Next scoped approval: should the separate exact-PSL manifest boundary and its fixture expect=2.1.220, matching the explicitly requested downgrade? It currently still requires=2.1.230.
+3. Next dependency decision: workspace rand0.8.8 versus reviewed fork rand0.8.7 is the next provenance mismatch. No other package pins or fork lock were changed.
+4. WebView2 floor and18 advisory exceptions require the separate real security review requested by the user; their dates remain untouched.
+5. The complete writes suite passed on rerun. Full Work all has a recorded content assertion and combined shutdown failure; Autopost and Leave passed isolated final-probe reruns. Full-suite reliability remains unresolved.
+6. Perform the native Windows compile/test pass listed below; this Mac cannot provide it.
+
+APPROVAL STATUS
+The previous automatic approval block was resolved by the user's explicit narrow approval. The3 approved check changes and PSL pin are committed. Additional account-count/PSL-expectation/rand mismatches remain unchanged because they are outside the expressly limited follow-up. No new automatic approval rejection occurred.
+
+Logs are local /tmp evidence; outcomes above are retained in this tracked report.

@@ -177,7 +177,50 @@ fn health_consume_acquires_coalesced_publication_or_preserves_a_successor_wake()
     }
 }
 fn registry() -> WorkBrowserResources {
-    WorkBrowserResources::new(WorkId::from_raw(1), ProfileId::from(2))
+    WorkBrowserResources::new(WorkId::from(1), ProfileId::from(2))
+}
+
+#[test]
+fn native_shutdown_joins_original_sealed_retained_registry_once_without_proving_zero() {
+    let mut rows = registry();
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Phase)
+    ));
+    let resource = create(&mut rows, 804);
+    rows.seal();
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Phase)
+    ));
+    let destruction = rows.destroy(&resource).unwrap();
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Phase)
+    ));
+    assert!(matches!(
+        rows.settle(destruction.complete(WorkBrowserResourceNativeOutcome::Destroyed))
+            .unwrap(),
+        WorkBrowserResourceEvent::Destroyed(_)
+    ));
+    let coordinator = rows.begin_native_shutdown().unwrap();
+    assert_eq!(
+        coordinator.status().stage(),
+        crate::AgentNativeShutdownStage::ReadyToSeal
+    );
+    assert_eq!(coordinator.status().attempts(), 0);
+    assert!(
+        coordinator.finish().is_err(),
+        "local destruction cannot manufacture native zero"
+    );
+    assert!(matches!(
+        rows.begin_native_shutdown(),
+        Err(WorkBrowserResourceError::Sealed)
+    ));
+    assert!(matches!(
+        rows.acquire(&resource, ContextRunId::from_raw(804), tick(3), tick(90)),
+        Err(WorkBrowserResourceError::Sealed)
+    ));
 }
 #[test]
 fn finalized_document_receipt_keeps_requested_lineage_and_binds_only_effective_source() {
@@ -221,6 +264,10 @@ fn finalized_document_receipt_keeps_requested_lineage_and_binds_only_effective_s
     let binding = rows.read_binding(&lease, tick(0)).unwrap();
     assert_eq!(binding.requested_document(), &requested);
     assert_eq!(binding.document(), &effective);
+    assert_eq!(
+        binding.document_policy(),
+        crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+    );
     assert_eq!(binding.lease().resource(), &resource);
 }
 #[test]
@@ -1046,4 +1093,70 @@ fn exact_nonadmission_survives_quarantine_without_retaining_a_fictitious_native_
     destroy(&mut registry, &resource);
     registry.seal();
     assert!(registry.is_quiescent());
+}
+
+#[test]
+fn anonymous_session_attachment_requires_exact_owner_and_isolated_construction() {
+    use std::time::{Duration, Instant};
+    let profile = ProfileId::from(2_u128);
+    let work = WorkId::from(1_u128);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    for (isolated, session, expected) in [
+        (
+            true,
+            crate::WorkBrowserSession::new(profile, work, deadline),
+            true,
+        ),
+        (
+            false,
+            crate::WorkBrowserSession::new(profile, work, deadline),
+            false,
+        ),
+        (
+            true,
+            crate::WorkBrowserSession::new(3_u128.into(), work, deadline),
+            false,
+        ),
+        (
+            true,
+            crate::WorkBrowserSession::new(profile, WorkId::from(3_u128), deadline),
+            false,
+        ),
+    ] {
+        let mut rows = registry();
+        let request = rows
+            .construct_document_with_isolation(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Durable,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                crate::WorkBrowserDocumentPolicy::Exact,
+                isolated,
+                tick(1),
+            )
+            .unwrap();
+        let result = request.with_anonymous_session(session.clone());
+        assert_eq!(result.is_ok(), expected);
+        if let Ok(request) = result {
+            assert_eq!(request.anonymous_session().unwrap().id(), session.id());
+            let request = request.with_anonymous_session(session.clone()).unwrap_err();
+            session.close();
+            assert!(!request.anonymous_session().unwrap().is_current());
+        }
+    }
+    let mut rows = registry();
+    let session = crate::WorkBrowserSession::new(profile, work, deadline);
+    session.close();
+    let request = rows
+        .construct_document_with_isolation(
+            WorkBrowserResourceId::generate(),
+            ContextId::generate(),
+            ContextProfileStorageClass::Durable,
+            ContextNavigationTarget::parse("https://example.test/").unwrap(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            true,
+            tick(1),
+        )
+        .unwrap();
+    assert!(request.with_anonymous_session(session).is_err());
 }

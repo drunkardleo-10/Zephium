@@ -128,7 +128,7 @@ fn explicit_content_policy_brackets_every_first_native_navigation() {
         .split_once("fn build_view_inner(")
         .expect("construction lost build_view_inner")
         .1
-        .split_once("\n#[cfg(target_os = \"windows\")]\nimpl EngineHost {")
+        .split_once("/// Why a profile's WebView2 environment could not be established.")
         .expect("construction lost build_view_inner's end")
         .0;
     let policy_gate = source
@@ -146,7 +146,7 @@ fn explicit_content_policy_brackets_every_first_native_navigation() {
         .rfind("crate::platform::imp::configure(")
         .expect("construction lost platform hardening");
     let policy_install = source
-        .find("install_content_policy_on_view(&view, &content_policy)")
+        .find("install_scoped_content_policy_on_view(")
         .expect("construction lost native content-policy installation");
     let first_load = source
         .find("view.load_url(url)")

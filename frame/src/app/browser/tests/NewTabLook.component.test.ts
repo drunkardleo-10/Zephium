@@ -30,6 +30,10 @@ vi.mock("$shared/ipc/bindings", async () => {
     newtabSearch: native.search,
     newtabRun: async () => ({ accepted: true, operation_id: null }),
     newtabCancel: async () => true,
+    blockerStats: async () => ({
+      status: "ok" as const,
+      data: { today: 1284, last7Days: 9120, days: [1100, 1250, 1400, 1310, 1380, 1396, 1284] },
+    }),
   });
 });
 vi.mock("$domain/tabs", () => ({
@@ -124,11 +128,9 @@ test("the field hangs from the top, the name and the day are cut into the page",
   const card = screen.container.querySelector(".tile")!.getBoundingClientRect();
   expect(pane.bottom - card.bottom).toBe(28);
 
-  // The figures: the blocker's and focus time stand in until they are
-  // counted; what is due is read from Tasks, the overdue one included.
+  // The figures: what the blocker stopped today, and what is due, read from
+  // Tasks with the overdue one included.
   await expect.element(screen.getByText("1,284")).toBeVisible();
-  await expect.element(screen.getByText("2h 14m")).toBeVisible();
-  await expect.element(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "134");
   const due = screen.getByRole("button", { name: /Due today 3 1 overdue/u });
   await expect.element(due).toBeVisible();
   await due.click();

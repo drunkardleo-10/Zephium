@@ -4,8 +4,11 @@ use sha2::{Digest, Sha256};
 mod task_lists;
 #[path = "resources/task_query.rs"]
 mod task_query;
-use zephium_core::ids::ResourceId;
+use zephium_core::ids::{ProfileId, ResourceId};
 use zephium_core::resources::*;
+use zephium_core::work::{
+    artifact::WorkArtifactDataV1, WorkArtifactId, WorkError, WorkExecutionId, WorkId,
+};
 
 fn error(error: ResourceError) -> ResourceResponse {
     ResourceResponse::Error { error }
@@ -14,6 +17,8 @@ fn kind(value: ResourceKind) -> &'static str {
     match value {
         ResourceKind::Note => "note",
         ResourceKind::Task => "task",
+        ResourceKind::Object => "object",
+        ResourceKind::Media => "media",
     }
 }
 fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ResourceRecord>> {
@@ -41,6 +46,26 @@ fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ResourceRecord>> 
         },
     )
     .optional()
+}
+/// A live media resource already holding this fetched asset: the same public
+/// URL, or the same bytes fetched from elsewhere. Imported files never merge.
+pub(super) fn existing_fetched_media(
+    conn: &Connection,
+    asset: &MediaAssetV1,
+) -> Option<ResourceRecord> {
+    let MediaOrigin::Fetched { url, .. } = &asset.origin else {
+        return None;
+    };
+    let id: String = conn
+        .query_row(
+            "SELECT id FROM user_resources WHERE kind='media' AND trashed=0 AND json_extract(body,'$.content.asset.origin.kind')='fetched' AND (json_extract(body,'$.content.asset.origin.url')=?1 OR json_extract(body,'$.content.asset.digest')=?2) ORDER BY id DESC LIMIT 1",
+            params![url, asset.digest],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    get(conn, &id).ok().flatten()
 }
 /// The listing projection, in one place so every caller reads the same columns
 /// in the same order as `summary_row`.
@@ -132,7 +157,9 @@ fn project(draft: &ResourceDraft) -> TaskProjection<'_> {
             sort_key: sort_key.as_deref(),
             work: work.as_deref(),
         },
-        ResourceContent::Note { .. } => TaskProjection {
+        ResourceContent::Note { .. }
+        | ResourceContent::Object { .. }
+        | ResourceContent::Media { .. } => TaskProjection {
             completed: None,
             due_date: None,
             due_time: None,
@@ -170,6 +197,11 @@ fn search_text(draft: &ResourceDraft) -> String {
                 }
                 pending.extend(node.content.iter().rev());
             }
+        }
+        ResourceContent::Object { object } => text.push_str(&object.data.plain_text()),
+        ResourceContent::Media { asset } => {
+            text.push('\n');
+            text.push_str(&asset.name);
         }
     }
     text.to_lowercase()
@@ -217,9 +249,8 @@ impl Hub {
             ResourceCall::List { query } => {
                 list(conn, query).unwrap_or_else(|_| error(ResourceError::Unavailable))
             }
-            ResourceCall::Mutate { command } => {
-                mutate(conn, *command).unwrap_or_else(|_| error(ResourceError::OutcomeUnknown))
-            }
+            ResourceCall::Mutate { command } => mutate(conn, profile, *command)
+                .unwrap_or_else(|_| error(ResourceError::OutcomeUnknown)),
         }
     }
 }
@@ -304,7 +335,62 @@ fn list(conn: &Connection, query: ResourceQuery) -> rusqlite::Result<ResourceRes
     };
     Ok(ResourceResponse::Page { items, next })
 }
-fn mutate(conn: &mut Connection, command: ResourceCommand) -> rusqlite::Result<ResourceResponse> {
+fn preserve_artifact(
+    tx: &Connection,
+    profile: ProfileId,
+    objective: WorkId,
+    execution: WorkExecutionId,
+    artifact: WorkArtifactId,
+    basis: WorkObjectBasis,
+    title: Option<String>,
+) -> Result<ResourceDraft, ResourceError> {
+    let (fact, value) = super::work_document::runtime_store::read_artifact_fact(
+        tx, profile, objective, execution, artifact,
+    )
+    .map_err(|error| match error {
+        WorkError::NotFound => ResourceError::NotFound,
+        _ => ResourceError::Unavailable,
+    })?;
+    let user = fact.user_artifacts.iter().find(|u| u.artifact == artifact);
+    let (data, evidence) = match basis {
+        WorkObjectBasis::Original => (value.data.clone(), value.evidence.clone()),
+        WorkObjectBasis::UserRevision { revision } => {
+            let Some(user) = user.filter(|u| u.revision == revision && u.edited_data.is_some())
+            else {
+                return Err(ResourceError::NotFound);
+            };
+            (user.edited_data.clone().unwrap(), user.evidence.clone())
+        }
+    };
+    if matches!(data, WorkArtifactDataV1::BrowserResourcePreview { .. }) {
+        return Err(ResourceError::Invalid);
+    }
+    Ok(ResourceDraft {
+        title: title.unwrap_or_else(|| value.title.clone()),
+        pinned: false,
+        content: ResourceContent::Object {
+            object: WorkObjectV1 {
+                version: 1,
+                data,
+                evidence,
+                provenance: Some(WorkObjectProvenance {
+                    objective,
+                    execution,
+                    artifact,
+                    basis,
+                    review: value.review,
+                }),
+            },
+        },
+        related: vec![],
+    })
+}
+
+pub(super) fn mutate(
+    conn: &mut Connection,
+    profile: ProfileId,
+    command: ResourceCommand,
+) -> rusqlite::Result<ResourceResponse> {
     if matches!(
         &command.intent,
         ResourceIntent::CreateTaskList { .. }
@@ -361,6 +447,29 @@ fn mutate(conn: &mut Connection, command: ResourceCommand) -> rusqlite::Result<R
                 tx.query_row("SELECT count(*) FROM user_resources", [], |r| r.get(0))?;
             if count >= MAX_RESOURCES as i64 {
                 return Ok(error(ResourceError::Capacity));
+            }
+            (ResourceId::generate().to_string(), draft, 1, now, false)
+        }
+        ResourceIntent::PreserveArtifact {
+            objective,
+            execution,
+            artifact,
+            basis,
+            title,
+        } => {
+            let count: i64 =
+                tx.query_row("SELECT count(*) FROM user_resources", [], |r| r.get(0))?;
+            if count >= MAX_RESOURCES as i64 {
+                return Ok(error(ResourceError::Capacity));
+            }
+            let draft =
+                match preserve_artifact(&tx, profile, objective, execution, artifact, basis, title)
+                {
+                    Ok(draft) => draft,
+                    Err(error) => return Ok(ResourceResponse::Error { error }),
+                };
+            if !draft.validate() {
+                return Ok(error(ResourceError::Invalid));
             }
             (ResourceId::generate().to_string(), draft, 1, now, false)
         }

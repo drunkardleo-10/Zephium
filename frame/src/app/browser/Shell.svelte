@@ -12,17 +12,20 @@
   import { Dock } from "$features/dock";
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionActions } from "$features/extensions";
+  import { ExtensionActions, ManageExtensions } from "$features/extensions";
+  import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
   import { TabRail } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
+  import { requestTab } from "$session/work-tab.svelte";
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
-  import { BlockerShield } from "$features/blocker";
+  import { blocker } from "$domain/blocker";
+  import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
   import { preview } from "$features/settings";
   import { onMount } from "svelte";
@@ -38,7 +41,7 @@
   import { loadTasksPage } from "$features/tasks";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { ModePicker, ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
+  import { ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { tabs } from "$domain/tabs";
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
@@ -94,6 +97,17 @@
     });
   });
   let splitting = $state(false);
+  let inWork = $derived(browserPage.currentPage() === "work");
+  // The column's body settles in only when the environment changes, never on launch.
+  let modeSwitched = $state(false);
+  let shownMode: boolean | null = null;
+  $effect(() => {
+    const next = inWork;
+    untrack(() => {
+      if (shownMode !== null && shownMode !== next) modeSwitched = true;
+      shownMode = next;
+    });
+  });
 
   // Kept sites fill the row beside the tool shelf first; the rest stack in
   // rows of even columns above it. The floor is the narrowest a tile may get
@@ -142,6 +156,7 @@
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
 
+  let protectionMenuActivated = $state(0);
   let handledCommand = 0;
   $effect(() => {
     const command = ui.uiCommand();
@@ -150,6 +165,9 @@
     untrack(() => {
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
+      if (command.id === "extensions.manage") void browserPage.open("extensions");
+      if (command.id === "protection.site") void toggleSiteProtection();
+      if (command.id === "protection.hide") void hideElements();
     });
   });
   function selectTab(id: string) {
@@ -158,49 +176,66 @@
       splitting = false;
       return;
     }
-    tabs.activate(id);
+    // In Work a tab opens over the canvas; the work stays where it is.
+    if (inWork) requestTab(id);
+    else tabs.activate(id);
   }
 </script>
 
 <div
   class="shell flex h-screen w-screen"
-  class:p-2={!IS_MAC}
+  class:p-2={!IS_MAC || inWork}
+  class:pb-0={inWork}
   data-zephium-active-tab={tabs.activeId() ?? ""}
-  data-zephium-surface={browserPage.currentPage() === "settings" ? "settings" : "browse"}
+  data-zephium-surface={browserPage.currentPage() ?? "browse"}
 >
   <Sidebar
     >{#snippet browserBody(compact)}
-      {#if compact}
-        <AddressField {compact} />
-        {#if toolHost.activeTool() !== null}<ModePicker standalone />{/if}
-        <TabRail entries={railTabs} onSelect={selectTab} />
-      {:else}
-        <!--
-        The switch sits above the address field because it governs the
-        whole column, field included; the tray rides the field itself,
-        because everything in it acts on the page the field names.
-      -->
-        <div class="sidebar-head"><ModeTabs /></div>
-        <AddressField {compact}>
-          {#snippet trailing()}
-            <UtilityTray>
-              <div class="utility-panel">
-                <BlockerShield />
-                <ExtensionActions />
-              </div>
-            </UtilityTray>
-          {/snippet}
-        </AddressField>
-        {#if tabs.profile()?.id}<DownloadStatus
-            profile={tabs.profile()!.id}
-            onopen={() => toolHost.open("downloads")}
-          />{/if}
-        {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
-            {m.choose_split()}
-          </p>{/if}
-        <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
-      {/if}
-    {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
+      {#if compact && (inWork || toolHost.activeTool() !== null)}
+        {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
+        {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
+      {:else if compact}<AddressField {compact} /><StoreInstallRail />
+      {:else}<div class="sidebar-head"><ModeTabs /></div>{/if}
+      <!-- One column in both environments: only what it lists changes, and the
+           new list settles in where the old one was. -->
+      {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
+          {#if compact}
+            <TabRail entries={railTabs} onSelect={selectTab} />
+          {:else}
+            <!--
+            The switch sits above the address field because it governs the
+            whole column, field included; the tray rides the field itself,
+            because everything in it acts on the page the field names.
+          -->
+            <AddressField {compact}>
+              {#snippet trailing()}
+                <UtilityTray
+                  onopen={() => {
+                    protectionMenuActivated += 1;
+                    void blocker.refresh();
+                  }}
+                >
+                  <BlockerShield labelled activated={protectionMenuActivated} />
+                  <ExtensionActions />
+                  <ManageExtensions />
+                </UtilityTray>
+              {/snippet}
+            </AddressField>
+            <HidingBar />
+            {#if tabs.profile()?.id}<DownloadStatus
+                profile={tabs.profile()!.id}
+                onopen={() => toolHost.open("downloads")}
+              />{/if}
+            {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
+                {m.choose_split()}
+              </p>{/if}
+            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
+          {/if}
+        </div>{/key}
+    {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact tools={!inWork}>
+          {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
+              variant="stack"
+            />{/snippet}
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
               onSelect={selectTab}
@@ -266,8 +301,10 @@
   {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
       {m.browser_nav_failed()}
     </div>{/if}
-  {#if !tabs.activeTab()?.url && browserPage.currentPage() === null}
+  {#if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
     <!--
+      A tab opened straight to an address is loading before it has a URL; it
+      goes to its page rather than flashing the new tab first.
       Occupies exactly the rect a content WebView would, so moving between a
       page and the new tab never changes the window's shape. The inline start
       inset matches the core layout gap between chrome and content.
@@ -307,6 +344,13 @@
             {#if browserPage.currentPage() === "settings"}
               <LazyView
                 loader={loadSettings}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+              >
+            {:else if browserPage.currentPage() === "extensions"}
+              <LazyView
+                loader={loadWebExtensionManager}
                 loadingLabel={m.surface_loading()}
                 failureLabel={m.surface_render_failed()}
                 retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
@@ -357,3 +401,23 @@
     </main>
   {/if}
 </div>
+
+<style>
+  .sidebar-mode-body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .sidebar-mode-body[data-arriving="true"] {
+    animation: mode-body-in var(--motion-slow) var(--ease-emphasized) both;
+  }
+
+  @keyframes mode-body-in {
+    from {
+      opacity: 0;
+      translate: 0 6px;
+    }
+  }
+</style>

@@ -27,15 +27,20 @@ fn every_disposition_pair_has_closed_transition_grammar() {
         FailedClosed,
         Failed,
         Cancelled,
+        WaitingForHuman,
     ];
     for from in dispositions {
         let mut bytes = *initial().as_bytes();
         bytes[1] = from as u8;
-        bytes[2] = if matches!(from, Succeeded | Failed | Cancelled) {
+        bytes[2] = if matches!(from, Succeeded | Failed | Cancelled | WaitingForHuman) {
             0
         } else {
             63
         };
+        if from == WaitingForHuman {
+            bytes[3] = 1;
+            bytes[7] = 1;
+        }
         let record = AgentWorkRecord::decode(bytes).unwrap();
         for to in dispositions {
             let allowed = matches!(
@@ -43,10 +48,9 @@ fn every_disposition_pair_has_closed_transition_grammar() {
                 (Admitted, Running | RecoveryRequired | FailedClosed)
                     | (Running, NeedsApproval | RecoveryRequired | FailedClosed)
                     | (
-                        NeedsApproval | Interrupted,
+                        NeedsApproval | Interrupted | RecoveryRequired,
                         FreshAdmissionRequired | Rejected | FailedClosed
                     )
-                    | (RecoveryRequired, FailedClosed)
             );
             assert_eq!(record.transition(to).is_ok(), allowed, "{from:?} -> {to:?}");
         }
@@ -129,15 +133,25 @@ fn unsuccessful_closed_facts_are_immutable_and_cannot_mint_mutation_authority() 
     for disposition in [
         AgentWorkDisposition::Failed,
         AgentWorkDisposition::Cancelled,
+        AgentWorkDisposition::WaitingForHuman,
     ] {
         let mut bytes = *running.as_bytes();
         bytes[1] = disposition as u8;
         bytes[2] = 0;
+        if disposition == AgentWorkDisposition::WaitingForHuman {
+            bytes[3] = 1;
+            bytes[7] = 1;
+        }
         bytes[8..16].copy_from_slice(&(running.revision() + 1).to_be_bytes());
         let terminal = AgentWorkRecord::decode(bytes).unwrap();
         assert!(terminal.is_successor_of(running));
         assert!(!terminal.is_successor_of(initial()));
         assert_eq!(terminal.debt(), AgentWorkDebt::NONE);
+        assert_eq!(
+            terminal.human_handoff().map(AgentWorkHumanHandoff::reason),
+            (disposition == AgentWorkDisposition::WaitingForHuman)
+                .then_some(AgentBrowserHumanReason::SignIn)
+        );
         assert_eq!(
             terminal.interrupted(AgentWorkIncarnation::generate()),
             Ok(terminal)
@@ -150,6 +164,37 @@ fn unsuccessful_closed_facts_are_immutable_and_cannot_mint_mutation_authority() 
         bytes[2] = AgentWorkDebt::UNKNOWN.bits();
         assert!(AgentWorkRecord::decode(bytes).is_none());
     }
+}
+
+#[test]
+fn human_handoff_metadata_is_exact_bounded_and_validated() {
+    let handoff = AgentWorkHumanHandoff::try_new(
+        AgentBrowserHumanReason::HumanChallenge,
+        SemanticObservationId::new(42).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(handoff.reason(), AgentBrowserHumanReason::HumanChallenge);
+    assert_eq!(handoff.observation(), 42);
+
+    let running = initial().transition(AgentWorkDisposition::Running).unwrap();
+    let mut bytes = *running.as_bytes();
+    bytes[1] = AgentWorkDisposition::WaitingForHuman as u8;
+    bytes[2] = AgentWorkDebt::NONE.bits();
+    bytes[3] = handoff.reason_byte();
+    bytes[4..8].copy_from_slice(&handoff.observation().to_be_bytes());
+    bytes[8..16].copy_from_slice(&(running.revision() + 1).to_be_bytes());
+    let terminal = AgentWorkRecord::decode(bytes).unwrap();
+    assert_eq!(terminal.human_handoff(), Some(handoff));
+    assert!(terminal.is_successor_of(running));
+
+    for corrupt in [0, 8] {
+        let mut bytes = *terminal.as_bytes();
+        bytes[3] = corrupt;
+        assert!(AgentWorkRecord::decode(bytes).is_none());
+    }
+    let mut missing_observation = *terminal.as_bytes();
+    missing_observation[4..8].fill(0);
+    assert!(AgentWorkRecord::decode(missing_observation).is_none());
 }
 
 #[test]
@@ -178,7 +223,7 @@ fn corrupt_versions_reserved_fields_and_zero_or_contradictory_state_fail_closed(
         (0, 0),
         (0, 2),
         (1, 0),
-        (1, 12),
+        (1, 13),
         (2, 64),
         (3, 1),
         (7, 1),

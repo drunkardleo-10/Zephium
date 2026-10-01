@@ -22,7 +22,8 @@ use zephium_agentic::{
     ContextNativeRequest, ContextNavigationReplacement, ContextRendererLoss,
     ContextResourceAuditId, ContextShutdownDispatch, SemanticActionNativeCompletion,
     SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeInvocation,
-    SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
+    SemanticScreenshotNativeCapture, SemanticScreenshotNativeCompletion,
+    SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest,
 };
 
 use crate::mailbox::{
@@ -63,16 +64,19 @@ const STAGED_STOP_CLOSED_MAILBOX: u8 = 4;
 // inherit an absolute deadline. It still gets one bounded, controller-visible
 // reconciliation window before this host forcibly drops retained authority.
 const CONTROLLER_FAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+// Provider TLS (reqwest, rustls, aws-lc) is polled inline on this worker; an
+// unoptimized build overflowed the 2 MiB platform default mid-handshake.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 static RUNTIME_WORKER_HELD: AtomicBool = AtomicBool::new(false);
-// Only one worker can exist process-wide, so one retained ownership bundle is
-// a complete, bounded fallback when the best-effort reaper cannot start.
-static EMERGENCY_WORKER_REAP: Mutex<Option<RuntimeWorkerOwnership>> = Mutex::new(None);
+static EMERGENCY_WORKER_REAP: Mutex<Vec<RuntimeWorkerOwnership>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 static FORCE_REAPER_SPAWN_FAILURE: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static WORKER_EXIT_GATE: WorkerExitGate = WorkerExitGate::new();
+#[cfg(test)]
+static WORKER_POST_COMPLETION_GATE: WorkerExitGate = WorkerExitGate::new();
 
 /// Minimum bounded control-command capacity for one staged run admission.
 pub const MIN_AGENT_RUNTIME_COMMAND_CAPACITY: usize = 1;
@@ -124,6 +128,9 @@ impl AgentRuntimeConfig {
 /// Content-free failure while starting the suspended worker.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RuntimeSpawnError {
+    /// A scoped group does not match the work or its fixed capacity.
+    #[error("agent runtime group does not admit this worker")]
+    Group,
     /// Another Zephium agent runtime worker has not yet exited.
     #[error("an agent runtime worker is already running")]
     AlreadyRunning,
@@ -377,6 +384,10 @@ pub enum AgentRuntimeEvent {
     NativeTerminal(ContextNativeEvent),
     /// A terminal settlement from an exact semantic native action callback.
     SemanticActionTerminal(SemanticActionNativeSettlement),
+    /// A terminal result from one exact native viewport-capture callback.
+    SemanticScreenshotTerminal(
+        Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ),
     /// A terminal settlement from an exact durable audit callback.
     AuditTerminal(AgentAuditDeliverySettlement),
     /// A page-initiated or otherwise unsolicited navigation replacement.
@@ -423,6 +434,7 @@ impl fmt::Debug for AgentRuntimeEvent {
             Self::RunStarted(_) => "RunStarted",
             Self::NativeTerminal(_) => "NativeTerminal",
             Self::SemanticActionTerminal(_) => "SemanticActionTerminal",
+            Self::SemanticScreenshotTerminal(_) => "SemanticScreenshotTerminal",
             Self::AuditTerminal(_) => "AuditTerminal",
             Self::NavigationReplaced(_) => "NavigationReplaced",
             Self::RendererLost(_) => "RendererLost",
@@ -747,6 +759,11 @@ impl AgentRuntimeWorker {
         self.inner.mailbox.semantic_action_sink().completion()
     }
 
+    /// Creates one exact move-only semantic-screenshot completion callback.
+    pub fn semantic_screenshot_completion(&self) -> SemanticScreenshotNativeCompletion {
+        self.inner.mailbox.semantic_screenshot_sink().completion()
+    }
+
     /// Creates one exact move-only durable-audit completion callback.
     pub fn audit_completion(&self) -> AgentAuditCompletion {
         self.inner.mailbox.audit_sink().completion()
@@ -822,6 +839,9 @@ fn controller_event_from_mailbox(item: AgentRuntimeMailboxItem) -> AgentRuntimeE
         AgentRuntimeMailboxItem::NativeTerminal(event) => AgentRuntimeEvent::NativeTerminal(event),
         AgentRuntimeMailboxItem::SemanticActionTerminal(settlement) => {
             AgentRuntimeEvent::SemanticActionTerminal(settlement)
+        }
+        AgentRuntimeMailboxItem::SemanticScreenshotTerminal(settlement) => {
+            AgentRuntimeEvent::SemanticScreenshotTerminal(settlement)
         }
         AgentRuntimeMailboxItem::AuditTerminal(settlement) => {
             AgentRuntimeEvent::AuditTerminal(settlement)
@@ -1002,6 +1022,7 @@ struct RuntimeInner {
     fault_shutdown_requested: AtomicBool,
     staged_stop_reason: AtomicU8,
     completion: CompletionState,
+    joined: Arc<WorkerJoinCompletion>,
 }
 
 impl RuntimeInner {
@@ -1280,7 +1301,7 @@ impl RuntimeInner {
     }
 }
 
-/// Cloneable observer for a runtime worker's eventual exit.
+/// Cloneable observer for logical worker-loop completion, not OS-thread exit.
 #[derive(Clone)]
 pub struct AgentRuntimeCompletion {
     inner: Arc<RuntimeInner>,
@@ -1288,12 +1309,13 @@ pub struct AgentRuntimeCompletion {
 
 impl AgentRuntimeCompletion {
     /// Registers one replaceable content-free application wake. Registration
-    /// racing worker exit cannot lose the wake; it is not a lifecycle proof.
+    /// racing logical completion cannot lose the wake; it is not a lifecycle proof.
     /// The waker must enqueue work without waiting for this worker to join.
     pub fn set_waker(&self, waker: std::task::Waker) {
         self.inner.completion.set_waker(waker);
     }
     /// Whether the worker loop stopped and published its completion signal.
+    /// Runtime/thread-local teardown can remain; only lifecycle join proves exit.
     pub fn is_stopped(&self) -> bool {
         self.inner.completion.is_stopped()
     }
@@ -1353,7 +1375,12 @@ impl AgentRuntimeHandle {
             self.inner.current_ticket.store(0, Ordering::Release);
             return Err(AgentRunAdmissionRefusal::Capacity);
         }
-        self.inner.control_wake.notify_one();
+        // Shared control has nested lifecycle/watchdog and controller event
+        // waiters. An older lifecycle waiter can remain enabled while the
+        // controller runs, so waking only one can strand this queued Start.
+        // Every consumer registers before inspecting durable control state;
+        // broadcast makes that state visible without relying on a wake permit.
+        self.inner.control_wake.notify_waiters();
         Ok(ticket)
     }
 
@@ -1399,7 +1426,7 @@ pub struct PendingAgentRuntime {
 impl PendingAgentRuntime {
     /// Starts one named current-thread Tokio worker behind a startup gate.
     pub fn spawn_suspended(config: AgentRuntimeConfig) -> Result<Self, RuntimeSpawnError> {
-        Self::spawn_suspended_inner(config, None, None)
+        Self::spawn_suspended_inner(config, None, None, None)
     }
 
     /// Starts the suspended worker with one controller moved to that worker.
@@ -1412,14 +1439,24 @@ impl PendingAgentRuntime {
         config: AgentRuntimeConfig,
         controller: Box<dyn AgentRuntimeController>,
     ) -> Result<Self, RuntimeSpawnError> {
-        Self::spawn_suspended_inner(config, Some(RuntimeController::Legacy(controller)), None)
+        Self::spawn_suspended_inner(
+            config,
+            Some(RuntimeController::Legacy(controller)),
+            None,
+            None,
+        )
     }
 
     fn spawn_suspended_inner(
         config: AgentRuntimeConfig,
         controller: Option<RuntimeController>,
         scope: Option<AgentRuntimeScopedBinding>,
+        group: Option<&AgentRuntimeWorkerGroup>,
     ) -> Result<Self, RuntimeSpawnError> {
+        let permit = match group {
+            Some(group) => group.acquire(scope.as_ref().ok_or(RuntimeSpawnError::Group)?)?,
+            None => acquire_worker_permit()?,
+        };
         let inner = Arc::new(RuntimeInner {
             scope,
             scoped_closure: Mutex::new(None),
@@ -1440,8 +1477,8 @@ impl PendingAgentRuntime {
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),
+            joined: Arc::new(WorkerJoinCompletion::new()),
         });
-        let permit = acquire_worker_permit()?;
         let gate = Arc::new(StartupGate::new());
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let worker_inner = Arc::clone(&inner);
@@ -1449,6 +1486,7 @@ impl PendingAgentRuntime {
         let worker_permit = Arc::clone(&permit);
         let worker = thread::Builder::new()
             .name("zephium-agent-runtime".to_owned())
+            .stack_size(WORKER_STACK_BYTES)
             .spawn(move || {
                 worker_main(
                     worker_inner,
@@ -1459,16 +1497,22 @@ impl PendingAgentRuntime {
                 )
             })
             .map_err(|_| RuntimeSpawnError::WorkerUnavailable)?;
+        let joined = inner.joined.clone();
+        let worker = RuntimeWorkerOwnership {
+            worker,
+            permit,
+            joined,
+        };
         match startup_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 inner,
                 gate,
-                worker: Some(RuntimeWorkerOwnership { worker, permit }),
+                worker: Some(worker),
                 bound: false,
             }),
             Ok(Err(())) | Err(_) => {
                 gate.stop();
-                let _ = worker.join();
+                worker.join();
                 Err(RuntimeSpawnError::WorkerUnavailable)
             }
         }
@@ -1583,13 +1627,16 @@ fn join_worker_until(
     deadline: Instant,
 ) -> bool {
     inner.request_cooperative_shutdown_until(deadline);
-    if !inner.completion.wait_until(deadline) {
-        if let Some(worker) = worker.take() {
-            schedule_reap(worker);
-        }
-        return false;
+    let completed = inner.completion.wait_until(deadline);
+    // Logical completion precedes Tokio/runtime/TLS teardown. Only the existing
+    // reaper may perform a potentially blocking OS-thread join; its original
+    // acknowledgement, not mark_stopped or is_finished, proves actual exit.
+    if let Some(worker) = worker.take() {
+        schedule_reap(worker);
     }
-    worker.take().is_some_and(RuntimeWorkerOwnership::join)
+    completed
+        && inner.joined.wait_until(deadline)
+        && Instant::now() < deadline
         && inner.controller_returned.load(Ordering::Acquire)
         && inner.run_state.load(Ordering::Acquire) == RUN_SUCCEEDED
         && inner.mailbox.fault().is_none()
@@ -1621,13 +1668,13 @@ fn schedule_reap(worker: RuntimeWorkerOwnership) {
     let handoff = Arc::new(Mutex::new(Some(worker)));
     let reaper_handoff = Arc::clone(&handoff);
     if spawn_reaper(reaper_handoff).is_err() {
-        // Do not trade the caller's deadline for join ownership. The singleton
-        // worker permit guarantees this global slot is empty here: a later
-        // spawn will join this retained handle only after it is finished, and
-        // otherwise refuses admission without starting another worker.
+        // Ownership stays bounded by the exclusive reservation or its three
+        // group slots. A failed reaper never releases a slot before join.
         let worker = take_worker_ownership(&handoff);
         let mut emergency = recover_lock(&EMERGENCY_WORKER_REAP);
-        *emergency = worker;
+        if let Some(worker) = worker {
+            emergency.push(worker);
+        }
     }
 }
 
@@ -1815,6 +1862,8 @@ async fn worker_loop(
     #[cfg(test)]
     WORKER_EXIT_GATE.wait();
     inner.completion.mark_stopped();
+    #[cfg(test)]
+    WORKER_POST_COMPLETION_GATE.wait();
 }
 
 async fn run_controller_no_unwind(
@@ -1961,20 +2010,52 @@ fn take_worker_ownership(
 struct RuntimeWorkerOwnership {
     worker: JoinHandle<()>,
     permit: Arc<WorkerPermit>,
+    joined: Arc<WorkerJoinCompletion>,
 }
 
 impl RuntimeWorkerOwnership {
-    fn is_finished(&self) -> bool {
-        self.worker.is_finished()
-    }
-
     fn join(self) -> bool {
         let joined = self.worker.join().is_ok();
         // Keep the lifecycle owner's permit alive until the actual worker has
         // been joined. The worker itself holds the other Arc until its thread
         // returns, so either ordering preserves process-wide exclusion.
-        let _permit_until_joined = self.permit;
+        drop(self.permit);
+        self.joined.finish(joined);
         joined
+    }
+}
+
+/// Original join acknowledgement. It can be published only after the owner's
+/// OS-thread join returns, including runtime and thread-local destruction.
+struct WorkerJoinCompletion {
+    result: Mutex<Option<bool>>,
+    changed: Condvar,
+}
+impl WorkerJoinCompletion {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            changed: Condvar::new(),
+        }
+    }
+    fn finish(&self, joined: bool) {
+        *recover_lock(&self.result) = Some(joined);
+        self.changed.notify_all();
+    }
+    fn wait_until(&self, deadline: Instant) -> bool {
+        let mut result = recover_lock(&self.result);
+        loop {
+            if let Some(joined) = *result {
+                return joined;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            result = match self.changed.wait_timeout(result, remaining) {
+                Ok((result, _)) => result,
+                Err(error) => error.into_inner().0,
+            };
+        }
     }
 }
 
@@ -2013,30 +2094,67 @@ impl WorkerExitGate {
     }
 }
 
-struct WorkerPermit;
+struct WorkerPermit(Option<Arc<WorkerGroup>>);
+
+/// One exclusive process reservation split into at most three scoped workers.
+#[derive(Clone)]
+pub struct AgentRuntimeWorkerGroup(Arc<WorkerGroup>);
+
+struct WorkerGroup {
+    _permit: Arc<WorkerPermit>,
+    work: zephium_agentic::WorkId,
+    capacity: u8,
+    active: AtomicU8,
+}
+
+impl AgentRuntimeWorkerGroup {
+    /// Reserves the existing exclusive runtime slot for one trusted Work group.
+    pub fn try_new(work: zephium_agentic::WorkId, capacity: u8) -> Result<Self, RuntimeSpawnError> {
+        if !(1..=3).contains(&capacity) {
+            return Err(RuntimeSpawnError::Group);
+        }
+        Ok(Self(Arc::new(WorkerGroup {
+            _permit: acquire_worker_permit()?,
+            work,
+            capacity,
+            active: AtomicU8::new(0),
+        })))
+    }
+
+    fn acquire(
+        &self,
+        scope: &AgentRuntimeScopedBinding,
+    ) -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
+        if scope.work() != self.0.work {
+            return Err(RuntimeSpawnError::Group);
+        }
+        if retry_emergency_reapers() {
+            return Err(RuntimeSpawnError::AlreadyRunning);
+        }
+        self.0
+            .active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.0.capacity).then_some(active + 1)
+            })
+            .map_err(|_| RuntimeSpawnError::Group)?;
+        Ok(Arc::new(WorkerPermit(Some(self.0.clone()))))
+    }
+}
 
 impl Drop for WorkerPermit {
     fn drop(&mut self) {
-        RUNTIME_WORKER_HELD.store(false, Ordering::Release);
+        match &self.0 {
+            Some(group) => {
+                group.active.fetch_sub(1, Ordering::AcqRel);
+            }
+            None => RUNTIME_WORKER_HELD.store(false, Ordering::Release),
+        }
     }
 }
 
 fn acquire_worker_permit() -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
-    let completed_worker = {
-        let mut emergency = recover_lock(&EMERGENCY_WORKER_REAP);
-        match emergency.as_ref() {
-            Some(worker) if worker.is_finished() => emergency.take(),
-            Some(_) => {
-                // The retained lifecycle permit remains held while this old
-                // worker finishes. Preserve its join ownership and reject this
-                // attempt; callers may retry without a second worker starting.
-                return Err(RuntimeSpawnError::AlreadyRunning);
-            }
-            None => None,
-        }
-    };
-    if let Some(worker) = completed_worker {
-        worker.join();
+    if retry_emergency_reapers() {
+        return Err(RuntimeSpawnError::AlreadyRunning);
     }
     if RUNTIME_WORKER_HELD
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -2044,7 +2162,18 @@ fn acquire_worker_permit() -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
     {
         return Err(RuntimeSpawnError::AlreadyRunning);
     }
-    Ok(Arc::new(WorkerPermit))
+    Ok(Arc::new(WorkerPermit(None)))
+}
+
+fn retry_emergency_reapers() -> bool {
+    let retained_workers = std::mem::take(&mut *recover_lock(&EMERGENCY_WORKER_REAP));
+    let retained = !retained_workers.is_empty();
+    if retained {
+        for worker in retained_workers {
+            schedule_reap(worker);
+        }
+    }
+    retained
 }
 
 #[cfg(test)]
@@ -2209,6 +2338,9 @@ mod tests {
                         Ok(AgentRuntimeEvent::SemanticActionTerminal(_)) => {
                             "SemanticActionTerminal"
                         }
+                        Ok(AgentRuntimeEvent::SemanticScreenshotTerminal(_)) => {
+                            "SemanticScreenshotTerminal"
+                        }
                         Ok(AgentRuntimeEvent::AuditTerminal(_)) => "AuditTerminal",
                         Ok(AgentRuntimeEvent::NavigationReplaced(_)) => "NavigationReplaced",
                         Ok(AgentRuntimeEvent::RendererLost(_)) => "RendererLost",
@@ -2229,6 +2361,77 @@ mod tests {
     }
 
     struct EarlyExitController;
+
+    pub(super) struct LateStartController {
+        pub(super) waiting: mpsc::Sender<()>,
+        pub(super) started: mpsc::Sender<Option<AgentRunTicket>>,
+    }
+
+    impl LateStartController {
+        fn wait_for_start(
+            self: Box<Self>,
+            mut worker: AgentRuntimeWorker,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async move {
+                let mut event = Box::pin(worker.next_event());
+                std::future::poll_fn(|cx| {
+                    // Signal only after the real inner waiter has registered
+                    // and returned Pending under the older lifecycle waiters.
+                    assert!(event.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                self.waiting.send(()).unwrap();
+                let ticket = match event.await {
+                    Ok(AgentRuntimeEvent::RunStarted(ticket)) => Some(ticket),
+                    _ => None,
+                };
+                let _ = self.started.send(ticket);
+            })
+        }
+    }
+
+    impl AgentRuntimeController for LateStartController {
+        fn run(
+            self: Box<Self>,
+            worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            self.wait_for_start(worker)
+        }
+    }
+
+    impl AgentRuntimeScopedController for LateStartController {
+        fn run(self: Box<Self>, worker: AgentRuntimeWorker) -> AgentRuntimeControllerFuture {
+            self.wait_for_start(worker)
+        }
+    }
+
+    #[test]
+    fn bound_controller_observes_late_start_without_an_unrelated_wake() {
+        let _guard = runtime_test_guard();
+        let (waiting, pending_event) = mpsc::channel();
+        let (started, observed_start) = mpsc::channel();
+        let pending = PendingAgentRuntime::spawn_suspended_with_controller(
+            AgentRuntimeConfig::STANDARD,
+            Box::new(LateStartController { waiting, started }),
+        )
+        .unwrap();
+        let (handle, _completion, lifecycle) = pending
+            .bind_browser_port(Arc::new(RecordingPort {
+                calls: AtomicUsize::new(0),
+            }))
+            .into_parts();
+        pending_event.recv_timeout(Duration::from_secs(2)).unwrap();
+        let ticket = handle.start_run().unwrap();
+        let observed = observed_start.recv_timeout(Duration::from_millis(200));
+        // Always clean up before asserting, including the negative control.
+        assert!(matches!(
+            lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
+            AgentBrowserShutdownOutcome::Unclean
+        ));
+        assert_eq!(observed, Ok(Some(ticket)));
+    }
 
     impl AgentRuntimeController for EarlyExitController {
         fn run(
@@ -2498,6 +2701,7 @@ mod tests {
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),
+            joined: Arc::new(WorkerJoinCompletion::new()),
         })
     }
 
@@ -3040,7 +3244,7 @@ mod tests {
                 Err(RuntimeSpawnError::AlreadyRunning) => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                Err(RuntimeSpawnError::WorkerUnavailable) => {
+                Err(RuntimeSpawnError::WorkerUnavailable | RuntimeSpawnError::Group) => {
                     panic!("test worker infrastructure is unavailable")
                 }
             }
@@ -3583,6 +3787,56 @@ mod tests {
         drop(next);
     }
 
+    struct DeepStackController {
+        report: mpsc::Sender<(Option<String>, u64)>,
+    }
+
+    #[inline(never)]
+    fn consume_stack(frames: usize) -> u64 {
+        let mut frame = [0u8; 64 * 1024];
+        std::hint::black_box(&mut frame);
+        if frames == 0 {
+            return u64::from(frame[0]);
+        }
+        consume_stack(frames - 1) + u64::from(std::hint::black_box(frame[frame.len() - 1]))
+    }
+
+    impl AgentRuntimeController for DeepStackController {
+        fn run(
+            self: Box<Self>,
+            _worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async move {
+                // Three times the 2 MiB platform default a provider handshake overflowed.
+                let depth = consume_stack(6 * 1024 * 1024 / (64 * 1024));
+                let _ = self
+                    .report
+                    .send((std::thread::current().name().map(str::to_owned), depth));
+            })
+        }
+    }
+
+    #[test]
+    fn worker_stack_admits_controller_frames_beyond_the_platform_default() {
+        let _guard = runtime_test_guard();
+        let (report, reported) = mpsc::channel();
+        let pending = spawn_suspended_with_controller(
+            AgentRuntimeConfig::STANDARD,
+            Box::new(DeepStackController { report }),
+        )
+        .expect("controller worker starts");
+        let (_handle, completion, lifecycle) = pending
+            .bind_browser_port(Arc::new(RecordingPort {
+                calls: AtomicUsize::new(0),
+            }))
+            .into_parts();
+        let observed = reported.recv_timeout(Duration::from_secs(5));
+        wait_stopped(&completion);
+        drop(lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)));
+        assert_eq!(observed, Ok((Some("zephium-agent-runtime".to_owned()), 0)));
+    }
+
     #[test]
     fn controller_exit_and_panic_release_browser_and_worker_permit() {
         let _guard = runtime_test_guard();
@@ -3718,9 +3972,11 @@ mod tests {
         let start = Instant::now();
         let pending = spawn_suspended(AgentRuntimeConfig::STANDARD).expect("worker starts");
         let native = pending.native_event_sink();
+        let joined = pending.inner.joined.clone();
         drop(native);
         drop(pending);
         assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(joined.wait_until(Instant::now() + Duration::from_secs(1)));
     }
 
     #[test]
@@ -3765,9 +4021,44 @@ mod tests {
     }
 
     #[test]
+    fn logical_completion_cannot_extend_shutdown_through_unfinished_thread_teardown() {
+        let _guard = runtime_test_guard();
+        struct ReleasePostCompletion;
+        impl Drop for ReleasePostCompletion {
+            fn drop(&mut self) {
+                WORKER_POST_COMPLETION_GATE.release();
+            }
+        }
+        WORKER_POST_COMPLETION_GATE.hold();
+        let release = ReleasePostCompletion;
+        let pending = spawn_suspended(AgentRuntimeConfig::STANDARD).unwrap();
+        let port = Arc::new(RecordingPort {
+            calls: AtomicUsize::new(0),
+        });
+        let (handle, completion, lifecycle) = pending.bind_browser_port(port).into_parts();
+        handle.stop_and_seal(AgentRuntimeStopReason::Cancelled);
+        wait_stopped(&completion);
+        assert!(RUNTIME_WORKER_HELD.load(Ordering::Acquire));
+        let (sent, received) = mpsc::channel();
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let caller = std::thread::spawn(move || {
+            sent.send(lifecycle.shutdown_until(deadline)).unwrap();
+        });
+        let outcome = received.recv_timeout(Duration::from_millis(200));
+        assert!(RUNTIME_WORKER_HELD.load(Ordering::Acquire));
+        drop(release);
+        caller.join().unwrap();
+        assert!(
+            matches!(outcome, Ok(AgentBrowserShutdownOutcome::Unclean)),
+            "logical completion must not make caller join unfinished teardown: {outcome:?}"
+        );
+        drop(spawn_after_true_worker_exit());
+    }
+
+    #[test]
     fn failed_reaper_spawn_retains_the_worker_without_extending_the_deadline() {
         let _guard = runtime_test_guard();
-        let _forced_failure = ForcedReaperSpawnFailure::enable();
+        let forced_failure = ForcedReaperSpawnFailure::enable();
         let worker_exit_gate = HeldWorkerExitGate::enable();
         let port = Arc::new(RecordingPort {
             calls: AtomicUsize::new(0),
@@ -3783,14 +4074,19 @@ mod tests {
         // method returns, so admission remains closed across the handoff even
         // if the worker races to exit immediately afterwards.
         assert!(RUNTIME_WORKER_HELD.load(Ordering::Acquire));
-        assert!(recover_lock(&EMERGENCY_WORKER_REAP).is_some());
+        assert!(!recover_lock(&EMERGENCY_WORKER_REAP).is_empty());
         assert!(!completion.is_stopped());
 
         worker_exit_gate.release();
         wait_stopped(&completion);
         assert!(RUNTIME_WORKER_HELD.load(Ordering::Acquire));
+        assert!(matches!(
+            spawn_suspended(AgentRuntimeConfig::STANDARD),
+            Err(RuntimeSpawnError::AlreadyRunning)
+        ));
+        drop(forced_failure);
         let next = spawn_after_true_worker_exit();
-        assert!(recover_lock(&EMERGENCY_WORKER_REAP).is_none());
+        assert!(recover_lock(&EMERGENCY_WORKER_REAP).is_empty());
         drop(next);
     }
 
@@ -3877,6 +4173,7 @@ mod tests {
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),
+            joined: Arc::new(WorkerJoinCompletion::new()),
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()

@@ -592,6 +592,12 @@ impl SemanticModelActionQualificationExecution {
             return Err(SemanticActionQualificationError::Contract);
         }
         let expected_proof = match proposal.verification() {
+            crate::SemanticVerification::PageDialogOpened => {
+                crate::SemanticEffectProofKind::PageDialogOpened
+            }
+            crate::SemanticVerification::PageDialogClosed => {
+                crate::SemanticEffectProofKind::PageDialogClosed
+            }
             crate::SemanticVerification::TargetState { .. } => {
                 crate::SemanticEffectProofKind::TargetState
             }
@@ -609,6 +615,7 @@ impl SemanticModelActionQualificationExecution {
             }
             crate::SemanticVerification::NavigationCommitted
             | crate::SemanticVerification::Dialog(_)
+            | crate::SemanticVerification::PageChanged
             | crate::SemanticVerification::ScrollPositionChanged => {
                 return Err(SemanticActionQualificationError::Contract);
             }
@@ -784,12 +791,24 @@ impl SemanticActionQualificationError {
                     "binding_outcome_already_satisfied"
                 }
                 crate::SemanticActionBindingError::OutcomeContract => "binding_outcome_contract",
+                crate::SemanticActionBindingError::TaskEffectMismatch(_) => {
+                    "binding_task_effect_mismatch"
+                }
+                crate::SemanticActionBindingError::TargetIncomplete => "binding_target_incomplete",
                 crate::SemanticActionBindingError::TextLimit => "binding_text_limit",
                 crate::SemanticActionBindingError::SettleLimit => "binding_settle_limit",
                 crate::SemanticActionBindingError::MixedEffectBoundary => {
                     "binding_mixed_effect_boundary"
                 }
                 crate::SemanticActionBindingError::EffectBatchLimit => "binding_effect_batch_limit",
+                crate::SemanticActionBindingError::UnsupportedVerification => {
+                    "binding_unsupported_verification"
+                }
+                crate::SemanticActionBindingError::AssignmentDenied => "binding_assignment_denied",
+                crate::SemanticActionBindingError::BudgetExhausted => "binding_budget_exhausted",
+                crate::SemanticActionBindingError::DispatchRejected => "binding_dispatch_rejected",
+                crate::SemanticActionBindingError::Unverified => "binding_unverified",
+                crate::SemanticActionBindingError::TargetCovered => "binding_target_covered",
             },
             Self::Checkpoint(error) => match error {
                 crate::SemanticActionPreparationError::IncompleteSnapshot => {

@@ -392,13 +392,15 @@ impl ContextJoin {
     pub(crate) const fn work_execution(
         identity: ContextIdentity,
         generation: ContextGeneration,
+        navigation_epoch: NavigationEpoch,
+        frame_generation: FrameGeneration,
     ) -> Self {
         Self {
             identity,
             context_generation: generation,
-            navigation_epoch: NavigationEpoch::INITIAL,
+            navigation_epoch,
             frame: FrameId::MAIN,
-            frame_generation: FrameGeneration::INITIAL,
+            frame_generation,
             cancellation_generation: RunCancellationGeneration::INITIAL,
         }
     }
@@ -486,6 +488,26 @@ pub struct ContextOperationJoin {
 }
 
 impl ContextOperationJoin {
+    /// Correlation only. The retained resource and policy must independently
+    /// own the preparation before this can enter the dedicated native port.
+    pub(crate) fn work_navigation(
+        source: ContextJoin,
+        operation: ContextOperationId,
+    ) -> Option<Self> {
+        Some(Self {
+            operation,
+            kind: ContextOperationKind::Navigate,
+            context: ContextJoin {
+                navigation_epoch: NavigationEpoch::new(
+                    source.navigation_epoch.get().checked_add(1)?,
+                )?,
+                frame_generation: FrameGeneration::new(
+                    source.frame_generation.get().checked_add(1)?,
+                )?,
+                ..source
+            },
+        })
+    }
     /// Shell-minted operation correlation identity.
     pub const fn operation(self) -> ContextOperationId {
         self.operation
@@ -650,6 +672,25 @@ pub struct ContextAutomationState {
 }
 
 impl ContextAutomationState {
+    /// Resource-core projection, not a navigation or action capability.
+    pub(crate) const fn work_execution(context: ContextJoin, observed: bool) -> Self {
+        Self::new(
+            context,
+            ContextStatus {
+                lifecycle: ContextLifecycle::Ready,
+                visibility: ContextVisibility::Hidden,
+                control: ContextControl::Agent,
+                freshness: if observed {
+                    ContextFreshness::Observed
+                } else {
+                    ContextFreshness::ObservationRequired
+                },
+                native_view_resident: true,
+                run_cancelled: false,
+                pending_operation: None,
+            },
+        )
+    }
     pub(crate) const fn new(context: ContextJoin, status: ContextStatus) -> Self {
         Self { context, status }
     }

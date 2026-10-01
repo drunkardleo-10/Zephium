@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use zephium_core::extensions::ExtensionNativeNamespaceScope;
 use zephium_core::ids::{ItemId, ProfileId};
 #[cfg(target_os = "windows")]
 use zephium_core::ports::engine::EngineEvent;
@@ -150,27 +149,6 @@ fn admit_profile_erasure(
     true
 }
 
-/// Refuses destructive profile cleanup while any process-local extension
-/// runtime generation may still own native state for the profile.
-///
-/// The caller installs its durable host tombstone before entering this gate.
-/// A refusal therefore leaves the profile inaccessible while preserving the
-/// exact attempt slot for a later retry after the extension service proves
-/// native absence. Registry or reservation-gate invariant loss is deliberately
-/// global and blocks every profile.
-pub(super) fn extension_runtime_allows_profile_erasure(
-    registry: &super::extension_runtime::ExtensionRuntimeRegistry,
-    profile: ProfileId,
-    completion: &Arc<crate::erasure::Completion>,
-) -> bool {
-    if registry.has_profile_obligation(profile) {
-        completion.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
-        false
-    } else {
-        true
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ProfilePersistenceClass {
     Durable,
@@ -251,32 +229,13 @@ pub(crate) fn release_linux_erasure_obligations(profile: ProfileId, attempt: Arc
 /// timed-out, or superseded callback must retain the handle so a retry cannot
 /// mistake forgotten in-memory state for verified deletion.
 #[cfg(target_os = "macos")]
-pub(crate) fn release_macos_erasure_obligation(
-    profile: ProfileId,
-    attempt: Arc<AtomicBool>,
-    controller_ticket: Option<crate::platform::imp::ControllerErasureTicket>,
-) {
+pub(crate) fn release_macos_erasure_obligation(profile: ProfileId, attempt: Arc<AtomicBool>) {
     let _ = try_with_profile_erasure(move |host| {
         if macos_erasure_release_matches(host.erasure_attempts.get(&profile), &attempt) {
-            match controller_ticket.map(|ticket| {
-                host.macos_extension_controllers
-                    .settle_verified_profile_erasure(profile, ticket, &attempt)
-            }) {
-                None | Some(crate::platform::imp::ControllerErasureSettlement::Settled) => {
-                    host.macos_ephemeral_data_stores.remove(&profile);
-                }
-                Some(crate::platform::imp::ControllerErasureSettlement::Stale) => {
-                    // A duplicate native terminal for an already-settled exact
-                    // attempt is an idempotent no-op. An ABA retry has a
-                    // different Arc attempt and never enters this branch.
-                }
-                Some(crate::platform::imp::ControllerErasureSettlement::IntegrityFailed) => {
-                    // The named store is gone, but losing the matching
-                    // controller generation settlement would make
-                    // shutdown/reuse claims stronger than retained evidence.
-                    host.native_resource_accounting_failed = true;
-                }
-            }
+            host.macos_ephemeral_data_stores.remove(&profile);
+            #[cfg(feature = "agentic-browser")]
+            host.anonymous_work_stores
+                .retain(|_, entry| entry.profile != profile);
         }
     });
 }
@@ -607,7 +566,6 @@ impl EngineHost {
     pub(crate) fn erase_profile_data(
         &mut self,
         profile: ProfileId,
-        extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         completion: Arc<crate::erasure::Completion>,
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -626,7 +584,7 @@ impl EngineHost {
                     }
                     let rejected = completion.clone();
                     if !super::dispatch::try_with_profile_erasure(move |host| {
-                        host.erase_profile_data(profile, extension_native_namespace, completion)
+                        host.erase_profile_data(profile, completion)
                     }) {
                         rejected
                             .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
@@ -656,8 +614,7 @@ impl EngineHost {
             return;
         }
         // Durable erasure tombstones the profile and synchronously retires
-        // every transient runtime/document authority before native cleanup.
-        self.extension_document_authority.revoke_profile(profile);
+        // every transient extension routing projection before native cleanup.
         self.retire_extension_browser_surface(profile);
         #[cfg(target_os = "windows")]
         self.pending_profile_recovery.remove(&profile);
@@ -670,24 +627,22 @@ impl EngineHost {
         // owned until the controllers are closed below.
         self.retire_content_policy(profile);
         self.user_content.remove_profile(profile);
-        if !extension_runtime_allows_profile_erasure(
-            &self.extension_runtime_registry,
-            profile,
-            &completion,
-        ) {
-            // The durable Store authorization cannot override a process-local
-            // native owner or even an unattached factory reservation. Keep the
-            // host tombstone and all native website-data resources intact so
-            // the extension service can retire the exact generation before a
-            // later erasure retry.
-            return;
-        }
         #[cfg(target_os = "macos")]
         let ephemeral_stores = self
             .macos_ephemeral_data_stores
             .get(&profile)
             .cloned()
             .into_iter()
+            .collect::<Vec<_>>();
+        #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+        let ephemeral_stores = ephemeral_stores
+            .into_iter()
+            .chain(
+                self.anonymous_work_stores
+                    .values()
+                    .filter(|entry| entry.profile == profile)
+                    .map(|entry| entry.store.clone()),
+            )
             .collect();
 
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -716,11 +671,7 @@ impl EngineHost {
                     .filter(|spare| spare.partition.profile() == profile)
                     .map(|spare| crate::platform::imp::profile_for_erasure(&spare.view))
             })
-            .or_else(|| {
-                self.windows_extension_profiles
-                    .get(&profile)
-                    .map(crate::platform::imp::WindowsNativeExtensionProfile::profile_for_erasure)
-            })
+            .or_else(|| self.windows_extension_profile_for_erasure(profile))
             .and_then(|result| match result {
                 Ok(profile) => Some(profile),
                 Err(error) => {
@@ -731,16 +682,7 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let had_environment = self.environments.contains_key(&profile);
         #[cfg(target_os = "windows")]
-        let extension_environment_binding_valid = self
-            .windows_extension_environments
-            .profile_binding_is_consistent(
-                profile,
-                had_environment,
-                self.windows_extension_profiles.contains_key(&profile),
-            )
-            && self
-                .windows_extension_environments
-                .profile_allows_erasure(profile);
+        self.forget_windows_extensions(profile);
         #[cfg(target_os = "windows")]
         let browser_process_exit_proof = self
             .browser_process_exit_observers
@@ -767,8 +709,7 @@ impl EngineHost {
             && !self.construction_unproven.contains(&profile)
             && !self.unproven_browser_processes.contains_key(&profile)
             && !self.unproven_environments.contains_key(&profile)
-            && !self.windows_cleanup_invariant_failed
-            && extension_environment_binding_valid;
+            && !self.windows_cleanup_invariant_failed;
 
         let mut ids: Vec<ItemId> = self
             .partitions
@@ -799,59 +740,10 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         self.browser_version_observers.remove(&profile);
         #[cfg(target_os = "windows")]
-        self.windows_extension_profiles.remove(&profile);
-        #[cfg(target_os = "windows")]
-        self.windows_extension_environments.remove(profile);
-        #[cfg(target_os = "windows")]
         self.environments.remove(&profile);
 
-        #[cfg(not(target_os = "macos"))]
-        if extension_native_namespace.is_some() {
-            // A platform-specific durable namespace is authority to prove its
-            // exact absence, never permission to silently ignore it on a
-            // backend that cannot perform that proof.
-            eprintln!("privacy: profile erasure carries an unsupported native extension namespace");
-            completion
-                .report_unsettled(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
-            return;
-        }
-
         #[cfg(target_os = "macos")]
-        {
-            // The service-runtime fence above proves there is no process-local
-            // extension owner. Clear its now-viewless logical delegate graph,
-            // then move a process-retained controller only after every profile
-            // view and warm spare has been dropped. Join the exact Store-owned
-            // durable scope; process-local map absence is never promoted into
-            // cross-restart namespace absence.
-            if !self.clear_retired_extension_browser_surface(profile) {
-                eprintln!("privacy: cannot clear the retiring macOS extension browser surface");
-                completion.report_unsettled(
-                    zephium_core::ports::engine::ProfileDataErasureOutcome::Failed,
-                );
-                return;
-            }
-            let controller_erasure = match self.macos_extension_controllers.begin_profile_erasure(
-                profile,
-                completion.attempt_flag(),
-                extension_native_namespace,
-            ) {
-                Ok(controller_erasure) => controller_erasure,
-                Err(error) => {
-                    eprintln!("privacy: cannot begin macOS extension-controller erasure: {error}");
-                    completion.report_unsettled(
-                        zephium_core::ports::engine::ProfileDataErasureOutcome::Failed,
-                    );
-                    return;
-                }
-            };
-            crate::platform::imp::erase_profile_data(
-                profile,
-                ephemeral_stores,
-                controller_erasure,
-                completion,
-            );
-        }
+        crate::platform::imp::erase_profile_data(profile, ephemeral_stores, completion);
         #[cfg(all(unix, not(target_os = "macos")))]
         crate::platform::imp::erase_profile_data(
             managers,
@@ -1068,9 +960,7 @@ impl EngineHost {
 
     #[cfg(target_os = "windows")]
     fn retire_profile_process_views(&mut self, profile: ProfileId) -> Vec<ItemId> {
-        // A browser-process generation loss invalidates all native extension
-        // owners and activeTab rows associated with the same profile.
-        self.extension_document_authority.revoke_profile(profile);
+        self.forget_windows_extensions(profile);
         let mut ids: Vec<ItemId> = self
             .partitions
             .iter()
@@ -1172,8 +1062,6 @@ impl EngineHost {
             return false;
         }
         self.browser_version_observers.remove(&profile);
-        self.windows_extension_profiles.remove(&profile);
-        self.windows_extension_environments.remove(profile);
         self.environments.remove(&profile);
         self.browser_processes.remove(&profile);
         self.browser_process_exit_observers.remove(&profile);

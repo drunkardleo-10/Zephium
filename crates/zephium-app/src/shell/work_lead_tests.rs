@@ -1,0 +1,1072 @@
+//! A lead run end to end over a scripted model: parts in parallel, found
+//! things placed per part, a plan pointing at them, a corrected fault, the
+//! reply, and a follow-up that revises instead of adding.
+use super::work_planning_tests::{drive, fixture};
+use crate::work_agent::{WorkAgentBrowseRequest, WorkBrowserOutcome};
+use crate::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
+use crate::work_runtime::WorkArtifactDraft;
+use crate::WorkIntent;
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+use zephium_core::work::{artifact::*, model::*, parts::*, runtime::*, search::*, *};
+use zephium_ipc::work::WorkCommandV1;
+
+struct Script {
+    calls: Mutex<Vec<String>>,
+}
+
+fn call(id: &str, name: &str, arguments: Value) -> WorkModelPart {
+    WorkModelPart::ToolCall(WorkModelToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments,
+    })
+}
+fn results(request: &WorkModelRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            WorkModelMessage::ToolResults(results) => Some(
+                results
+                    .iter()
+                    .map(|r| r.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+fn first_key(text: &str) -> String {
+    let at = text.find("[s").expect("a source key");
+    let end = text[at..].find(']').unwrap();
+    text[at + 1..at + end].split(',').next().unwrap().to_owned()
+}
+
+impl Script {
+    fn lead(&self, request: &WorkModelRequest, turn: usize) -> Vec<WorkModelPart> {
+        let seen = results(request);
+        let follow_up = request.messages.iter().any(|m| match m {
+            WorkModelMessage::User(parts) => parts
+                .iter()
+                .any(|p| matches!(p, WorkModelPart::Text(t) if t.contains("Earlier requests"))),
+            _ => false,
+        });
+        if follow_up {
+            return match turn {
+                0 => vec![call("r1", "read_canvas", json!({}))],
+                1 => {
+                    let plan = seen
+                        .lines()
+                        .find(|l| l.contains(" plan "))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap()
+                        .to_owned();
+                    vec![
+                        call(
+                            "r2",
+                            "revise",
+                            json!({"id": plan, "data": {"steps": [
+                                {"title": "Fly home early", "kind": "travel", "when": "Fri 10 Jan"}
+                            ]}}),
+                        ),
+                        call(
+                            "r3",
+                            "create",
+                            json!({"kind": "reply", "title": "Shorter trip", "data": {
+                            "headline": "Home a day early", "text": "The plan now ends on Friday."}}),
+                        ),
+                        call(
+                            "r5",
+                            "create",
+                            json!({"kind": "plan", "title": "Your trip, shorter", "data": {"steps": [
+                                {"title": "Fly home early", "kind": "travel"}]}}),
+                        ),
+                    ]
+                }
+                2 => {
+                    assert!(seen.contains("already covers this subject"), "{seen}");
+                    vec![call(
+                        "r4",
+                        "finish",
+                        json!({"say": "The plan ends a day earlier."}),
+                    )]
+                }
+                _ => vec![call(
+                    "r4",
+                    "finish",
+                    json!({"say": "The plan ends a day earlier."}),
+                )],
+            };
+        }
+        match turn {
+            0 => vec![
+                WorkModelPart::Text("Starting the stay and entry parts.".into()),
+                call("a", "load_skill", json!({"name": "trip-planning"})),
+                call(
+                    "b",
+                    "start_part",
+                    json!({"title": "Stay", "helper": "browser",
+                    "goal": "Two homes near the YC office for 6–12 January",
+                    "brief": "2 guests, under $300 a night", "service": "airbnb.com"}),
+                ),
+                call(
+                    "c",
+                    "start_part",
+                    json!({"title": "Entry", "helper": "research",
+                    "goal": "What a Polish citizen needs to enter the US"}),
+                ),
+            ],
+            1 => {
+                assert!(seen.contains("Part Stay"), "{seen}");
+                assert!(seen.contains("Part Entry"), "{seen}");
+                let picks = seen
+                    .lines()
+                    .find(|l| l.contains(" picks \""))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .expect("the Stay part's picks")
+                    .to_owned();
+                vec![
+                    call(
+                        "d",
+                        "create",
+                        json!({"kind": "plan", "title": "Your trip", "data": {
+                        "steps": [
+                            {"title": "Stay in the Mission", "kind": "stay", "when": "6–12 Jan",
+                             "pick": {"artifact": picks, "index": 0}},
+                            {"title": "Apply for ESTA", "kind": "task", "when": "Before 3 Jan"}
+                        ],
+                        "total": {"label": "Estimated total", "value": "$1,740"}}}),
+                    ),
+                    call(
+                        "e",
+                        "create",
+                        json!({"kind": "reply", "title": "Your trip", "data": {
+                        "headline": "x".repeat(90), "text": "Six nights in the Mission."}}),
+                    ),
+                ]
+            }
+            2 => {
+                assert!(
+                    seen.contains("headline is one line of 1 to 80 characters"),
+                    "{seen}"
+                );
+                vec![call(
+                    "f",
+                    "create",
+                    json!({"kind": "reply", "title": "Your trip", "data": {
+                    "headline": "Six nights in the Mission, $1,740", "text": "Apply for **ESTA** first."}}),
+                )]
+            }
+            _ => vec![call(
+                "g",
+                "finish",
+                json!({"say": "Your trip is on the canvas.",
+                "followups": ["Book the Mission loft"], "title": "YC trip from Warsaw."}),
+            )],
+        }
+    }
+    fn browser(&self, request: &WorkModelRequest, turn: usize) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![call(
+                "h1",
+                "browse",
+                json!({"start": "airbnb.com",
+                "goal": "Homes near the YC office for 6–12 January, 2 guests",
+                "records": {"title": "Homes", "max_items": 2, "columns": [
+                    {"name": "price", "value": {"kind": "text"}, "required": false},
+                    {"name": "photo", "value": {"kind": "image_url"}, "required": false}]}}),
+            )],
+            1 => {
+                let seen = results(request);
+                let key = first_key(&seen);
+                vec![call(
+                    "h2",
+                    "create",
+                    json!({"kind": "picks", "title": "Homes near YC", "data": {
+                    "facet": "stay", "items": [
+                        {"name": "Mission loft", "price": {"display": "$290 / night", "amount": 290, "currency": "USD"},
+                         "image_candidates": ["https://a0.muscache.com/im/pictures/loft.jpg"],
+                         "recommended": true, "source": key},
+                        {"name": "SoMa studio", "price": {"display": "$240 / night"}, "source": key}]},
+                    "sources": [key]}),
+                )]
+            }
+            _ => vec![call(
+                "h3",
+                "finish",
+                json!({"summary": "2 homes", "digest": "Mission loft $290/night; SoMa studio $240/night."}),
+            )],
+        }
+    }
+    fn research(&self, request: &WorkModelRequest, turn: usize) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![call(
+                "e1",
+                "web_search",
+                json!({"query": "US entry requirements Polish citizens ESTA"}),
+            )],
+            1 => {
+                let key = first_key(&results(request));
+                vec![call(
+                    "e2",
+                    "create",
+                    json!({"kind": "list", "title": "Entry needs", "data": {
+                    "style": "requirements", "items": [{"title": "ESTA approved before you fly", "source": key}]},
+                    "sources": [key]}),
+                )]
+            }
+            _ => {
+                let seen = results(request);
+                assert!(seen.contains("finish's digest"), "{seen}");
+                let key = first_key(&seen);
+                vec![call(
+                    "e3",
+                    "finish",
+                    json!({"summary": "Entry needs", "digest": format!("ESTA required [{key}]")}),
+                )]
+            }
+        }
+    }
+}
+
+impl WorkModelClient for Script {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let system = request
+                .system
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<String>();
+            let (who, assistant) = if system.contains("You are the Work agent") {
+                ("lead", self.lead(&request, turn))
+            } else if system.contains("You work on web pages") {
+                ("browser", self.browser(&request, turn))
+            } else {
+                ("research", self.research(&request, turn))
+            };
+            self.calls.lock().unwrap().push(format!("{who}:{turn}"));
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 2_000,
+                    cached_input_tokens: 1_000,
+                    output_tokens: 200,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+struct Search;
+impl WorkPublicSearchProvider for Search {
+    fn search<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        _: &'a [zephium_core::work::context::WorkContextBody],
+        _: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            assert!(scope.query.contains("ESTA"));
+            Ok(WorkPublicSearchResult {
+                evidence: WorkProviderSearchEvidenceV1 {
+                    version: 1,
+                    provider: WorkSearchProvider::OpenAi,
+                    model: PUBLIC_SEARCH_MODEL.into(),
+                    response_model: PUBLIC_SEARCH_MODEL.into(),
+                    response_id: "resp_entry".into(),
+                    search_call_id: "ws_entry".into(),
+                    answer: "Polish citizens travel on ESTA [1].".into(),
+                    citations: vec![WorkProviderSearchCitation {
+                        url: "https://esta.cbp.dhs.gov/".into(),
+                        title: "Official ESTA Application".into(),
+                        start_index: 0,
+                        end_index: 10,
+                    }],
+                    actual_input_tokens: 200,
+                    actual_output_tokens: 100,
+                },
+                usage: WorkUsage {
+                    model_tokens: 300,
+                    cost_micro_usd: 1_000,
+                    operations: 1,
+                    accounting: WorkUsageAccounting::Exact,
+                },
+            })
+        })
+    }
+}
+
+fn model(client: Arc<Script>) -> LeadModel {
+    LeadModel {
+        entry: WorkModelEntry {
+            id: "openai/gpt-6".into(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::OpenAi,
+                wire: WorkModelWire::OpenAiResponses,
+                model: "gpt-6".into(),
+            },
+            display_name: "GPT-6".into(),
+            roles: vec![WorkModelRole::Lead],
+            recommended: true,
+            context_window: 400_000,
+            max_output: 32_000,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: true,
+                prompt_cache: true,
+                reasoning: true,
+                native_search: true,
+            },
+            price: Some(WorkModelPrice {
+                input: 2_000_000,
+                cached_input: 200_000,
+                output: 8_000_000,
+            }),
+        },
+        client,
+    }
+}
+
+fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
+    WorkCommandV1 {
+        version: 1,
+        work,
+        expected_revision: expected,
+        command: WorkCommandId::generate(),
+        intent: WorkRuntimeIntent::BeginAgent {
+            grant: WorkAgentGrantV1 {
+                provider: WorkSearchProvider::OpenAi,
+                model: PUBLIC_SEARCH_MODEL.into(),
+                max_turns: 10,
+                max_steps: 32,
+                browse_hops: 4,
+                folders: vec![],
+                accounts: vec![],
+                private: false,
+                lead: None,
+                skill: None,
+            },
+            limits: WorkExecutionLimits {
+                model_tokens: 1_000_000,
+                cost_micro_usd: 3_000_000,
+                operations: 256,
+                timeout_seconds: 120,
+                max_workers: 4,
+            },
+        },
+    }
+}
+
+async fn page(request: WorkAgentBrowseRequest) -> Result<WorkBrowserOutcome, WorkError> {
+    let WorkStepKindV1::Read { goal, .. } = &request.step else {
+        panic!("a page step");
+    };
+    assert!(goal.as_deref().is_some_and(|g| g.contains("YC office")));
+    let subject = |name: &str, image: &str| WorkSubject {
+        name: name.into(),
+        descriptor: Some("Entire home".into()),
+        homepage: Some(format!("https://www.airbnb.com/rooms/{}", name.len())),
+        image_candidates: vec![image.into()],
+    };
+    Ok(WorkBrowserOutcome {
+        status: WorkStepStatus::Succeeded,
+        usage: Some(WorkUsage {
+            model_tokens: 5_000,
+            cost_micro_usd: 20_000,
+            operations: 4,
+            accounting: WorkUsageAccounting::Exact,
+        }),
+        artifacts: vec![WorkArtifactDraft {
+            output: request.output,
+            title: "Homes".into(),
+            data: WorkArtifactDataV1::Findings {
+                subjects: vec![
+                    subject(
+                        "Mission loft",
+                        "https://a0.muscache.com/im/pictures/loft.jpg",
+                    ),
+                    subject(
+                        "SoMa studio",
+                        "https://a0.muscache.com/im/pictures/studio.jpg",
+                    ),
+                ],
+                items: vec![WorkFinding {
+                    claim: "Mission loft is $290 a night".into(),
+                    subject: Some(0),
+                    evidence: vec![0],
+                    confidence: WorkConfidence::Supported,
+                    detail: None,
+                    general_knowledge: false,
+                }],
+            },
+            evidence: vec![WorkEvidenceLink {
+                extraction_id: WorkArtifactId::from(900),
+                source_id: 1,
+            }],
+        }],
+        intervention: None,
+        note: None,
+        measurements: None,
+        helped: false,
+        held_back: false,
+        rerun: false,
+    })
+}
+
+#[tokio::test]
+async fn a_lead_run_splits_into_parts_builds_the_result_and_revises_on_follow_up() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Plan my YC batch trip from Warsaw".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let script = Arc::new(Script {
+        calls: Mutex::new(Vec::new()),
+    });
+    let models = WorkLeadModels {
+        lead: model(script.clone()),
+        page: model(script.clone()),
+        light: model(script.clone()),
+    };
+    let service = WorkLeadService::new(handle.clone());
+    let first = drive(
+        &mut shell,
+        &queue,
+        service.run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models.clone(),
+            &Search,
+            |_, request| page(request),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let run = &first.executions[0];
+    assert!(
+        matches!(
+            run.status,
+            WorkExecutionStatus::NeedsReview | WorkExecutionStatus::Completed
+        ),
+        "{:?} {:?}",
+        run.status,
+        run.steps
+            .iter()
+            .map(|s| (s.status, s.note.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(run.agent_grant().unwrap().lead.is_some());
+    let titles: Vec<(&str, WorkPartStateV1, Option<&str>)> = run
+        .parts
+        .iter()
+        .map(|p| (p.title.as_str(), p.state, p.summary.as_deref()))
+        .collect();
+    assert!(
+        titles.contains(&("Stay", WorkPartStateV1::Done, Some("2 homes"))),
+        "{titles:?}"
+    );
+    assert!(
+        titles.contains(&("Entry", WorkPartStateV1::Done, Some("Entry needs"))),
+        "{titles:?}"
+    );
+    assert_eq!(run.inputs[0].kind, WorkInputKindV1::Skill);
+    assert_eq!(run.inputs[0].label, "Trip planning");
+    let stay = run.parts.iter().find(|p| p.title == "Stay").unwrap().id;
+    let page_step = run
+        .steps
+        .iter()
+        .find(|s| matches!(&s.kind, WorkStepKindV1::Read { goal: Some(_), .. }))
+        .unwrap();
+    assert_eq!(page_step.part, Some(stay));
+    let object = |kind: &str| {
+        run.artifacts
+            .iter()
+            .find(|a| a.data.kind_name() == kind)
+            .unwrap_or_else(|| panic!("a {kind}"))
+    };
+    let picks = object("picks");
+    assert_eq!(picks.part, Some(stay));
+    assert!(!picks.evidence.is_empty());
+    let WorkArtifactDataV1::Plan { steps, .. } = &object("plan").data else {
+        panic!()
+    };
+    assert_eq!(steps[0].pick.as_ref().unwrap().artifact, picks.id);
+    assert_eq!(object("plan").part, None);
+    assert_eq!(
+        run.artifacts
+            .iter()
+            .filter(|a| a.data.kind_name() == "reply")
+            .count(),
+        1
+    );
+    // A research part hands its facts to the lead; it places no list.
+    let entry = run.parts.iter().find(|p| p.title == "Entry").unwrap().id;
+    assert!(!run.artifacts.iter().any(|a| a.part == Some(entry)));
+    let finish = run.steps.last().unwrap();
+    assert!(
+        matches!(&finish.kind, WorkStepKindV1::Finish { followups, .. } if followups.len() == 1)
+    );
+    assert_eq!(finish.note.as_deref(), Some("Your trip is on the canvas."));
+    assert_eq!(run.title.as_deref(), Some("YC trip from Warsaw"));
+    let calls = script.calls.lock().unwrap().clone();
+    assert!(
+        calls.contains(&"browser:2".into()) && calls.contains(&"research:2".into()),
+        "{calls:?}"
+    );
+
+    let second = drive(
+        &mut shell,
+        &queue,
+        service.run(
+            profile,
+            command(work, first.work.revision),
+            None,
+            models,
+            &Search,
+            |_, request| page(request),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let follow_up = second.executions.last().unwrap();
+    assert!(follow_up.parts.is_empty());
+    let revised = follow_up
+        .artifacts
+        .iter()
+        .find(|a| a.data.kind_name() == "plan")
+        .unwrap();
+    assert_eq!(revised.revises, Some(object("plan").id));
+    assert_eq!(revised.title, "Your trip");
+    assert_eq!(
+        follow_up
+            .artifacts
+            .iter()
+            .filter(|a| a.data.kind_name() == "plan")
+            .count(),
+        1
+    );
+}
+
+/// A part whose site fails says what it needs; the lead may not stand a
+/// figure or a to-do in for what was not found.
+struct Honest;
+impl WorkModelClient for Honest {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let lead = request
+                .system
+                .iter()
+                .any(|b| b.text.contains("You are the Work agent"));
+            let seen = results(&request);
+            let assistant = match (lead, turn) {
+                (true, 0) => vec![call(
+                    "p",
+                    "start_part",
+                    json!({"title": "Flights", "helper": "browser", "service": "kayak.com",
+                    "goal": "Round trips WAW to SFO for 5 January 2027"}),
+                )],
+                (true, 1) => {
+                    assert!(seen.contains("could not do its job"), "{seen}");
+                    assert!(seen.contains("another try on kayak.com"), "{seen}");
+                    vec![
+                        call(
+                            "r",
+                            "create",
+                            json!({"kind": "reply", "title": "Flights", "data": {
+                            "headline": "Airfare recheck complete", "text": "No fare was found.",
+                            "figures": [{"label": "Exact-date fare", "value": "Not verified"}]}}),
+                        ),
+                        call(
+                            "l",
+                            "create",
+                            json!({"kind": "list", "title": "To do", "data": {"style": "todo",
+                            "items": [{"title": "Retry the Kayak flights check"}]}}),
+                        ),
+                    ]
+                }
+                (true, 2) => {
+                    assert!(seen.contains("figure 1 stands for something"), "{seen}");
+                    assert!(seen.contains("list: item 1 is about work"), "{seen}");
+                    vec![call(
+                        "r2",
+                        "create",
+                        json!({"kind": "reply", "title": "Flights", "data": {
+                        "headline": "No flights found yet",
+                        "text": "Kayak did not load; try again from the Flights row."}}),
+                    )]
+                }
+                (true, _) => vec![call("f", "finish", json!({"say": "No flights yet."}))],
+                (false, _) => vec![call(
+                    "h",
+                    "finish",
+                    json!({"summary": "Kayak did not load", "digest": "The results page failed.",
+                    "found": false, "need": {"kind": "retry", "target": "https://www.kayak.com/flights"}}),
+                )],
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_part_that_cannot_do_its_job_carries_its_fix_and_nothing_stands_for_it() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Recheck flights WAW to SFO".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let client = Arc::new(Honest);
+    let lead = LeadModel {
+        client,
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, request| page(request),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let run = &done.executions[0];
+    let flights = &run.parts[0];
+    assert_eq!(flights.state, WorkPartStateV1::Failed);
+    assert_eq!(
+        flights.need,
+        Some(WorkPartNeedV1::Retry {
+            host: Some("kayak.com".into()),
+            reason: None,
+        })
+    );
+    let kinds: Vec<&str> = run.artifacts.iter().map(|a| a.data.kind_name()).collect();
+    assert_eq!(kinds, ["reply"]);
+}
+
+/// A Slack part when the person added a Slack MCP server: the run offers it
+/// once, the part runs as a connection and calls the server's tools.
+struct Connected;
+impl WorkModelClient for Connected {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let system = request
+                .system
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<String>();
+            let seen = results(&request);
+            let assistant = if system.contains("You are the Work agent") {
+                match turn {
+                    0 => vec![call(
+                        "p",
+                        "start_part",
+                        json!({"title": "Slack", "helper": "browser", "service": "app.slack.com",
+                        "goal": "Unread mentions since yesterday"}),
+                    )],
+                    1 => {
+                        assert!(
+                            seen.contains("Part Slack") && seen.contains("done"),
+                            "{seen}"
+                        );
+                        vec![call(
+                            "r",
+                            "create",
+                            json!({"kind": "reply", "title": "Today", "data": {
+                            "headline": "One mention today", "text": "Ana asked about the deck."}}),
+                        )]
+                    }
+                    _ => vec![call("f", "finish", json!({"say": "Slack is read."}))],
+                }
+            } else {
+                assert!(system.contains("Connection helper"), "{system}");
+                match turn {
+                    0 => {
+                        assert!(
+                            request.tools.iter().any(|t| t.name == "slack__echo"),
+                            "the server's tools are offered"
+                        );
+                        vec![call("e", "slack__echo", json!({"text": "mentions"}))]
+                    }
+                    _ => vec![call(
+                        "h",
+                        "finish",
+                        json!({"summary": "1 mention", "digest": "Ana: the deck."}),
+                    )],
+                }
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs the zephium-mcp-fixture binary in ZEPHIUM_MCP_FIXTURE"]
+async fn a_service_the_person_connected_is_offered_once_before_its_website() {
+    use zephium_ipc::work::{WorkServerTransportV1, WorkServerV1};
+    let program = std::env::var("ZEPHIUM_MCP_FIXTURE").expect("set ZEPHIUM_MCP_FIXTURE");
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let data = std::env::temp_dir().join(format!("zephium-connected-{}", std::process::id()));
+    crate::work_connections::store::install(&data);
+    let server = WorkServerV1 {
+        id: "slack".into(),
+        name: "Slack".into(),
+        transport: WorkServerTransportV1::Stdio {
+            command: program,
+            args: vec![],
+            env: vec![],
+        },
+        enabled: true,
+    };
+    let connections = crate::work_connections::store::shared().unwrap();
+    connections
+        .put(&profile.to_string(), server.clone(), None)
+        .unwrap();
+    crate::work_connections::mcp::check(&profile.to_string(), &server).await;
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "What do I need to do today in Slack?".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Connected),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let answering = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let mut answered = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let Ok(request) = handle.work_projection(profile, work) else {
+                    continue;
+                };
+                let zephium_ipc::work::WorkReplyV1::Projection { projection } =
+                    request.response(profile).await.reply
+                else {
+                    continue;
+                };
+                let Some(execution) = projection.executions.last() else {
+                    continue;
+                };
+                let open = execution.steps.iter().find_map(|step| match &step.kind {
+                    WorkStepKindV1::Ask {
+                        options,
+                        answer: None,
+                        purpose,
+                        ..
+                    } if step.status == WorkStepStatus::Running => {
+                        Some((step.id, options[0].clone(), *purpose))
+                    }
+                    _ => None,
+                });
+                let Some((step, first, purpose)) = open else {
+                    continue;
+                };
+                assert_eq!(purpose, Some(WorkAskPurposeV1::Connection));
+                answered += 1;
+                let _ = handle
+                    .work_command(
+                        profile,
+                        WorkCommandV1 {
+                            version: 1,
+                            work,
+                            expected_revision: projection.work.revision,
+                            command: WorkCommandId::generate(),
+                            intent: WorkRuntimeIntent::AnswerStep {
+                                execution: execution.id,
+                                step,
+                                answer: first,
+                            },
+                        },
+                    )
+                    .unwrap()
+                    .await;
+                if answered > 3 {
+                    return answered;
+                }
+            }
+        })
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, _| async { panic!("the Slack part never opens the website") },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    answering.abort();
+    let run = &done.executions[0];
+    let asks: Vec<&str> = run
+        .steps
+        .iter()
+        .filter_map(|s| match &s.kind {
+            WorkStepKindV1::Ask { prompt, .. } => Some(prompt.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asks,
+        ["Use Slack (MCP)? Its tools read Slack as you in this work."]
+    );
+    let slack = &run.parts[0];
+    assert_eq!(slack.helper, WorkHelperV1::Connection);
+    assert_eq!(slack.state, WorkPartStateV1::Done);
+    assert!(run
+        .steps
+        .iter()
+        .any(|s| matches!(&s.kind, WorkStepKindV1::Call { call } if call.service == "slack")));
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A lead scripted turn by turn: the turn's index and every tool result so
+/// far in, the calls out.
+struct Turns(fn(usize, &str) -> Vec<WorkModelPart>);
+impl WorkModelClient for Turns {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant: (self.0)(turn, &results(&request)),
+            })
+        })
+    }
+}
+
+async fn scripted(
+    objective: &str,
+    turns: fn(usize, &str) -> Vec<WorkModelPart>,
+) -> WorkExecutionFact {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: objective.into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Turns(turns)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, request| page(request),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    done.executions[0].clone()
+}
+
+#[tokio::test]
+async fn a_refused_object_stands_on_its_second_try_without_its_optional_excess() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        let plan = || {
+            call(
+                "p",
+                "create",
+                json!({"kind": "plan", "title": "Your trip", "data": {"steps": [
+                    {"title": "Fly to SFO", "kind": "travel", "detail": "x".repeat(300)},
+                    {"title": "Check in", "kind": "stay", "date": "5 Jan"}]}}),
+            )
+        };
+        match turn {
+            0 => vec![plan()],
+            1 => {
+                assert!(
+                    seen.contains("plan: steps[1].date is not a field of steps[1]"),
+                    "{seen}"
+                );
+                vec![plan()]
+            }
+            2 => {
+                assert!(
+                    seen.contains("Left out to place it: steps[1].date (not a field of plan); steps[0].detail (300 characters; the limit is 280)"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Your trip", "data": {
+                        "headline": "Two steps to San Francisco", "text": "Fly, then check in."}}),
+                    ),
+                    call(
+                        "f",
+                        "finish",
+                        json!({"say": "Your trip is on the canvas.", "title": "Trip to San Francisco"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 2"),
+        }
+    }
+    let run = scripted("Plan my trip", turns).await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    let plan = run
+        .artifacts
+        .iter()
+        .find_map(|a| match &a.data {
+            WorkArtifactDataV1::Plan { steps, .. } => Some(steps.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(plan[0].detail, None);
+    assert_eq!(plan[1].title, "Check in");
+    assert_eq!(run.title.as_deref(), Some("Trip to San Francisco"));
+}
+
+#[tokio::test]
+async fn a_run_that_stops_moving_closes_with_what_it_has() {
+    fn turns(_: usize, _: &str) -> Vec<WorkModelPart> {
+        vec![WorkModelPart::Text("Thinking about it.".into())]
+    }
+    let run = scripted("Plan my day", turns).await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    assert!(run.steps.iter().all(|s| s.status != WorkStepStatus::Failed));
+    let reply = run
+        .artifacts
+        .iter()
+        .find_map(|a| match &a.data {
+            WorkArtifactDataV1::Reply { headline, text, .. } => {
+                Some((headline.clone(), text.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(reply.0, "I couldn't finish this");
+    assert!(reply
+        .1
+        .contains("I stopped before I could put the rest together."));
+    assert!(matches!(
+        run.steps.last().unwrap().kind,
+        WorkStepKindV1::Finish { .. }
+    ));
+}

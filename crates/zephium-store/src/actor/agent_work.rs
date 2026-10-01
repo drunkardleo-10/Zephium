@@ -51,7 +51,7 @@ impl AgentWorkJournalPort for SqliteStore {
         request: zephium_agentic::AgentWorkArtifactRequest,
         completion: zephium_agentic::AgentWorkArtifactCompletion,
     ) -> Result<(), Error> {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(value) => value,
             Err(TryLockError::Poisoned(value)) => value.into_inner(),
             Err(TryLockError::WouldBlock) => {
@@ -87,7 +87,7 @@ impl AgentWorkJournalPort for SqliteStore {
         request: AgentWorkJournalRequest,
         completion: AgentWorkJournalCompletion,
     ) -> Result<(), Error> {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(value) => value,
             Err(TryLockError::Poisoned(value)) => value.into_inner(),
             Err(TryLockError::WouldBlock) => return refuse(Error::Unavailable, completion),

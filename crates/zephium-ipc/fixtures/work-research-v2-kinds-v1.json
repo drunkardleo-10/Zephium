@@ -1,0 +1,288 @@
+{
+  "executions": [
+    {
+      "approved_revision": "3",
+      "artifacts": [
+        {
+          "attempt": "01M291HFMGGJER7VSE2TWKWZD0",
+          "data": {
+            "kind": "comparison_matrix",
+            "subjects": [
+              {
+                "name": "WAL on NFS"
+              },
+              {
+                "name": "WAL on local disk"
+              }
+            ],
+            "criteria": [
+              {
+                "name": "Shared memory",
+                "kind": {
+                  "kind": "presence"
+                }
+              },
+              {
+                "name": "Documented limitation",
+                "kind": {
+                  "kind": "text"
+                }
+              }
+            ],
+            "cells": [
+              [
+                {
+                  "value": {
+                    "kind": "presence",
+                    "present": false
+                  },
+                  "evidence": [
+                    0
+                  ]
+                },
+                {
+                  "value": {
+                    "kind": "text",
+                    "text": "Processes must share a host for WAL shared memory."
+                  },
+                  "evidence": [
+                    1
+                  ]
+                }
+              ],
+              [
+                {
+                  "value": {
+                    "kind": "presence",
+                    "present": true
+                  },
+                  "evidence": [
+                    0
+                  ]
+                },
+                {
+                  "value": {
+                    "kind": "unknown"
+                  },
+                  "evidence": []
+                }
+              ]
+            ],
+            "notes": [
+              "Subjects are deployment conditions, not competing products."
+            ]
+          },
+          "evidence": [
+            {
+              "extraction_id": "01M291JWGRYCV0DCCGCMGTYT7D",
+              "source_id": 38
+            },
+            {
+              "extraction_id": "01M291JWGRYCV0DCCGCMGTYT7D",
+              "source_id": 49
+            }
+          ],
+          "execution": "01M291HFM8M8GWP3T4PWEDXA6C",
+          "id": "01M291JWMAE6QYGFEDTXSEHSER",
+          "node": "01M291HFM1RHNXE5AQEFRV1R56",
+          "output": "sqlite_wal_network_filesystem_findings",
+          "presentation": "automatic",
+          "review": "source_mapped_needs_review",
+          "title": "WAL deployment conditions",
+          "version": 1
+        },
+        {
+          "attempt": "01M291HFM9J614W5MVVPKFA4J6",
+          "data": {
+            "kind": "findings",
+            "subjects": [
+              {
+                "name": "SQLite WAL"
+              }
+            ],
+            "items": [
+              {
+                "claim": "WAL mode requires all processes to be on the same host.",
+                "subject": 0,
+                "evidence": [
+                  0
+                ],
+                "confidence": "supported"
+              },
+              {
+                "claim": "Network filesystems without coherent shared memory break WAL.",
+                "subject": 0,
+                "evidence": [],
+                "confidence": "inferred",
+                "general_knowledge": false
+              }
+            ]
+          },
+          "evidence": [
+            {
+              "extraction_id": "01M291JWGRYCV0DCCGCMGTYT7D",
+              "source_id": 38
+            },
+            {
+              "extraction_id": "01M291JWGRYCV0DCCGCMGTYT7D",
+              "source_id": 49
+            }
+          ],
+          "execution": "01M291HFM8M8GWP3T4PWEDXA6C",
+          "id": "01M291K0Q0T79KME1RXP55TMQA",
+          "node": "01M291HFM1J1PX3203Y9B0PGW8",
+          "output": "sqlite_wal_network_filesystem_explanation",
+          "presentation": "automatic",
+          "review": "source_mapped_needs_review",
+          "title": "WAL findings",
+          "version": 1
+        }
+      ],
+      "attempts": [
+        {
+          "id": "01M291HFM9J614W5MVVPKFA4J6",
+          "node": "01M291HFM1J1PX3203Y9B0PGW8",
+          "status": "succeeded",
+          "usage": {
+            "accounting": "conservative_reservation",
+            "cost_micro_usd": 521,
+            "model_tokens": 1276,
+            "operations": 1
+          }
+        },
+        {
+          "id": "01M291HFMGGJER7VSE2TWKWZD0",
+          "node": "01M291HFM1RHNXE5AQEFRV1R56",
+          "status": "succeeded",
+          "usage": {
+            "accounting": "conservative_reservation",
+            "cost_micro_usd": 500000,
+            "model_tokens": 400000,
+            "operations": 48
+          }
+        }
+      ],
+      "id": "01M291HFM8M8GWP3T4PWEDXA6C",
+      "spec": {
+        "limits": {
+          "cost_micro_usd": 1000000,
+          "max_workers": 2,
+          "model_tokens": 800000,
+          "operations": 96,
+          "timeout_seconds": 180
+        },
+        "nodes": [
+          {
+            "capability": {
+              "kind": "public_browse",
+              "scope": {
+                "max_hops": 8,
+                "routes": [
+                  {
+                    "origin": "https://sqlite.org",
+                    "path_prefix": "/"
+                  },
+                  {
+                    "origin": "https://www.sqlite.org",
+                    "path_prefix": "/"
+                  }
+                ],
+                "start_url": "https://sqlite.org/docs.html"
+              }
+            },
+            "limits": {
+              "cost_micro_usd": 500000,
+              "max_workers": 1,
+              "model_tokens": 400000,
+              "operations": 48,
+              "timeout_seconds": 180
+            },
+            "node": "01M291HFM1RHNXE5AQEFRV1R56",
+            "parent": "01M291HFM1J1PX3203Y9B0PGW8"
+          },
+          {
+            "capability": {
+              "kind": "coordinate",
+              "scope": {
+                "max_hops": 8,
+                "routes": [
+                  {
+                    "origin": "https://sqlite.org",
+                    "path_prefix": "/"
+                  },
+                  {
+                    "origin": "https://www.sqlite.org",
+                    "path_prefix": "/"
+                  }
+                ],
+                "start_url": "https://sqlite.org/docs.html"
+              }
+            },
+            "limits": {
+              "cost_micro_usd": 500000,
+              "max_workers": 2,
+              "model_tokens": 400000,
+              "operations": 48,
+              "timeout_seconds": 180
+            },
+            "node": "01M291HFM1J1PX3203Y9B0PGW8",
+            "parent": null
+          }
+        ],
+        "plan_revision": "2"
+      },
+      "status": "needs_review"
+    }
+  ],
+  "interrupted": [],
+  "version": 1,
+  "work": {
+    "context_revision": "1",
+    "id": "01M291H9MYJTTPGW56P6ZX11QD",
+    "lifecycle": "active",
+    "objective": "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.",
+    "objective_author": "user",
+    "objective_revision": "1",
+    "plan": {
+      "author": "primary_agent",
+      "basis_revision": "1",
+      "draft": {
+        "id": "01M291HFM14RE3E3YA585G7FBS",
+        "nodes": [
+          {
+            "dependencies": [],
+            "id": "01M291HFM1RHNXE5AQEFRV1R56",
+            "objective": "Research SQLite's official documentation on why WAL mode does not work when clients on different machines share a database over a network filesystem. Use only sqlite.org or www.sqlite.org, identify the relevant official statements, and preserve precise source locations and quotations or faithful excerpts.",
+            "outputs": [
+              {
+                "description": "Source-backed findings identifying SQLite's official reason, with URLs, document titles, relevant sections, and quotations or faithful excerpts from sqlite.org or www.sqlite.org.",
+                "name": "sqlite_wal_network_filesystem_findings",
+                "review": "source_mapped_needs_review"
+              }
+            ]
+          },
+          {
+            "dependencies": [
+              "01M291HFM1RHNXE5AQEFRV1R56"
+            ],
+            "id": "01M291HFM1J1PX3203Y9B0PGW8",
+            "objective": "Use the research findings to write a concise explanation of SQLite's official reason that WAL mode does not work for clients on different machines sharing a database over a network filesystem. Use only the supplied sqlite.org or www.sqlite.org evidence and distinguish the documented mechanism or limitation from any unsupported inference.",
+            "outputs": [
+              {
+                "description": "One concise, source-backed explanation with inline or adjacent source links limited to sqlite.org or www.sqlite.org.",
+                "name": "sqlite_wal_network_filesystem_explanation",
+                "review": "source_mapped_needs_review"
+              }
+            ]
+          }
+        ]
+      },
+      "revision": "2"
+    },
+    "profile": "01M291H20DG213EYB2W72XZV63",
+    "questions": [],
+    "revision": "7",
+    "schema_version": 2,
+    "status": "plan_ready"
+  }
+}

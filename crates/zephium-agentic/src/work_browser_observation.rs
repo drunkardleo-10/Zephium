@@ -4,18 +4,73 @@
 
 use super::*;
 use crate::{
-    encode_semantic_runtime_invocation, ContextGeneration, ContextIdentity, ContextJoin,
-    ContextKind, FrameId, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
-    SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest, SemanticOrigin,
-    SemanticRuntimeBudget, SemanticRuntimeCorrelation, SemanticRuntimeInvocation,
-    SemanticRuntimePortFailure, SemanticRuntimeSettlement, SemanticSnapshot,
-    SemanticSnapshotGeneration, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
+    encode_semantic_runtime_invocation, AgentNavigationDiscovery, ContextGeneration,
+    ContextIdentity, ContextJoin, ContextKind, FrameId, SemanticFrameJoin, SemanticFrameTrust,
+    SemanticInvocationId, SemanticObservationBudget, SemanticObservationId,
+    SemanticObservationRequest, SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeCorrelation,
+    SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
+    SemanticSnapshot, SemanticSnapshotGeneration, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ObservationJoin {
     lease: WorkBrowserExecutionLease,
     correlation: SemanticRuntimeCorrelation,
+}
+
+/// Immutable host-selected semantic disclosure capability for one retained
+/// observation. The model cannot construct or widen this value; public link
+/// URL state is available only for the separately validated production
+/// navigation profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkBrowserObservationCapability {
+    runtime_budget: SemanticRuntimeBudget,
+    observation_budget: SemanticObservationBudget,
+}
+
+impl WorkBrowserObservationCapability {
+    /// Conservative observation with no query/fragment projection.
+    pub const RESTRICTED: Self = Self {
+        runtime_budget: SemanticRuntimeBudget::INITIAL_FILTERED,
+        observation_budget: SemanticObservationBudget::INITIAL_FILTERED,
+    };
+
+    /// Derives the exact observation capability from frozen trusted discovery.
+    pub fn for_navigation_discovery(discovery: Option<&AgentNavigationDiscovery>) -> Self {
+        if discovery.is_some_and(AgentNavigationDiscovery::is_production) {
+            Self {
+                runtime_budget: SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state(),
+                ..Self::RESTRICTED
+            }
+        } else {
+            Self::RESTRICTED
+        }
+    }
+
+    /// The same capability with a larger node and text budget, for a trusted
+    /// whole-page findings or catalog schema only: most of a long document in
+    /// one look, so one typed batch can locate its evidence or its records.
+    /// Disclosure is unchanged.
+    pub fn for_whole_page_read(self) -> Self {
+        Self {
+            runtime_budget: if self.runtime_budget.includes_link_url_state() {
+                SemanticRuntimeBudget::WHOLE_PAGE.with_link_url_state()
+            } else {
+                SemanticRuntimeBudget::WHOLE_PAGE
+            },
+            observation_budget: SemanticObservationBudget::WHOLE_PAGE,
+        }
+    }
+
+    /// Exact runtime budget authorized by this closed capability.
+    pub const fn runtime_budget(self) -> SemanticRuntimeBudget {
+        self.runtime_budget
+    }
+
+    /// Exact assembled-observation budget authorized by this capability.
+    pub const fn observation_budget(self) -> SemanticObservationBudget {
+        self.observation_budget
+    }
 }
 
 /// Original-row description for one current retained-page execution lease.
@@ -28,10 +83,19 @@ pub struct WorkBrowserReadBinding {
     frame: SemanticFrameJoin,
     document: Arc<ContextNavigationTarget>,
     requested_document: Arc<ContextNavigationTarget>,
+    current_requested_document: Arc<ContextNavigationTarget>,
+    document_policy: crate::WorkBrowserDocumentPolicy,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
+    at_admission_document: bool,
 }
 
 impl WorkBrowserReadBinding {
+    /// Construction or a completed human handoff established this admission epoch.
+    pub const fn is_admission_document(&self) -> bool {
+        self.at_admission_document
+    }
+
     /// Exact process-local resource incarnation and execution lease.
     pub const fn lease(&self) -> &WorkBrowserExecutionLease {
         &self.lease
@@ -45,9 +109,23 @@ impl WorkBrowserReadBinding {
     pub fn document(&self) -> &ContextNavigationTarget {
         &self.document
     }
-    /// Original user/task-authored request; never replaced by finalization.
+    /// This actor's admission document; native finalization never replaces it.
+    /// A completed human handoff establishes a fresh admission document.
     pub fn requested_document(&self) -> &ContextNavigationTarget {
         &self.requested_document
+    }
+    /// Exact request that produced this current document. The initial resource
+    /// admission document remains separately available through `requested_document`.
+    pub fn current_requested_document(&self) -> &ContextNavigationTarget {
+        &self.current_requested_document
+    }
+    /// Original trusted initial-document policy from the retained resource.
+    pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
+        self.document_policy
+    }
+    /// Original construction isolated this resource from all profile cookies.
+    pub const fn isolated_public(&self) -> bool {
+        self.isolated_public
     }
     /// Immutable selected-profile persistence class from the original row.
     pub const fn storage(&self) -> ContextProfileStorageClass {
@@ -56,12 +134,14 @@ impl WorkBrowserReadBinding {
 }
 
 /// Move-only request produced after publishing the exact read callback owner.
-/// There is no caller-supplied script, selector, role set, scope or ceiling.
+/// There is no caller-supplied script, selector, role set or ceiling. Structural
+/// scopes are admitted only from exact current acknowledged references.
 #[must_use]
 #[derive(Debug)]
 pub struct WorkBrowserObservationRequest {
     join: ObservationJoin,
     invocation: SemanticRuntimeInvocation,
+    observation: SemanticObservationRequest,
 }
 impl WorkBrowserObservationRequest {
     /// Exact temporary execution lease, not durable page ownership.
@@ -71,6 +151,10 @@ impl WorkBrowserObservationRequest {
     /// Existing closed, bounded semantic grammar for the native isolated world.
     pub const fn invocation(&self) -> &SemanticRuntimeInvocation {
         &self.invocation
+    }
+    /// Exact core-admitted scope/lineage used to assemble the native result.
+    pub const fn observation(&self) -> &SemanticObservationRequest {
+        &self.observation
     }
     /// Transfer the actual invocation while retaining its exact terminal owner.
     pub fn into_parts(self) -> (SemanticRuntimeInvocation, WorkBrowserObservationCompletion) {
@@ -93,6 +177,17 @@ pub struct WorkBrowserObservationCompletion {
     outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>,
 }
 impl WorkBrowserObservationCompletion {
+    /// Checks the original read correlation without consuming its callback.
+    /// This grants no observation authority and permits lossless routing before
+    /// the registry accounts the exact completion.
+    pub fn matches(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        correlation: &SemanticRuntimeCorrelation,
+    ) -> bool {
+        &self.join.lease == lease && &self.join.correlation == correlation
+    }
+
     /// Bind one result; cross-request snapshots become a typed native refusal.
     pub fn settle(mut self, outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>) -> Self {
         self.outcome = SemanticRuntimeSettlement::try_new(self.join.correlation.clone(), outcome)
@@ -126,6 +221,9 @@ impl WorkBrowserResources {
     ) -> Result<WorkBrowserReadBinding, WorkBrowserResourceError> {
         self.admits_lease(lease, now)?;
         let row = self.row_mut(lease.resource())?;
+        if !row.document_available || row.navigation.is_some() || row.action.is_some() {
+            return Err(WorkBrowserResourceError::Pending);
+        }
         let document = row
             .effective_document
             .as_ref()
@@ -138,6 +236,8 @@ impl WorkBrowserResources {
                 ContextKind::Owned,
             ),
             ContextGeneration::new(lease.generation).ok_or(WorkBrowserResourceError::Exhausted)?,
+            row.navigation_epoch,
+            row.frame_generation,
         );
         let frame = SemanticFrameJoin::try_new(
             context,
@@ -152,11 +252,20 @@ impl WorkBrowserResources {
             lease: lease.clone(),
             frame,
             document: Arc::clone(document),
+            current_requested_document: row
+                .current_requested_document
+                .as_ref()
+                .or(row.document.as_ref())
+                .cloned()
+                .ok_or(WorkBrowserResourceError::Phase)?,
             requested_document: row
-                .document
+                .admission_document
                 .clone()
                 .ok_or(WorkBrowserResourceError::Phase)?,
+            document_policy: row.document_policy,
             storage: row.storage,
+            isolated_public: row.isolated_public,
+            at_admission_document: row.navigation_epoch == row.admission_epoch,
         })
     }
 
@@ -167,6 +276,81 @@ impl WorkBrowserResources {
         &mut self,
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        self.observe_initial_with_capability(
+            lease,
+            WorkBrowserObservationCapability::RESTRICTED,
+            now,
+        )
+    }
+
+    /// Admits one initial read under an immutable host-derived disclosure
+    /// capability. This never accepts a raw caller-authored runtime budget.
+    pub fn observe_initial_with_capability(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        self.observe(lease, capability, now, None)
+    }
+
+    /// Captures only an exact current, provider-acknowledged structural scope.
+    /// No new account, effect, navigation or model admission is conferred.
+    pub fn observe_expansion(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        previous: &crate::SemanticObservation,
+        acknowledgement: &crate::SemanticObservationAcknowledgement,
+        target: crate::SemanticReferenceId,
+        kind: crate::SemanticExpansionKind,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        self.observe_expansion_with_capability(
+            lease,
+            previous,
+            acknowledgement,
+            target,
+            kind,
+            WorkBrowserObservationCapability::RESTRICTED,
+            now,
+        )
+    }
+
+    /// Admits one acknowledged expansion under the same immutable disclosure
+    /// capability as its run's initial observation.
+    #[allow(clippy::too_many_arguments)] // Explicit ownership, scope, and clock operands.
+    pub fn observe_expansion_with_capability(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        previous: &crate::SemanticObservation,
+        acknowledgement: &crate::SemanticObservationAcknowledgement,
+        target: crate::SemanticReferenceId,
+        kind: crate::SemanticExpansionKind,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
+        if !acknowledgement.matches(previous)
+            || matches!(
+                &kind,
+                crate::SemanticExpansionKind::Frame | crate::SemanticExpansionKind::Table
+            )
+        {
+            return Err(WorkBrowserResourceError::Stale);
+        }
+        self.observe(lease, capability, now, Some((previous, target, kind)))
+    }
+
+    fn observe(
+        &mut self,
+        lease: &WorkBrowserExecutionLease,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+        expansion: Option<(
+            &crate::SemanticObservation,
+            crate::SemanticReferenceId,
+            crate::SemanticExpansionKind,
+        )>,
     ) -> Result<WorkBrowserObservationRequest, WorkBrowserResourceError> {
         let binding = self.read_binding(lease, now)?;
         let row = self.row_mut(lease.resource())?;
@@ -180,12 +364,26 @@ impl WorkBrowserResources {
             .ok_or(WorkBrowserResourceError::Exhausted)?;
         let frame = binding.frame;
         let context = frame.context();
-        let observation = SemanticObservationRequest::initial(
-            SemanticObservationId::new(u64::from(sequence))
-                .ok_or(WorkBrowserResourceError::Exhausted)?,
-            context,
-            SemanticObservationBudget::INITIAL_FILTERED,
-        );
+        let id = SemanticObservationId::new(u64::from(sequence))
+            .ok_or(WorkBrowserResourceError::Exhausted)?;
+        let observation = if let Some((previous, target, kind)) = expansion {
+            let [source] = previous.frames() else {
+                return Err(WorkBrowserResourceError::Stale);
+            };
+            if !row.observed
+                || previous.request().context() != context
+                || source.frame() != &frame
+                || source.generation().get() != u64::from(row.observation_sequence)
+                || source.invocation().get() != u64::from(row.observation_sequence)
+            {
+                return Err(WorkBrowserResourceError::Stale);
+            }
+            previous
+                .begin_expansion(id, target, &frame, kind, capability.observation_budget())
+                .map_err(|_| WorkBrowserResourceError::Stale)?
+        } else {
+            SemanticObservationRequest::initial(id, context, capability.observation_budget())
+        };
         let invocation = encode_semantic_runtime_invocation(
             &observation,
             frame,
@@ -193,7 +391,7 @@ impl WorkBrowserResources {
                 .ok_or(WorkBrowserResourceError::Exhausted)?,
             SemanticSnapshotGeneration::new(u64::from(sequence))
                 .ok_or(WorkBrowserResourceError::Exhausted)?,
-            SemanticRuntimeBudget::INITIAL_FILTERED,
+            capability.runtime_budget(),
         )
         .map_err(|_| WorkBrowserResourceError::Phase)?;
         let join = ObservationJoin {
@@ -202,7 +400,11 @@ impl WorkBrowserResources {
         };
         row.observation_sequence = sequence;
         row.observation = Some(join.clone());
-        Ok(WorkBrowserObservationRequest { join, invocation })
+        Ok(WorkBrowserObservationRequest {
+            join,
+            invocation,
+            observation,
+        })
     }
 
     /// Account the exact owned callback before exposing any page-derived data.
@@ -235,7 +437,10 @@ impl WorkBrowserResources {
             return Ok(WorkBrowserObservationEvent::DebtSettled);
         }
         Ok(match completion.outcome {
-            Ok(snapshot) => WorkBrowserObservationEvent::Snapshot(Box::new(snapshot)),
+            Ok(snapshot) => {
+                row.observed = true;
+                WorkBrowserObservationEvent::Snapshot(Box::new(snapshot))
+            }
             Err(failure) => WorkBrowserObservationEvent::Refused(failure),
         })
     }
@@ -277,6 +482,7 @@ pub enum WorkBrowserObservationDispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semantic_diff::SemanticObservationFingerprint;
     fn tick(value: u64) -> AgentPolicyInstant {
         AgentPolicyInstant::from_millis(value)
     }
@@ -340,6 +546,126 @@ mod tests {
             resource_retained: true,
         }
     }
+    #[test]
+    fn expansion_requires_current_acknowledged_lease_and_keeps_original_callback_debt() {
+        use crate::{
+            SemanticExpansionKind, SemanticObservationAcknowledgement,
+            SemanticObservationAssembler, SemanticReferenceId,
+        };
+        let (mut rows, resource) = document();
+        let lease = acquire(&mut rows, &resource, ContextRunId::generate());
+        let initial = rows.observe_initial(&lease, tick(2)).unwrap();
+        let request = initial.observation().clone();
+        let WorkBrowserObservationEvent::Snapshot(initial) =
+            rows.settle_observation(snapshot(initial), tick(2)).unwrap()
+        else {
+            panic!("initial")
+        };
+        let initial = SemanticObservationAssembler::new(request, *initial)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let ack = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&initial),
+        );
+        let target = SemanticReferenceId::new(1).unwrap();
+        let kind = SemanticExpansionKind::Region;
+        assert!(rows
+            .observe_expansion(
+                &lease,
+                &initial,
+                &ack,
+                SemanticReferenceId::new(99).unwrap(),
+                kind.clone(),
+                tick(2)
+            )
+            .is_err());
+        let expanded = rows
+            .observe_expansion(&lease, &initial, &ack, target, kind.clone(), tick(2))
+            .unwrap();
+        assert_eq!(expanded.lease(), &lease);
+        assert_eq!(expanded.invocation().frame(), initial.frames()[0].frame());
+        assert_eq!(expanded.invocation().snapshot_generation().get(), 2);
+        assert_eq!(
+            expanded.observation().parent().unwrap().id(),
+            initial.request().id()
+        );
+        assert!(rows
+            .observe_expansion(&lease, &initial, &ack, target, kind.clone(), tick(2))
+            .is_err());
+        let revoke = rows.revoke(&lease).unwrap();
+        assert!(rows.observe_initial(&lease, tick(2)).is_err());
+        assert!(matches!(
+            rows.settle_observation(snapshot(expanded), tick(2))
+                .unwrap(),
+            WorkBrowserObservationEvent::DebtSettled
+        ));
+        let _ = rows.settle_at(revoke.complete(drained()), tick(2)).unwrap();
+        let successor_request = rows
+            .acquire(&resource, ContextRunId::generate(), tick(2), tick(100))
+            .unwrap();
+        let successor = successor_request.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                successor_request.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                tick(2),
+            )
+            .unwrap();
+        assert!(rows
+            .observe_expansion(&successor, &initial, &ack, target, kind.clone(), tick(2))
+            .is_err());
+        assert!(rows
+            .observe_expansion(&lease, &initial, &ack, target, kind, tick(2))
+            .is_err());
+    }
+
+    #[test]
+    fn refused_expansion_cannot_reuse_a_stale_snapshot_generation() {
+        use crate::{
+            SemanticExpansionKind, SemanticObservationAcknowledgement,
+            SemanticObservationAssembler, SemanticReferenceId,
+        };
+        let (mut rows, resource) = document();
+        let lease = acquire(&mut rows, &resource, ContextRunId::generate());
+        let initial = rows.observe_initial(&lease, tick(2)).unwrap();
+        let request = initial.observation().clone();
+        let WorkBrowserObservationEvent::Snapshot(initial) =
+            rows.settle_observation(snapshot(initial), tick(2)).unwrap()
+        else {
+            panic!("initial")
+        };
+        let initial = SemanticObservationAssembler::new(request, *initial)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let ack = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&initial),
+        );
+        let expanded = rows
+            .observe_expansion(
+                &lease,
+                &initial,
+                &ack,
+                SemanticReferenceId::new(1).unwrap(),
+                SemanticExpansionKind::Region,
+                tick(2),
+            )
+            .unwrap();
+        rows.observation_dispatch_refused(expanded).unwrap();
+        assert!(rows
+            .observe_expansion(
+                &lease,
+                &initial,
+                &ack,
+                SemanticReferenceId::new(1).unwrap(),
+                SemanticExpansionKind::Region,
+                tick(2)
+            )
+            .is_err());
+        let fresh = rows.observe_initial(&lease, tick(2)).unwrap();
+        assert_eq!(fresh.invocation().snapshot_generation().get(), 3);
+    }
+
     #[test]
     fn descriptive_binding_is_original_current_and_does_not_reserve_a_read() {
         let (mut rows, resource) = document();
@@ -465,6 +791,40 @@ mod tests {
         );
         assert_eq!(request.invocation().invocation().get(), 2);
         assert_eq!(request.invocation().snapshot_generation().get(), 2);
+    }
+
+    #[test]
+    fn retained_observation_capability_is_derived_from_frozen_discovery_profile() {
+        let departure = ContextNavigationTarget::parse("https://example.test/frozen").unwrap();
+        let restrictive =
+            AgentNavigationDiscovery::try_new(departure.clone(), "/".into(), 2).unwrap();
+        let production = AgentNavigationDiscovery::try_new_production(
+            departure,
+            vec![crate::AgentNavigationOriginRule::try_new(
+                SemanticOrigin::parse("https://example.test").unwrap(),
+                "/".into(),
+                true,
+                true,
+            )
+            .unwrap()],
+            2,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            WorkBrowserObservationCapability::for_navigation_discovery(None),
+            WorkBrowserObservationCapability::RESTRICTED
+        );
+        assert!(
+            !WorkBrowserObservationCapability::for_navigation_discovery(Some(&restrictive))
+                .runtime_budget()
+                .includes_link_url_state()
+        );
+        assert!(
+            WorkBrowserObservationCapability::for_navigation_discovery(Some(&production))
+                .runtime_budget()
+                .includes_link_url_state()
+        );
     }
     #[test]
     fn same_run_cannot_reuse_prior_lease_references_or_restart_document_budget() {

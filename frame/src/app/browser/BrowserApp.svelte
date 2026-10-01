@@ -2,7 +2,8 @@
   import { installCloseService } from "$shared/lib/close";
   import "$styles/global.css";
   import { onMount, untrack } from "svelte";
-  import { ExtensionPermissionPrompt } from "$features/extensions";
+  import { WebExtensionAccessPrompt, WebExtensionReview } from "$features/webext";
+  import { webext } from "$domain/webext";
   import { PagePermissionPrompt } from "$features/permissions";
   import * as sidebar from "$session/sidebar-mode.svelte";
   import { Dividers } from "$features/split";
@@ -40,9 +41,10 @@
     );
   });
 
-  let extensionPermissionPrompt = $derived(extensions.permissionPrompt());
   let pagePermissionPrompt = $derived(pagePermissions.prompt());
-  let consentActive = $derived(extensionPermissionPrompt !== null || pagePermissionPrompt !== null);
+  let consentActive = $derived(
+    pagePermissionPrompt !== null || webext.review() !== null || webext.accessRequest() !== null,
+  );
 
   type ChromeShortcut = {
     matches: (event: KeyboardEvent) => boolean;
@@ -116,6 +118,9 @@
     const preferencesReady = preferences.init();
     const runtimeReady = runtime.init();
     const extensionsReady = extensions.init();
+    void webext.refresh();
+    const stopAccess = webext.listenForAccess();
+    const stopDrops = webext.listenForDrops(() => browserPage.currentPage() !== "work");
     const pagePermissionsReady = pagePermissions.init();
 
     // Rasters are emitted immediately before the projection that references
@@ -173,6 +178,8 @@
       runtime.dispose();
       extensions.dispose();
       pagePermissions.dispose();
+      void stopAccess.then((stop) => stop());
+      void stopDrops.then((stop) => stop());
       favicons.dispose();
       tabs.dispose();
       ui.dispose();
@@ -188,9 +195,11 @@
     <Dividers />
   {/if}
 </div>
-{#if extensionPermissionPrompt !== null}
-  {#key `${extensionPermissionPrompt.runtime_generation}:${extensionPermissionPrompt.request_id}`}
-    <ExtensionPermissionPrompt prompt={extensionPermissionPrompt} />
+{#if webext.review() !== null}
+  <WebExtensionReview review={webext.review()!} />
+{:else if webext.accessRequest() !== null}
+  {#key webext.accessRequest()!.request}
+    <WebExtensionAccessPrompt request={webext.accessRequest()!} />
   {/key}
 {:else if pagePermissionPrompt !== null}
   {#key `${pagePermissionPrompt.profile_id}:${pagePermissionPrompt.item_id}:${pagePermissionPrompt.request_id}`}

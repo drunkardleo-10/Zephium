@@ -322,6 +322,13 @@ pub enum AgentBrowserScopeProposal {
         /// Existing hard-bounded surrounding window.
         window: SemanticTextWindow,
     },
+    /// Discover visible source passages omitted by compact observations.
+    TextSearch {
+        /// Exact acknowledged document/region reference.
+        target: SemanticReferenceId,
+        /// Plain literal keywords, never code or selectors.
+        query: crate::SemanticTextSearch,
+    },
 }
 
 impl AgentBrowserScopeProposal {
@@ -338,7 +345,9 @@ impl AgentBrowserScopeProposal {
             Self::Subtree(reference) => Ok(SemanticLocateScope::Subtree(reference)),
             Self::Table(reference) => Ok(SemanticLocateScope::Table(reference)),
             Self::Frame(reference) => Ok(SemanticLocateScope::Frame(reference)),
-            Self::SurroundingText { .. } => Err(AgentBrowserToolContractError::Scope),
+            Self::SurroundingText { .. } | Self::TextSearch { .. } => {
+                Err(AgentBrowserToolContractError::Scope)
+            }
         }
     }
 }
@@ -720,6 +729,10 @@ impl AgentBrowserToolCall {
             AgentBrowserToolProposal::Read(scope) => Some(scope.clone()),
             _ => None,
         };
+        let snapshot_scope = match self.proposal.as_ref() {
+            AgentBrowserToolProposal::Snapshot(scope) => Some(scope.clone()),
+            _ => None,
+        };
         let navigation_target = match self.proposal.as_ref() {
             AgentBrowserToolProposal::Navigate(target) => Some(target.clone()),
             _ => None,
@@ -732,6 +745,7 @@ impl AgentBrowserToolCall {
                 extraction_schema,
                 extraction_scope,
                 read_scope,
+                snapshot_scope,
                 navigation_target,
                 provider_item_id: self.provider_item_id,
                 arguments: self.arguments,
@@ -772,6 +786,7 @@ pub(crate) struct AgentProviderToolCallCorrelation {
     pub(super) extraction_schema: Option<SemanticExtractionSchemaId>,
     pub(super) extraction_scope: Option<AgentBrowserScopeProposal>,
     pub(super) read_scope: Option<AgentBrowserScopeProposal>,
+    pub(super) snapshot_scope: Option<AgentBrowserScopeProposal>,
     pub(super) navigation_target: Option<ContextNavigationTarget>,
     pub(super) provider_item_id: Option<String>,
     pub(super) arguments: String,
@@ -974,6 +989,11 @@ fn decode_scope(
     scope: Option<ScopeWire>,
 ) -> Result<AgentBrowserScopeProposal, AgentBrowserToolContractError> {
     match scope.unwrap_or(ScopeWire::Initial) {
+        ScopeWire::TextSearch { target, query } => Ok(AgentBrowserScopeProposal::TextSearch {
+            target: reference(target)?,
+            query: crate::SemanticTextSearch::try_new(query)
+                .map_err(|_| AgentBrowserToolContractError::Scope)?,
+        }),
         ScopeWire::Initial => Ok(AgentBrowserScopeProposal::Initial),
         ScopeWire::Region { target } => Ok(AgentBrowserScopeProposal::Region(reference(target)?)),
         ScopeWire::Subtree { target } => Ok(AgentBrowserScopeProposal::Subtree(reference(target)?)),
@@ -1128,6 +1148,8 @@ fn decode_verification(
             state: state.into(),
             present,
         },
+        VerificationWire::PageDialogOpened {} => SemanticVerification::PageDialogOpened,
+        VerificationWire::PageDialogClosed {} => SemanticVerification::PageDialogClosed,
         VerificationWire::TargetValueMatchesInput => SemanticVerification::TargetValueMatchesInput,
         VerificationWire::TargetValueChanged => SemanticVerification::TargetValueChanged,
         VerificationWire::TargetSelectionMatchesOption => {
@@ -1137,6 +1159,7 @@ fn decode_verification(
         VerificationWire::NavigationCommitted => SemanticVerification::NavigationCommitted,
         VerificationWire::Dialog { state } => SemanticVerification::Dialog(state.into()),
         VerificationWire::ScrollPositionChanged => SemanticVerification::ScrollPositionChanged,
+        VerificationWire::PageChanged => SemanticVerification::PageChanged,
     })
 }
 
@@ -1203,6 +1226,10 @@ struct ScopeArgumentsWire {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ScopeWire {
+    TextSearch {
+        target: String,
+        query: String,
+    },
     Initial,
     Region {
         target: String,
@@ -1350,6 +1377,8 @@ enum StandaloneWaitWire {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum VerificationWire {
+    PageDialogOpened {},
+    PageDialogClosed {},
     TargetState { state: StateWire, present: bool },
     TargetValueMatchesInput,
     TargetValueChanged,
@@ -1358,6 +1387,7 @@ enum VerificationWire {
     NavigationCommitted,
     Dialog { state: DialogWire },
     ScrollPositionChanged,
+    PageChanged,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1601,6 +1631,35 @@ mod tests {
     }
 
     #[test]
+    fn text_search_scope_is_literal_snapshot_content_not_lookup_or_code() {
+        let value = decode(
+            "snapshot",
+            r#"{"scope":{"kind":"text_search","target":"@a1","query":"dimensions width depth"}}"#,
+        )
+        .unwrap();
+        let AgentBrowserToolProposal::Snapshot(
+            scope @ AgentBrowserScopeProposal::TextSearch { target, query },
+        ) = value.proposal()
+        else {
+            panic!("text search");
+        };
+        assert_eq!(target.get(), 1);
+        assert_eq!(query.as_str(), "dimensions width depth");
+        assert!(scope.clone().try_into_locate_scope().is_err());
+        for query in ["", "\n", &"é".repeat(129)] {
+            let arguments =
+                serde_json::json!({"scope":{"kind":"text_search","target":"@a1","query":query}})
+                    .to_string();
+            assert!(decode("snapshot", &arguments).is_err());
+        }
+        assert!(decode(
+            "snapshot",
+            r#"{"scope":{"kind":"text_search","target":"@a1","query":"width","selector":"body"}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn locate_read_extract_and_wait_retain_only_typed_bounded_values() {
         let locate = decode(
             "locate",
@@ -1714,6 +1773,7 @@ mod tests {
     fn all_semantic_action_variants_decode_through_existing_contracts() {
         let arguments = r#"{"actions":[
           {"kind":"click","target":"@a1","effect":"read","wait":{"kind":"target_state","state":"expanded","present":true},"verification":{"kind":"target_state","state":"expanded","present":true},"settle_millis":1000},
+          {"kind":"click","target":"@a7","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"page_dialog_closed"},"settle_millis":1000},
           {"kind":"fill","target":"@a2","value":"ordinary value","effect":"read","wait":{"kind":"semantic_change"},"verification":{"kind":"target_value_matches_input"},"settle_millis":1000},
           {"kind":"select","target":"@a3","option":"@a4","effect":"read","wait":{"kind":"immediate"},"verification":{"kind":"target_selection_matches_option"},"settle_millis":1000},
           {"kind":"press","target":"@a5","key":"enter","effect":"read","wait":{"kind":"navigation_committed"},"verification":{"kind":"navigation_committed"},"settle_millis":1000},
@@ -1723,9 +1783,9 @@ mod tests {
         let AgentBrowserToolProposal::Act(batch) = call.proposal() else {
             panic!("act");
         };
-        assert_eq!(batch.actions().len(), 5);
+        assert_eq!(batch.actions().len(), 6);
         assert_eq!(batch.effect(), SemanticEffectClass::Read);
-        assert_eq!(batch.settle_millis(), 5_000);
+        assert_eq!(batch.settle_millis(), 6_000);
         assert_eq!(batch.text_bytes(), "ordinary value".len());
     }
 
@@ -1790,6 +1850,29 @@ mod tests {
             decode("extract", r#"{"schema_id":0}"#).map(|_| ()),
             Err(AgentBrowserToolContractError::ExtractionSchema)
         );
+    }
+
+    #[test]
+    fn single_local_write_keeps_cross_field_settle_contract_fail_closed() {
+        for (quiet, settle, valid) in [
+            (250, 250, true),
+            (250, 249, false),
+            (1_000, 1_000, true),
+            (1_000, 250, false),
+        ] {
+            let arguments = serde_json::json!({"actions":[{
+                "kind":"fill", "target":"@a1", "value":"ordinary title",
+                "effect":"local_write", "wait":{"kind":"mutation_quiet","millis":quiet},
+                "verification":{"kind":"target_value_matches_input"}, "settle_millis":settle
+            }]})
+            .to_string();
+            let result = decode("act", &arguments).map(|_| ());
+            if valid {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result, Err(AgentBrowserToolContractError::Action));
+            }
+        }
     }
 
     #[test]

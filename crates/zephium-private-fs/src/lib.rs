@@ -9,7 +9,9 @@
 //! readable `/proc/self/fd` so exact spelling can be proven from live file
 //! descriptors even on case-folding filesystems. Missing or restricted procfs
 //! fails closed. Other Unix targets and Windows fail closed until their native
-//! adapters have passed dedicated live tests.
+//! adapters have passed dedicated live tests. Windows has an explicit
+//! `windows-namespace-validation` feature for debug validation on local NTFS;
+//! it is disabled by default and forbidden in optimized shipping builds.
 //!
 //! The boundary excludes unprivileged operating-system principals that have no
 //! delegated access and rejects untrusted package contents. Root/administrator,
@@ -21,29 +23,13 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
-// Internal repository tests explicitly request these debug counters. The
-// release product probe instead retains only the sealed fixture authority, so
-// its filesystem path matches the optimized shipping implementation.
-#[cfg(all(
-    zephium_private_fs_operation_instrumentation,
-    not(zephium_internal_repository_e2e)
-))]
-compile_error!("private-filesystem instrumentation requires the internal repository authority");
-#[cfg(all(zephium_private_fs_operation_instrumentation, not(debug_assertions)))]
-compile_error!("private-filesystem operation instrumentation is forbidden in optimized builds");
-#[cfg(all(
-    zephium_internal_repository_e2e,
-    not(zephium_private_fs_operation_instrumentation),
-    not(zephium_extension_product_measurement)
-))]
-compile_error!("internal private-filesystem builds require an explicit execution mode");
+#[cfg(all(feature = "windows-namespace-validation", not(debug_assertions)))]
+compile_error!("Windows namespace validation must not enter an optimized shipping build");
 
 mod component;
 mod entry_name;
 mod error;
 mod identity;
-#[cfg(zephium_private_fs_operation_instrumentation)]
-mod instrumentation;
 mod lease;
 mod namespace;
 mod platform;
@@ -54,10 +40,6 @@ pub use component::{PrivateComponent, PrivateComponentError};
 pub use entry_name::{PrivateEntryName, PrivateEntryNameError, MAX_PRIVATE_ENTRY_NAME_BYTES};
 pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
-#[cfg(zephium_private_fs_operation_instrumentation)]
-pub use instrumentation::{
-    PrivateFsOperationMeasurement, PrivateFsOperationMeasurementError, PrivateFsOperationSnapshot,
-};
 pub use namespace::{
     ByteLimit, LockedPrivateNamespace, OpenedPrivateDirectory, PrivateChildKind, PrivateDirectory,
     SealedPrivateDirectory, TreeRemovalLimits, TreeRemovalReport, MAX_TREE_REMOVAL_DEPTH,

@@ -708,21 +708,21 @@ impl Downloads {
     pub(in crate::host) fn retain_closed_view(
         &self,
         view: super::super::ObservedView,
-    ) -> Result<(), super::super::ObservedView> {
+    ) -> Option<super::super::ObservedView> {
         if self.stopping.get()
             || !self.active.borrow().values().any(|transfer| {
                 transfer.authorized && transfer.native.permit.same_generation(&view.event_permit)
             })
         {
-            return Err(view);
+            return Some(view);
         }
         if !view.event_permit.retire_for_download() {
-            return Err(view);
+            return Some(view);
         }
         view.download_surface_intent.store(false, Ordering::Release);
         view.presentation_permit.store(false, Ordering::Release);
         if view.view.set_visible(false).is_err() {
-            return Err(view);
+            return Some(view);
         }
         use wry::WebViewExtWindows;
         let parked = (|| -> windows::core::Result<()> {
@@ -735,10 +735,10 @@ impl Downloads {
             Ok(())
         })();
         if parked.is_err() {
-            return Err(view);
+            return Some(view);
         }
         self.retained_views.borrow_mut().push(view);
-        Ok(())
+        None
     }
     pub(super) fn release_retained_views(&self) {
         if self.stopping.get() {

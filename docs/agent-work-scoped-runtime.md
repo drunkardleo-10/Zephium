@@ -2,9 +2,190 @@
 
 Status: production runtime foundation and read-only retained backing in the
 existing Work controller, with deterministic actual-worker/loopback-provider
-tests through the private application resource owner. Durable coordination and
-product admission remain separate. No native, public-site or UI qualification
+tests through the private application resource owner. A scoped durable-terminal
+proof join, private application-owned admission coordinator, and original-port
+global native shutdown join now exist;
+Shell attachment, selected-profile admission and product UI remain separate.
+No native, public-site or UI qualification
 is added by this integration.
+
+## Durable terminal without destroying the Work page
+
+### Application-owned retained admission
+
+`work_resources_application::RetainedWork` now owns one original retained
+resource owner and one bounded actor at a time. This is shared production Rust,
+not another controller/provider algorithm or a diagnostic executor. It remains
+private: no Shell command, native composition-root entry, or product UI is
+exposed before the selected-profile/resource-construction join is integrated.
+
+The coordinator claims the original fenced Store and requires the audit and
+journal ports to identify that same allocation. An explicit fresh request
+acquires a lease, prepares the existing read-only retained controller against
+its exact new binding, then receives the original Admitted and Running CAS
+acknowledgements before starting the original scoped worker. No read/provider
+operation precedes Running ACK. Descriptive IDs and an independently read
+durable record cannot release a startup gate.
+
+Native-resource, journal and progress callbacks share the original coalesced
+application wake. Each application poll drains/rearms that original stable
+resource lane; the original runtime completion registers that wake independently
+of progress, before start, so consuming Terminal progress before worker exit
+cannot strand the coordinator. A task-destructor barrier regression consumes
+every last progress/native wake before permitting actual worker completion, then
+drives terminal persistence using only callbacks, without periodic polling.
+Wake-only assertions guard against fixtures hiding a lost wake
+by repeatedly polling. Global audit terminals are admitted only by the original
+owner's active native shutdown coordinator; unexpected terminals remain retained
+and fail closed rather than being discarded or converted to resource proof.
+
+After accepted/failed/cancelled actor closure, it joins the original outcome,
+matching scoped worker drain and resource lease, prepares the existing terminal
+mutation, and waits for the exact original CAS acknowledgement. A second lease
+cannot be acquired until that join, progress drain and result handoff complete;
+the primitive's native-reusable bit is not enough. The new explicit request
+must use a run ID absent from the bounded durable inventory. Its controller
+receives a fresh read binding and captures again; no old observation, task,
+model proposal or input authority is resumed.
+
+Malformed replies/timeouts retain the exact request for explicit bounded
+idempotent reconciliation (at most four attempts). Reconciliation uses the
+same original CAS, never read-back or decoded facts as acknowledgement. Old
+callbacks retain their disconnected bounded slots. A stop caused by uncertainty
+stays sticky even after the original durable fact is reconciled: no automatic
+successor or result publication is enabled.
+
+Whole-owner shutdown can independently destroy the retained resource after the
+worker stops. Resource destruction is not coordinator completion: outstanding
+Claim/Admit/Start/Terminal acknowledgement, retained pre-start recovery, or
+unproven scoped drain keeps shutdown unsettled. Destruction receipt and final
+callback reaping remain separately polled. Cancellation/expiry after acquisition
+but before startup never treats a dropped facade as a revocation receipt;
+the resource remains non-reusable recovery until explicit whole-owner shutdown.
+Late admission acknowledgements are reconciled to immutable FailedClosed with
+their debt intact. The original pre-start recovery owner remains retained;
+this slice does **not** claim a clean recover-and-reuse path for that case.
+
+After those local obligations settle, the original sealed/quiescent retained
+registry admits the existing `AgentNativeShutdownCoordinator` exactly once.
+The private `work_resources_shutdown` adapter retains the original native port
+and drives its seal barrier and subsequent resource audits through the original
+event lane. Completion requires that coordinator's constructor-closed native
+zero proof, not local resource absence or an empty replacement legacy registry.
+The existing exact audit identity/type checks, all-zero count predicate, eight
+attempt ceiling and 100–1000 ms backoff are shared unchanged. One application
+poll performs at most one native dispatch; its next retry deadline is exposed
+without a new thread or periodic busy poll. The caller still owns the absolute
+shutdown deadline; a missing native callback cannot produce completion.
+Synchronous seal/audit refusals arm their next deadline in the same dispatch
+poll, since no native callback can wake the application for those outcomes;
+the eighth synchronous refusal returns failure in that poll instead of waiting
+for a callback or retry that cannot exist.
+
+Deterministic regressions hold the original global terminal after local
+destruction, reject wrong seal-terminal kind and identity, retain nonzero queued
+native debt through the shared retry cadence, reject a queued duplicate before
+reporting completion, and stop after eight unsuccessful audits. Outstanding
+durable acknowledgements prevent global seal admission.
+This is a private lifecycle prerequisite, not Shell attachment or native
+qualification of the retained product workflow.
+
+The private `RetainedWork::shutdown_until` now supplies the caller-blocking
+barrier needed before Shell attachment. The same original notification owner
+increments a checked epoch after callback state publication, including when a
+Shell wake is already coalesced. The barrier snapshots that epoch before each
+poll and waits on its condition variable, not the Shell command queue (which
+cannot run during Shell teardown). A callback between poll and wait cannot be
+lost; spurious notifications recheck the original epoch without polling Work.
+No worker, periodic timer, provider path, or alternate cleanup proof is created.
+
+One caller-owned absolute deadline caps Store acknowledgement, scoped worker
+completion, retained resource cleanup, native audit waiting and the unchanged
+retry cadence. The trusted policy clock is refreshed each poll; expiration is
+rechecked before cleanup/native dispatch and before returning success. Epoch
+overflow/poison and clock failure remain fail-closed. Deadline expiry stops
+admission but retains every unfinished original owner; a later explicit cleanup
+attempt can settle the original callback rather than creating replacement
+authority. The barrier does not perform automatic Store reconciliation.
+
+Tests cover actual worker completion plus a held original terminal Store ACK
+and native proof without consuming Shell commands, callback-before-wait and
+coalesced/spurious wakes, deadline-capped retry, retained late native/Store ACKs,
+one deadline across delayed Store and native phases, and no cleanup dispatch
+after an already-expired deadline or a delayed policy clock. Shell/profile
+attachment remains the next independent product join.
+
+Logical `mark_stopped` is not OS-thread exit: Tokio and thread-local destruction
+can still be running. Deadline-bearing runtime lifecycle joins now run on the existing
+reaper, whose original acknowledgement is published after the OS join and
+permit release. The caller waits for that acknowledgement under its unchanged
+deadline. A reaper-spawn failure retains the original emergency bundle and
+refuses new workers; later admission retries the same reaper handoff, never a
+potentially blocking admission-side join. Deadlineless suspended Drop/startup
+failure preserve their existing synchronous recovery-outcome contract; this
+does not claim those separate paths are deadline-bounded. No native/scoped
+clean proof can precede actual join.
+Retained shutdown passes its caller deadline into scoped drain, rather than
+creating a fresh 100 ms window. Post-`mark_stopped` gates reproduce the old
+unbounded join and guard the runtime and application deadline schedules.
+An expired consumed scoped drain remains Unproven: its worker stays owned by
+the reaper/emergency bundle, while application recovery remains fail-closed;
+this does not add clean recovery/reuse permission.
+
+Deterministic real-SQLite/loopback tests hold Admitted, Running and successful
+terminal ACKs independently of actual commits. They exercise an accepted A,
+fresh observed/cancelled B, unread-result and progress ownership, wrong-guard
+ACK refusal, timeout plus exact reconciliation/late callback isolation, and
+stop/expiry before startup, and real process-worker permit refusal after Running
+ACK. The page survives both clean actors and is destroyed
+once only on whole-owner shutdown. These are application-coordination tests,
+not native/GUI/provider qualification.
+
+Remaining product joins are explicit Shell ownership and selected-profile
+admission, pre-start/run recovery reconciliation, durable result publication,
+rendering/input handoff, post-human document authority and retained navigation.
+The production constructor still uses the common stateless provider transport;
+only unit-test construction can inject the existing loopback transport.
+
+### Original durable proof bridge
+
+`AgentWorkRetainedController::journal_admission` supplies the dormant original
+manifest's admission intent. The application must acknowledge exact Admitted
+and Running writes before releasing the scoped startup gate. The controller
+does not own a Store port or dispatch persistence itself.
+
+After actual scoped drain, `AgentRuntimeScopedDrained::work_terminal` requires
+the exact original runtime allocation and a Running record matching the
+consumed manifest identity, complete authority guard and lease run. It uses the
+original native lease-delivery proof and settled policy/audit/provider owners
+to prepare Succeeded, Failed or Cancelled with no run-owned debt. It cannot
+produce `AgentNativeShutdownProof`, destroy the retained resource, acknowledge
+its own write or reopen an old actor. Existing global-zero terminal/successor
+and Store record-format/immutability contracts are unchanged.
+
+The lower functional constructor `AgentWorkJournalMutation::closed_retained`
+checks the record against actual delivery and policy operands, just as the
+legacy terminal constructor checks original native/policy operands; callers
+must additionally own the matching runtime drain. The runtime wrapper joins
+those operands by construction and never exports or reconstructs their native
+delivery authority from serialized coordinates.
+
+Deterministic integration uses the real fenced SQLite Store and original
+retained controller, provider transport, worker and application resource owner.
+One accepted read/mapping run durably closes while the page stays alive. After
+that exact acknowledgement and native notification drain, an explicitly
+acquired second lease starts a fresh observed run, is cancelled and durably
+closes without destroying the page. Wrong runtime/manifest/run/guard records,
+non-Running state and reopening a terminal refuse; exact Store-write
+reconciliation remains idempotent. Global-zero still refuses until independent
+resource destruction. No process fence is reset for the test.
+
+The proof bridge itself is not successor permission; the private application
+coordinator above now performs that join. The existing Shell coordinator still
+owns only legacy complete-browser runs; it must attach the retained owner and
+selected-profile admission before this becomes a user-facing workflow. Durable
+result publication, Work/resource restart inventory, rendering/input takeover,
+fresh post-human document authority and retained navigation remain separate.
 
 ## The ownership distinction
 
@@ -246,3 +427,16 @@ formatting and default Browse provider/runtime dependency isolation pass. These
 are deterministic/build results; no GUI, credential or public provider service
 was used. All actual-runtime application fixtures share the existing process-wide
 worker test lock; the production one-worker admission limit is unchanged.
+
+Runtime control notifications broadcast to the registered lifecycle, watchdog
+and controller event waiters. Each registers before checking durable control
+state; the bounded Start queue remains the admission source of truth. In the
+real bind-before-start ordering, an older outer lifecycle waiter remains enabled
+while the controller awaits its first event. A single-consumer notification can
+wake that dormant waiter and strand the queued Start. Deterministic legacy and
+scoped regressions first poll the actual controller event future to Pending,
+then admit the run and require its exact ticket without any unrelated wake or
+polling loop. Both time out with the single-consumer publisher and pass with
+broadcast. Cancellation, watchdog and absolute shutdown deadline ownership are
+unchanged; delivering Start does not grant a closure proof or qualify a live
+retained product workflow.

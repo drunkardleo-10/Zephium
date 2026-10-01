@@ -86,6 +86,9 @@ pub(super) struct RetainedBrowser {
     binding: WorkBrowserReadBinding,
     listener: Option<Arc<LeaseSignal>>,
     read: Option<(PendingRead, SemanticObservationRequest)>,
+    navigation: Option<PendingNavigation>,
+    action: Option<PendingAction>,
+    screenshot: bool,
     revoke: Option<PendingLifecycle>,
     delivered: bool,
 }
@@ -102,6 +105,9 @@ impl WorkResourceOwner {
             binding,
             listener: None,
             read: None,
+            navigation: None,
+            action: None,
+            screenshot: false,
             revoke: None,
             delivered: false,
         })
@@ -136,11 +142,58 @@ impl RetainedBrowser {
     }
 }
 impl AgentWorkRetainedBrowser for RetainedBrowser {
+    fn supports_screenshots(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+    fn dispatch_screenshot(
+        &mut self,
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+        now: AgentPolicyInstant,
+    ) -> ContextDispatch {
+        if !self.supports_screenshots()
+            || self.listener().is_err()
+            || self.check_health(now).is_err()
+            || self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.screenshot
+            || self.revoke.is_some()
+            || self.delivered
+        {
+            return ContextDispatch::Rejected(ContextPortFailure::Stale);
+        }
+        let dispatch = self
+            .browser
+            .shared
+            .port
+            .capture_semantic_screenshot(request, completion);
+        self.screenshot = matches!(dispatch, ContextDispatch::Scheduled);
+        dispatch
+    }
+    fn account_screenshot_terminal(
+        &mut self,
+        _now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        if !self.screenshot {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.screenshot = false;
+        // This is original callback accounting, not new browser authority.
+        // It must remain possible after cancellation revoked the lease.
+        Ok(())
+    }
     fn binding(&self) -> &WorkBrowserReadBinding {
         &self.binding
     }
     fn register_listener(&mut self, waker: Waker) -> Result<(), AgentWorkFailure> {
-        if self.listener.is_some() || self.read.is_some() || self.revoke.is_some() {
+        if self.listener.is_some()
+            || self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.screenshot
+            || self.revoke.is_some()
+        {
             return Err(Self::error(self.browser.refusal()));
         }
         self.browser.retired.check_active().map_err(Self::error)?;
@@ -180,10 +233,166 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         }
         self.browser.health(now).map_err(Self::error)
     }
-    fn begin_observation(&mut self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure> {
+    fn supports_navigation(&self) -> bool {
+        true
+    }
+    fn supports_history_back(&self) -> bool {
+        self.browser
+            .shared
+            .port
+            .supports_work_resource_history_back()
+    }
+    fn supports_actions(&self) -> bool {
+        true
+    }
+    fn dispatch_action(
+        &mut self,
+        request: SemanticActionNativeRequest,
+        now: AgentPolicyInstant,
+    ) -> ContextDispatch {
+        if self.listener().is_err()
+            || self.check_health(now).is_err()
+            || self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.screenshot
+            || self.revoke.is_some()
+            || self.delivered
+        {
+            return ContextDispatch::Rejected(ContextPortFailure::Stale);
+        }
+        match PendingAction::dispatch(&self.browser, request, now) {
+            Ok((pending, dispatch)) => {
+                if !pending.finished() {
+                    self.action = Some(pending);
+                }
+                dispatch
+            }
+            Err(Refusal::NativeAdmission(failure)) => ContextDispatch::Rejected(failure),
+            Err(_) => ContextDispatch::Rejected(ContextPortFailure::NativeRefused),
+        }
+    }
+    fn poll_action(
+        &mut self,
+        now: AgentPolicyInstant,
+    ) -> Result<Option<SemanticActionNativeSettlement>, AgentWorkFailure> {
+        self.listener()
+            .map_err(Self::error)?
+            .rearm()
+            .map_err(Self::error)?;
+        let pending = self.action.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let Some(event) = pending.poll(now).map_err(Self::error)? else {
+            return Ok(None);
+        };
+        self.action.take();
+        Ok(Some(event.into_terminal()))
+    }
+    fn automation_state(
+        &self,
+        now: AgentPolicyInstant,
+    ) -> Result<ContextAutomationState, AgentWorkFailure> {
+        self.check_health(now)?;
+        self.browser
+            .shared
+            .lock_rows()
+            .map_err(Self::error)?
+            .automation_state(&self.browser.lease, now)
+            .map_err(Refusal::from)
+            .map_err(Self::error)
+    }
+    fn prepare_navigation(
+        &mut self,
+        source: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<ContextOperationJoin, AgentWorkFailure> {
         self.listener().map_err(Self::error)?;
         self.check_health(now)?;
-        if self.read.is_some() || self.revoke.is_some() || self.delivered {
+        if self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.screenshot
+            || self.revoke.is_some()
+            || self.delivered
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let (pending, operation) =
+            PendingNavigation::prepare(&self.browser, source, now).map_err(Self::error)?;
+        self.navigation = Some(pending);
+        Ok(operation)
+    }
+    fn cancel_navigation_preparation(&mut self) -> Result<(), AgentWorkFailure> {
+        let pending = self.navigation.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        pending.cancel_preparation().map_err(Self::error)?;
+        self.navigation.take();
+        Ok(())
+    }
+    fn dispatch_navigation(&mut self, active: &AgentActiveNavigation) -> ContextDispatch {
+        let Some(pending) = self.navigation.as_mut() else {
+            self.browser.refusal();
+            return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
+        };
+        let result = pending.dispatch(active);
+        if pending.finished() {
+            self.navigation.take();
+        }
+        result
+    }
+    fn dispatch_history_back(&mut self, active: &AgentActiveNavigation) -> ContextDispatch {
+        let Some(pending) = self.navigation.as_mut() else {
+            self.browser.refusal();
+            return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
+        };
+        let result = pending.dispatch_history_back(active);
+        if pending.finished() {
+            self.navigation.take();
+        }
+        result
+    }
+    fn poll_navigation(
+        &mut self,
+        now: AgentPolicyInstant,
+    ) -> Result<Option<ContextNavigationSettlement>, AgentWorkFailure> {
+        // Health may already be revoked. Reconcile the exact original receipt,
+        // never issue new work or require live execution authority for cleanup.
+        self.listener()
+            .map_err(Self::error)?
+            .rearm()
+            .map_err(Self::error)?;
+        let pending = self.navigation.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let Some(event) = pending.poll(now).map_err(Self::error)? else {
+            return Ok(None);
+        };
+        self.navigation.take();
+        if event.is_current() {
+            match self.browser.shared.lock_rows().and_then(|mut rows| {
+                rows.read_binding(&self.browser.lease, now)
+                    .map_err(Into::into)
+            }) {
+                Ok(binding) => self.binding = binding,
+                Err(_) => {
+                    self.browser.refusal();
+                }
+            }
+        }
+        Ok(Some(event.into_terminal()))
+    }
+    fn begin_observation(&mut self, now: AgentPolicyInstant) -> Result<(), AgentWorkFailure> {
+        self.begin_observation_with_capability(WorkBrowserObservationCapability::RESTRICTED, now)
+    }
+    fn begin_observation_with_capability(
+        &mut self,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        self.listener().map_err(Self::error)?;
+        self.check_health(now)?;
+        if self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.revoke.is_some()
+            || self.delivered
+        {
             return Err(AgentWorkFailure::Contract);
         }
         let request = self
@@ -191,16 +400,75 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             .shared
             .lock_rows()
             .map_err(Self::error)?
-            .observe_initial(&self.browser.lease, now)
+            .observe_initial_with_capability(&self.browser.lease, capability, now)
             .map_err(Refusal::from)
             .map_err(Self::error)?;
-        let correlation = request.invocation().correlation();
-        let observation = SemanticObservationRequest::initial(
-            SemanticObservationId::new(correlation.invocation().get())
-                .ok_or(AgentWorkFailure::Contract)?,
-            correlation.frame().context(),
-            SemanticObservationBudget::INITIAL_FILTERED,
-        );
+        let observation = request.observation().clone();
+        let pending = PendingRead::dispatch(
+            self.browser.shared.clone(),
+            self.browser.resource.clone(),
+            request,
+        )
+        .map_err(Self::error)?;
+        self.read = Some((pending, observation));
+        Ok(())
+    }
+    fn supports_expansion(&self) -> bool {
+        true
+    }
+    fn begin_expansion(
+        &mut self,
+        previous: &SemanticObservation,
+        acknowledgement: &SemanticObservationAcknowledgement,
+        target: SemanticReferenceId,
+        kind: SemanticExpansionKind,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        self.begin_expansion_with_capability(
+            previous,
+            acknowledgement,
+            target,
+            kind,
+            WorkBrowserObservationCapability::RESTRICTED,
+            now,
+        )
+    }
+    fn begin_expansion_with_capability(
+        &mut self,
+        previous: &SemanticObservation,
+        acknowledgement: &SemanticObservationAcknowledgement,
+        target: SemanticReferenceId,
+        kind: SemanticExpansionKind,
+        capability: WorkBrowserObservationCapability,
+        now: AgentPolicyInstant,
+    ) -> Result<(), AgentWorkFailure> {
+        self.listener().map_err(Self::error)?;
+        self.check_health(now)?;
+        if self.read.is_some()
+            || self.navigation.is_some()
+            || self.action.is_some()
+            || self.revoke.is_some()
+            || self.delivered
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let request = self
+            .browser
+            .shared
+            .lock_rows()
+            .map_err(Self::error)?
+            .observe_expansion_with_capability(
+                &self.browser.lease,
+                previous,
+                acknowledgement,
+                target,
+                kind,
+                capability,
+                now,
+            )
+            .map_err(Refusal::from)
+            .map_err(Self::error)?;
+        let observation = request.observation().clone();
         let pending = PendingRead::dispatch(
             self.browser.shared.clone(),
             self.browser.resource.clone(),
@@ -223,7 +491,35 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         let snapshot = match event {
             WorkBrowserObservationEvent::Snapshot(snapshot) => *snapshot,
             WorkBrowserObservationEvent::Refused(failure) => {
-                return Err(AgentWorkFailure::Observation(failure))
+                if request.scope().anchor().is_some()
+                    && failure
+                        == SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
+                            SemanticRuntimeFault::AnchorMissing,
+                        ))
+                {
+                    // The exact callback has already been drained. Recheck the
+                    // original resource binding before classifying anchor churn;
+                    // navigation, account takeover and lease loss stay terminal.
+                    self.check_health(now)?;
+                    let current = self
+                        .browser
+                        .shared
+                        .lock_rows()
+                        .map_err(Self::error)?
+                        .read_binding(&self.browser.lease, now)
+                        .map_err(Refusal::from)
+                        .map_err(Self::error)?;
+                    if current.lease() != self.binding.lease()
+                        || current.frame() != self.binding.frame()
+                        || current.document() != self.binding.document()
+                        || current.current_requested_document()
+                            != self.binding.current_requested_document()
+                    {
+                        return Err(AgentWorkFailure::ContextLost);
+                    }
+                    return Err(AgentWorkFailure::InspectionAnchorLost);
+                }
+                return Err(AgentWorkFailure::Observation(failure));
             }
             WorkBrowserObservationEvent::DebtSettled => return Err(AgentWorkFailure::ContextLost),
         };
@@ -289,6 +585,15 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             .map_err(Self::error)?
             .rearm()
             .map_err(Self::error)?;
+        // The scoped controller must first consume the exact navigation event
+        // and reconcile its independent policy/audit receipt. Never silently
+        // drain navigation here just to make the resource lease look closed.
+        if self.navigation.is_some() || self.action.is_some() {
+            return Ok(None);
+        }
+        if self.screenshot {
+            return Ok(None);
+        }
         if let Some((pending, _)) = self.read.as_mut() {
             match pending.poll(now) {
                 Ok(None) => return Ok(None),

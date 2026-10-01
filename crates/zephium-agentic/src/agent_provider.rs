@@ -33,11 +33,15 @@ use openai::OpenAiResponsesStreamDecoder;
 
 pub(crate) use continuation::AgentProviderContinuationSeed;
 pub use continuation::{
-    AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
-    AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
-    AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,
-    AgentProviderContinuationError, AgentProviderNavigationCheckpoint,
-    MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+    AgentProviderActionAuthority, AgentProviderActionRefusal, AgentProviderActionRefusalContext,
+    AgentProviderActionRefusalKey, AgentProviderActionResolution,
+    AgentProviderActionResolutionError, AgentProviderBoundDiffContinuation,
+    AgentProviderBoundExtractionContinuation, AgentProviderBoundLocateContinuation,
+    AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,
+    AgentProviderContinuation, AgentProviderContinuationError, AgentProviderNavigationCheckpoint,
+    AgentProviderNavigationRefusal, AgentProviderNavigationRefusalReason,
+    AgentProviderObservationCheckpoint, AgentProviderObservationRefusal,
+    AgentProviderObservationResolution, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
 pub use extraction::{
@@ -69,8 +73,8 @@ pub use request::{
     AgentCommittedProviderInput, AgentPreparedDiffRequest, AgentPreparedExtractionRequest,
     AgentPreparedLocateRequest, AgentPreparedObservationRequest,
     AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
-    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExactInputCount,
-    AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
+    AgentProviderDecisionInputStats, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
+    AgentProviderExactInputCount, AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
     AgentProviderInputMetricReceipt, AgentProviderInputMetrics, AgentProviderInputOutcome,
     AgentProviderInputTokenBinding, AgentProviderInputTokenCount, AgentProviderInputTokenRequest,
     AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft, AgentProviderObjective,
@@ -96,6 +100,16 @@ pub const MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES: usize = 96;
 /// admitted by the current snapshot-action driver. This is not a required wait.
 /// Public native qualification observed >1 s captures on throttled owned pages.
 pub const MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS: u32 = 2_000;
+
+/// Fixed isolated-runtime actions supported by the retained snapshot-verifying
+/// controller and desktop adapters.
+pub const AGENT_BROWSER_SNAPSHOT_ACTION_KINDS: [crate::SemanticActionKind; 5] = [
+    crate::SemanticActionKind::Click,
+    crate::SemanticActionKind::Fill,
+    crate::SemanticActionKind::Select,
+    crate::SemanticActionKind::Press,
+    crate::SemanticActionKind::Scroll,
+];
 /// Maximum bytes in one provider-attested service-tier identity.
 pub const MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES: usize = 32;
 /// Maximum trusted effective model revisions accepted for one requested alias.
@@ -730,6 +744,14 @@ pub struct AgentProviderCallConfig {
     store_response: bool,
     tools: BrowserToolProfile,
     baseline_read: bool,
+    progressive_observation: bool,
+    viewport_screenshot: bool,
+    standalone_wait: bool,
+    human_request: bool,
+    navigation_available: bool,
+    history_back: bool,
+    history_back_available: bool,
+    decision_budget: Option<(AgentModelCallId, u8)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -741,6 +763,8 @@ enum BrowserToolProfile {
     ScopedExtraction,
     LocateActScopedExtraction,
     NavigationExtraction,
+    NavigationActionsExtraction,
+    SiteActionsExtraction,
 }
 
 impl AgentProviderCallConfig {
@@ -778,6 +802,14 @@ impl AgentProviderCallConfig {
             store_response: false,
             tools: BrowserToolProfile::Full,
             baseline_read: false,
+            progressive_observation: false,
+            viewport_screenshot: false,
+            standalone_wait: false,
+            human_request: false,
+            navigation_available: true,
+            history_back: false,
+            history_back_available: false,
+            decision_budget: None,
         })
     }
 
@@ -808,6 +840,74 @@ impl AgentProviderCallConfig {
         self.baseline_read && self.tools != BrowserToolProfile::Full
     }
 
+    /// Enables closed, reference-bound native inspection of the current page.
+    /// This freezes tool availability only; each request still needs exact
+    /// acknowledged predecessor, native scope, account and provider admission.
+    pub fn with_progressive_observation(mut self) -> Self {
+        self.progressive_observation = true;
+        self
+    }
+
+    /// Whether this fixed provider lineage permits progressive inspection.
+    pub const fn permits_progressive_observation(&self) -> bool {
+        self.progressive_observation
+    }
+
+    pub(super) fn adds_progressive_observation(&self) -> bool {
+        self.progressive_observation && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Enables one bounded viewport capture of the exact acknowledged semantic
+    /// observation. This only freezes model vocabulary; task policy, native
+    /// platform support, secret screening and current-document admission remain
+    /// independently mandatory for every capture.
+    pub fn with_viewport_screenshot(mut self) -> Self {
+        self.viewport_screenshot = true;
+        self
+    }
+
+    /// Whether this immutable provider lineage can request a viewport capture.
+    pub const fn permits_viewport_screenshot(&self) -> bool {
+        self.viewport_screenshot
+    }
+
+    pub(super) fn adds_viewport_screenshot(&self) -> bool {
+        self.viewport_screenshot && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Enables only proof-carrying semantic-change and exact target-state waits.
+    /// The host remains responsible for one absolute deadline and fresh native
+    /// observations; this setting grants no timer or action authority.
+    pub fn with_standalone_wait(mut self) -> Self {
+        self.standalone_wait = true;
+        self
+    }
+
+    /// Whether this immutable provider lineage permits a bounded semantic wait.
+    pub const fn permits_standalone_wait(&self) -> bool {
+        self.standalone_wait
+    }
+
+    pub(super) fn adds_standalone_wait(&self) -> bool {
+        self.standalone_wait && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Enables model-requested human handoff with one closed reason. This never
+    /// enables `resume_after_human`; only a trusted host can start a successor.
+    pub fn with_human_request(mut self) -> Self {
+        self.human_request = true;
+        self
+    }
+
+    /// Whether this immutable lineage lets the model stop and request a person.
+    pub const fn permits_human_request(&self) -> bool {
+        self.human_request
+    }
+
+    pub(super) fn adds_human_request(&self) -> bool {
+        self.human_request && self.tools != BrowserToolProfile::Full
+    }
+
     /// Restricts browser planning to the one trusted run-local extraction
     /// schema (identity 1), using only the current initial observation.
     /// This enables no native action, navigation or scope expansion.
@@ -821,6 +921,69 @@ impl AgentProviderCallConfig {
     pub fn restrict_to_navigation_and_extraction(mut self) -> Self {
         self.tools = BrowserToolProfile::NavigationExtraction;
         self
+    }
+
+    /// Enables model-selected navigation, one snapshot-verifiable Click, Fill
+    /// or Select action per turn, and terminal mapping. Only Read/LocalWrite
+    /// effects and immediate/mutation-quiet settlement are advertised inside
+    /// one frozen lineage. Trusted host assessment, exact current refs,
+    /// policy admission and independent verification remain mandatory per effect.
+    pub fn restrict_to_navigation_actions_and_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::NavigationActionsExtraction;
+        self
+    }
+
+    /// The same tools for work on one site in the person's session, where a
+    /// click may also declare a commitment. Declaring one grants nothing: the
+    /// trusted host classifies every step and holds commitments for the person.
+    pub fn restrict_to_site_actions_and_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::SiteActionsExtraction;
+        self
+    }
+
+    /// Freezes the host's total model-call allowance for one bounded workflow.
+    /// Call identities advance once per attempt; the last call is reserved for
+    /// terminal mapping. This only narrows decisions, never policy budgets or
+    /// the task's independent extraction, action, or navigation preconditions.
+    pub fn with_decision_budget(
+        mut self,
+        first_call: AgentModelCallId,
+        max_calls: u8,
+    ) -> Result<Self, AgentProviderContractError> {
+        if self.provider() != AgentProviderKind::OpenAiResponses
+            || self.input_accounting
+                != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        {
+            return Err(AgentProviderContractError::InputAccountingMode);
+        }
+        if max_calls < 2
+            || first_call
+                .get()
+                .checked_add(u64::from(max_calls) - 1)
+                .is_none()
+        {
+            return Err(AgentProviderContractError::AdmissionBudget);
+        }
+        self.decision_budget = Some((first_call, max_calls));
+        Ok(self)
+    }
+
+    pub(super) fn remaining_decision_calls(
+        &self,
+        call: AgentModelCallId,
+    ) -> Result<Option<u8>, AgentProviderContractError> {
+        let Some((first, max_calls)) = self.decision_budget else {
+            return Ok(None);
+        };
+        let remaining = call
+            .get()
+            .checked_sub(first.get())
+            .and_then(|used| u64::from(max_calls).checked_sub(used))
+            .and_then(|remaining| remaining.checked_sub(1))
+            .filter(|remaining| *remaining > 0)
+            .and_then(|remaining| u8::try_from(remaining).ok())
+            .ok_or(AgentProviderContractError::AdmissionBudget)?;
+        Ok(Some(remaining))
     }
 
     /// Restricts a trusted combined task to snapshot actions, bounded locate
@@ -856,9 +1019,32 @@ impl AgentProviderCallConfig {
         )
     }
 
-    pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+    /// Reports whether this immutable request profile advertises a tool kind.
+    pub fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+        if matches!(
+            kind,
+            AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
+        ) && !self.navigation_available
+        {
+            return false;
+        }
         if self.baseline_read && kind == AgentBrowserToolKind::Read {
             return true;
+        }
+        if self.progressive_observation && kind == AgentBrowserToolKind::Snapshot {
+            return true;
+        }
+        if self.viewport_screenshot && kind == AgentBrowserToolKind::Screenshot {
+            return true;
+        }
+        if self.standalone_wait && kind == AgentBrowserToolKind::Wait {
+            return true;
+        }
+        if self.human_request && kind == AgentBrowserToolKind::ShowForHuman {
+            return true;
+        }
+        if kind == AgentBrowserToolKind::Back {
+            return self.history_back && self.history_back_available;
         }
         match self.tools {
             BrowserToolProfile::Full => true,
@@ -867,6 +1053,14 @@ impl AgentProviderCallConfig {
                 kind,
                 AgentBrowserToolKind::Locate
                     | AgentBrowserToolKind::Navigate
+                    | AgentBrowserToolKind::Extract
+            ),
+            BrowserToolProfile::NavigationActionsExtraction
+            | BrowserToolProfile::SiteActionsExtraction => matches!(
+                kind,
+                AgentBrowserToolKind::Locate
+                    | AgentBrowserToolKind::Navigate
+                    | AgentBrowserToolKind::Act
                     | AgentBrowserToolKind::Extract
             ),
             BrowserToolProfile::ScopedExtraction => matches!(
@@ -885,6 +1079,29 @@ impl AgentProviderCallConfig {
                     | AgentBrowserToolKind::Extract
             ),
         }
+    }
+
+    /// Enables one-step native history proposals. Policy and the native adapter
+    /// still require an exact run-enrolled predecessor for every invocation.
+    pub fn with_history_back(mut self) -> Self {
+        self.history_back = true;
+        self
+    }
+
+    /// Projects current-phase Back availability without changing whether the
+    /// host supports the primitive. This may only be enabled after a committed
+    /// run-local predecessor exists and must be cleared again at history root.
+    pub fn with_history_back_available(mut self, available: bool) -> Self {
+        self.history_back_available = self.history_back && available;
+        self
+    }
+
+    /// Projects whether another navigation effect can still be accepted by
+    /// the trusted route/discovery state. This removes both forward and Back
+    /// vocabulary; it grants no destination or navigation authority.
+    pub fn with_navigation_available(mut self, available: bool) -> Self {
+        self.navigation_available = available;
+        self
     }
 
     /// Enables provider-side response retention for an inspectable public-data probe.
@@ -932,6 +1149,22 @@ impl AgentProviderCallConfig {
     /// Selected provider protocol.
     pub fn provider(&self) -> AgentProviderKind {
         self.catalog.provider()
+    }
+
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn planning_cost_ceiling(&self, input: u32, output: u32) -> Option<u64> {
+        let rates = self.catalog.rates();
+        let input_rate = rates
+            .uncached_input()
+            .max(rates.cached_input())
+            .max(rates.cache_write_input());
+        let numerator = u128::from(input) * u128::from(input_rate)
+            + u128::from(output) * u128::from(rates.output());
+        u64::try_from(numerator.div_ceil(1_000_000)).ok()
+    }
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn planning_identity_matches(&self, model: &str, tier: &str) -> bool {
+        self.catalog.allows_response_identity(model, tier, None)
     }
 
     /// Exact billing mode encoded into and required from the provider call.
@@ -1959,6 +2192,9 @@ pub enum AgentProviderProtocolError {
     /// A complete client tool call failed the closed browser-tool contract.
     #[error("agent provider tool call is invalid")]
     ToolCall,
+    /// A known tool failed a closed argument contract; carries no model text.
+    #[error("agent provider tool contract is invalid ({0:?}, {1:?})")]
+    ToolContract(AgentBrowserToolKind, AgentBrowserToolContractError),
     /// Terminal provider usage was absent or internally inconsistent.
     #[error("agent provider terminal usage is invalid")]
     Usage,
@@ -2006,6 +2242,16 @@ mod tests {
                 fixed_input_tokens: 512
             }
         );
+        assert!(!config.permits_tool(AgentBrowserToolKind::Back));
+        let supported = config.clone().with_history_back();
+        assert!(!supported.permits_tool(AgentBrowserToolKind::Back));
+        assert!(supported
+            .clone()
+            .with_history_back_available(true)
+            .permits_tool(AgentBrowserToolKind::Back));
+        assert!(!supported
+            .with_history_back_available(false)
+            .permits_tool(AgentBrowserToolKind::Back));
         assert_eq!(
             config.reasoning_effort(),
             AgentProviderReasoningEffort::High

@@ -24,6 +24,10 @@ use super::{
 #[path = "work_tests.rs"]
 mod tests;
 
+#[path = "work_decision.rs"]
+mod decision;
+#[path = "work_inspection.rs"]
+mod inspection;
 #[path = "work_navigation.rs"]
 mod navigation;
 
@@ -49,10 +53,130 @@ pub enum AgentWorkTaskProgress {
     Complete,
 }
 
+/// Trusted pre-model readiness of the initial document, never action progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentWorkInitialReadiness {
+    /// The task can evaluate this fresh observation normally.
+    Ready,
+    /// The exact task context exists but has not finished becoming usable.
+    /// The controller may obtain a bounded number of fresh read-only samples.
+    Pending,
+}
+
+/// A document can finish navigating while its initial application shell still
+/// consists of loading placeholders. This is scheduling evidence only: neither
+/// its presence nor absence grants action authority or proves task readiness.
+///
+/// A cohort must dominate the usable controls before it delays startup. Named
+/// meters, nonzero progress, and an isolated spinner are normal page content;
+/// treating every progress role as a loading document would block dashboards.
+fn has_dominant_loading_placeholders(observation: &SemanticObservation) -> bool {
+    let mut placeholders = 0usize;
+    let mut controls = 0usize;
+    for node in observation
+        .frames()
+        .iter()
+        .flat_map(SemanticSnapshot::nodes)
+    {
+        let anonymous = node.name().is_none_or(SemanticText::is_empty)
+            && node.text().is_none_or(SemanticText::is_empty);
+        if node.role() == SemanticRole::Progress
+            && anonymous
+            && matches!(node.value(), None | Some(SemanticValueSummary::Ordinal(0)))
+        {
+            placeholders += 1;
+        } else if !anonymous
+            && !node.states().contains(SemanticState::Disabled)
+            && [
+                SemanticOperationClass::Click,
+                SemanticOperationClass::Fill,
+                SemanticOperationClass::Select,
+                SemanticOperationClass::Press,
+            ]
+            .into_iter()
+            .any(|operation| node.operations().contains(operation))
+        {
+            controls += 1;
+        }
+    }
+    (placeholders >= 3 && placeholders > controls) || says_loading(observation)
+}
+
+/// A page with next to nothing on it yet but its own "Loading…": an app
+/// still booting, not a page to judge.
+fn says_loading(observation: &SemanticObservation) -> bool {
+    let nodes = || {
+        observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+    };
+    nodes().count() <= 16
+        && nodes().any(|node| {
+            [node.name(), node.text()]
+                .into_iter()
+                .flatten()
+                .map(|words| {
+                    words
+                        .as_str()
+                        .trim()
+                        .trim_end_matches(['…', '.'])
+                        .to_ascii_lowercase()
+                })
+                .any(|words| words == "loading" || words == "loading your workspace")
+        })
+}
+
+fn finish_initial_readiness_wait(
+    observation: SemanticObservation,
+    readiness: AgentWorkInitialReadiness,
+) -> Result<SemanticObservation, AgentWorkFailure> {
+    match readiness {
+        // Loading placeholders are page-controlled scheduling evidence. They
+        // may buy the application bounded hydration time, but they must never
+        // let a page veto a task that its trusted predicate considers ready.
+        AgentWorkInitialReadiness::Ready => Ok(observation),
+        AgentWorkInitialReadiness::Pending => Err(AgentWorkFailure::Observation(
+            SemanticRuntimePortFailure::NotReady,
+        )),
+    }
+}
+
+fn validate_initial_readiness_successor(
+    prior: &SemanticObservation,
+    next: &SemanticObservation,
+) -> Result<(), AgentWorkFailure> {
+    if prior.request().context() != next.request().context()
+        || prior.request().scope() != next.request().scope()
+        || prior.request().generation() != next.request().generation()
+        || prior.request().id() == next.request().id()
+        || prior.frames().len() != next.frames().len()
+        || prior.frames().iter().zip(next.frames()).any(|(a, b)| {
+            a.frame() != b.frame()
+                || a.invocation() == b.invocation()
+                || a.generation() >= b.generation()
+        })
+    {
+        return Err(AgentWorkFailure::Context);
+    }
+    Ok(())
+}
+
 /// Trusted product execution contract. Never implement this from model text,
 /// page instructions, or a model-authored predicate. The UI does not receive
 /// this port; it receives only the content-free handle below.
 pub trait AgentWorkTask: Send {
+    /// Read-only startup gate, called only before the first task evaluation or
+    /// provider request. Pending grants no effect/ref authority or progress.
+    /// Implementations must reject changed/ambiguous task identity rather than
+    /// treating arbitrary missing content as hydration. Ready is the default;
+    /// the controller's generic loading-placeholder gate still applies.
+    fn initial_readiness(
+        &self,
+        _: &SemanticObservation,
+    ) -> Result<AgentWorkInitialReadiness, AgentWorkFailure> {
+        Ok(AgentWorkInitialReadiness::Ready)
+    }
     /// One immutable same-origin exact destination. The first navigation task
     /// shape is read-only, initial-extraction only, with no redirects/repeats.
     /// The task must independently prove departure and arrival from fresh state.
@@ -66,10 +190,41 @@ pub trait AgentWorkTask: Send {
     fn navigation_route(&self) -> Option<&AgentNavigationRoute> {
         None
     }
+    /// Frozen public observed-link discovery authority, mutually exclusive with
+    /// fixed routes. The model chooses a route and answer inside this scope.
+    fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {
+        None
+    }
     /// Opts into nonterminal public reads of the exact initial baseline. Reads
     /// grant no task progress, new observation/ref or native effect authority.
     /// This setting is frozen at admission with the other task capabilities.
     fn allows_baseline_read(&self) -> bool {
+        false
+    }
+    /// Frozen opt-in to exact-reference native inspection and fresh delivery.
+    fn allows_progressive_observation(&self) -> bool {
+        false
+    }
+    /// Explicitly permits one-shot viewport captures when semantic inspection
+    /// cannot represent a visual/layout question. Captures remain bound to an
+    /// acknowledged complete public observation and the provider disclosure
+    /// policy; this opt-in alone grants neither pixels nor native authority.
+    fn allows_viewport_screenshot(&self) -> bool {
+        false
+    }
+    /// Enables bounded standalone waits over semantic change or one exact
+    /// target-state predicate. The model cannot select timer-only success.
+    fn allows_standalone_wait(&self) -> bool {
+        false
+    }
+    /// Lets the model stop cleanly and request a person using one closed reason.
+    /// This grants no resume capability; successor admission belongs to the host.
+    fn allows_human_request(&self) -> bool {
+        false
+    }
+    /// Enables a native Back step only when policy and the retained platform
+    /// both prove an exact predecessor enrolled by this run.
+    fn allows_history_back(&self) -> bool {
         false
     }
     /// Explicitly permits one terminal native subtree read anchored to the
@@ -83,6 +238,35 @@ pub trait AgentWorkTask: Send {
     /// admission; it grants no effect permission beyond the original policy.
     fn allows_actions_before_extraction(&self) -> bool {
         false
+    }
+    /// Returns the task-approved operation subset for one node in the exact
+    /// freshly evaluated observation. The controller intersects this with the
+    /// node's semantic operations before constructing provider-visible action
+    /// affordances. The default denies every action.
+    fn model_action_operations(
+        &self,
+        _: &SemanticNode,
+        _: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        Ok(SemanticOperations::NONE)
+    }
+    /// Optional effect vocabulary restriction; it never replaces assessment.
+    fn model_action_effect(&self) -> Option<SemanticEffectClass> {
+        None
+    }
+    /// Advances trusted task state from one independently verified native
+    /// action terminal. The default has no action-progress contract.
+    fn accept_verified_action(
+        &mut self,
+        _: &SemanticActionBatchResult,
+        _: &SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        Ok(())
+    }
+    /// Whether terminal extraction is currently authorized by trusted task
+    /// state. This is dynamic progress, not a frozen capability grant.
+    fn terminal_extraction_ready(&self) -> bool {
+        true
     }
     /// Optional single trusted extraction schema. Identity 1 is run-local;
     /// model/page content cannot register or replace it. Default is no extraction.
@@ -107,6 +291,69 @@ pub trait AgentWorkTask: Send {
         &self,
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure>;
+    /// Assesses a proposal against the controller's exact current observation.
+    /// Open objectives use this port to resolve model-selected targets without
+    /// accepting caller-provided refs. Existing frozen task assessors retain
+    /// their own independently bound baseline through the default implementation.
+    fn assess_observed(
+        &self,
+        action: &SemanticPreparedAction,
+        _: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        self.assess(action)
+    }
+    /// Supplies a code-owned recipe for a typed selection. None uses the page planner.
+    /// The recipe still requires ordinary semantic binding and independent assessment.
+    fn decision_action_recipe(
+        &self,
+        _: &DecisionOperation,
+        _: &SemanticObservation,
+    ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
+        Ok(None)
+    }
+    /// The control that dismisses a cookie consent dialog on this observation,
+    /// picked by the task's own closed name list; never a provider's choice.
+    fn consent_dismissal(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
+
+    /// The look shows a consent banner or page whose controls it may have
+    /// cut off: a whole look decides.
+    fn consent_suspected(&self, _: &SemanticObservation) -> bool {
+        false
+    }
+
+    /// Rust presses a cookie banner's refusal (true), and the press came
+    /// back (false). A page that saved the choice by loading another document
+    /// ends between the two; the task may run the page again once, with the
+    /// choice in place.
+    fn consent_pressing(&self, _: bool) {}
+
+    /// A collapsed disclosure the task's own closed name list says may hold
+    /// the read's values; toggled once by Rust when a value is unlocated.
+    fn detail_disclosure(&self, _: &SemanticObservation) -> Option<DecisionOperation> {
+        None
+    }
+    /// A trusted page-state reading that the person must act first (a sign-in
+    /// wall). Checked on the first observation, each snapshot and each verified action;
+    /// the page agent can raise a wall itself but never clear one.
+    fn human_wall(&self, _: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        None
+    }
+    /// The first view is judged whole before any model call.
+    fn whole_first_look(&self) -> bool {
+        false
+    }
+    /// A daily app's view (Slack, Gmail, Calendar, Linear, Notion, GitHub)
+    /// is read as its records at once, before any model call.
+    fn reads_app_view(&self) -> bool {
+        false
+    }
+    /// The control that opens the next view a daily app's read goes
+    /// through, pressed by Rust as a read; None when no view is left.
+    fn app_view(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -127,6 +374,7 @@ pub struct AgentWorkContextSpec {
     storage: ContextProfileStorageClass,
     target: ContextNavigationTarget,
     origin: SemanticOrigin,
+    document_policy: WorkBrowserDocumentPolicy,
 }
 
 impl AgentWorkContextSpec {
@@ -137,16 +385,37 @@ impl AgentWorkContextSpec {
         storage: ContextProfileStorageClass,
         target: ContextNavigationTarget,
     ) -> Result<Self, AgentWorkFailure> {
+        Self::try_new_with_document_policy(
+            identity,
+            storage,
+            target,
+            WorkBrowserDocumentPolicy::Exact,
+        )
+    }
+
+    /// Validates one trusted initial-document policy together with the exact
+    /// owned target. This policy is application-authored before native work;
+    /// it grants no model or successor-navigation authority.
+    pub fn try_new_with_document_policy(
+        identity: ContextIdentity,
+        storage: ContextProfileStorageClass,
+        target: ContextNavigationTarget,
+        document_policy: WorkBrowserDocumentPolicy,
+    ) -> Result<Self, AgentWorkFailure> {
         if identity.kind() != ContextKind::Owned {
             return Err(AgentWorkFailure::Contract);
         }
         let origin = SemanticOrigin::parse(target.as_url().as_ref())
             .map_err(|_| AgentWorkFailure::Contract)?;
+        if !document_policy.admits_request(&target) {
+            return Err(AgentWorkFailure::Contract);
+        }
         Ok(Self {
             identity,
             storage,
             target,
             origin,
+            document_policy,
         })
     }
 }
@@ -157,6 +426,8 @@ pub struct AgentWorkRunSettings {
     ids: TerraControllerIds,
     clock: Arc<dyn TerraControllerClock>,
     deadline: Instant,
+    max_model_calls: u8,
+    max_actions: u64,
 }
 
 impl AgentWorkRunSettings {
@@ -173,22 +444,92 @@ impl AgentWorkRunSettings {
             ids,
             clock,
             deadline,
+            max_model_calls: super::MAX_BROWSER_MODEL_TURNS,
+            max_actions: super::MAX_BROWSER_ACTIONS,
         }
+    }
+
+    /// Sets this run's total provider-call allowance, including terminal
+    /// mapping (2–64; default 8). This trusted application setting grants no
+    /// manifest operation, token, cost, scope or deadline authority. Stateless
+    /// context retention and provider input bounds remain independently enforced.
+    pub fn with_max_model_calls(mut self, max_calls: u8) -> Result<Self, AgentWorkFailure> {
+        if !(2..=super::MAX_WORK_MODEL_CALLS).contains(&max_calls) {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.max_model_calls = max_calls;
+        Ok(self)
+    }
+
+    /// Sets the native action-attempt allowance (0–64; default 8). Zero
+    /// disables action admission. Each attempt still needs the approved
+    /// manifest's effect authority and remaining operation budget.
+    pub fn with_max_actions(mut self, max_actions: u64) -> Result<Self, AgentWorkFailure> {
+        if max_actions > super::MAX_WORK_ACTIONS {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.max_actions = max_actions;
+        Ok(self)
     }
 }
 
 /// Approved product input, admitted before native or provider work begins.
 #[must_use]
 pub struct AgentWorkRunInput {
+    decision_provider: Option<super::AgentBrowserDecisionProvider>,
     manifest: AgentRunManifest,
     lease: AgentPlanLeaseBinding,
     context: AgentWorkContextSpec,
     objective: Option<AgentProviderObjective>,
     settings: AgentWorkRunSettings,
     durable_result: bool,
+    isolated_store: bool,
 }
 
 impl AgentWorkRunInput {
+    /// Enables typed decisions with a trusted provider configuration. Existing
+    /// OpenAI ownership supplies the per-question fallback; no scope is added.
+    pub fn with_decision_provider(mut self, provider: super::AgentBrowserDecisionProvider) -> Self {
+        self.decision_provider = Some(provider);
+        self
+    }
+
+    /// Replaces only the trusted dormant provider selection before admission.
+    pub fn set_decision_provider(&mut self, provider: super::AgentBrowserDecisionProvider) {
+        self.decision_provider = Some(provider);
+    }
+    /// Requires isolated native storage without changing account or disclosure scope.
+    pub fn with_isolated_website_data(mut self) -> Self {
+        self.isolated_store = true;
+        self
+    }
+    /// Descriptive original resource construction operands for the trusted
+    /// application. These do not mint a browser, account or execution lease.
+    pub fn retained_resource_spec(
+        &self,
+    ) -> Result<AgentWorkRetainedResourceSpec, AgentWorkFailure> {
+        Ok(AgentWorkRetainedResourceSpec {
+            identity: self.context.identity,
+            storage: self.context.storage,
+            isolated_public: self.isolated_store
+                || self
+                    .manifest
+                    .plan_node(self.lease.node())
+                    .is_some_and(|node| {
+                        node.navigation_discovery()
+                            .is_some_and(|scope| scope.is_public_web())
+                    }),
+            target: self.context.target.clone(),
+            document_policy: self.context.document_policy,
+            clock: self.settings.clock.clone(),
+            deadline: self.settings.deadline,
+            expires_at: self
+                .manifest
+                .plan_node(self.lease.node())
+                .ok_or(AgentWorkFailure::Contract)?
+                .expires_at(),
+        })
+    }
     /// Joins approved scope, explicit profile, bounded objective and model.
     pub fn try_new(
         manifest: AgentRunManifest,
@@ -197,13 +538,24 @@ impl AgentWorkRunInput {
         objective: String,
         settings: AgentWorkRunSettings,
     ) -> Result<Self, AgentWorkFailure> {
-        let horizon = settings
-            .deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(AgentWorkFailure::Deadline)?;
-        if horizon.is_zero() || horizon > super::MAX_TERRA_CONTROLLER_HARD_DEADLINE {
-            return Err(AgentWorkFailure::Deadline);
-        }
+        Self::try_new_with_monotonic_now(
+            manifest,
+            lease,
+            context,
+            objective,
+            settings,
+            Instant::now,
+        )
+    }
+
+    fn try_new_with_monotonic_now(
+        manifest: AgentRunManifest,
+        lease: AgentPlanLeaseBinding,
+        context: AgentWorkContextSpec,
+        objective: String,
+        settings: AgentWorkRunSettings,
+        monotonic_now: impl FnOnce() -> Instant,
+    ) -> Result<Self, AgentWorkFailure> {
         let root = manifest
             .plan_node(lease.node())
             .ok_or(AgentWorkFailure::Contract)?;
@@ -211,6 +563,18 @@ impl AgentWorkRunInput {
             .clock
             .now()
             .map_err(|_| AgentWorkFailure::Contract)?;
+        // Policy time floors elapsed milliseconds. Sample it first: comparing
+        // an earlier, larger wall horizon with a later, smaller policy remainder
+        // can falsely reject the same absolute deadline at a millisecond edge.
+        // Neither approved expiry nor the caller's absolute deadline is changed;
+        // later execution still independently enforces both original bounds.
+        let horizon = settings
+            .deadline
+            .checked_duration_since(monotonic_now())
+            .ok_or(AgentWorkFailure::Deadline)?;
+        if horizon.is_zero() || horizon > super::MAX_TERRA_CONTROLLER_HARD_DEADLINE {
+            return Err(AgentWorkFailure::Deadline);
+        }
         let remaining = root
             .expires_at()
             .millis()
@@ -235,17 +599,23 @@ impl AgentWorkRunInput {
                 super::TERRA_CONTROLLER_MAX_OUTPUT_TOKENS,
             )
             .map_err(|_| AgentWorkFailure::Contract)?,
+            AgentBrowserModel::Gpt6Luna => super::try_gpt6_luna_provider_exact_call_config(
+                super::TERRA_CONTROLLER_MAX_OUTPUT_TOKENS,
+            )
+            .map_err(|_| AgentWorkFailure::Contract)?,
         };
         let objective =
             AgentProviderObjective::try_admit_conservative_utf8(objective, config.tokenizer())
                 .map_err(|_| AgentWorkFailure::Contract)?;
         Ok(Self {
+            decision_provider: None,
             manifest,
             lease,
             context,
             objective: Some(objective),
             settings,
             durable_result: false,
+            isolated_store: false,
         })
     }
     /// Explicitly opts a trusted extraction task into profile-owned result
@@ -272,6 +642,26 @@ impl AgentWorkRunInput {
             Ok(AgentWorkJournalMutation::admit(&self.manifest, owner))
         }
     }
+}
+
+/// Original approved input facts, not resource or execution authority.
+pub struct AgentWorkRetainedResourceSpec {
+    /// Exact context/run/profile identity in the approved input.
+    pub identity: ContextIdentity,
+    /// Original selected session persistence class.
+    pub storage: ContextProfileStorageClass,
+    /// Frozen public discovery must never inherit profile cookies.
+    pub isolated_public: bool,
+    /// Exact approved initial document, not navigation authority.
+    pub target: ContextNavigationTarget,
+    /// Trusted initial-document construction policy, frozen before native work.
+    pub document_policy: WorkBrowserDocumentPolicy,
+    /// Original policy clock, shared with controller admission.
+    pub clock: Arc<dyn TerraControllerClock>,
+    /// Original absolute execution deadline.
+    pub deadline: Instant,
+    /// Original plan-node policy expiry ceiling for resource acquisition.
+    pub expires_at: AgentPolicyInstant,
 }
 
 /// Content-free shell/application observation port. It exposes no browser,
@@ -312,6 +702,10 @@ pub enum AgentWorkOutcome {
     /// Trusted task completion with durable policy/accounting closure. Native
     /// and provider shutdown proofs are consumed by the runtime lifecycle.
     Succeeded(AgentWorkSuccess),
+    /// The current run closed cleanly after the model requested a person. All
+    /// execution authority is revoked; only a trusted host may admit a fresh
+    /// successor run.
+    WaitingForHuman(AgentWorkWaitingForHuman),
     /// Task failed or was cancelled, but all original execution owners drained.
     /// This never carries an extraction result or authorizes another run.
     ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully),
@@ -332,6 +726,72 @@ pub struct AgentWorkClosedUnsuccessfully {
     settlement: AgentRunPolicySettlement,
     failure: AgentWorkFailure,
     human_review: Option<AgentNeedsHumanTransition>,
+}
+
+/// Durable, non-authorizing model request for human intervention.
+///
+/// It is bound to the exact delivered observation at which the run stopped.
+/// It carries no provider continuation, old ref authority, or resume token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentWorkHumanRequest {
+    context: ContextJoin,
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    reason: AgentBrowserHumanReason,
+    retained_resource: Option<WorkBrowserResourceIdentity>,
+}
+
+impl AgentWorkHumanRequest {
+    /// Exact document/cancellation authority at the handoff request.
+    pub const fn context(self) -> ContextJoin {
+        self.context
+    }
+
+    /// Exact model-delivered observation at the handoff request.
+    pub const fn observation(self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Exact progressive-observation generation at the handoff request.
+    pub const fn generation(self) -> SemanticObservationGeneration {
+        self.generation
+    }
+
+    /// Closed model-selected reason for requesting a person.
+    pub const fn reason(self) -> AgentBrowserHumanReason {
+        self.reason
+    }
+
+    /// Exact retained resource whose run lease was revoked at handoff. Legacy
+    /// owned contexts return `None` because clean closure destroys that page.
+    pub const fn retained_resource(self) -> Option<WorkBrowserResourceIdentity> {
+        self.retained_resource
+    }
+}
+
+/// Clean terminal handoff. This contains durable accounting and descriptive
+/// correlation only: no provider continuation, native lease, refs, or model
+/// authority survives the stopped run.
+pub struct AgentWorkWaitingForHuman {
+    settlement: AgentRunPolicySettlement,
+    request: AgentWorkHumanRequest,
+}
+
+impl AgentWorkWaitingForHuman {
+    /// Closed model request bound to the last delivered observation.
+    pub const fn request(&self) -> AgentWorkHumanRequest {
+        self.request
+    }
+
+    /// Original clean policy/accounting closure for the stopped actor.
+    pub const fn policy_settlement(&self) -> AgentRunPolicySettlement {
+        self.settlement
+    }
+
+    /// Content-free metric closure for product persistence and diagnostics.
+    pub const fn closure(&self) -> AgentRunMetricClosure {
+        self.settlement.closure()
+    }
 }
 
 impl AgentWorkClosedUnsuccessfully {
@@ -374,6 +834,7 @@ impl AgentWorkSuccess {
 /// is frozen before admission; no native action is allowed.
 pub struct AgentWorkExtractionTask {
     baseline_read: bool,
+    progressive_observation: bool,
     schema: SemanticExtractionSchema,
     account: AgentAccountScope,
     account_sample: std::cell::Cell<Option<AgentContextAccountBinding>>,
@@ -394,6 +855,7 @@ impl AgentWorkExtractionTask {
             account_sample: std::cell::Cell::new(None),
             subtree: false,
             baseline_read: false,
+            progressive_observation: false,
         })
     }
 
@@ -419,10 +881,22 @@ impl AgentWorkExtractionTask {
         self.baseline_read = true;
         self
     }
+
+    /// Allows bounded, reference-anchored expansion of the acknowledged
+    /// current document before terminal mapping. This grants neither
+    /// navigation nor native action authority and requires baseline reads so
+    /// the model can inspect the evidence from which it selects a scope.
+    pub fn with_progressive_observation(mut self) -> Self {
+        self.progressive_observation = true;
+        self
+    }
 }
 impl AgentWorkTask for AgentWorkExtractionTask {
     fn allows_baseline_read(&self) -> bool {
         self.baseline_read
+    }
+    fn allows_progressive_observation(&self) -> bool {
+        self.progressive_observation
     }
     fn allows_subtree_extraction(&self) -> bool {
         self.subtree
@@ -555,6 +1029,10 @@ impl fmt::Debug for AgentWorkOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Succeeded(_) => formatter.write_str("AgentWorkOutcome::Succeeded"),
+            Self::WaitingForHuman(value) => formatter
+                .debug_tuple("AgentWorkOutcome::WaitingForHuman")
+                .field(&value.request.reason)
+                .finish(),
             Self::ClosedUnsuccessfully(value) => formatter
                 .debug_tuple("AgentWorkOutcome::ClosedUnsuccessfully")
                 .field(&value.failure)
@@ -576,7 +1054,28 @@ pub struct AgentWorkController {
     retained_terminal: Option<Arc<Mutex<Option<AgentWorkRetainedOutcome>>>>,
 }
 
+/// Landmarks an app view read opens whole before it gives up.
+const MAX_APP_LANDMARKS: usize = 4;
+/// Views one app read goes through at most (Activity, DMs, Home).
+const MAX_APP_VIEWS: usize = 3;
+/// A view's list settles once its pane stops changing this long.
+const APP_VIEW_QUIET_MILLIS: u32 = 300;
+/// Virtual lists render their rows a beat after the pane itself.
+const APP_VIEW_RENDER_MILLIS: u64 = 400;
+
 impl AgentWorkController {
+    /// Immutable session storage selected in the trusted input, while dormant.
+    pub fn profile_storage_binding(
+        &self,
+    ) -> Result<(AgentWorkProfileId, ContextProfileStorageClass), AgentWorkFailure> {
+        let context = &self
+            .state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .ok_or(AgentWorkFailure::Contract)?
+            .context;
+        Ok((context.identity.profile(), context.storage))
+    }
     /// Trusted durable destination, fixed before native/provider admission.
     pub fn durable_result_profile(&self) -> Result<Option<AgentWorkProfileId>, AgentWorkFailure> {
         let input = self
@@ -675,19 +1174,55 @@ impl AgentWorkController {
         retention: AgentBrowserRetention,
         retained: Option<Box<dyn AgentWorkRetainedBrowser>>,
     ) -> Result<(Self, AgentWorkHandle), AgentWorkFailure> {
+        if input.retained_resource_spec()?.isolated_public
+            && !retained
+                .as_ref()
+                .is_some_and(|browser| browser.binding().isolated_public())
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         let extraction_schema = task.extraction_schema().cloned();
         let actions_before_extraction = task.allows_actions_before_extraction();
         let subtree_extraction = task.allows_subtree_extraction();
         let baseline_read = task.allows_baseline_read();
+        let progressive_observation = task.allows_progressive_observation();
+        let viewport_screenshot = task.allows_viewport_screenshot();
+        let standalone_wait = task.allows_standalone_wait();
+        let human_request = task.allows_human_request();
+        let history_back_requested = task.allows_history_back();
+        let history_back = history_back_requested
+            && retained
+                .as_ref()
+                .is_some_and(|browser| browser.supports_history_back());
         let navigation_target = task.navigation_target().cloned();
         let navigation_route = task.navigation_route().cloned();
+        let navigation_discovery = task.navigation_discovery().cloned();
+        if progressive_observation
+            && (extraction_schema.is_none()
+                || !baseline_read
+                || retained
+                    .as_ref()
+                    .is_some_and(|browser| !browser.supports_expansion()))
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         if retained.is_some()
-            && (input.durable_result
-                || extraction_schema.is_none()
-                || actions_before_extraction
+            && (extraction_schema.is_none()
+                || (actions_before_extraction
+                    && !retained
+                        .as_ref()
+                        .is_some_and(|browser| browser.supports_actions()))
                 || subtree_extraction
                 || navigation_target.is_some()
-                || navigation_route.is_some())
+                || navigation_route.is_some()
+                || (navigation_discovery.is_some()
+                    && !retained
+                        .as_ref()
+                        .is_some_and(|browser| browser.supports_navigation()))
+                || (viewport_screenshot
+                    && !retained
+                        .as_ref()
+                        .is_some_and(|browser| browser.supports_screenshots())))
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -701,6 +1236,23 @@ impl AgentWorkController {
             || navigation_route.as_ref().is_some_and(|route| {
                 route.departure() != &input.context.target
                     || route.origin() != &input.context.origin
+            })
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let approved_discovery = input
+            .manifest
+            .plan_node(input.lease.node())
+            .ok_or(AgentWorkFailure::Contract)?
+            .navigation_discovery();
+        if navigation_discovery.as_ref() != approved_discovery
+            || navigation_discovery.as_ref().is_some_and(|scope| {
+                navigation_target.is_some()
+                    || navigation_route.is_some()
+                    || scope.departure() != &input.context.target
+                    || scope.origin() != &input.context.origin
+                    || extraction_schema.is_none()
+                    || subtree_extraction
             })
         {
             return Err(AgentWorkFailure::Contract);
@@ -758,13 +1310,26 @@ impl AgentWorkController {
                     actions_before_extraction,
                     subtree_extraction,
                     baseline_read,
+                    progressive_observation,
+                    viewport_screenshot,
+                    standalone_wait,
+                    human_request,
+                    history_back_requested,
+                    history_back,
                     navigation_target,
                     navigation_route,
+                    navigation_discovery,
                     navigation_hops: 0,
                     extraction: None,
+                    retained_read_evidence: SemanticRetainedReadEvidence::default(),
+                    follow: zephium_agentic::SemanticActionFollow::default(),
+                    consent_press: false,
                     failure: None,
                     observation: None,
                     native_terminal: None,
+                    model_human_request: None,
+                    decision_answers: None,
+                    terminal_intent: None,
                 }),
                 terminal: Arc::clone(&terminal),
                 retained_terminal: None,
@@ -775,10 +1340,22 @@ impl AgentWorkController {
 }
 
 struct WorkState {
+    retained_read_evidence: SemanticRetainedReadEvidence,
+    /// A same-site load the page started during the last action.
+    follow: zephium_agentic::SemanticActionFollow,
+    /// The action in flight is Rust's press of a cookie banner's refusal.
+    consent_press: bool,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
+    navigation_discovery: Option<AgentNavigationDiscovery>,
     navigation_hops: usize,
     baseline_read: bool,
+    progressive_observation: bool,
+    viewport_screenshot: bool,
+    standalone_wait: bool,
+    human_request: bool,
+    history_back_requested: bool,
+    history_back: bool,
     extraction_schema: Option<SemanticExtractionSchema>,
     actions_before_extraction: bool,
     subtree_extraction: bool,
@@ -796,10 +1373,39 @@ struct WorkState {
     failure: Option<AgentWorkFailure>,
     observation: Option<SemanticObservation>,
     native_terminal: Option<SemanticActionNativeSettlement>,
+    model_human_request: Option<AgentWorkHumanRequest>,
+    decision_answers: Option<DecisionObservationAnswers>,
+    terminal_intent: Option<WorkTerminalIntent>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "One Copy terminal intent per bounded worker; keep the exact human handoff inline without a separate allocation"
+)]
+enum WorkTerminalIntent {
+    Succeeded,
+    WaitingForHuman(AgentWorkHumanRequest),
+    ClosedUnsuccessfully(AgentWorkFailure),
 }
 
 impl WorkState {
+    fn record_failure(&mut self, failure: AgentWorkFailure) {
+        let failure = if failure == AgentWorkFailure::Browser(AgentBrowserProviderError::Journal) {
+            self.journal_mut()
+                .ok()
+                .and_then(|journal| journal.failure)
+                .unwrap_or(failure)
+        } else {
+            failure
+        };
+        self.failure = Some(failure);
+    }
+
     fn navigation_length(&self) -> usize {
+        if let Some(scope) = &self.navigation_discovery {
+            return scope.max_hops();
+        }
         self.navigation_route
             .as_ref()
             .map_or(usize::from(self.navigation_target.is_some()), |route| {
@@ -808,7 +1414,37 @@ impl WorkState {
     }
 
     fn has_navigation(&self) -> bool {
-        self.navigation_target.is_some() || self.navigation_route.is_some()
+        self.navigation_target.is_some()
+            || self.navigation_route.is_some()
+            || self.navigation_discovery.is_some()
+    }
+
+    fn observation_capability(&self) -> WorkBrowserObservationCapability {
+        let capability = WorkBrowserObservationCapability::for_navigation_discovery(
+            self.navigation_discovery.as_ref(),
+        );
+        if self
+            .extraction_schema
+            .as_ref()
+            .is_some_and(SemanticExtractionSchema::reads_whole_page)
+        {
+            capability.for_whole_page_read()
+        } else {
+            capability
+        }
+    }
+
+    fn requires_decision_budget(&self) -> bool {
+        self.extraction_schema.is_some()
+            && (self.has_navigation()
+                || self.baseline_read
+                || self.progressive_observation
+                || self.viewport_screenshot
+                || self.standalone_wait
+                || self.human_request
+                || self.history_back
+                || self.actions_before_extraction
+                || self.subtree_extraction)
     }
 
     fn navigation_complete(&self) -> bool {
@@ -853,7 +1489,11 @@ impl WorkState {
         self.check_task_contract()?;
         let progress = self.task.evaluate(observation)?;
         self.check_task_contract()?;
-        if self.has_navigation() {
+        if self.navigation_discovery.is_some() {
+            if progress != AgentWorkTaskProgress::Continue {
+                return Err(AgentWorkFailure::Contract);
+            }
+        } else if self.has_navigation() {
             let expected = if self.navigation_complete() {
                 AgentWorkTaskProgress::ReadyForExtraction
             } else {
@@ -874,13 +1514,59 @@ impl WorkState {
         Ok(progress)
     }
 
+    fn action_authority(
+        &self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentProviderActionAuthority, AgentWorkFailure> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(usize::from(observation.node_count()))
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        for node in observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+        {
+            let approved = self.task.model_action_operations(node, observation)?;
+            let operations = [
+                SemanticOperationClass::Click,
+                SemanticOperationClass::Fill,
+                SemanticOperationClass::Select,
+                SemanticOperationClass::Press,
+                SemanticOperationClass::Scroll,
+            ]
+            .into_iter()
+            .filter(|operation| {
+                node.operations().contains(*operation) && approved.contains(*operation)
+            })
+            .collect::<Vec<_>>();
+            let operations =
+                SemanticOperations::try_new(&operations).map_err(|_| AgentWorkFailure::Contract)?;
+            if !operations.is_empty() {
+                entries.push((node.reference(), operations));
+            }
+        }
+        let authority = AgentProviderActionAuthority::try_new(observation, &entries)
+            .ok_or(AgentWorkFailure::Contract)?;
+        Ok(match self.task.model_action_effect() {
+            Some(effect) => authority.with_required_effect(effect),
+            None => authority,
+        })
+    }
+
     fn check_task_contract(&self) -> Result<(), AgentWorkFailure> {
         if self.task.extraction_schema() != self.extraction_schema.as_ref()
             || self.task.navigation_target() != self.navigation_target.as_ref()
             || self.task.navigation_route() != self.navigation_route.as_ref()
+            || self.task.navigation_discovery() != self.navigation_discovery.as_ref()
             || self.task.allows_actions_before_extraction() != self.actions_before_extraction
             || self.task.allows_subtree_extraction() != self.subtree_extraction
             || self.task.allows_baseline_read() != self.baseline_read
+            || self.task.allows_progressive_observation() != self.progressive_observation
+            || self.task.allows_viewport_screenshot() != self.viewport_screenshot
+            || self.task.allows_standalone_wait() != self.standalone_wait
+            || self.task.allows_human_request() != self.human_request
+            || self.task.allows_history_back() != self.history_back_requested
         {
             return Err(AgentWorkFailure::Contract);
         }
@@ -921,6 +1607,8 @@ struct WorkNative {
     recovery_close: Option<ContextOperationJoin>,
     observation: Option<SemanticRuntimeCorrelation>,
     snapshot_generation: Option<SemanticSnapshotGeneration>,
+    screenshots: SemanticScreenshotCoordinator,
+    screenshot_pending: Option<SemanticScreenshotPending>,
     action_pending: bool,
     cancellation: Option<ContextJoin>,
     shutdown_audit: Option<ContextResourceAuditId>,
@@ -935,13 +1623,23 @@ struct WorkContextResources {
     contexts: ContextRegistry,
     profiles: ContextProfileLeaseRegistry,
     cookies: ContextCookieTransferRegistry,
-    screenshots: SemanticScreenshotCoordinator,
 }
 
 impl WorkNative {
     // A synchronous trusted adapter cannot yield to the provider/event pump.
     // Recheck sticky controls after it returns, before admitting more work.
     fn check_control(
+        &mut self,
+        worker: &AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<(), AgentWorkFailure> {
+        self.check_stop(worker, browser)?;
+        self.check_retained_health()
+    }
+
+    // Exact in-flight terminal reconciliation must obey sticky controls even
+    // when document/resource authority is already gone.
+    fn check_stop(
         &mut self,
         worker: &AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
@@ -966,7 +1664,7 @@ impl WorkNative {
             self.revoke(browser)?;
             return Err(failure);
         }
-        self.check_retained_health()
+        Ok(())
     }
     fn new(
         identity: ContextIdentity,
@@ -983,7 +1681,6 @@ impl WorkNative {
                 contexts: ContextRegistry::new(),
                 profiles: ContextProfileLeaseRegistry::new(),
                 cookies: ContextCookieTransferRegistry::new(),
-                screenshots: SemanticScreenshotCoordinator::new(),
             }),
             retained,
             retained_delivery: None,
@@ -995,6 +1692,8 @@ impl WorkNative {
             recovery_close: None,
             observation: None,
             snapshot_generation: None,
+            screenshots: SemanticScreenshotCoordinator::new(),
+            screenshot_pending: None,
             action_pending: false,
             cancellation: None,
             shutdown_audit: None,
@@ -1217,7 +1916,7 @@ impl AgentRuntimeController for AgentWorkController {
             let mut controller = *self;
             if let Err(failure) = controller.execute(&mut worker, &browser).await {
                 if let Some(state) = controller.state.as_mut() {
-                    state.failure = Some(failure);
+                    state.record_failure(failure);
                     let _ = state.native.revoke(&browser);
                     if let Some(session) = state.session.as_ref() {
                         session.cancel();
@@ -1436,7 +2135,10 @@ impl AgentWorkController {
             ids: input.settings.ids,
             clock: input.settings.clock,
             deadline: input.settings.deadline,
+            max_model_calls: input.settings.max_model_calls,
+            max_actions: input.settings.max_actions,
         };
+        let decision_budget = state.requires_decision_budget();
         let mut session = AgentBrowserSession::try_new_with_transport(
             run,
             state.transport.take().ok_or(AgentWorkFailure::Contract)?,
@@ -1445,6 +2147,21 @@ impl AgentWorkController {
             state.retention,
         )
         .map_err(AgentWorkFailure::Browser)?;
+        if let Some(provider) = input.decision_provider.take() {
+            if let Err(error) = session.configure_decisions(provider) {
+                session.journal = state.journal.take();
+                state.session = Some(session);
+                return Err(AgentWorkFailure::Browser(error));
+            }
+        }
+        if state.navigation_discovery.is_some() {
+            if let Some(retained) = &state.native.retained {
+                session
+                    .policy
+                    .bind_retained_initial_document(retained.binding())
+                    .map_err(|_| AgentWorkFailure::Contract)?;
+            }
+        }
         session.journal = state.journal.take();
         if state.extraction_schema.is_some() {
             session.config = match (state.actions_before_extraction, state.subtree_extraction) {
@@ -1455,16 +2172,205 @@ impl AgentWorkController {
             };
         }
         if state.has_navigation() {
-            session.config = session.config.restrict_to_navigation_and_extraction();
+            session.config = if state.actions_before_extraction
+                && state
+                    .navigation_discovery
+                    .as_ref()
+                    .is_some_and(AgentNavigationDiscovery::is_site_session)
+            {
+                session.config.restrict_to_site_actions_and_extraction()
+            } else if state.actions_before_extraction {
+                session
+                    .config
+                    .restrict_to_navigation_actions_and_extraction()
+            } else {
+                session.config.restrict_to_navigation_and_extraction()
+            };
         }
+        session.config = session
+            .config
+            .with_navigation_available(!state.navigation_complete());
         if state.baseline_read {
             session.config = session.config.with_baseline_read();
+        }
+        if state.progressive_observation {
+            session.config = session.config.with_progressive_observation();
+        }
+        if state.viewport_screenshot {
+            session.config = session.config.with_viewport_screenshot();
+        }
+        if state.standalone_wait {
+            session.config = session.config.with_standalone_wait();
+        }
+        if state.human_request {
+            session.config = session.config.with_human_request();
+        }
+        if state.history_back {
+            session.config = session.config.with_history_back();
+        }
+        session.unverified_local_writes = state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_site_session);
+        if decision_budget {
+            session.config = session
+                .config
+                .with_decision_budget(
+                    AgentModelCallId::new(session.next_call).ok_or(AgentWorkFailure::Contract)?,
+                    session.max_model_calls,
+                )
+                .map_err(|_| AgentWorkFailure::Contract)?;
         }
         state.session = Some(session);
         Ok(())
     }
 
+    async fn classify_human_challenge(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        observation: &SemanticObservation,
+        locate_only: bool,
+    ) -> Result<bool, AgentWorkFailure> {
+        state.decision_answers = None;
+        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        if session.decisions.is_none() {
+            return Ok(looks_like_human_challenge(observation));
+        }
+        state.refresh_account(worker, browser)?;
+        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let authority = if session.config.permits_tool(AgentBrowserToolKind::Act) {
+            state.action_authority(observation)?
+        } else {
+            AgentProviderActionAuthority::try_new(observation, &[])
+                .ok_or(AgentWorkFailure::Contract)?
+        };
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let answers = Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            session.decide_observation(
+                observation,
+                &authority,
+                state.extraction_schema.as_ref(),
+                locate_only,
+            ),
+        )
+        .await?;
+        let Some(mut answers) = answers else {
+            return Ok(looks_like_human_challenge(observation));
+        };
+        let challenge = answers
+            .take_challenge(observation, session.account)
+            .map_err(AgentWorkFailure::DecisionChallenge)?;
+        state.decision_answers = Some(answers);
+        Ok(challenge.unwrap_or_else(|| looks_like_human_challenge(observation)))
+    }
+
+    /// Let automatic verification settle inside the original deadline before takeover.
+    async fn settle_human_challenge(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        mut observation: SemanticObservation,
+    ) -> Result<(SemanticObservation, bool), AgentWorkFailure> {
+        if state.human_request && Self::raise_human_wall(state, &observation)? {
+            return Ok((observation, true));
+        }
+        if !state.human_request
+            || !Self::classify_human_challenge(state, worker, browser, &observation, false).await?
+        {
+            return Ok((observation, false));
+        }
+        for millis in HUMAN_CHALLENGE_SETTLE_MILLIS {
+            let wake = Instant::now()
+                .checked_add(Duration::from_millis(millis))
+                .ok_or(AgentWorkFailure::Deadline)?;
+            if wake >= state.native.deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            state.refresh_account(worker, browser)?;
+            observation =
+                Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
+            if !Self::classify_human_challenge(state, worker, browser, &observation, false).await? {
+                return Ok((observation, false));
+            }
+        }
+        let reason = AgentBrowserHumanReason::HumanChallenge;
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
+        state.model_human_request = Some(AgentWorkHumanRequest {
+            context: observation.request().context(),
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            reason,
+            retained_resource: state
+                .native
+                .retained
+                .as_ref()
+                .map(|browser| browser.binding().lease().resource().identity()),
+        });
+        Ok((observation, true))
+    }
+
+    /// Stops for the person when the task reads a wall on this page.
+    fn raise_human_wall(
+        state: &mut WorkState,
+        observation: &SemanticObservation,
+    ) -> Result<bool, AgentWorkFailure> {
+        let Some(reason) = state.task.human_wall(observation) else {
+            return Ok(false);
+        };
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
+        state.model_human_request = Some(AgentWorkHumanRequest {
+            context: observation.request().context(),
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            reason,
+            retained_resource: state
+                .native
+                .retained
+                .as_ref()
+                .map(|browser| browser.binding().lease().resource().identity()),
+        });
+        Ok(true)
+    }
+
     async fn observe(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let look = Self::observe_page(state, worker, browser).await?;
+        Self::capture_app_view(state, &look);
+        Ok(look)
+    }
+
+    /// QA builds keep a daily app's views as reader fixtures.
+    fn capture_app_view(state: &WorkState, look: &SemanticObservation) {
+        let Some(browser) = state.native.retained.as_ref() else {
+            return;
+        };
+        let page = browser.binding().document().as_url();
+        if let Some(app) = page.host_str().and_then(zephium_agentic::DailyApp::of) {
+            zephium_agentic::captured_app_view(app, page, look);
+        }
+    }
+
+    async fn observe_page(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
@@ -1478,19 +2384,52 @@ impl AgentWorkController {
         {
             return Self::observe_once(state, worker, browser).await;
         }
-        // Only an explicit pre-dispatch NotReady receipt can start another
-        // read-only readiness check. Never retry a mutation, stale reference,
-        // replaced document, malformed callback or provider turn.
-        for _ in 0..64 {
-            match Self::observe_once(state, worker, browser).await {
-                Err(AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)) => {
+        // Only an explicit pre-dispatch NotReady receipt, or the runtime's own
+        // "still parsing" refusal (a sign-in redirect in flight), can start
+        // another read-only readiness check. Never retry a mutation, stale
+        // reference, replaced document, malformed callback or provider turn. Another
+        // page's look holds the one presentation for up to its own budget, so
+        // readiness is waited for by time, not by a count of quick refusals.
+        let started = Instant::now();
+        let mut delay = Duration::from_millis(50);
+        // A document still parsing is looked at again only a few times, a
+        // second and more apart: each look shows the page, and one that never
+        // settles (a sign-in redirect) is better reported than watched.
+        let mut parsing = 0u32;
+        while started.elapsed() < NOT_READY_PATIENCE {
+            let result = Self::observe_once(state, worker, browser).await;
+            let still_parsing = matches!(
+                result,
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
+                        SemanticRuntimeFault::DocumentLoading
+                    ),)
+                ))
+            );
+            if still_parsing {
+                parsing += 1;
+                if parsing > DOCUMENT_LOADING_LOOKS {
+                    return result;
+                }
+                delay = Duration::from_millis(800) * parsing;
+            }
+            match result {
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::NotReady
+                    | SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
+                        SemanticRuntimeFault::DocumentLoading,
+                    )),
+                )) => {
                     tokio::select! {
                         biased;
                         event = state.native.next_event(worker, browser) => {
                             state.native.retain(event?)?;
                             return Err(AgentWorkFailure::Mailbox);
                         }
-                        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                    if !still_parsing {
+                        delay = (delay * 2).min(Duration::from_millis(400));
                     }
                 }
                 result => return result,
@@ -1507,7 +2446,8 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
         if state.native.retained.is_some() {
-            return state.native.observe_retained(worker).await;
+            let capability = state.observation_capability();
+            return state.native.observe_retained(worker, capability).await;
         }
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
@@ -1562,12 +2502,21 @@ impl AgentWorkController {
                 SemanticSnapshotGeneration::next,
             )
             .ok_or(AgentWorkFailure::Contract)?;
+        let runtime_budget = if state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_production)
+        {
+            SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state()
+        } else {
+            SemanticRuntimeBudget::INITIAL_FILTERED
+        };
         let invocation = encode_semantic_runtime_invocation(
             &request,
             frame,
             SemanticInvocationId::new(next).ok_or(AgentWorkFailure::Contract)?,
             generation,
-            SemanticRuntimeBudget::INITIAL_FILTERED,
+            runtime_budget,
         )
         .map_err(|_| AgentWorkFailure::Context)?;
         let correlation = invocation.correlation();
@@ -1639,13 +2588,199 @@ impl AgentWorkController {
         }
     }
 
+    async fn observe_initial_ready(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        // Seven samples at most; backoff schedules work, it is never evidence
+        // of readiness. The original run deadline/control lane remains live.
+        const DELAYS_MS: [u64; 6] = [250, 500, 1000, 2000, 2000, 2000];
+        let mut observation = Self::observe(state, worker, browser).await?;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .ok_or(AgentWorkFailure::Deadline)?
+            .min(state.native.deadline);
+        let mut delays = DELAYS_MS.into_iter();
+        loop {
+            state.check_task_contract()?;
+            let readiness = state.task.initial_readiness(&observation)?;
+            state.check_task_contract()?;
+            state.native.check_control(worker, browser)?;
+            if readiness == AgentWorkInitialReadiness::Ready
+                && !has_dominant_loading_placeholders(&observation)
+            {
+                return Ok(observation);
+            }
+            state.refresh_account(worker, browser)?;
+            if state
+                .native
+                .retained
+                .as_ref()
+                .is_some_and(|b| !b.allows_readiness_retry())
+            {
+                return finish_initial_readiness_wait(observation, readiness);
+            }
+            let Some(delay) = delays.next() else {
+                return finish_initial_readiness_wait(observation, readiness);
+            };
+            let wake = Instant::now()
+                .checked_add(Duration::from_millis(delay))
+                .ok_or(AgentWorkFailure::Deadline)?;
+            if wake >= deadline {
+                return finish_initial_readiness_wait(observation, readiness);
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            state.refresh_account(worker, browser)?;
+            let next = Self::observe(state, worker, browser).await?;
+            validate_initial_readiness_successor(&observation, &next)?;
+            if Instant::now() >= deadline {
+                state.check_task_contract()?;
+                let readiness = state.task.initial_readiness(&next)?;
+                state.check_task_contract()?;
+                state.native.check_control(worker, browser)?;
+                return finish_initial_readiness_wait(next, readiness);
+            }
+            observation = next;
+        }
+    }
+
+    /// One code-owned capture of the whole document under the whole-page
+    /// capability. The initial capture holds the viewport and the headings
+    /// below it; this one holds the sections' own text. No provider is asked.
+    async fn whole_page_capture(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        initial: SemanticObservation,
+        kind: SemanticExpansionKind,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let Some((baseline, root)) = state
+            .native
+            .retained
+            .is_some()
+            .then(|| SemanticObservationAcknowledgement::whole_page_scope(&initial))
+            .flatten()
+        else {
+            return Ok(initial);
+        };
+        state.native.check_control(worker, browser)?;
+        state.refresh_account(worker, browser)?;
+        state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+        let capability = state.observation_capability();
+        match state
+            .native
+            .observe_retained_scope(worker, Some((&initial, &baseline, root, kind)), capability)
+            .await
+        {
+            // A catalog's records may sit under landmarks the region capture
+            // leaves truncated; it keeps whichever look holds more of the page.
+            Ok(page)
+                if state
+                    .extraction_schema
+                    .as_ref()
+                    .is_some_and(SemanticExtractionSchema::is_row_collection)
+                    && node_count(&page) < node_count(&initial) =>
+            {
+                Ok(initial)
+            }
+            Ok(page) => {
+                Self::capture_app_view(state, &page);
+                Ok(page)
+            }
+            Err(AgentWorkFailure::InspectionAnchorLost) => Ok(initial),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn browser_loop(
         &mut self,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let mut observation = Self::observe(state, worker, browser).await?;
+        // A whole-page findings or catalog read decides over its whole
+        // capture; only the page planner, if it is needed, sees the fitted
+        // prefix.
+        let whole_page = state
+            .extraction_schema
+            .as_ref()
+            .is_some_and(SemanticExtractionSchema::reads_whole_page);
+        let observation = Self::observe_initial_ready(state, worker, browser).await?;
+        let first_look = state.task.whole_first_look();
+        let observation = if whole_page || first_look {
+            // Boxed: the read loop's future must stay well inside the
+            // runtime worker's stack.
+            // A first look reads the whole document, landmarks and all.
+            let kind = if first_look {
+                SemanticExpansionKind::Subtree
+            } else {
+                SemanticExpansionKind::Region
+            };
+            Box::pin(Self::whole_page_capture(
+                state,
+                worker,
+                browser,
+                observation,
+                kind,
+            ))
+            .await?
+        } else {
+            Self::fit_model_observation(observation)?
+        };
+        let (mut observation, challenged) =
+            Self::settle_human_challenge(state, worker, browser, observation).await?;
+        if challenged {
+            state.observation = Some(observation);
+            return Ok(());
+        }
+        if state.task.reads_app_view() {
+            if let Some(look) = Box::pin(Self::read_app_rows(state, worker, browser)).await? {
+                state.observation = Some(look);
+                return Ok(());
+            }
+        }
+        // The model starts from an ordinary fitted look.
+        if first_look && !whole_page {
+            state.refresh_account(worker, browser)?;
+            observation = Self::fit_model_observation(
+                Box::pin(Self::observe(state, worker, browser)).await?,
+            )?;
+        }
+        // A cookie banner on a page worked for the person is refused by Rust
+        // before any model sees the page. Rust presses on a whole look of the
+        // page: the model's fitted look may shorten the banner's fields or cut
+        // its buttons off, and a press needs them whole.
+        if state.actions_before_extraction
+            && state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+            && (state.task.consent_dismissal(&observation).is_some()
+                || state.task.consent_suspected(&observation))
+        {
+            state.refresh_account(worker, browser)?;
+            let initial = Box::pin(Self::observe(state, worker, browser)).await?;
+            let whole = Box::pin(Self::whole_page_capture(
+                state,
+                worker,
+                browser,
+                initial,
+                SemanticExpansionKind::Subtree,
+            ))
+            .await?;
+            if let Some(target) = state.task.consent_dismissal(&whole) {
+                observation =
+                    Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
+            }
+        }
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -1659,16 +2794,55 @@ impl AgentWorkController {
             state.observation = Some(observation);
             return Ok(());
         }
+        let (current, at, next_progress, challenged) =
+            Self::run_decision_actions(state, worker, browser, observation, captured_at, progress)
+                .await?;
+        observation = current;
+        captured_at = at;
+        progress = next_progress;
+        if challenged || progress == AgentWorkTaskProgress::Complete {
+            state.observation = Some(observation);
+            return Ok(());
+        }
+        // The page planner starts from an ordinary fitted capture.
+        if whole_page {
+            state.refresh_account(worker, browser)?;
+            observation = Self::fit_model_observation(
+                Box::pin(Self::observe(state, worker, browser)).await?,
+            )?;
+            captured_at = SemanticCaptureInstant::from_millis(
+                state
+                    .journal_mut()?
+                    .clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)?
+                    .millis(),
+            );
+            progress = state.task_progress(&observation)?;
+        }
         state.refresh_account(worker, browser)?;
+        let action_authority = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .config
+            .permits_tool(AgentBrowserToolKind::Act)
+            .then(|| state.action_authority(&observation))
+            .transpose()?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let mut turn: AgentBrowserProviderTurn = Self::provider(
             &mut state.native,
             worker,
             browser,
             session.cancellation.clone(),
-            session.start_initial(&observation),
+            session.start_initial_with_action_authority(&observation, action_authority.as_ref()),
         )
         .await?;
+        if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
+            Self::accept_model_human_request(state, turn, &observation)?;
+            state.observation = Some(observation);
+            return Ok(());
+        }
         if state.extraction_schema.is_some()
             && !state.has_navigation()
             && !state.actions_before_extraction
@@ -1684,19 +2858,151 @@ impl AgentWorkController {
             .iter()
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
+        // One corrective model decision is allowed for each exact rejected
+        // operation/target/baseline. Retaining only content-free keys prevents
+        // secret fill values from entering controller state while ensuring a
+        // weak model cannot consume the rest of a run repeating an impossible
+        // proposal. Fresh observations carry distinct identities.
+        let mut action_refusals = Vec::<AgentProviderActionRefusalKey>::new();
+        // A control a single-page app re-renders comes back under a new
+        // reference: counted by a digest of its role and name, a second
+        // refusal tells the model to change approach and a third ends the loop.
+        let mut refused_controls = Vec::<(u64, u8)>::new();
+        let mut refused_navigations = 0u8;
+        let mut refused_inspections = 0u8;
         loop {
             state.check_task_contract()?;
+            // Deliver acknowledged audit batches while idle so long runs keep
+            // their fixed pending-event bound and leave room for terminal debt.
+            if state.journal_mut()?.audit.status().pending() >= 32 {
+                Self::drain_audit(state, worker, browser, None).await?;
+            }
+            // The last decision was advertised as Extract-only. Independently
+            // enforce that narrowing before any native capture, navigation or
+            // local inspection can consume the reserved mapping call.
+            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            if state.requires_decision_budget()
+                && (session.turns.saturating_add(1) >= session.max_model_calls
+                    || session
+                        .policy
+                        .remaining_operations(session.lease.lease())
+                        .map_err(|_| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+                        })?
+                        <= 1)
+                && turn.turn.proposal().kind() != AgentBrowserToolKind::Extract
+                && !(state.human_request
+                    && turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman)
+            {
+                return Err(AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::TurnLimit,
+                ));
+            }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Snapshot {
+                if session.turns.saturating_add(2) > session.max_model_calls
+                    || session
+                        .policy
+                        .remaining_operations(session.lease.lease())
+                        .map_err(|_| {
+                            AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
+                        })?
+                        < 2
+                {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::TurnLimit,
+                    ));
+                }
+                let resolution = turn
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .resolve_observation(&observation, &session.config)
+                    .map_err(|_| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                    })?;
+                let checkpoint = match resolution {
+                    AgentProviderObservationResolution::Capture(checkpoint) => {
+                        let checkpoint = *checkpoint;
+                        if let Some(schema) = &state.extraction_schema {
+                            let session =
+                                state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                            session.check_live().map_err(AgentWorkFailure::Browser)?;
+                            let read = read_semantic_observation_for_schema(
+                                &observation,
+                                SemanticReadAuthority::Acknowledged(checkpoint.baseline()),
+                                captured_at,
+                                SemanticReadSensitivityLimit::PublicOnly,
+                                SemanticReadBudget::STANDARD,
+                                schema,
+                            )
+                            .map_err(|error| {
+                                AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                            })?;
+                            state
+                                .retained_read_evidence
+                                .retain(&read, checkpoint.baseline())
+                                .map_err(|error| {
+                                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(
+                                        error,
+                                    ))
+                                })?;
+                        }
+                        checkpoint
+                    }
+                    AgentProviderObservationResolution::Refused(refusal) => {
+                        state.native.check_control(worker, browser)?;
+                        state.refresh_account(worker, browser)?;
+                        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                            AgentBrowserToolKind::Snapshot,
+                        ))?;
+                        state
+                            .journal_mut()?
+                            .emit(AgentWorkEventKind::InspectionRefused)?;
+                        refused_inspections = refused_inspections.saturating_add(1);
+                        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                        // A page that has already refused this many inspections
+                        // yields nothing more from snapshots. Narrow the
+                        // remaining allowance to the extract and mapping pair
+                        // instead of spending the read on refusals.
+                        if refused_inspections >= MAX_REFUSED_INSPECTIONS {
+                            session.max_model_calls = session
+                                .max_model_calls
+                                .min(session.turns.saturating_add(REMAINING_EXTRACTION_CALLS));
+                        }
+                        turn = Self::provider(
+                            &mut state.native,
+                            worker,
+                            browser,
+                            session.cancellation.clone(),
+                            session.continue_after_scope_refusal(*refusal, &observation),
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let next =
+                    Self::inspect_current(state, worker, browser, checkpoint, &observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                progress = next.2;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
+                frames = observation
+                    .frames()
+                    .iter()
+                    .map(|snapshot| snapshot.frame().clone())
+                    .collect();
+                continue;
+            }
             if matches!(
                 turn.turn.proposal().kind(),
                 AgentBrowserToolKind::Locate | AgentBrowserToolKind::Read
             ) {
-                if state
-                    .session
-                    .as_ref()
-                    .ok_or(AgentWorkFailure::Contract)?
-                    .turns
-                    >= super::MAX_BROWSER_MODEL_TURNS
-                {
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                if session.turns >= session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
                         AgentBrowserProviderError::TurnLimit,
                     ));
@@ -1718,11 +3024,100 @@ impl AgentWorkController {
                 .await?;
                 continue;
             }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Screenshot {
+                turn = Self::screenshot_current(state, worker, browser, turn, &observation).await?;
+                continue;
+            }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::ShowForHuman {
+                Self::accept_model_human_request(state, turn, &observation)?;
+                state.observation = Some(observation);
+                return Ok(());
+            }
+            if turn.turn.proposal().kind() == AgentBrowserToolKind::Wait {
+                let next = Self::wait_current(state, worker, browser, turn, observation).await?;
+                observation = next.0;
+                captured_at = next.1;
+                turn = next.2;
+                // The task reads the waited-for page like any fresh one, so a
+                // later extraction binds to it.
+                progress = state.task_progress(&observation)?;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
             let step = turn;
-            if step.turn.proposal().kind() == AgentBrowserToolKind::Navigate {
-                let next =
-                    Self::navigate_current(state, worker, browser, step, &observation, progress)
-                        .await?;
+            // A model can miscopy a public link. Refuse before policy admission,
+            // retaining the exact observation/call and the original budgets.
+            // Broken authority and out-of-scope targets still fail closed.
+            let refused_navigation = match step.turn.proposal() {
+                AgentBrowserToolProposal::Navigate(target) => {
+                    Self::navigation_refusal(state, target, &observation)
+                }
+                _ => None,
+            };
+            if let Some(reason) = refused_navigation {
+                state.native.check_control(worker, browser)?;
+                state.refresh_account(worker, browser)?;
+                state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Navigate,
+                ))?;
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::NavigationRefused(reason))?;
+                // A model that keeps proposing refused moves ends its page
+                // instead of spending the rest of its calls on them.
+                refused_navigations = refused_navigations.saturating_add(1);
+                if refused_navigations > MAX_REFUSED_NAVIGATIONS {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::ActionProposalLoop,
+                    ));
+                }
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                if session.turns.saturating_add(2) > session.max_model_calls {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::TurnLimit,
+                    ));
+                }
+                let refusal = step
+                    .into_tool_turn()
+                    .into_parts()
+                    .1
+                    .refuse_navigation(&observation, &session.config, reason)
+                    .map_err(|_| {
+                        AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
+                    })?;
+                turn = Self::provider(
+                    &mut state.native,
+                    worker,
+                    browser,
+                    session.cancellation.clone(),
+                    session.continue_after_navigation_refusal(refusal, &observation),
+                )
+                .await?;
+                continue;
+            }
+            if matches!(
+                step.turn.proposal().kind(),
+                AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
+            ) {
+                if state.navigation_discovery.is_none() {
+                    state.retained_read_evidence.clear();
+                }
+                let next = Self::navigate_current(
+                    state,
+                    worker,
+                    browser,
+                    navigation::NavigationStart::Model(Box::new(step)),
+                    &observation,
+                    captured_at,
+                    progress,
+                )
+                .await?;
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
@@ -1738,9 +3133,16 @@ impl AgentWorkController {
             }
             let navigation_incomplete = state.has_navigation() && !state.navigation_complete();
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let proposal = match step.turn.proposal().kind() {
+            let (proposal, assessment) = match step.turn.proposal().kind() {
                 AgentBrowserToolKind::Extract => {
+                    if !state.task.terminal_extraction_ready() {
+                        return Err(AgentWorkFailure::TaskPhase {
+                            expected: progress,
+                            proposed: AgentBrowserToolKind::Extract,
+                        });
+                    }
                     if state.has_navigation()
+                        && state.navigation_discovery.is_none()
                         && (navigation_incomplete
                             || progress != AgentWorkTaskProgress::ReadyForExtraction)
                     {
@@ -1750,6 +3152,7 @@ impl AgentWorkController {
                         });
                     }
                     if state.actions_before_extraction
+                        && state.navigation_discovery.is_none()
                         && progress != AgentWorkTaskProgress::ReadyForExtraction
                     {
                         return Err(AgentWorkFailure::TaskPhase {
@@ -1772,9 +3175,90 @@ impl AgentWorkController {
                             proposed: AgentBrowserToolKind::Act,
                         });
                     }
-                    session
+                    let binding = session
                         .bind_action_turn(step, &observation, &frames)
-                        .map_err(AgentWorkFailure::Browser)?
+                        .map_err(AgentWorkFailure::Browser)?;
+                    // Reserve the effect, the next decision and terminal mapping
+                    // before starting a mutation in an open objective. A page
+                    // that cannot afford them, or an action the assignment
+                    // does not permit, is refused to the model, not failed.
+                    let admitted = match binding {
+                        crate::action::AgentBrowserActionBinding::Prepared(proposal) => {
+                            let starved = state.navigation_discovery.is_some()
+                                && session
+                                    .policy
+                                    .remaining_operations(session.lease.lease())
+                                    .map_err(|_| {
+                                        AgentWorkFailure::Browser(
+                                            AgentBrowserProviderError::Authority,
+                                        )
+                                    })?
+                                    < 3;
+                            if starved {
+                                Err(proposal
+                                    .into_refusal(SemanticActionBindingError::BudgetExhausted)
+                                    .ok_or(AgentWorkFailure::Contract)?)
+                            } else {
+                                match state.task.assess_observed(proposal.action(), &observation) {
+                                    Ok(assessment) => Ok((*proposal, assessment)),
+                                    Err(AgentWorkFailure::ActionDenied) => Err(proposal
+                                        .into_refusal(SemanticActionBindingError::AssignmentDenied)
+                                        .ok_or(AgentWorkFailure::Contract)?),
+                                    Err(AgentWorkFailure::EffectRequired(effect)) => Err(proposal
+                                        .into_refusal(
+                                            SemanticActionBindingError::TaskEffectMismatch(effect),
+                                        )
+                                        .ok_or(AgentWorkFailure::Contract)?),
+                                    Err(failure) => return Err(failure),
+                                }
+                            }
+                        }
+                        crate::action::AgentBrowserActionBinding::Refused(refusal) => Err(*refusal),
+                    };
+                    match admitted {
+                        Ok(admitted) => admitted,
+                        Err(refusal) => {
+                            state.native.check_control(worker, browser)?;
+                            state.refresh_account(worker, browser)?;
+                            state.journal_mut()?.emit(
+                                AgentWorkEventKind::ActionProposalRefused(refusal.reason()),
+                            )?;
+                            // A step held for the person's decision stops here,
+                            // the page kept as it is.
+                            if state.human_request && Self::raise_human_wall(state, &observation)? {
+                                state.observation = Some(observation);
+                                return Ok(());
+                            }
+                            if let Some(key) = refusal.key() {
+                                if action_refusals.contains(&key) {
+                                    return Err(AgentWorkFailure::Browser(
+                                        AgentBrowserProviderError::ActionProposalLoop,
+                                    ));
+                                }
+                                action_refusals
+                                    .try_reserve(1)
+                                    .map_err(|_| AgentWorkFailure::Contract)?;
+                                action_refusals.push(key);
+                            }
+                            let refusal = Self::count_refused_control(
+                                &mut refused_controls,
+                                refusal,
+                                &observation,
+                                &frames,
+                            )?;
+                            let session =
+                                state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                            turn = Self::provider(
+                                &mut state.native,
+                                worker,
+                                browser,
+                                session.cancellation.clone(),
+                                session.continue_after_action_refusal(refusal, &observation),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    }
                 }
                 kind => {
                     return Err(AgentWorkFailure::Browser(
@@ -1782,101 +3266,137 @@ impl AgentWorkController {
                     ))
                 }
             };
-            let assessment = state.task.assess(proposal.action())?;
-            state.refresh_account(worker, browser)?;
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let id = state.native.identity.id();
-            let automation = state
-                .native
-                .contexts()?
-                .automation_state(id)
-                .map_err(|_| AgentWorkFailure::Context)?;
-            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-            let request = session
-                .authorize_action(
-                    proposal,
-                    &assessment,
-                    automation,
-                    SemanticActionExecutionInstant::from_millis(now.millis()),
-                )
-                .map_err(AgentWorkFailure::Browser)?;
-            let dispatch =
-                browser.execute_semantic_action(request, worker.semantic_action_completion());
-            session
-                .action
-                .as_mut()
-                .ok_or(AgentWorkFailure::Contract)?
-                .account_dispatch(
-                    dispatch,
-                    &mut session.policy,
-                    &mut session.action_executions,
-                )
-                .map_err(|error| {
-                    AgentWorkFailure::Browser(AgentBrowserProviderError::Action(error))
-                })?;
-            state.native.action_pending = true;
-            let terminal = match state.native.next_event(worker, browser).await? {
-                AgentRuntimeEvent::SemanticActionTerminal(terminal)
-                    if session.action.as_ref().is_some_and(|action| {
-                        action.accepts_settlement(&session.action_executions, &terminal)
-                    }) =>
-                {
-                    terminal
-                }
-                event => {
-                    state.native.retain(event)?;
-                    return Err(AgentWorkFailure::Mailbox);
-                }
-            };
-            state.native.action_pending = false;
-            state.native_terminal = Some(terminal);
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let terminal = state
-                .native_terminal
-                .take()
-                .ok_or(AgentWorkFailure::Contract)?;
-            let mut wake = session
-                .begin_action_settlement(terminal)
-                .map_err(AgentWorkFailure::Browser)?;
-            for _ in 0..8 {
-                let Some(next_wake) = wake else {
-                    break;
-                };
-                let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-                let delay = Duration::from_millis(next_wake.millis().saturating_sub(now.millis()));
-                tokio::select! {
-                    biased;
-                    event = state.native.next_event(worker, browser) => {
-                        state.native.retain(event?)?;
-                        return Err(AgentWorkFailure::Mailbox);
+            Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
+            let (current, current_at, transition) = match Self::execute_prepared_action(
+                state,
+                worker,
+                browser,
+                proposal,
+                assessment,
+                &observation,
+            )
+            .await
+            {
+                Ok(verified) => verified,
+                Err(AgentWorkFailure::Browser(
+                    error @ (AgentBrowserProviderError::ActionRejected(_)
+                    | AgentBrowserProviderError::ActionUnverified),
+                )) => {
+                    let refusal = state
+                        .session
+                        .as_mut()
+                        .and_then(|session| session.take_rejected_refusal())
+                        .ok_or(AgentWorkFailure::Contract)?;
+                    // The page ran its checks for a step it then refused
+                    // (covered, changed): the context needs a fresh look
+                    // before the next step, as after any step it ran.
+                    if matches!(
+                        error,
+                        AgentBrowserProviderError::ActionRejected(
+                            crate::AgentBrowserActionError::Failed(_)
+                        )
+                    ) {
+                        state.refresh_account(worker, browser)?;
+                        let _ = Box::pin(Self::observe(state, worker, browser)).await?;
                     }
-                    () = tokio::time::sleep(delay) => {}
+                    if let Some(target) = state.follow.take() {
+                        let next = Self::navigate_current(
+                            state,
+                            worker,
+                            browser,
+                            navigation::NavigationStart::Follow(Box::new((
+                                refusal.into_continuation(),
+                                target,
+                            ))),
+                            &observation,
+                            captured_at,
+                            progress,
+                        )
+                        .await?;
+                        (observation, captured_at, progress, turn) = next;
+                        frames.clear();
+                        frames.extend(
+                            observation
+                                .frames()
+                                .iter()
+                                .map(|snapshot| snapshot.frame().clone()),
+                        );
+                        continue;
+                    }
+                    state.native.check_control(worker, browser)?;
+                    state.refresh_account(worker, browser)?;
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
+                    if let Some(key) = refusal.key() {
+                        if action_refusals.contains(&key) {
+                            return Err(AgentWorkFailure::Browser(
+                                AgentBrowserProviderError::ActionProposalLoop,
+                            ));
+                        }
+                        action_refusals
+                            .try_reserve(1)
+                            .map_err(|_| AgentWorkFailure::Contract)?;
+                        action_refusals.push(key);
+                    }
+                    let refusal = Self::count_refused_control(
+                        &mut refused_controls,
+                        refusal,
+                        &observation,
+                        &frames,
+                    )?;
+                    let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                    turn = Self::provider(
+                        &mut state.native,
+                        worker,
+                        browser,
+                        session.cancellation.clone(),
+                        session.continue_after_action_refusal(refusal, &observation),
+                    )
+                    .await?;
+                    continue;
                 }
-                let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-                wake = session
-                    .wake_action_settlement(SemanticSettleInstant::from_millis(now.millis()))
-                    .map_err(AgentWorkFailure::Browser)?;
-            }
-            if wake.is_some() {
-                return Err(AgentWorkFailure::Contract);
-            }
-            let current = Self::observe(state, worker, browser).await?;
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-            let (_, transition) = session
-                .verify_action_settlement(
+                Err(error) => return Err(error),
+            };
+            state.task.accept_verified_action(
+                transition
+                    .batch_result()
+                    .ok_or(AgentWorkFailure::Contract)?,
+                &current,
+            )?;
+            if let Some(target) = state.follow.take() {
+                let (continuation, _) =
+                    transition.into_parts().ok_or(AgentWorkFailure::Contract)?;
+                let next = Self::navigate_current(
+                    state,
+                    worker,
+                    browser,
+                    navigation::NavigationStart::Follow(Box::new((continuation, target))),
                     &observation,
-                    &current,
-                    SemanticSettleInstant::from_millis(now.millis()),
+                    captured_at,
+                    progress,
                 )
-                .map_err(AgentWorkFailure::Browser)?;
+                .await?;
+                (observation, captured_at, progress, turn) = next;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
             observation = current;
-            captured_at = SemanticCaptureInstant::from_millis(now.millis());
+            captured_at = current_at;
             progress = state.task_progress(&observation)?;
-            if progress == AgentWorkTaskProgress::Complete {
+            if progress == AgentWorkTaskProgress::Complete
+                || (state.human_request && Self::raise_human_wall(state, &observation)?)
+            {
                 state.observation = Some(observation);
                 return Ok(());
             }
+            let action_authority = state.action_authority(&observation)?;
             // Reads/locates retain this exact frame cohort. Reuse its bounded
             // storage; only an independently captured observation replaces it.
             frames.clear();
@@ -1886,13 +3406,8 @@ impl AgentWorkController {
                     .iter()
                     .map(|snapshot| snapshot.frame().clone()),
             );
-            if state
-                .session
-                .as_ref()
-                .ok_or(AgentWorkFailure::Contract)?
-                .turns
-                >= super::MAX_BROWSER_MODEL_TURNS
-            {
+            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            if session.turns >= session.max_model_calls {
                 return Err(AgentWorkFailure::Browser(
                     AgentBrowserProviderError::TurnLimit,
                 ));
@@ -1904,10 +3419,548 @@ impl AgentWorkController {
                 worker,
                 browser,
                 session.cancellation.clone(),
-                session.continue_after_verified_action(transition),
+                session.continue_after_verified_action_with_authority(
+                    transition,
+                    Some(&action_authority),
+                ),
             )
             .await?;
         }
+    }
+
+    /// The daily app the page's admitted document is on.
+    fn daily_app(state: &WorkState) -> Option<zephium_agentic::DailyApp> {
+        let browser = state.native.retained.as_ref()?;
+        let document = browser.binding().document();
+        zephium_agentic::DailyApp::of(document.as_url().host_str()?)
+    }
+
+    /// Reads an app's views as their records, with no model call: the view
+    /// the task opens first (Slack's Activity, Linear's Inbox), each next one
+    /// when a view lists nothing, and in each the page's look, else each of
+    /// its landmarks opened whole in turn. None when no view held records,
+    /// leaving the page planner.
+    async fn read_app_rows(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
+        let Some(schema) = state.extraction_schema.clone() else {
+            return Ok(None);
+        };
+        state.refresh_account(worker, browser)?;
+        let mut look = Box::pin(Self::observe(state, worker, browser)).await?;
+        let mut tried = false;
+        for _ in 0..=MAX_APP_VIEWS {
+            let last = match state.task.app_view(&look) {
+                Some(target) => {
+                    look =
+                        Box::pin(Self::open_app_view(state, worker, browser, look, target)).await?;
+                    false
+                }
+                // No view is left: the one shown answers, empty or not.
+                None => tried,
+            };
+            if let Some(read) = Box::pin(Self::read_app_look(
+                state, worker, browser, &schema, look, last,
+            ))
+            .await?
+            {
+                return Ok(Some(read));
+            }
+            if last {
+                return Ok(None);
+            }
+            tried = true;
+            state.refresh_account(worker, browser)?;
+            look = Box::pin(Self::observe(state, worker, browser)).await?;
+        }
+        Ok(None)
+    }
+
+    /// Presses a view's control as a read and waits for its list: a view
+    /// that renders its rows after the press gets one more look.
+    async fn open_app_view(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        look: SemanticObservation,
+        target: SemanticReferenceId,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let press = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click { target },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(APP_VIEW_QUIET_MILLIS)
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            ),
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        )
+        .map_err(|_| AgentWorkFailure::Contract)?;
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::AppViewOpened)?;
+        let _ = Box::pin(Self::code_owned_read(state, worker, browser, &look, press)).await?;
+        tokio::time::sleep(Duration::from_millis(APP_VIEW_RENDER_MILLIS)).await;
+        state.refresh_account(worker, browser)?;
+        Box::pin(Self::observe(state, worker, browser)).await
+    }
+
+    /// One view's records: its look, else each landmark opened whole. The
+    /// last view is read as it stands, its empty-state line an answer.
+    async fn read_app_look(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        schema: &SemanticExtractionSchema,
+        fresh: SemanticObservation,
+        last: bool,
+    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
+        let app = Self::daily_app(state);
+        let landmarks: Vec<SemanticReferenceId> = fresh
+            .frames()
+            .first()
+            .filter(|_| !last)
+            .map(|frame| {
+                frame
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.role() == SemanticRole::Landmark)
+                    .map(SemanticNode::reference)
+                    .take(MAX_APP_LANDMARKS)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let capability = state.observation_capability();
+        let mut look = fresh;
+        let mut next = landmarks.into_iter();
+        loop {
+            state.refresh_account(worker, browser)?;
+            let captured_at = SemanticCaptureInstant::from_millis(
+                state
+                    .journal_mut()?
+                    .clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)?
+                    .millis(),
+            );
+            let account = state
+                .session
+                .as_ref()
+                .ok_or(AgentWorkFailure::Contract)?
+                .account;
+            if let Some(located) =
+                zephium_agentic::read_app_view(&look, account, captured_at, schema, app, last)
+            {
+                // The task judges the look its records come from.
+                state.task_progress(&look)?;
+                state.journal_mut()?.emit(AgentWorkEventKind::RowRead {
+                    found: u8::try_from(located.rows_read()).unwrap_or(u8::MAX),
+                    cells: false,
+                    refused: None,
+                })?;
+                Box::pin(Self::finish_located_read(state, worker, browser, located)).await?;
+                return Ok(Some(look));
+            }
+            let Some(landmark) = next.next() else {
+                return Ok(None);
+            };
+            // An expansion starts from the look the page delivered last.
+            let base = Box::pin(Self::observe(state, worker, browser)).await?;
+            let Some((acknowledgement, _)) =
+                SemanticObservationAcknowledgement::whole_page_scope(&base)
+            else {
+                return Ok(None);
+            };
+            state.native.check_control(worker, browser)?;
+            state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+            look = match state
+                .native
+                .observe_retained_scope(
+                    worker,
+                    Some((
+                        &base,
+                        &acknowledgement,
+                        landmark,
+                        SemanticExpansionKind::Subtree,
+                    )),
+                    capability,
+                )
+                .await
+            {
+                Ok(look) => {
+                    Self::capture_app_view(state, &look);
+                    look
+                }
+                Err(AgentWorkFailure::InspectionAnchorLost) => base,
+                Err(error) => return Err(error),
+            };
+        }
+    }
+
+    /// Clicks a consent banner's refusal as a read. A page that refuses the
+    /// click or does not change keeps the model's ordinary first look.
+    async fn dismiss_consent(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        look: SemanticObservation,
+        target: SemanticReferenceId,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let press = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click { target },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(100)
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            ),
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        )
+        .map_err(|_| AgentWorkFailure::Contract)?;
+        state.consent_press = true;
+        state.task.consent_pressing(true);
+        let pressed = Box::pin(Self::code_owned_read(state, worker, browser, &look, press)).await;
+        state.consent_press = false;
+        state.task.consent_pressing(false);
+        match pressed? {
+            Some(after) => Self::fit_model_observation(after),
+            None => {
+                state.refresh_account(worker, browser)?;
+                Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)
+            }
+        }
+    }
+
+    /// One read step Rust chose on `observation`, assessed by the task like
+    /// any other: the page after it, or None when it was refused or failed
+    /// without effect. Any other failure ends the page as before.
+    async fn code_owned_read(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        observation: &SemanticObservation,
+        recipe: SemanticActionProposal,
+    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|snapshot| snapshot.frame().clone())
+            .collect::<Vec<_>>();
+        // The task assesses only the look it last evaluated.
+        if state.task_progress(observation)? == AgentWorkTaskProgress::Complete {
+            return Ok(None);
+        }
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let account = session.account;
+        session
+            .policy
+            .admit_owned_observation(observation, account)
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        let batch =
+            SemanticActionBatchId::new(session.next_action).ok_or(AgentWorkFailure::Contract)?;
+        let Ok(proposal) =
+            crate::AgentBrowserActionProposal::bind_code_owned(recipe, observation, &frames, batch)
+        else {
+            return Ok(None);
+        };
+        let assessment = match state.task.assess_observed(proposal.action(), observation) {
+            Ok(assessment) => assessment,
+            Err(AgentWorkFailure::ActionDenied | AgentWorkFailure::EffectRequired(_)) => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
+        match Self::execute_prepared_action(
+            state,
+            worker,
+            browser,
+            proposal,
+            assessment,
+            observation,
+        )
+        .await
+        {
+            Ok((current, _, transition)) => {
+                let _ = state.follow.take();
+                if let Some(batch) = transition.batch_result() {
+                    state.task.accept_verified_action(batch, &current)?;
+                }
+                Ok(Some(current))
+            }
+            Err(AgentWorkFailure::Browser(error)) => {
+                let _ = state.follow.take();
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                let _ = session.take_rejected_refusal();
+                if !session
+                    .close_failed_owned_read()
+                    .map_err(AgentWorkFailure::Browser)?
+                {
+                    return Err(AgentWorkFailure::Browser(error));
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn accept_model_human_request(
+        state: &mut WorkState,
+        turn: AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+    ) -> Result<(), AgentWorkFailure> {
+        state.check_task_contract()?;
+        if !state.human_request || state.model_human_request.is_some() {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::ShowForHuman),
+            ));
+        }
+        let (proposal, continuation) = turn.into_tool_turn().into_parts();
+        let AgentBrowserToolProposal::ShowForHuman(reason) = proposal else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        if !continuation.baseline().authenticates(observation) {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::Authority,
+            ));
+        }
+        let request = AgentWorkHumanRequest {
+            context: observation.request().context(),
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            reason,
+            retained_resource: state
+                .native
+                .retained
+                .as_ref()
+                .map(|browser| browser.binding().lease().resource().identity()),
+        };
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
+        state.model_human_request = Some(request);
+        Ok(())
+    }
+
+    async fn screenshot_current(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        turn: AgentBrowserProviderTurn,
+        observation: &SemanticObservation,
+    ) -> Result<AgentBrowserProviderTurn, AgentWorkFailure> {
+        state.check_task_contract()?;
+        if !state.viewport_screenshot
+            || state.native.screenshot_pending.is_some()
+            || state
+                .native
+                .retained
+                .as_ref()
+                .is_some_and(|browser| !browser.supports_screenshots())
+        {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Screenshot),
+            ));
+        }
+        let baseline = turn.turn.continuation().baseline();
+        let now = state
+            .session
+            .as_mut()
+            .ok_or(AgentWorkFailure::Contract)?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)?;
+        let remaining = state
+            .native
+            .deadline
+            .saturating_duration_since(Instant::now());
+        let window_millis = u64::try_from(remaining.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS);
+        if window_millis == 0 {
+            return Err(AgentWorkFailure::Deadline);
+        }
+        let requested_at = SemanticCaptureInstant::from_millis(now.millis());
+        let deadline = SemanticCaptureInstant::from_millis(
+            now.millis()
+                .checked_add(window_millis)
+                .ok_or(AgentWorkFailure::Contract)?,
+        );
+        let request = prepare_semantic_screenshot(
+            SemanticScreenshotRequestId::new(state.native.id()?)
+                .ok_or(AgentWorkFailure::Contract)?,
+            observation,
+            baseline,
+            requested_at,
+            deadline,
+            SemanticScreenshotBudget::STANDARD,
+        )
+        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+        let (pending, native) = state
+            .native
+            .screenshots
+            .begin(request)
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        state.native.screenshot_pending = Some(pending);
+        let dispatch = if let Some(retained) = &mut state.native.retained {
+            retained.dispatch_screenshot(native, worker.semantic_screenshot_completion(), now)
+        } else {
+            browser.capture_semantic_screenshot(native, worker.semantic_screenshot_completion())
+        };
+        if dispatch != ContextDispatch::Scheduled {
+            let pending = state
+                .native
+                .screenshot_pending
+                .take()
+                .ok_or(AgentWorkFailure::Contract)?;
+            state
+                .native
+                .screenshots
+                .cancel(pending)
+                .map_err(|_| AgentWorkFailure::Contract)?;
+            return Err(AgentWorkFailure::Context);
+        }
+        let capture = match state.native.next_event(worker, browser).await? {
+            AgentRuntimeEvent::SemanticScreenshotTerminal(capture) => {
+                if let Some(retained) = &mut state.native.retained {
+                    retained.account_screenshot_terminal(now)?;
+                }
+                capture.map_err(AgentWorkFailure::Screenshot)?
+            }
+            event => {
+                state.native.retain(event)?;
+                return Err(AgentWorkFailure::Mailbox);
+            }
+        };
+        let pending = state
+            .native
+            .screenshot_pending
+            .take()
+            .ok_or(AgentWorkFailure::Contract)?;
+        let context = observation.request().context();
+        let screenshot = state
+            .native
+            .screenshots
+            .admit(pending, context, capture)
+            .map_err(|_| AgentWorkFailure::ContextLost)?;
+        state.native.check_control(worker, browser)?;
+        state.refresh_account(worker, browser)?;
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            session.continue_after_screenshot(turn.into_tool_turn(), screenshot, observation),
+        )
+        .await
+    }
+
+    async fn wait_current(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        turn: AgentBrowserProviderTurn,
+        observation: SemanticObservation,
+    ) -> Result<
+        (
+            SemanticObservation,
+            SemanticCaptureInstant,
+            AgentBrowserProviderTurn,
+        ),
+        AgentWorkFailure,
+    > {
+        state.check_task_contract()?;
+        if !state.standalone_wait {
+            return Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::UnsupportedTool(AgentBrowserToolKind::Wait),
+            ));
+        }
+        let AgentBrowserToolProposal::Wait { condition, timeout } = turn.turn.proposal() else {
+            return Err(AgentWorkFailure::Contract);
+        };
+        let wait_deadline = Instant::now()
+            .checked_add(Duration::from_millis(u64::from(timeout.millis())))
+            .map_or(state.native.deadline, |deadline| {
+                deadline.min(state.native.deadline)
+            });
+        let mut wait = SemanticStandaloneWait::prepare(
+            *condition,
+            observation,
+            turn.turn.continuation().baseline(),
+        )
+        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+        let mut backoff = SemanticStandaloneWaitBackoff::new();
+        let result = loop {
+            let now = Instant::now();
+            if now >= wait_deadline {
+                break wait.time_out();
+            }
+            let wake = now
+                .checked_add(Duration::from_millis(u64::from(
+                    backoff.next_delay_millis(),
+                )))
+                .map_or(wait_deadline, |wake| wake.min(wait_deadline));
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            if Instant::now() >= wait_deadline {
+                break wait.time_out();
+            }
+            state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+            let current = match Self::observe_once(state, worker, browser).await {
+                Err(AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)) => {
+                    continue;
+                }
+                result => result?,
+            };
+            let step = wait
+                .advance(current)
+                .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?;
+            if Instant::now() >= wait_deadline {
+                break match step {
+                    SemanticStandaloneWaitStep::Pending(pending) => pending.time_out(),
+                    SemanticStandaloneWaitStep::Satisfied(result) => result.into_timed_out(),
+                };
+            }
+            match step {
+                SemanticStandaloneWaitStep::Pending(pending) => wait = pending,
+                SemanticStandaloneWaitStep::Satisfied(result) => break result,
+            }
+        };
+        state.native.check_control(worker, browser)?;
+        state.refresh_account(worker, browser)?;
+        let action_authority = state.action_authority(result.observation())?;
+        let captured_at = {
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+            SemanticCaptureInstant::from_millis(now.millis())
+        };
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let cancellation = session.cancellation.clone();
+        let (next_turn, observation) = Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            cancellation,
+            session.continue_after_standalone_wait(
+                turn.into_tool_turn(),
+                result,
+                Some(&action_authority),
+            ),
+        )
+        .await?;
+        Ok((observation, captured_at, next_turn))
     }
 
     async fn extract_current(
@@ -1921,7 +3974,7 @@ impl AgentWorkController {
         state.check_task_contract()?;
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
-        if session.turns >= super::MAX_BROWSER_MODEL_TURNS {
+        if session.turns >= session.max_model_calls {
             // Do not capture data when no mapping call can be admitted.
             return Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::TurnLimit,
@@ -2004,16 +4057,22 @@ impl AgentWorkController {
             worker,
             browser,
             session.cancellation.clone(),
-            session.extract_from(
+            session.extract_from_with_evidence(
                 turn,
                 source,
                 expanded.as_ref().map(|_| observation),
                 &frames,
                 captured_at,
                 schema,
+                if state.progressive_observation || state.navigation_discovery.is_some() {
+                    Some(&state.retained_read_evidence)
+                } else {
+                    None
+                },
             ),
         )
         .await?;
+        let dropped = result.stats().dropped();
         if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
             return Err(AgentWorkFailure::Contract);
         }
@@ -2023,6 +4082,11 @@ impl AgentWorkController {
                 .into_owned()
                 .map_err(|_| AgentWorkFailure::Contract)?,
         );
+        if dropped > 0 {
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
+        }
         Ok(())
     }
 
@@ -2031,6 +4095,7 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
+        state.retained_read_evidence.clear();
         let id = state.native.identity.id();
         // Revoke before teardown even on trusted successful completion.
         state.native.revoke(browser)?;
@@ -2196,6 +4261,7 @@ impl AgentWorkController {
             || state.native.recovery_close.is_some()
             || state.native.observation.is_some()
             || state.native.action_pending
+            || state.native.screenshot_pending.is_some()
             || state.native.cancellation.is_some()
             || state.native.shutdown_audit.is_some()
             || state.native_terminal.is_some()
@@ -2213,6 +4279,20 @@ impl AgentWorkController {
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let terminal_intent = match cleanup {
+            Some(_) => WorkTerminalIntent::ClosedUnsuccessfully(
+                state.failure.ok_or(AgentWorkFailure::Contract)?,
+            ),
+            None => state.model_human_request.map_or(
+                WorkTerminalIntent::Succeeded,
+                WorkTerminalIntent::WaitingForHuman,
+            ),
+        };
+        state.native.screenshots.seal_for_shutdown();
+        let screenshots = std::mem::replace(
+            &mut state.native.screenshots,
+            SemanticScreenshotCoordinator::new(),
+        );
         let resources = state
             .native
             .resources
@@ -2230,9 +4310,9 @@ impl AgentWorkController {
             .cookies
             .seal_for_shutdown()
             .map_err(|_| AgentWorkFailure::Shutdown)?;
-        resources.screenshots.seal_for_shutdown();
         let session = state.session.take().ok_or(AgentWorkFailure::Contract)?;
-        let finished = if cleanup.is_some() {
+        let unsuccessful = !matches!(terminal_intent, WorkTerminalIntent::Succeeded);
+        let finished = if unsuccessful {
             session.try_finish_unsuccessful()
         } else {
             session.try_finish()
@@ -2245,6 +4325,21 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Browser(failure));
             }
         };
+        if state.terminal_intent.replace(terminal_intent).is_some() {
+            state.session = Some(*terminal.session);
+            return Err(AgentWorkFailure::Contract);
+        }
+        // Once the provider session has closed around an accepted human
+        // request, that clean handoff wins over a later stop notification.
+        // Continue only the bounded terminal cleanup lane: it ignores control
+        // messages but still requires exact native/audit receipts before the
+        // terminal claim. A stop observed before this boundary still prevents
+        // the handoff from being frozen.
+        let cleanup = cleanup.or_else(|| {
+            matches!(terminal_intent, WorkTerminalIntent::WaitingForHuman(_))
+                .then_some(state.native.deadline)
+        });
+        state.model_human_request = None;
         let resources = match state.native.resources.take() {
             Some(resources) => resources,
             None => {
@@ -2275,7 +4370,7 @@ impl AgentWorkController {
                 resources.cookies,
                 action_executions,
                 action_settlements,
-                resources.screenshots,
+                screenshots,
             )),
             proof: None,
             delivery: None,
@@ -2345,8 +4440,12 @@ impl AgentWorkController {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let drained = state.drained.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let journal = drained.journal.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let completion = match state.failure.filter(|_| cleanup.is_some()) {
-            Some(failure) => {
+        let terminal_intent = state.terminal_intent.ok_or(AgentWorkFailure::Contract)?;
+        let completion = match terminal_intent {
+            WorkTerminalIntent::WaitingForHuman(_) => {
+                AgentSupervisorCompletion::Failed(AgentSupervisorFailure::PolicyDenied)
+            }
+            WorkTerminalIntent::ClosedUnsuccessfully(failure) => {
                 let cancellation = match worker.stop_reason() {
                     Some(AgentRuntimeStopReason::HumanTakeover) => {
                         Some(AgentSupervisorCancellationReason::HumanTakeover)
@@ -2378,27 +4477,28 @@ impl AgentWorkController {
                     AgentWorkFailure::Browser(AgentBrowserProviderError::Action(
                         crate::AgentBrowserActionError::NeedsHuman(_),
                     )) => AgentSupervisorFailure::PolicyDenied,
-                    AgentWorkFailure::Browser(AgentBrowserProviderError::Account(_)) => {
-                        AgentSupervisorFailure::PolicyDenied
-                    }
+                    AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::Account(_)
+                        | AgentBrowserProviderError::NoExtractionEvidence,
+                    ) => AgentSupervisorFailure::PolicyDenied,
                     AgentWorkFailure::Browser(_) => AgentSupervisorFailure::ProviderFailed,
                     _ => AgentSupervisorFailure::PolicyDenied,
                 })
             }
-            None => AgentSupervisorCompletion::Succeeded,
+            WorkTerminalIntent::Succeeded => AgentSupervisorCompletion::Succeeded,
         };
         let execution = journal.execution.take().ok_or(AgentWorkFailure::Contract)?;
         journal
             .supervisor
             .complete(execution, completion)
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::Supervisor)?;
         journal.record()?;
         journal
             .audit
             .seal_for_shutdown()
             .map_err(|_| AgentWorkFailure::Audit)?;
         self.deliver_audit(worker, browser, cleanup).await?;
-        self.publish_terminal(worker, cleanup.is_some()).await
+        self.publish_terminal(worker).await
     }
 
     async fn deliver_audit(
@@ -2408,17 +4508,29 @@ impl AgentWorkController {
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        for raw in 1..=4 {
+        Self::drain_audit(state, worker, browser, cleanup).await?;
+        state
+            .journal_mut()?
+            .audit
+            .is_quiescent()
+            .then_some(())
+            .ok_or(AgentWorkFailure::Audit)
+    }
+
+    async fn drain_audit(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        cleanup: Option<Instant>,
+    ) -> Result<(), AgentWorkFailure> {
+        for _ in 0..MAX_PENDING_AGENT_AUDIT_EVENTS.div_ceil(MAX_AGENT_AUDIT_DELIVERY_EVENTS) {
             let journal = state.journal_mut()?;
-            if journal.audit.is_quiescent() {
+            if journal.audit.status().pending() == 0 {
                 return Ok(());
             }
             let batch = journal
                 .audit
-                .begin_delivery(
-                    AgentAuditDeliveryId::new(raw).ok_or(AgentWorkFailure::Contract)?,
-                    MAX_AGENT_AUDIT_DELIVERY_EVENTS,
-                )
+                .begin_next_delivery(MAX_AGENT_AUDIT_DELIVERY_EVENTS)
                 .map_err(|_| AgentWorkFailure::Audit)?;
             let expected = batch.proof();
             let settlement = match state.audit.append(batch, worker.audit_completion()) {
@@ -2463,10 +4575,7 @@ impl AgentWorkController {
                 return Err(AgentWorkFailure::Audit);
             }
         }
-        state
-            .journal_mut()?
-            .audit
-            .is_quiescent()
+        (state.journal_mut()?.audit.status().pending() == 0)
             .then_some(())
             .ok_or(AgentWorkFailure::Audit)
     }
@@ -2474,7 +4583,6 @@ impl AgentWorkController {
     async fn publish_terminal(
         &mut self,
         worker: &mut AgentRuntimeWorker,
-        unsuccessful: bool,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
         if !state.native.deferred.is_empty()
@@ -2482,6 +4590,7 @@ impl AgentWorkController {
             || state.native.recovery_close.is_some()
             || state.native.observation.is_some()
             || state.native.action_pending
+            || state.native.screenshot_pending.is_some()
             || state.native.cancellation.is_some()
             || state.native.shutdown_audit.is_some()
             || state.native_terminal.is_some()
@@ -2493,6 +4602,13 @@ impl AgentWorkController {
             return Err(AgentWorkFailure::Shutdown);
         }
         let journal = drained.journal.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let terminal_intent = state.terminal_intent.ok_or(AgentWorkFailure::Contract)?;
+        if self.retained_terminal.is_some()
+            && matches!(terminal_intent, WorkTerminalIntent::Succeeded)
+            && state.extraction.is_none()
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
         let closure = AgentRunMetricClosure::try_close(
             drained
                 .policy
@@ -2505,20 +4621,35 @@ impl AgentWorkController {
             &journal.actions,
             &journal.inputs,
         )
-        .map_err(|_| AgentWorkFailure::Accounting)?;
-        let class = if unsuccessful && worker.shutdown_deadline().is_some() {
+        .map_err(AgentWorkFailure::MetricClosure)?;
+        // A clean success is claimed only as the ordinary terminal it proved.
+        // If control arrived after its intent was frozen but before the claim,
+        // the runtime must refuse that claim and retain recovery ownership;
+        // accepting it as a cancelled terminal would publish `Accepted` from a
+        // cancelled run. Waiting/unsuccessful intents already closed through
+        // the unsuccessful accounting lane and may truthfully settle under the
+        // matching control class without being relabelled.
+        let controlled = !matches!(terminal_intent, WorkTerminalIntent::Succeeded);
+        let class = if controlled && worker.shutdown_deadline().is_some() {
             AgentRuntimeControllerTerminalClass::Shutdown
-        } else if unsuccessful && worker.stop_reason().is_some() {
+        } else if controlled && worker.stop_reason().is_some() {
             AgentRuntimeControllerTerminalClass::Cancelled
         } else {
             AgentRuntimeControllerTerminalClass::Ordinary
         };
-        let failure = if unsuccessful {
-            Some(state.failure.ok_or(AgentWorkFailure::Contract)?)
-        } else {
-            None
+        let closure_matches_intent = match terminal_intent {
+            WorkTerminalIntent::Succeeded => {
+                closure.outcome() == AgentRunProgressOutcome::Succeeded
+            }
+            WorkTerminalIntent::WaitingForHuman(_) => {
+                closure.outcome()
+                    == AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+            }
+            WorkTerminalIntent::ClosedUnsuccessfully(_) => {
+                closure.outcome() != AgentRunProgressOutcome::Succeeded
+            }
         };
-        if (closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful {
+        if !closure_matches_intent {
             return Err(AgentWorkFailure::Accounting);
         }
         let claim = match if self.retained_terminal.is_some() {
@@ -2551,11 +4682,12 @@ impl AgentWorkController {
             match policy.settle_metric_closure(closure, &journal.accounting, journal.audit) {
                 Ok(settlement) => settlement,
                 Err(refusal) => {
+                    let cause = refusal.error();
                     let (policy, audit) = refusal.into_parts();
                     drained.policy = Some(policy);
                     journal.audit = audit;
                     drained.journal = Some(journal);
-                    return Err(AgentWorkFailure::Accounting);
+                    return Err(AgentWorkFailure::PolicySettlement(cause));
                 }
             };
         let provider = drained.provider.take().ok_or(AgentWorkFailure::Shutdown)?;
@@ -2584,15 +4716,21 @@ impl AgentWorkController {
         // cannot discard an already-consumed clean terminal owner.
         let _ = lock(&journal.events).publish(AgentWorkEventKind::Terminal);
         if let Some(terminal) = &self.retained_terminal {
-            *lock(terminal) = Some(match failure {
-                Some(failure) => {
+            *lock(terminal) = Some(match terminal_intent {
+                WorkTerminalIntent::WaitingForHuman(request) => {
+                    AgentWorkRetainedOutcome::WaitingForHuman(AgentWorkWaitingForHuman {
+                        settlement,
+                        request,
+                    })
+                }
+                WorkTerminalIntent::ClosedUnsuccessfully(failure) => {
                     AgentWorkRetainedOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
                         settlement,
                         failure,
                         human_review,
                     })
                 }
-                None => AgentWorkRetainedOutcome::Accepted {
+                WorkTerminalIntent::Succeeded => AgentWorkRetainedOutcome::Accepted {
                     settlement,
                     extraction: Box::new(
                         state.extraction.take().ok_or(AgentWorkFailure::Contract)?,
@@ -2602,15 +4740,21 @@ impl AgentWorkController {
             self.state.take();
             return Ok(());
         }
-        *lock(&self.terminal) = Some(match failure {
-            Some(failure) => {
+        *lock(&self.terminal) = Some(match terminal_intent {
+            WorkTerminalIntent::WaitingForHuman(request) => {
+                AgentWorkOutcome::WaitingForHuman(AgentWorkWaitingForHuman {
+                    settlement,
+                    request,
+                })
+            }
+            WorkTerminalIntent::ClosedUnsuccessfully(failure) => {
                 AgentWorkOutcome::ClosedUnsuccessfully(AgentWorkClosedUnsuccessfully {
                     settlement,
                     failure,
                     human_review,
                 })
             }
-            None => AgentWorkOutcome::Succeeded(AgentWorkSuccess {
+            WorkTerminalIntent::Succeeded => AgentWorkOutcome::Succeeded(AgentWorkSuccess {
                 settlement,
                 extraction: state.extraction.take().map(Box::new),
             }),
@@ -2630,6 +4774,7 @@ impl AgentWorkController {
         let Some(state) = self.state.as_mut() else {
             return deadline;
         };
+        state.retained_read_evidence.clear();
         if Instant::now() < deadline {
             // Reconcile one already-known synchronous terminal, never reissue
             // native work. Time/audit refusal retains its exact original owner.
@@ -2643,12 +4788,15 @@ impl AgentWorkController {
             // bounded deferred lane before cleanup starts. Consume it there,
             // preserving foreign or otherwise unaccounted terminals in order.
             Self::reconcile_deferred_audit(state);
+            Self::drain_retained_navigation(state, deadline).await;
+            Self::drain_retained_action(state, deadline).await;
         }
         // Drain already-dispatched callbacks only; no action or provider retry.
         while state.native.operation.is_some()
             || state.native.recovery_close.is_some()
             || state.native.observation.is_some()
             || state.native.action_pending
+            || state.native.screenshot_pending.is_some()
             || state.native.cancellation.is_some()
             || state.native.shutdown_audit.is_some()
             || state
@@ -2684,6 +4832,7 @@ impl AgentWorkController {
                 {
                     state.native.action_pending = false
                 }
+                AgentRuntimeEvent::SemanticScreenshotTerminal(_) => {}
                 _ => {}
             }
             let accounted = match &event {
@@ -2715,6 +4864,25 @@ impl AgentWorkController {
                 )) if state.native.cancellation == Some(value.current()) => {
                     state.native.cancellation = None;
                     value.outcome().is_ok()
+                }
+                AgentRuntimeEvent::SemanticScreenshotTerminal(_) => {
+                    let pending = state.native.screenshot_pending.take();
+                    let now = state
+                        .native
+                        .clock
+                        .as_ref()
+                        .and_then(|clock| clock.now().ok());
+                    let retained = state.native.retained.as_mut();
+                    let accounted = match (retained, now) {
+                        (Some(retained), Some(now)) => {
+                            retained.account_screenshot_terminal(now).is_ok()
+                        }
+                        (None, _) => true,
+                        _ => false,
+                    };
+                    pending.is_some_and(|pending| {
+                        state.native.screenshots.cancel(pending).is_ok() && accounted
+                    })
                 }
                 AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::TransitionSettled(value))
                     if state.native.recovery_close == Some(value.operation()) =>
@@ -2842,6 +5010,65 @@ impl Drop for AgentWorkController {
 /// never silently overwritten and the terminal owner has a separate slot.
 pub const MAX_AGENT_WORK_EVENTS: usize = 64;
 
+/// Closed phrases a bot check shows in place of the page. They are matched
+/// against short node names and texts; page text is never kept or shown.
+const HUMAN_CHALLENGE_PHRASES: [&str; 18] = [
+    "just a moment",
+    "performing security verification",
+    "verify you are human",
+    "verifying you are human",
+    "please verify you are human",
+    "checking your browser",
+    "checking if the site connection is secure",
+    "enable javascript and cookies to continue",
+    "let's confirm you are human",
+    "confirm you are human",
+    "pardon our interruption",
+    "attention required",
+    "access denied",
+    "please complete the security check",
+    "press & hold",
+    "human verification",
+    "are you a human",
+    "prove you are human",
+];
+/// Bot-check pages are small; a real page that mentions these words is not one.
+const MAX_HUMAN_CHALLENGE_NODES: usize = 48;
+/// How long a script-only check gets to pass on its own before a person is asked.
+const HUMAN_CHALLENGE_SETTLE_MILLIS: [u64; 3] = [2_000, 3_000, 4_000];
+/// Refused inspections one read tolerates before snapshots stop being worth a
+/// model call. Two lets the planner correct one genuinely wrong scope; beyond
+/// that the recorded runs only repeated unchanged captures.
+const MAX_REFUSED_INSPECTIONS: u8 = 2;
+/// Calls kept for the extract proposal and its mapping turn after the planner's
+/// snapshot allowance is narrowed.
+const REMAINING_EXTRACTION_CALLS: u8 = 2;
+
+fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
+    let mut nodes = 0;
+    let mut matched = false;
+    for snapshot in observation.frames() {
+        for node in snapshot.nodes() {
+            nodes += 1;
+            if nodes > MAX_HUMAN_CHALLENGE_NODES {
+                return false;
+            }
+            matched |= [node.name(), node.text()]
+                .into_iter()
+                .flatten()
+                .map(|text| text.as_str().trim())
+                .filter(|text| text.len() <= 96)
+                .any(|text| {
+                    let lower = text.to_ascii_lowercase();
+                    HUMAN_CHALLENGE_PHRASES
+                        .iter()
+                        .any(|phrase| lower.starts_with(phrase))
+                });
+        }
+    }
+    matched
+}
+
 /// Content-free product phase. Model text never declares task completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkEventKind {
@@ -2859,6 +5086,8 @@ pub enum AgentWorkEventKind {
         call: AgentModelCallId,
         /// Charged input tokens.
         input_tokens: u64,
+        /// The cached-read subset of the input, when the provider reports it.
+        cached_input_tokens: u64,
         /// Charged output tokens.
         output_tokens: u64,
         /// Charged micro-USD.
@@ -2872,20 +5101,95 @@ pub enum AgentWorkEventKind {
         /// Count plus streaming turn wall time, not server-only inference time.
         elapsed_millis: u64,
     },
+    /// One typed decision call settled with closed provider/size/latency facts.
+    DecisionSettled(DecisionCallDiagnostic),
+    /// Per-kind fallback reasons; counts follow the decision routing contract.
+    DecisionFallback {
+        /// Noul, Choice and Score counts by unavailable, rate limited, invalid, uncertain.
+        counts: [[u8; 4]; 3],
+        /// Unresolved heads by declared purpose, in the closed purpose order:
+        /// challenge, action, locate, picture, relevance, wall, completion, score.
+        purposes: [u8; zephium_decision::DecisionPurpose::COUNT],
+        /// Whether the shared call allowance permits attempting emulation.
+        capacity: bool,
+    },
+    /// A catalog read found records on the typed path. `refused` is set when
+    /// none could be copied and the page planner reads the page instead.
+    RowRead {
+        /// Records found, at most the requested number.
+        found: u8,
+        /// Whether a cell batch located their text columns.
+        cells: bool,
+        /// Why no record could be copied.
+        refused: Option<SemanticExtractionError>,
+    },
+    /// Rust pressed a daily app's view control to read that view.
+    AppViewOpened,
+    /// Closed size facts of one observation a typed read decides on.
+    ObservationFacts {
+        /// Nodes across every captured frame.
+        nodes: u16,
+        /// Text bytes across every captured frame.
+        text_bytes: u32,
+        /// Nodes with the dialog role in the top frame.
+        dialogs: u8,
+        /// Whether the top frame was captured completely.
+        complete: bool,
+    },
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),
+    /// Snapshot scope was incompatible with the delivered baseline. No native
+    /// capture ran; one budgeted provider turn can select a different operation.
+    InspectionRefused,
+    /// A model Navigate was refused before dispatch, with its closed reason:
+    /// an unobserved or out-of-task address, the open document, a destination
+    /// visited its limit, or no page visits left.
+    NavigationRefused(AgentProviderNavigationRefusalReason),
+    /// A model action failed binding before preparation, policy, or dispatch.
+    /// Correcting the proposal consumes another ordinary budgeted model call.
+    ActionProposalRefused(SemanticActionBindingError),
+    /// An exact native scoped capture lost its anchor. A separate initial
+    /// capture may restore current refs under the original run authority.
+    InspectionAnchorLost,
     /// An independently authorized native effect is active.
     ActionActive,
+    /// Native execution settled; a fresh observation is checking the outcome.
+    Verifying,
+    /// Native synchronously refused admission; the failed effect and batch
+    /// were accounted. No native execution or retry is implied.
+    ActionRejected(SemanticActionFailure),
+    /// A completed read-only scroll did not prove movement; its failed receipt is closed.
+    ActionUnverified(SemanticActionFailure),
+    /// Records or optional record fields left out of an extraction because
+    /// their own evidence did not hold; the rest stood.
+    ExtractionDropped {
+        /// Records and fields left out.
+        values: u16,
+    },
+    /// A read's own target re-rendered while its page visibly changed; the
+    /// change proved the action (a channel, thread or date opened).
+    AppliedOnPageChange,
     /// A native effect was independently verified and accounted.
     Verified,
     /// An explicit policy/human boundary stopped execution.
     NeedsHuman(AgentNeedsHumanReason),
+    /// The model deliberately stopped and requested a person with a closed reason.
+    ModelRequestedHuman(AgentBrowserHumanReason),
     /// Execution owners closed; the separate outcome distinguishes task
     /// success from a fully drained failure/cancellation.
     Terminal,
     /// Exact retained ownership needs reconciliation; this is not success.
     Recovery,
 }
+
+/// How long a page waits for its look to become ready (another page's look
+/// holding the presentation, a document still committing).
+const NOT_READY_PATIENCE: Duration = Duration::from_secs(30);
+/// Extra looks at a document still parsing before its first look gives up.
+const DOCUMENT_LOADING_LOOKS: u32 = 3;
+
+/// Refused Navigate proposals one page task may make before it ends.
+const MAX_REFUSED_NAVIGATIONS: u8 = 4;
 
 /// Stable content-free correlation for a product event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2918,6 +5222,17 @@ impl AgentWorkEvent {
 /// Closed failure vocabulary; no variant contains page, provider or user text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkFailure {
+    /// Challenge decision failed its exact observation/account binding.
+    DecisionChallenge(DecisionProjectionError),
+    /// Further-content decision failed its exact observation/account binding.
+    DecisionMoreBelow(DecisionProjectionError),
+    /// Action selection failed its exact observation/account or offered-option binding.
+    DecisionOperation(DecisionProjectionError),
+    /// Read selection failed its exact observation, account or schema binding.
+    DecisionRead(DecisionProjectionError),
+    /// Accounted scoped read reported AnchorMissing while its original retained
+    /// document and lease remained live. Only progressive inspection may recover.
+    InspectionAnchorLost,
     /// A settled model proposal crossed the trusted task's fresh phase gate.
     TaskPhase {
         /// Current product-side task state, never model completion text.
@@ -2952,18 +5267,37 @@ pub enum AgentWorkFailure {
     Native(ContextPortFailure),
     /// Exact content-free semantic runtime refusal.
     Observation(SemanticRuntimePortFailure),
+    /// Exact bounded native viewport-capture refusal.
+    Screenshot(SemanticScreenshotNativeFailure),
     /// Renderer or navigation authority changed; stale refs are revoked.
     ContextLost,
     /// Provider or action authority returned a closed refusal.
     Browser(AgentBrowserProviderError),
     /// A progress/receipt/metric join was refused.
     Accounting,
+    /// Exact content-free coverage refusal from the original metric reducers.
+    MetricClosure(AgentRunMetricClosureError),
+    /// Exact terminal policy/audit refusal; the original owners are retained.
+    PolicySettlement(AgentRunPolicySettlementError),
+    /// Exact model-receipt accounting refusal, with no provider content.
+    ModelAccounting(AgentMetricError),
+    /// Exact committed-input coverage refusal, with no disclosed input.
+    InputAccounting(AgentProviderInputMetricError),
+    /// Exact progress-reducer refusal, with no page or model content.
+    ProgressAccounting(AgentProgressMetricError),
+    /// Exact original supervisor refusal.
+    Supervisor(AgentSupervisorRuntimeError),
     /// Durable audit delivery or acknowledgement was refused.
     Audit,
     /// Native or provider resources could not prove terminal drain.
     Shutdown,
     /// Trusted input, clock, state, or task contract was invalid.
     Contract,
+    /// The task's own policy declines this one proposed action; the model
+    /// may choose another, nothing having been issued.
+    ActionDenied,
+    /// The proposal must declare this effect, which the page shows it has.
+    EffectRequired(SemanticEffectClass),
 }
 
 pub(super) struct WorkEvents {
@@ -3028,6 +5362,7 @@ pub(super) fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The exact supervisor, receipt reducers and durable ledger for one run.
 /// It remains inside the session while provider/native authorities are live.
 pub(crate) struct WorkJournal {
+    pub(super) failure: Option<AgentWorkFailure>,
     model_started: Option<Instant>,
     pub(super) supervisor: AgentRunSupervisor,
     pub(super) execution: Option<AgentNodeExecution>,
@@ -3069,6 +5404,7 @@ impl WorkJournal {
             .map_err(|_| AgentWorkFailure::Accounting)?;
         Ok(Self {
             supervisor,
+            failure: None,
             model_started: None,
             execution: None,
             cancellation,
@@ -3106,7 +5442,7 @@ impl WorkJournal {
         self.last_at = now;
         self.progress
             .record_event(event)
-            .map_err(|_| AgentWorkFailure::Accounting)
+            .map_err(AgentWorkFailure::ProgressAccounting)
     }
 
     pub(super) fn start(
@@ -3161,16 +5497,16 @@ impl WorkJournal {
     ) -> Result<(), AgentWorkFailure> {
         self.accounting
             .record_model_receipt(receipt)
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::ModelAccounting)?;
         self.inputs
             .record(input)
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::InputAccounting)?;
         self.supervisor
             .record_model_call_result(
                 self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
                 receipt,
             )
-            .map_err(|_| AgentWorkFailure::Accounting)?;
+            .map_err(AgentWorkFailure::Supervisor)?;
         self.record()?;
         let elapsed_millis = u64::try_from(
             self.model_started
@@ -3183,6 +5519,9 @@ impl WorkJournal {
         self.emit(AgentWorkEventKind::ModelSettled {
             call: receipt.id(),
             input_tokens: receipt.input_tokens(),
+            cached_input_tokens: receipt
+                .pricing_attribution()
+                .map_or(0, |pricing| pricing.cached_input_tokens()),
             output_tokens: receipt.output_tokens(),
             cost_micro_usd: receipt.cost_micro_usd(),
             request_bytes: input.metrics().serialized_request_bytes(),
@@ -3210,6 +5549,7 @@ impl WorkJournal {
         &mut self,
         receipt: AgentEffectReceipt,
         batch: &SemanticActionBatchResult,
+        page_change: bool,
     ) -> Result<(), AgentWorkFailure> {
         self.accounting
             .record_effect_receipt(receipt)
@@ -3224,7 +5564,54 @@ impl WorkJournal {
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
+        if page_change {
+            self.emit(AgentWorkEventKind::AppliedOnPageChange)?;
+        }
         self.emit(AgentWorkEventKind::Verified)
+    }
+
+    pub(super) fn action_rejected(
+        &mut self,
+        batch: &SemanticActionBatchResult,
+    ) -> Result<(), AgentWorkFailure> {
+        self.action_failure(batch, false)
+    }
+
+    pub(super) fn action_unverified(
+        &mut self,
+        batch: &SemanticActionBatchResult,
+    ) -> Result<(), AgentWorkFailure> {
+        self.action_failure(batch, true)
+    }
+
+    fn action_failure(
+        &mut self,
+        batch: &SemanticActionBatchResult,
+        issued: bool,
+    ) -> Result<(), AgentWorkFailure> {
+        let failure = batch.failure().ok_or(AgentWorkFailure::Accounting)?;
+        let receipt = failure.receipt();
+        let AgentEffectSettlement::Failed(reason) = receipt.settlement() else {
+            return Err(AgentWorkFailure::Accounting);
+        };
+        self.accounting
+            .record_effect_receipt(receipt)
+            .map_err(|_| AgentWorkFailure::Accounting)?;
+        self.actions
+            .record_batch_result(batch)
+            .map_err(|_| AgentWorkFailure::Accounting)?;
+        self.supervisor
+            .record_effect_result(
+                self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                receipt,
+            )
+            .map_err(|_| AgentWorkFailure::Accounting)?;
+        self.record()?;
+        self.emit(if issued {
+            AgentWorkEventKind::ActionUnverified(reason)
+        } else {
+            AgentWorkEventKind::ActionRejected(reason)
+        })
     }
 }
 
@@ -3232,4 +5619,12 @@ impl fmt::Debug for WorkJournal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("WorkJournal([owned, content-free])")
     }
+}
+
+fn node_count(observation: &SemanticObservation) -> usize {
+    observation
+        .frames()
+        .iter()
+        .map(|frame| frame.nodes().len())
+        .sum()
 }

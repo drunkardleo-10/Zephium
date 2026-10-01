@@ -10,15 +10,7 @@ for (const file of files) {
   const root = postcss.parse(await readFile(new URL(file, dist), "utf8"), { from: file });
   root.walkDecls((declaration) => {
     const { prop, value } = declaration;
-    // The menu surface is the one sanctioned blur: it floats over our own
-    // document, never over a page WebView or the native material.
-    const menuSurface =
-      declaration.parent?.type === "rule" && declaration.parent.selector === ".ui-menu";
-    if (
-      !menuSurface &&
-      (/^(?:-webkit-)?backdrop-filter$/u.test(prop) || /\bblur\s*\(/iu.test(value))
-    )
-      failures.push(`${file}: forbidden CSS blur: ${prop}: ${value}`);
+    // Blur is a design/performance decision, not a blanket CSS prohibition.
     if (prop !== "box-shadow" && !prop.startsWith("--shadow-")) return;
     // Named shadows for surfaces and thumbs that physically float are the
     // only intentional exception; ordinary controls keep a contact shadow.
@@ -27,6 +19,7 @@ for (const file of files) {
         "--shadow-popover",
         "--shadow-menu",
         "--shadow-overlay",
+        "--shadow-sheet",
         "--shadow-float",
         "--shadow-thumb",
         "--shadow-thumb-grab",

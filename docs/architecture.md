@@ -437,7 +437,7 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
   activation recreates it and reapplies zoom.
 - The application refuses a 33rd logical view synchronously. Its absolute 32
   ceiling includes eight slots for the largest visible split/recovery batch.
-  The native engine has an independent ceiling of 48 counting live views, a
+  The native engine has an independent ceiling of 57 (65 with agentic contexts), counting live views, a
   warm spare, construction reservations, and WebView2 cleanup debt that may
   still own a controller. These constants are admission bounds; the packaged
   1/10/50/100-tab and 24-hour resource measurements remain release work.
@@ -639,8 +639,109 @@ the current tree. The product target is a curated, package-neutral MV3
 compatibility surface. Pinned **Bitwarden Core** and stock third-party
 artifacts are adversarial acceptance contracts used to expose platform gaps;
 they are not product dependencies and no target-specific branch belongs in
-ordinary browser code. An open store or general-parity promise remains outside
-the initial release.
+ordinary browser code. The agreed public target now combines a small
+recommended cohort with policy-eligible Compatibility/Beta installation from
+the Chrome Web Store or an approved publisher. Original package bytes come
+directly to the user's device; Zephium serves shared signed compatibility and
+revocation metadata, not third-party packages. Recommendations retain exact
+test history while eligible upstream versions update independently. This does
+not relax the existing exact Verified manifest authority or promise general
+API parity. Public provider composition and Beta activation remain unfinished
+and disabled.
+
+The public metadata format and backend handoff are defined in
+`extension-metadata-service.md`. Its bounded parser and read-only xtask
+validator produce structural data, not authenticated policy or installation
+authority. Upstream intake can authenticate and preflight an original CRX
+without inventing a reviewed catalog row; complete tree receipts preserve its
+original CRX digest and can bind its exact original manifest to a numeric
+upstream checkpoint. The checkpoint has a fixed durable codec and rejects
+downgrades, publisher changes, and equal-version byte changes.
+
+The opt-in `zephium-extension-distribution/public-policy` client now verifies
+the fixed shared target with Tough 0.24.0. It pins the channel and bootstrap
+root, bounds every metadata response before parsing, rejects delegations and
+unexpected targets, requires 2-of-3 root keys and separate signing roles, and
+compares all four role versions/digests plus the exact policy revision/digest
+against durable history. Publisher-wide revocations cannot disappear. Both
+compiled root slots remain empty, so this client is not enabled in the desktop.
+
+`ExtensionPolicyCache` uses the existing exclusive private-filesystem namespace
+to atomically commit the target bytes and checkpoint in one bounded record.
+Reopening retains expired high-water history and rejects corrupt state instead
+of resetting it; uncommitted staging is discarded only after current-state
+validation. Receipts become stale when superseded or when their cache owner is
+dropped. Freshness checks include the earliest signed role/policy deadline,
+durable known time, and a process-local monotonic deadline. These are signed
+policy receipts, not Beta manifest or native-runtime authority. The filesystem
+adapter supports this cache on macOS/Linux. Windows has implemented handle-relative
+operations and shared recovery behind a debug-only validation gate; default
+activation still fails closed pending [live Windows validation](extension-windows-validation.md).
+
+The response cache is bounded to 2 MiB/32 entries and sends only content-derived
+conditional ETags. A 304 still re-enters full signature and freshness validation.
+Requests have a 20-second deadline, complete refreshes a 60-second deadline,
+and at most 16 root updates are processed per refresh. No worker or scheduling
+loop is started; jitter/backoff and desktop composition remain integration work.
+
+PROFILE schema v14 adds an immutable provenance row per installation and a
+bounded publisher high-water history. The source-aware Store authority methods
+commit package selection, source/transform/output/compatibility/policy evidence,
+grants, and upstream history in the same transaction. Updates compare the
+complete expected current provenance and reject source-provider changes,
+policy rollback/equivocation, and upstream rollback/equivocation. Existing
+reviewed installs receive no inferred source data. Snapshot reads require
+matching independently reauthenticated provenance when a row exists; legacy
+bindings cannot silently omit it. Native Begin/MayOwn and grant writes also
+rejoin the stored output descriptor and high-water state through the existing
+grant codec. The native journal retains its existing exact package and
+install/grant revision bindings rather than duplicating mutable grant/native
+identities in provenance. Uninstall removes the installation's provenance but
+retains its upstream maximum; complete profile erasure scrubs both tables.
+
+The empty schema adds 8 KiB (two 4-KiB SQLite pages) per profile in the measured
+migration. Each encoded record is bounded to 1 KiB (the current maximum shape
+is 812 bytes), and history is capped at 128 publishers per profile. The path
+uses the existing Store actor and starts no worker, timer, or native view.
+These are structural persistence guarantees, not Beta authentication.
+The opt-in `zephium-extension-distribution/beta-admission` path now consumes an
+authenticated complete CRX tree and a live accepted policy to mint the separate
+`ProductAdmittedBetaSource` witness. Both macOS and Windows native targets are
+assessed independently of the build host. The shared manifest parser retains
+the exact Verified entry point; the new upstream entry permits an absent
+manifest key while rejecting a supplied key that differs from the CRX publisher.
+No reviewed catalog row is synthesized. Compiled source rules, exact remote
+target/version opt-in, revocation, and upstream high-water comparison all apply.
+The witness rechecks live policy on use and cannot enter a Verified activation
+path. See `extension-beta-admission.md` for the initial closed subset and limits.
+
+The opt-in `BetaPreparationWorkspace` now turns admitted source into a private,
+sealed output artifact. It reauthenticates the original CRX, performs the
+compiled manifest-key identity adaptation, streams and re-hashes the closed
+tree, and atomically publishes an uninstalled `ready` slot with the original
+archive, canonical index, and deterministic transformation evidence. Reopen
+recomputes the transformation before accepting stored output. Private filesystem
+primitives own identity/mode checks, sealing, no-replace publication, and bounded
+recovery; operation serialization and receipt epochs prevent discard/read races.
+`PreparedBetaArtifact` exposes no native path or lease and cannot enter a
+Verified activation path. Its structural provenance requires separately proven
+provider classification and later Store/native joins.
+
+Approved provider acquisition, broader compiled compatibility adaptations,
+publication into the installation repository, permission consent, native
+admission, and public install/update
+orchestration remain necessary before exposing public installation. The exact
+Verified constructors remain unchanged.
+
+The synchronized macOS private-directory publication hardening also requires
+GC to account for one additional root-reseal directory sync and two mode
+changes per freshly retired tree. The pre-existing maximum-cohort filesystem
+tests reproduced five failures on unchanged `1db685c`; correcting the accounting
+makes measured macOS pending cleanup 102 syncs against a 104-sync cap, preserving
+two syncs of headroom. Fresh cleanup is 115/128. Other platforms retain the
+existing 94/96 pending and 107/128 fresh accounting. This changes no native
+filesystem operation and does not remove the required publication hardening;
+the no-garbage path still performs zero durability writes.
 
 Delivery is layered and measured:
 
@@ -818,7 +919,7 @@ WebKit may cache the wrapper and its last URL after `closePopup`, so production
 holds the process-wide `ExtensionPopup` resource lease only for the presented
 interval and treats the documented close call—not wrapper deallocation—as the
 presentation-resource release boundary. Only one such lease exists inside the
-same hard 48-resource ceiling.
+same hard native-resource ceiling (57, or 65 with agentic contexts).
 
 Toolbar projection is a replaceable Shell-owned cohort keyed by the exact
 profile, logical tab, browser-surface generation, runtime generation, and

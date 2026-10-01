@@ -19,7 +19,7 @@ use crate::{
     MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 
-crate::context::durable_id!(WorkId, "Durable identity of one profile-owned Work.");
+pub use zephium_core::ids::WorkId;
 crate::context::durable_id!(
     WorkBrowserResourceId,
     "Durable identity of one browser resource, independent of every actor run."
@@ -120,6 +120,12 @@ pub enum WorkBrowserResourcePhase {
     Constructing,
     /// Native resource is retained with no executing actor lease.
     Retained,
+    /// Agent admission is sealed while native human presentation is pending.
+    PresentingHuman,
+    /// Only the person may interact with this exact retained page.
+    PresentedHuman,
+    /// Native hiding and document rebinding must finish before agent admission.
+    ContinuingAfterHuman,
     /// One exact native lease binding is awaiting acknowledgement.
     Acquiring,
     /// The exact acknowledged execution lease is active.
@@ -199,6 +205,10 @@ pub enum WorkBrowserResourceOperation {
     Revoke,
     /// Explicitly destroy the exact resource and its resource-owned channels.
     Destroy,
+    /// Present the drained page under an explicit bounded human-control request.
+    PresentHuman,
+    /// Hide the human page and bind its final document without starting an actor.
+    ContinueAfterHuman,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,18 +219,98 @@ struct OperationJoin {
     lease: Option<WorkBrowserExecutionLease>,
 }
 
+/// Code-owned retry policy; the original Work deadline always remains binding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkBrowserConstructionAttempt {
+    /// Original page-loading window.
+    #[default]
+    Initial,
+    /// One longer retry after a native page-loading timeout.
+    SlowPageRetry,
+}
+impl WorkBrowserConstructionAttempt {
+    /// Closed per-attempt ceiling, intersected with the original deadline.
+    pub const fn budget(self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Self::Initial => 30,
+            Self::SlowPageRetry => 60,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct ConstructionSettings {
+    anonymous_session: Option<crate::WorkBrowserSession>,
+    window: Option<(WorkBrowserConstructionAttempt, std::time::Instant)>,
+}
+
 /// Move-only exact native request, minted after publishing its pending owner.
 #[must_use]
 #[derive(Debug)]
 pub struct WorkBrowserResourceRequest {
+    construction: Option<Box<ConstructionSettings>>,
     operation: OperationJoin,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
     document: Option<Arc<ContextNavigationTarget>>,
     document_policy: crate::WorkBrowserDocumentPolicy,
-    delivery: Option<delivery::DeliveryDispatch>,
+    delivery: Option<Box<delivery::DeliveryDispatch>>,
     health: Option<Box<WorkBrowserResourceHealthReporter>>,
+    human: Option<Box<human::HumanWindow>>,
 }
 impl WorkBrowserResourceRequest {
+    /// Binds trusted retry policy and the original absolute Work deadline once.
+    pub fn with_construction_window(
+        mut self,
+        attempt: WorkBrowserConstructionAttempt,
+        deadline: std::time::Instant,
+    ) -> Result<Self, Box<Self>> {
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || self.construction_window().is_some()
+            || deadline <= std::time::Instant::now()
+            || (attempt == WorkBrowserConstructionAttempt::SlowPageRetry && !self.isolated_public)
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .window = Some((attempt, deadline));
+        Ok(self)
+    }
+    /// Exact construction-only policy; ordinary lifecycle successors have none.
+    pub fn construction_window(
+        &self,
+    ) -> Option<(WorkBrowserConstructionAttempt, std::time::Instant)> {
+        self.construction
+            .as_ref()
+            .and_then(|settings| settings.window)
+    }
+
+    /// Attaches attempt-owned storage only to exact anonymous construction.
+    pub fn with_anonymous_session(
+        mut self,
+        session: crate::WorkBrowserSession,
+    ) -> Result<Self, Box<Self>> {
+        let identity = self.resource().identity();
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || !self.isolated_public
+            || self.anonymous_session().is_some()
+            || !session.admits(identity.profile(), identity.work())
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .anonymous_session = Some(session);
+        Ok(self)
+    }
+    /// Optional anonymous storage scope; never profile authentication.
+    pub fn anonymous_session(&self) -> Option<&crate::WorkBrowserSession> {
+        self.construction
+            .as_ref()
+            .and_then(|settings| settings.anonymous_session.as_ref())
+    }
+
     /// Attaches one stable resource-health observer to original construction.
     /// Other operations and repeated attachment return the request losslessly.
     pub fn track_resource_health(mut self) -> Result<(Self, WorkBrowserResourceHealth), Box<Self>> {
@@ -252,6 +342,10 @@ impl WorkBrowserResourceRequest {
     pub const fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
+    /// Anonymous nonpersistent storage, separate from profile cookies.
+    pub const fn isolated_public(&self) -> bool {
+        self.isolated_public
+    }
     /// Admission-frozen initial document, absent for an empty resource. Native
     /// construction must install selected-profile policy before loading it and
     /// refuse redirects, substitutions and any later page navigation.
@@ -261,6 +355,35 @@ impl WorkBrowserResourceRequest {
     /// Immutable construction policy, never supplied by a page or model.
     pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
         self.document_policy
+    }
+    /// Frozen native presentation operands; absent from ordinary actor operations.
+    pub fn human_region(&self) -> Option<WorkBrowserHumanRegion> {
+        self.human.as_ref().and_then(|human| human.region)
+    }
+    /// Native document-change reporting without page content or URL disclosure.
+    pub fn human_progress(&self) -> Option<WorkBrowserHumanProgress> {
+        self.human.as_ref().map(|human| human.progress.clone())
+    }
+    /// Original absolute human wait deadline, never renewed by presentation.
+    pub fn human_deadline(&self) -> Option<AgentPolicyInstant> {
+        self.human.as_ref().map(|human| human.deadline)
+    }
+    /// A sign-in presentation: navigation may cross sites until it settles back.
+    pub fn human_sign_in(&self) -> bool {
+        self.human.as_ref().is_some_and(|human| human.sign_in)
+    }
+    /// Exact source whose origin bounds human navigation; it grants no actor scope.
+    pub fn human_source(&self) -> Option<&ContextNavigationTarget> {
+        self.human.as_ref().map(|human| human.source.as_ref())
+    }
+    /// Native proof that the page is hidden and its final document is frozen.
+    pub fn complete_human_document(
+        self,
+        effective: ContextNavigationTarget,
+    ) -> WorkBrowserResourceCompletion {
+        let mut completion = self.complete(WorkBrowserResourceNativeOutcome::HumanContinued);
+        completion.effective_document = Some(Arc::new(effective));
+        completion
     }
     /// Attest the frozen native location after the exact initial navigation.
     /// The original operation owner binds the requested/effective lineage.
@@ -349,6 +472,10 @@ pub enum WorkBrowserResourceNativeOutcome {
     Destroyed,
     /// No exact successful native result could be proven.
     Refused,
+    /// Exact drained page is presented in the requested human-owned region.
+    HumanPresented,
+    /// Native human input is retired and the current document is frozen.
+    HumanContinued,
 }
 
 /// Non-cloneable native terminal; ordinary audits cannot mint this receipt.
@@ -384,6 +511,10 @@ impl WorkBrowserLeaseEnded {
 pub enum WorkBrowserResourceEvent {
     /// Resource construction is acknowledged without actor authority.
     Retained(WorkBrowserResourceJoin),
+    /// Native presentation acknowledged; no execution lease exists.
+    HumanPresented(WorkBrowserResourceJoin),
+    /// Human input retired and document rebound; fresh actor admission is separate.
+    HumanContinued(WorkBrowserResourceJoin),
     /// An exact native lease binding was acknowledged.
     Acquired(WorkBrowserExecutionLease),
     /// Exact binding exists but was not activated because expiry or shutdown
@@ -412,6 +543,7 @@ pub enum WorkBrowserResourceEvent {
 struct Resource {
     join: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
     phase: WorkBrowserResourcePhase,
     pending: Option<OperationJoin>,
     destruction: Option<OperationJoin>,
@@ -422,8 +554,18 @@ struct Resource {
     document: Option<Arc<ContextNavigationTarget>>,
     document_policy: crate::WorkBrowserDocumentPolicy,
     effective_document: Option<Arc<ContextNavigationTarget>>,
+    current_requested_document: Option<Arc<ContextNavigationTarget>>,
+    admission_document: Option<Arc<ContextNavigationTarget>>,
+    admission_epoch: crate::NavigationEpoch,
+    navigation_epoch: crate::NavigationEpoch,
+    frame_generation: crate::FrameGeneration,
+    document_available: bool,
+    observed: bool,
+    navigation: Option<navigation::NavigationJoin>,
+    action: Option<action::ActionJoin>,
     observation_sequence: u16,
     observation: Option<observation::ObservationJoin>,
+    human: Option<Box<human::HumanWindow>>,
 }
 impl Resource {
     fn quarantine(&mut self, failure: WorkBrowserResourceFailure) {
@@ -452,6 +594,13 @@ pub struct WorkBrowserResources {
     rows: BTreeMap<WorkBrowserResourceId, Resource>,
     sequence: u64,
     sealed: bool,
+    native_shutdown_started: bool,
+}
+
+/// Crate-private, move-only admission from the actual permanently sealed row
+/// owner. It is not native zero, and cannot be reconstructed from durable IDs.
+pub(crate) struct WorkBrowserNativeShutdownAdmission {
+    _authority: Authority,
 }
 impl WorkBrowserResources {
     /// The trusted application supplies its actual durable Work/profile owner.
@@ -464,6 +613,7 @@ impl WorkBrowserResources {
             rows: BTreeMap::new(),
             sequence: 0,
             sealed: false,
+            native_shutdown_started: false,
         }
     }
     fn next(&mut self) -> Result<u64, WorkBrowserResourceError> {
@@ -497,6 +647,7 @@ impl WorkBrowserResources {
             None,
             crate::WorkBrowserDocumentPolicy::Exact,
             now,
+            false,
         )
     }
     /// Reserve one exact initial document at the trusted application edge.
@@ -530,6 +681,23 @@ impl WorkBrowserResources {
         policy: crate::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        self.construct_document_with_isolation(
+            resource, context, storage, document, policy, false, now,
+        )
+    }
+    /// Trusted public-discovery admission; the isolation operand is frozen in
+    /// every lifecycle request and cannot change when a worker is replaced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_document_with_isolation(
+        &mut self,
+        resource: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        document: ContextNavigationTarget,
+        policy: crate::WorkBrowserDocumentPolicy,
+        isolated_public: bool,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         crate::SemanticOrigin::parse(document.as_url().as_str())
             .map_err(|_| WorkBrowserResourceError::Source)?;
         if !policy.admits_request(&document) {
@@ -542,6 +710,7 @@ impl WorkBrowserResources {
             Some(Arc::new(document)),
             policy,
             now,
+            isolated_public,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -553,6 +722,7 @@ impl WorkBrowserResources {
         document: Option<Arc<ContextNavigationTarget>>,
         document_policy: crate::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
+        isolated_public: bool,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         if self.sealed {
             return Err(WorkBrowserResourceError::Sealed);
@@ -590,6 +760,7 @@ impl WorkBrowserResources {
             Resource {
                 join,
                 storage,
+                isolated_public,
                 phase: WorkBrowserResourcePhase::Constructing,
                 pending: Some(operation.clone()),
                 destruction: None,
@@ -600,17 +771,30 @@ impl WorkBrowserResources {
                 document: document.clone(),
                 document_policy,
                 effective_document: None,
+                current_requested_document: None,
+                admission_document: document.clone(),
+                admission_epoch: crate::NavigationEpoch::INITIAL,
+                navigation_epoch: crate::NavigationEpoch::INITIAL,
+                frame_generation: crate::FrameGeneration::INITIAL,
+                document_available: false,
+                observed: false,
+                navigation: None,
+                action: None,
                 observation_sequence: 0,
                 observation: None,
+                human: None,
             },
         );
         Ok(WorkBrowserResourceRequest {
+            construction: None,
             operation,
             storage,
+            isolated_public,
             document,
             document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Reserve one run-bound native lease without transferring page ownership.
@@ -640,6 +824,8 @@ impl WorkBrowserResources {
             || row.pending.is_some()
             || row.lease.is_some()
             || row.observation.is_some()
+            || row.navigation.is_some()
+            || row.action.is_some()
         {
             return Err(WorkBrowserResourceError::Phase);
         }
@@ -657,15 +843,19 @@ impl WorkBrowserResources {
             lease: Some(lease.clone()),
         };
         row.lease = Some(lease);
+        row.observed = false;
         row.phase = WorkBrowserResourcePhase::Acquiring;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
+            construction: None,
             operation,
             storage: row.storage,
+            isolated_public: row.isolated_public,
             document: row.document.clone(),
             document_policy: row.document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Check exact current native-lease membership and immutable deadline.
@@ -720,12 +910,15 @@ impl WorkBrowserResources {
         row.phase = WorkBrowserResourcePhase::Revoking;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
+            construction: None,
             operation,
             storage: row.storage,
+            isolated_public: row.isolated_public,
             document: row.document.clone(),
             document_policy: row.document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Revokes the exact lease and additionally tracks physical delivery of its
@@ -741,7 +934,7 @@ impl WorkBrowserResources {
     > {
         let mut request = self.revoke(lease)?;
         let (delivery, ticket) = delivery::track(lease.clone());
-        request.delivery = Some(delivery);
+        request.delivery = Some(Box::new(delivery));
         Ok((request, ticket))
     }
     /// Quarantine one resource without discarding callback or capacity debt.
@@ -770,7 +963,11 @@ impl WorkBrowserResources {
         }
         if !matches!(
             row.phase,
-            WorkBrowserResourcePhase::Retained | WorkBrowserResourcePhase::Quarantined
+            WorkBrowserResourcePhase::Retained
+                | WorkBrowserResourcePhase::Quarantined
+                | WorkBrowserResourcePhase::PresentingHuman
+                | WorkBrowserResourcePhase::PresentedHuman
+                | WorkBrowserResourcePhase::ContinuingAfterHuman
         ) {
             return Err(WorkBrowserResourceError::Phase);
         }
@@ -784,12 +981,15 @@ impl WorkBrowserResources {
         row.destruction_attempted = true;
         row.destruction = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
+            construction: None,
             operation,
             storage: row.storage,
+            isolated_public: row.isolated_public,
             document: row.document.clone(),
             document_policy: row.document_policy,
             delivery: None,
             health: None,
+            human: None,
         })
     }
     /// Settle the exact owned terminal. Wrong authority/phase cannot be replaced
@@ -849,6 +1049,13 @@ impl WorkBrowserResources {
             row.phase = WorkBrowserResourcePhase::Quarantined;
             return Ok(WorkBrowserResourceEvent::Quarantined(failure));
         }
+        if matches!(
+            completion.operation.kind,
+            WorkBrowserResourceOperation::PresentHuman
+                | WorkBrowserResourceOperation::ContinueAfterHuman
+        ) {
+            return Ok(human::settle(row, completion, now, sealed));
+        }
         let failure = match (completion.operation.kind, completion.outcome) {
             (
                 WorkBrowserResourceOperation::Construct,
@@ -873,6 +1080,7 @@ impl WorkBrowserResources {
                     ));
                 }
                 row.effective_document = effective;
+                row.document_available = row.effective_document.is_some();
                 row.phase = WorkBrowserResourcePhase::Retained;
                 return Ok(WorkBrowserResourceEvent::Retained(row.join.clone()));
             }
@@ -898,6 +1106,8 @@ impl WorkBrowserResources {
                     && debt.is_empty()
                     && resource_retained
                     && row.observation.is_none()
+                    && row.navigation.is_none()
+                    && row.action.is_none()
                 {
                     if let Some(lease) = row.lease.take() {
                         row.phase = WorkBrowserResourcePhase::Retained;
@@ -963,6 +1173,8 @@ impl WorkBrowserResources {
                         row.phase = WorkBrowserResourcePhase::Retained;
                     }
                     WorkBrowserResourceOperation::Revoke
+                    | WorkBrowserResourceOperation::PresentHuman
+                    | WorkBrowserResourceOperation::ContinueAfterHuman
                     | WorkBrowserResourceOperation::Destroy => {
                         row.quarantine(WorkBrowserResourceFailure::NativeRefused)
                     }
@@ -1001,7 +1213,32 @@ impl WorkBrowserResources {
                     && row.destruction.is_none()
                     && row.lease.is_none()
                     && row.observation.is_none()
+                    && row.navigation.is_none()
+                    && row.action.is_none()
             })
+    }
+    /// Admits the existing global native seal/audit protocol once, only after
+    /// this original registry is permanently sealed and every resource and
+    /// logical callback is drained. The application must additionally prove
+    /// physical callback/health-owner retirement and use its original port.
+    /// No native-zero proof exists until that protocol accepts an exact audit.
+    pub fn begin_native_shutdown(
+        &mut self,
+    ) -> Result<crate::AgentNativeShutdownCoordinator, WorkBrowserResourceError> {
+        if self.native_shutdown_started {
+            return Err(WorkBrowserResourceError::Sealed);
+        }
+        if !self.is_quiescent() {
+            return Err(WorkBrowserResourceError::Phase);
+        }
+        self.native_shutdown_started = true;
+        Ok(
+            crate::AgentNativeShutdownCoordinator::from_retained_registry(
+                WorkBrowserNativeShutdownAdmission {
+                    _authority: self.authority.clone(),
+                },
+            ),
+        )
     }
     /// Release runtime bookkeeping only after exact resource destruction and
     /// every retained callback. The returned durable identity is not deleted.
@@ -1010,7 +1247,12 @@ impl WorkBrowserResources {
         resource: &WorkBrowserResourceJoin,
     ) -> Result<WorkBrowserResourceIdentity, WorkBrowserResourceError> {
         let row = self.row_mut(resource)?;
-        if row.pending.is_some() || row.destruction.is_some() || row.observation.is_some() {
+        if row.pending.is_some()
+            || row.destruction.is_some()
+            || row.observation.is_some()
+            || row.navigation.is_some()
+            || row.action.is_some()
+        {
             return Err(WorkBrowserResourceError::Pending);
         }
         if row.phase != WorkBrowserResourcePhase::Destroyed || row.lease.is_some() {
@@ -1023,12 +1265,37 @@ impl WorkBrowserResources {
     }
 }
 
+#[path = "work_browser_human.rs"]
+mod human;
+pub use human::{
+    brand_family, same_work_human_site, WorkBrowserHumanProgress, WorkBrowserHumanRegion,
+    MAX_WORK_HUMAN_WAIT_MILLIS,
+};
+
 #[path = "work_browser_observation.rs"]
 mod observation;
 pub use observation::{
-    WorkBrowserObservationCompletion, WorkBrowserObservationCompletionCallback,
-    WorkBrowserObservationDispatch, WorkBrowserObservationEvent, WorkBrowserObservationRequest,
-    WorkBrowserReadBinding,
+    WorkBrowserObservationCapability, WorkBrowserObservationCompletion,
+    WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
+    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserReadBinding,
+};
+
+#[path = "work_browser_navigation.rs"]
+mod navigation;
+pub use navigation::{
+    WorkBrowserHistoryBackCompletionCallback, WorkBrowserHistoryBackDispatch,
+    WorkBrowserHistoryBackRequest, WorkBrowserNavigationCompletion,
+    WorkBrowserNavigationCompletionCallback, WorkBrowserNavigationDispatch,
+    WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation, WorkBrowserNavigationRequest,
+};
+
+#[path = "work_browser_action.rs"]
+mod action;
+pub use action::{
+    WorkBrowserActionCompletion, WorkBrowserActionCompletionCallback,
+    WorkBrowserActionCompletionOwner, WorkBrowserActionDeliveryCompletion,
+    WorkBrowserActionDeliveryTicket, WorkBrowserActionDispatch, WorkBrowserActionEvent,
+    WorkBrowserActionRefusal, WorkBrowserActionRequest,
 };
 
 #[path = "work_browser_delivery.rs"]

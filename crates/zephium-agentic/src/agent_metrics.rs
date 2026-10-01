@@ -227,7 +227,7 @@ pub struct AgentEffectAccountingMetrics {
     verified: u32,
     failed: u32,
     classes: [AgentEffectClassMetrics; 7],
-    proofs: [u32; 8],
+    proofs: [u32; 11],
     failures: [u32; 17],
 }
 
@@ -553,7 +553,7 @@ pub struct AgentRunAccountingSnapshot {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
-    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
 }
 
 impl AgentRunAccountingSnapshot {
@@ -594,13 +594,19 @@ impl AgentRunAccountingSnapshot {
     /// Exact ordered fixed-capacity terminals; absent entries are unobserved.
     pub const fn navigation_receipts(
         &self,
-    ) -> &[Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS] {
+    ) -> &[Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS] {
         &self.navigation
     }
 
     /// Terminal native document-navigation attempt count, never action count.
     pub const fn navigations(self) -> u32 {
-        self.navigation[0].is_some() as u32 + self.navigation[1].is_some() as u32
+        let mut count = 0;
+        let mut index = 0;
+        while index < self.navigation.len() {
+            count += self.navigation[index].is_some() as u32;
+            index += 1;
+        }
+        count
     }
 }
 
@@ -645,7 +651,7 @@ pub struct AgentRunAccountingMetrics {
     operations: u32,
     model: AgentModelAccountingMetrics,
     effects: AgentEffectAccountingMetrics,
-    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    navigation: [Option<crate::AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     nodes: Vec<AgentNodeAccountingRow>,
     model_receipts: Vec<AgentModelCallId>,
     effect_receipts: Vec<AgentEffectId>,
@@ -710,7 +716,7 @@ impl AgentRunAccountingMetrics {
             operations: 0,
             model: AgentModelAccountingMetrics::default(),
             effects: AgentEffectAccountingMetrics::default(),
-            navigation: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation: [None; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
             nodes,
             model_receipts: Vec::new(),
             effect_receipts: Vec::new(),
@@ -996,6 +1002,8 @@ const fn effect_index(effect: SemanticEffectClass) -> usize {
 
 const fn proof_index(proof: SemanticEffectProofKind) -> usize {
     match proof {
+        SemanticEffectProofKind::PageDialogOpened => 8,
+        SemanticEffectProofKind::PageDialogClosed => 9,
         SemanticEffectProofKind::TargetState => 0,
         SemanticEffectProofKind::ExactTargetValue => 1,
         SemanticEffectProofKind::TargetValueChanged => 2,
@@ -1004,6 +1012,7 @@ const fn proof_index(proof: SemanticEffectProofKind) -> usize {
         SemanticEffectProofKind::Navigation => 5,
         SemanticEffectProofKind::Dialog => 6,
         SemanticEffectProofKind::Scroll => 7,
+        SemanticEffectProofKind::PageChanged => 10,
     }
 }
 

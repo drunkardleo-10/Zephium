@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+zephium-core = { workspace = true, features = ["ipc-types"] }
 serde.workspace = true
-zephium-core.workspace = true
 specta.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+specta-typescript.workspace = true
+specta-serde = "0.0.12"

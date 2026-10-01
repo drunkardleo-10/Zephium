@@ -371,21 +371,54 @@ must not rely on private WebKit SPI. Its native state machine returns the typed
 `NotReady` refusal for a loading document; it does not encode that ordinary
 lifecycle state as an invariant abort.
 
-The macOS owned-agent-view constructor additionally installs one immutable,
-main-frame-only page-world compatibility shim for bounded Fill operations on
-text/search inputs and textareas. This is a narrow compatibility exception,
-not a general page-world execution surface: it is never installed in Browse or
-borrowed tabs, has no native bridge, selectors, arbitrary code input, user
-activation route, storage/network authority, or cross-document authority. The
-shim's command and terminal attributes are untrusted transport hints and can
-never authorize success. The isolated runtime first binds the exact target and
-private input, the shim independently revalidates connected control identity,
-writability, supported type, and bounded credential metadata before and after
-`beforeinput`, and only a complete adjacent isolated-world snapshot proving the
-exact post-value can authorize success. Once `beforeinput` has been observed,
-any cancellation, mutation, ambiguous terminal, or later exception is treated
-as applied-but-unverified and requires human judgment; it is never blindly
-retried.
+The macOS owned-agent-view constructor installs and attests exactly one
+immutable isolated-world script. Fill is a private fixed recipe reachable only
+from its admitted action path: resolve the private stable ref, revalidate the
+exact descriptor and native control, dispatch bounded untrusted
+`beforeinput`/`input` events, and use captured native value/text setters.
+There is no page-world request listener, transport marker, capability token,
+shared callback, or second mutating script. The former attribute/event relays
+were removed because page content could originate an edit independently of
+controller admission; payload correlation did not constitute authority.
+
+Editable replacement accepts only empty or direct-text explicit hosts with native
+contenteditable state. A nested host additionally binds a private bounded
+editing-context witness at observation: the exact ancestor identities through
+the document and each ancestor's native editability. The same context, visible
+unprotected state and credential boundaries must hold immediately before
+dispatch, after `beforeinput`, and after mutation. Only the exact leaf is ever
+replaced; its editor and siblings acquire no write authority. Element descendants,
+unproven editing contexts, unsupported hosts, and oversized text refuse.
+The full private descriptor, credential metadata,
+connected identity, writability and supported type are revalidated after
+`beforeinput`, before touching the setter. Once the page observes that event,
+cancellation, revalidation failure, mutation failure or postcondition exceptions
+are applied-but-unverified; they never become clean retryable refusals.
+
+Fill reports `FixedSemanticRecipe` with connected writable form readiness.
+Success still requires complete adjacent isolated-world exact-value proof and
+the core's independent fresh semantic postcondition. No user activation,
+arbitrary script, selector, page-facing native bridge, or global input route is
+introduced. Main-world prototype poisoning cannot replace captured isolated
+getters, setters, constructors or event dispatch. Windows native action
+integration and site-specific editing/persistence behavior require separate
+qualification.
+
+A release-excluded [isolated editing-command candidate](../eval/agentic-browsing/isolated-contenteditable-command-qualification.md)
+now runs through this same owned-view document-start channel. It captures the
+fixed native `insertText` command, consumes one document-local opportunity before
+focus preparation, revalidates exact refs/descriptors/range boundaries, and
+checks a fresh bounded logical-editor value after framework reconciliation.
+The real owned/presented normal and focus-retarget fixtures retained their model
+with trusted input and no observed activation; cancellation, replacement,
+same-origin adoption and protected-sibling mutation stayed unverified. Even a
+matching logical value returns the closed `AppliedUnverifiedLogicalEditor`
+diagnostic, mapped to nonretryable `AppliedUnverified`. It cannot mint the
+existing exact-ref Fill success proof. Shipping runtime bytes/digest, control
+setters, grammar and admission are unchanged. Production promotion still needs
+the exact effect/account/lease authority joined to independently fresh logical
+editor evidence and qualification of the supported retained-view activation
+and composition histories; DOM identity cannot supply those guarantees.
 
 On Windows, isolated CDP worlds may be an
 internal adapter mechanism, but CDP remains absent from domain and model
@@ -518,7 +551,7 @@ later bounded turn. Refusal or pre-commit cancellation releases the reservation.
 carry bounded page strings. A read result records the exact full-observation
 fingerprint in addition to its context, generation, capture time, provenance,
 omissions, and content guard. Only the matching prior tool-only `read` stop may
-bind its token-admitted `ZREAD2` bytes to a newer same-plan call. The full
+bind its token-admitted `ZREAD3` bytes to a newer same-plan call. The full
 OpenAI or Anthropic replay must retain the exact semantic-delivery revision.
 The exact-local path requires an exact (`ExactLocal` or authenticated
 `ProviderExact`) latest-result measurement and an `ExactLocal` whole-input
@@ -543,13 +576,64 @@ the reservation. An explicit frozen `with_baseline_read` provider configuration
 adds only this initial-scope tool to the restricted capability profiles; no
 other profile capability or continuation budget changes.
 
+Host-selected extraction schemas also admit one bounded `Rows` level with
+text, boolean, unsigned, money and source-backed link/image URL cells. Child
+declarations share the schema guard;
+each cell retains its own source edges under the existing aggregate limits.
+Row archives use version 3; scalar archives remain version 2 without URL or
+money evidence. The Work adapter
+can map these rows directly to comparison cells, preserving missing optional
+values as unknown. This does not establish collection completeness. Ordinary Work read/discovery steps now return up to 16 individually
+cited findings (1,024 bytes each), mapped directly to finding artifacts. Scalar
+node outputs remain compatible. A collection-level citation never substitutes
+for a finding's own sources; empty findings return unavailable.
+Symbol-only `locate` queries match literal retained substrings.
+URL fields require an exact public link destination from the native semantic
+observation; prose containing a URL is insufficient. The existing URL screen
+rejects credentials and sensitive embedded state. Schema-driven reads include
+`link_destination` fragments only when a URL field is declared, within the
+same fragment and byte budgets. The field selection is bound to read guards,
+retention and extraction admission. Version 4 archives independently revalidate
+the URL, source kind, exact cited value and capture provenance; readers retain
+versions 1–3. A host-selected URL field can populate a Work subject's homepage
+and its comparison cell keeps both identity and destination citations. None of
+these historical URLs supplies navigation or action authority.
+Image fields use the captured native `currentSrc` getter (with `src` fallback),
+screened and bounded like link destinations. Only image-selected schemas expose
+`image_source` fragments. Exact image citations survive version 5 archives and
+can populate host-selected Work subject image candidates; readers retain versions
+1–5. Candidates are not downloaded or decoded images and grant no fetch authority.
+
+Money fields carry a bounded nonnegative decimal string and one of up to 16
+host-approved three-letter currency codes. A cited, complete text/name/value
+fragment must show the matching amount beside an explicit currency code. Bare
+symbols, ambiguous separators and clipped prefixes do not establish a price. Field completeness survives read guards and retained
+evidence; version 6 archives recheck it with amount, currency and citations.
+Readers retain versions 1–6. Work money cells preserve the decimal string and
+identity/price citations. `observed_at` remains absent: capture ticks are
+process-local monotonic time, not a wall-clock timestamp.
+
+`execute_collection_node_owned` also accepts these schemas for one output of an
+original durable public browse/discovery attempt. The original scope, limits,
+cancellation, closure and publication receipt remain authoritative; account
+tasks cannot enter this collection route. Existing scalar node outputs and
+ordinary agent reads keep their previous mapping. Work still needs to select
+and supply collection schemas in its normal product routing.
+
+Public-web discovery may finalize an initial query rewrite on the same exact
+HTTPS origin/path and native committed load, then freezes that URL; it grants
+no redirect or subsequent location-change authority.
+
 `extract` now consumes that bounded read through a distinct, terminal mapping
 turn. Only the exact prior tool-only `extract` correlation selecting the same
 trusted schema ID may bind a strictly newer same-plan call. Deterministic
 `ZEXTRACT1` input carries trusted, closed schema field declarations followed by
-the exact hostile `ZREAD2` evidence; one guard binds the full schema definition,
+the exact hostile `ZREAD3` evidence; one guard binds the full schema definition,
 read, observation fingerprint, context, generation, and capture time. The
-complete immutable replay must either receive an `ExactLocal` pinned
+fresh mapping request contains only the objective and exact bound `ZEXTRACT1`
+evidence. Browsing observations, checkpoints, old tool replay and reasoning
+are not resent to this mapper; ordinary browser continuation replay is unchanged.
+The complete mapping request must either receive an `ExactLocal` pinned
 provider/model/tokenizer count, or enter the OpenAI-only conservative-reserve
 then authenticated-exact-count path, before model generation. Policy rejoins
 the unchanged committed baseline taint without adding origins, references,
@@ -559,14 +643,47 @@ A trusted extraction schema may carry a nonempty, duplicate-free closed set of
 semantic source roles. Its default is all roles. Selection removes readable
 fields only after the same bounded native capture and sensitivity/secret
 checks; it is not a DOM selector, capture expansion, native call, or permission.
-Nondefault `ZREAD2` headers name the canonical `selected_roles`; excluded
+Nondefault `ZREAD3` headers name the canonical `selected_roles`; excluded
 otherwise-readable fields report `role_selection`, separately from
 `source_incomplete` and privacy/byte/item omissions. The added metadata consumes
 the same combined encoding budget. Both schema and read guards bind the exact
 selection even when two role sets happen to produce identical fragments.
 Encoding and output admission reject mismatched schema/read selections; only
 fragments in the exact delivered projection can be cited. Default all-role
-model bytes and baseline-read behavior are unchanged.
+source selection and baseline-read behavior are unchanged.
+
+`ZREAD3` declares row columns and default frame/page/public provenance once;
+nondefault frame, source and sensitivity remain explicit on each affected row.
+Every fragment, quoted value, source ID and receipt binding is preserved.
+Retained reads explicitly declare `provenance=cohorts_v1`: `P` records hold
+exact capture coordinates once, `default_p=p1` selects the default, and `p=pN`
+selects another cohort per row. Historical frame invocation/snapshot come from
+that cohort. This additive extension leaves ordinary reads byte-compatible;
+retained quotes and per-source policy checks are unchanged. Unchanged fragments
+from the same private node identity, field, frame, role and trust are deduplicated;
+equal values from different nodes and changed values remain distinct. Under the
+unchanged eight-capture/128-fragment/32-KiB limits, coarse capture cost favors
+focused evidence, with newest duplicate provenance preferred on ties. Broad
+captures cannot erase focused duplicate sources before being evicted. Terminal
+reads reserve at most half the existing budget for focused history or a prior
+page. Same-page initial viewport history uses only leftover capacity, so stale
+navigation chrome cannot displace current product evidence. All budget omissions
+remain explicit. Private node keys confer no current action authority.
+
+Visible article prose now includes ordinary descendant text across structural
+wrappers, while hidden, editable and secret boundaries still exclude content.
+Inspection checkpoints expose remaining capture capacity. Repeated subtree and
+exhausted-inspection refusals have distinct codes; the eight-capture limit is
+checked before native dispatch, preserving current evidence for extraction.
+
+Terminal extraction has its own 112-KiB conservative encoding envelope instead
+of reusing the 16-KiB initial-observation envelope: the existing STANDARD read
+can contain 32 KiB of values, which require up to 64 KiB after escaping, plus
+128 bounded rows, already-admitted frame provenance and the closed schema.
+This is not additional page disclosure or a larger native/read/turn/run budget.
+Only actual encoded bytes enter the original whole-request provider-exact
+counting path. The mapper receives the whole selected read, never an implicit
+evidence subset chosen after the model has committed to terminal extraction.
 
 The mapping call exposes no browser tools. OpenAI uses strict Responses
 `text.format` JSON Schema and Anthropic uses stable Messages
@@ -823,6 +940,65 @@ The runtime can choose among:
 Backend choice is measured per action/site and returned as diagnostic metadata,
 not exposed as a model choice. Zephium must never steal pointer or keyboard
 focus from normal browsing to make an invisible owned context work.
+
+### 8.3 Deferred native trusted-context text design
+
+There is no `trusted_text` module or native trusted-text capability in the
+current architecture. An earlier functional-core sketch was removed after the
+platform audit found no executable backend that could satisfy its recipient,
+composition, activation, cancellation, and lifetime assumptions. Keeping a
+dormant authority model without a qualifying implementation would create stale
+architecture rather than useful safety. Existing production Fill remains
+unchanged.
+
+If a native trusted-context text backend is revisited, it requires both the
+original live `AgentActiveEffect` and a separate trusted product approval for
+bounded text delivery within the approved owned
+same-origin context. Approval rechecks the actual policy row, exact manifest
+revision, plan/effect reservation, account, profile, retained resource and lease,
+document, bounded value and absolute deadline. It covers potential same-origin
+recipient changes as an explicit additional scope decision. An opaque DOM ref
+locates the intended logical editor; it is not authority against page-authored
+focus changes, framework reconstruction or adoption into another document.
+
+Activation permission is independent of trusted-event production. An explicitly
+approved potentially activating primitive taints its native-view lifetime
+before entry. Navigation, cancellation, successful verification, new action
+objects, blur and page telemetry never clear that state. A qualified primitive
+that cannot activate may preserve clear activation state, but still consumes
+the same one-shot native input opportunity and incurs native drain debt.
+
+The proposed initial composition assumption admits only one first native
+text operation in a newly allocated view with no prior human/native input
+exposure. A synchronous `hasMarkedText == false` report cannot restore that
+assumption. A future host would have to retain one native text-lifetime owner
+alongside the exact native view for its entire lifetime, serialize its entry
+with existing retained action/read/navigation debt, and close admission under
+the actual human-input fence.
+
+Entered requests are move-only and leave independent view-owned debt even if
+their callback owner is lost. Timeout, cancellation and takeover cannot retract
+queued input or fabricate drain. Exclusive human input must wait for exact
+native drain or exact native view destruction. Late drain can retire debt but
+cannot repair uncertainty or turn a revoked operation into success. A fresh,
+complete, unique logical-editor resolution must establish the requested full
+value and preserved protected content after drain; a replacement DOM leaf is
+allowed. Such evidence proves observed editor state, not remote persistence.
+Such a backend must not mint the existing exact-Fill success terminal from
+native delivery alone; an entered effect can only be accounted as unverified
+until independent semantic verification succeeds.
+
+Before any qualification constructor is added, the backend must prove continuous
+closure over every possible recipient, including dynamic initial blank/srcdoc,
+opaque/remote frames, effective-origin changes and DOM-adoptable destinations;
+deny unauthorized navigation and privileged capability transfers while native
+input remains queued; and establish trustworthy native drain plus independent
+editor observation. Neither top-level URL, child-navigation denial, command
+return values nor sampled activation/composition getters establish those facts.
+Any future implementation must add deterministic coverage for the authority
+joins, independent activation axis, first-input assumption, one-shot debt,
+takeover order, substituted drain owners, late completion, logical-editor
+mismatch, and content-redacted diagnostics before it can be admitted.
 
 ## 9. Native-input spike comes first
 
@@ -1463,31 +1639,39 @@ violation, or uncontrolled side effect.
 
 ### 13.2 Held-out open-objective qualification
 
-Before expanding site coverage, prove that the model can make the decisions
-that task-authored qualifiers currently make for it. The actor receives only:
+The open-objective gate proves that the model can make the decisions that
+task-authored qualifiers otherwise make for it. The actor receives only:
 
 - the user's bounded natural-language objective;
 - the immutable capability envelope and resource ceilings;
 - the initial Work-owned browser resource and its current observation; and
 - the small model-facing capability profile admitted for the current phase.
 
-The route, expected answer, completion predicate, evidence requirements, and
-recovery path are withheld from the actor. They are retained by a separate
-validator that cannot grant browser authority or contribute instructions to the
-model context. A successful run must independently choose what to inspect,
-follow at least one previously observed navigation opportunity, recognize when
-evidence is sufficient, and terminate through a bounded `finish` proposal that
-names the retained evidence it relies on. The validator then evaluates the
-result and provenance; a model's declaration of success is never the verdict.
+The route and answer are withheld from the actor. Trusted host policy supplies
+only the approved origin/path scope, maximum hop allowance, operation budgets,
+and extraction schema; it cannot turn page content into authority. A successful
+run must independently choose what to inspect, follow at least one previously
+observed navigation opportunity, recognize when the current document contains
+sufficient evidence, and request a source-bound extraction. Mechanical
+completion verifies provenance and lifecycle. A separate human review judges
+factual correctness and usefulness; a model's declaration of success is never
+the verdict.
 
-The first objective uses versioned loopback documents with an unfamiliar
-route, distractors, dynamic state, and a hidden ground-truth value. This keeps
-the decision problem real while making failures reproducible. Subsequent
-objectives add same-origin SPA transitions, cross-origin scope boundaries,
-multiple pages, contradictory sources, insufficient evidence, and a required
-human-takeover branch. At least one successful page and its evidence remain
-owned by Work after the actor lease ends, proving that run completion and
-resource destruction are not the same lifetime.
+The first actual-app objective is now qualified on macOS at source `e792f6f`.
+Starting at React's public Learn index, Luna discovered an unknown two-hop route,
+selected the relevant documentation page, and returned the correct functional
+updater solution with current-page evidence. The run used the actual bundled
+application, ordinary Work controller, native WKWebView, provider adapter,
+durable Store, audit path, and normal shutdown. Full identities, metrics,
+retained response IDs, manual judgment, and scoped limits are recorded in the
+[qualification evidence](../eval/agentic-browsing/macos-open-objective.md).
+
+Subsequent objectives add deterministic loopback tasks with hidden ground truth,
+same-origin SPA transitions, cross-origin scope boundaries, multiple pages,
+contradictory sources, insufficient evidence, and a required human-takeover
+branch. At least one successful page and its evidence must remain owned by Work
+after the actor lease ends, proving that run completion and resource destruction
+are not the same lifetime.
 
 Every run records a content-free decision trace: offered capability profile,
 chosen capability, observation/evidence identifiers, verification level,

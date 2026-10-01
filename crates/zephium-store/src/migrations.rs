@@ -6,19 +6,6 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::{Connection, Transaction};
 
-// Keep the literal embedded in META v11's SQLite capacity trigger tied to the
-// Core authority bound. SQL migration text cannot interpolate a Rust const.
-const _: [(); 1024] =
-    [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES];
-// Keep META v12/v13's fixed-width native identity checks tied to Core. A
-// changed native grammar must never leave SQLite accepting a different
-// authority.
-const _: [(); 32] = [(); zephium_core::extensions::EXTENSION_NATIVE_OWNERSHIP_ID_BYTES];
-// Keep META v14's durable obligation capacity tied to Core's complete
-// active-profile plus deletion-tombstone union.
-const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS];
-// Keep PROFILE v13's exact site-denial capacity trigger tied to Core.
-const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_SITE_DENIALS_PER_PROFILE];
 // Keep META v16's fixed audit payload and append ceiling tied to the adapter.
 const _: [(); 128] = [(); zephium_agentic::AGENT_AUDIT_RECORD_V1_BYTES];
 const _: [(); 16] = [(); zephium_agentic::MAX_AGENT_AUDIT_DELIVERY_EVENTS];
@@ -29,7 +16,8 @@ pub struct Migration {
     pub up: fn(&Transaction) -> rusqlite::Result<()>,
 }
 
-const MAX_SCHEMA_OBJECTS: i64 = 128;
+// Bound both the merged schema and historical Work QA schemas during upgrade.
+const MAX_SCHEMA_OBJECTS: i64 = 192;
 const MAX_SCHEMA_IDENTIFIER_BYTES: i64 = 256;
 const MAX_SCHEMA_SQL_BYTES: i64 = 256 * 1024;
 
@@ -47,6 +35,17 @@ static EXPECTED_MANIFESTS: OnceLock<Mutex<ManifestCache>> = OnceLock::new();
 
 pub fn apply(conn: &mut Connection, migrations: &[Migration]) -> rusqlite::Result<()> {
     let current = validate_current(conn, migrations)?;
+    if legacy_work_profile(conn, migrations, current)? {
+        integrate_legacy_work_profile(conn, current)?;
+        return apply(conn, migrations);
+    }
+    if accepts_legacy_profile_v14(migrations)
+        && current == 14
+        && schema_manifest(conn)? == expected_legacy_profile_v14_manifest()?
+    {
+        integrate_legacy_profile_v14(conn)?;
+        return apply(conn, migrations);
+    }
     for m in migrations.iter().filter(|m| m.version > current) {
         let tx = conn.transaction()?;
         (m.up)(&tx)?;
@@ -90,8 +89,105 @@ pub(crate) fn validate_current(
     // trigger, then validate again after every committed step. The trusted
     // reference is generated once from these same immutable migrations in a
     // fresh in-memory database, including FTS shadow objects and triggers.
+    if accepts_legacy_profile_v14(migrations)
+        && current == 14
+        && schema_manifest(conn)? == expected_legacy_profile_v14_manifest()?
+    {
+        return Ok(current);
+    }
+    if legacy_work_profile(conn, migrations, current)? {
+        return Ok(current);
+    }
     validate_manifest(conn, migrations, current)?;
     Ok(current)
+}
+
+fn accepts_legacy_profile_v14(migrations: &[Migration]) -> bool {
+    std::ptr::eq(migrations.as_ptr(), PROFILE.as_ptr())
+        && migrations
+            .last()
+            .is_some_and(|migration| migration.version >= 22)
+}
+
+// The extension branch shipped a different PROFILE v14. Identify it by the
+// complete schema, not its ambiguous version number or a few table names.
+fn expected_legacy_profile_v14_manifest() -> rusqlite::Result<Vec<SchemaObject>> {
+    let cache = EXPECTED_MANIFESTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(manifest) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&(3, 14))
+        .cloned()
+    {
+        return Ok(manifest);
+    }
+
+    let mut reference = Connection::open_in_memory()?;
+    for migration in &PROFILE[..13] {
+        let tx = reference.transaction()?;
+        (migration.up)(&tx)?;
+        tx.commit()?;
+    }
+    let tx = reference.transaction()?;
+    create_extension_profile_provenance(&tx)?;
+    tx.commit()?;
+    let manifest = schema_manifest(&reference)?;
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((3, 14), manifest.clone());
+    Ok(manifest)
+}
+
+// Apply the main lineage and extension provenance in one transaction. No
+// intermediate user_version can claim one lineage's schema with the other's
+// tables after a crash or a failed migration.
+fn integrate_legacy_profile_v14(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    for migration in PROFILE
+        .iter()
+        .filter(|migration| (14..=22).contains(&migration.version))
+    {
+        (migration.up)(&tx)?;
+    }
+    tx.pragma_update(None, "user_version", 22)?;
+    validate_manifest(&tx, PROFILE, 22)?;
+    tx.commit()
+}
+
+// Work QA used 22..=29 before integration. Match the complete historical
+// schema before applying the missing main migrations, in one transaction.
+fn legacy_work_profile(
+    conn: &Connection,
+    migrations: &[Migration],
+    current: i64,
+) -> rusqlite::Result<bool> {
+    if !std::ptr::eq(migrations.as_ptr(), PROFILE.as_ptr())
+        || migrations.len() != PROFILE.len()
+        || !(22..=29).contains(&current)
+    {
+        return Ok(false);
+    }
+    let mut reference = Connection::open_in_memory()?;
+    for migration in PROFILE[..21]
+        .iter()
+        .chain(PROFILE[24..(current + 3) as usize].iter())
+    {
+        let tx = reference.transaction()?;
+        (migration.up)(&tx)?;
+        tx.commit()?;
+    }
+    Ok(schema_manifest(conn)? == schema_manifest(&reference)?)
+}
+
+fn integrate_legacy_work_profile(conn: &mut Connection, current: i64) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    for migration in &PROFILE[21..24] {
+        (migration.up)(&tx)?;
+    }
+    tx.pragma_update(None, "user_version", current + 3)?;
+    validate_manifest(&tx, PROFILE, current + 3)?;
+    tx.commit()
 }
 
 fn validate_manifest(
@@ -382,6 +478,146 @@ fn preflight_macos_native_namespace_seeds(tx: &Transaction<'_>) -> rusqlite::Res
         ));
     }
     Ok(())
+}
+
+// Rebuild from the immutable v18 *program-generated reference*, never SQL
+// supplied by the database being migrated. Preserve every column and every
+// related trigger, including cross-table history guards. Migration framework
+// verifies the exact v18 schema before this function and v19 afterwards.
+fn migrate_beta_native_source(tx: &Transaction) -> rusqlite::Result<()> {
+    const TABLE: &str = "extension_native_ownership_journal";
+    const NEXT: &str = "extension_native_ownership_journal_beta_v19";
+    const OLD_ROLE: &str = "check (catalog_role in ('active', 'rollback'))";
+    let reference = expected_manifest(META, 18)?;
+    let table = reference
+        .iter()
+        .find(|object| object.kind == "table" && object.name == TABLE)
+        .and_then(|object| object.sql.as_deref())
+        .ok_or_else(|| invalid_schema("missing v18 native journal template"))?;
+    if table.matches(OLD_ROLE).count() != 1 {
+        return Err(invalid_schema("native journal role template changed"));
+    }
+    let table = table.replacen(TABLE, NEXT, 1).replace(
+        OLD_ROLE,
+        "CHECK (catalog_role IN ('active', 'rollback', 'beta'))",
+    );
+    let end = table
+        .rfind(')')
+        .ok_or_else(|| invalid_schema("native journal template has no closing boundary"))?;
+    if table[end + 1..].trim() != "strict, without rowid" {
+        return Err(invalid_schema("native journal template suffix changed"));
+    }
+    // These are the immutable V1 domains. Future domains require a new
+    // migration; deriving SQL from a future mutable runtime policy is unsafe.
+    const MAC: &str = "X'e3da979db873ec00b4f1b8be4496b5428f961db187b5c4588f3d5b30d60426da',X'4e86c0e24ae61e3cc7078300975eaff4a296bcf1192df0285140e21715fc9239'";
+    const WIN: &str = "X'9378c48279f1efef79cd8fb2a8c0227214e13961084dd2c5f64585248c3d1368',X'b8d3da2d3adb78aaa3a4c44ae0402664bd6e9a2600de328b192bd7116076a71e'";
+    let checks = format!(
+        ", CHECK ((catalog_role = 'beta') = (authority IN ({MAC},{WIN}))),
+        CHECK (catalog_role != 'beta' OR (browsing_context = 'regular' AND payload_kind = 2 AND
+          ((authority IN ({MAC}) AND runtime_backend = 'macos_native') OR
+           (authority IN ({WIN}) AND runtime_backend = 'windows_native')))),
+        CHECK (catalog_role != 'beta' OR phase = 'native_absent_preparing'
+          OR (phase = 'native_absent_release_pending' AND revision = 2)
+          OR expected_native_identity IS NOT NULL),
+        CHECK (catalog_role != 'beta' OR phase != 'native_absent_release_pending'
+          OR revision != 2 OR expected_native_identity IS NULL)"
+    );
+    let create = format!("{}{}{};", &table[..end], checks, &table[end..]);
+    rebuild_native_source_table(tx, &reference, &create, NEXT)
+}
+
+fn rebuild_native_source_table(
+    tx: &Transaction,
+    reference: &[SchemaObject],
+    create: &str,
+    next: &str,
+) -> rusqlite::Result<()> {
+    const TABLE: &str = "extension_native_ownership_journal";
+    if !next
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(invalid_schema(
+            "native migration identifier is not canonical",
+        ));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM extension_native_ownership_journal LIMIT 1025)",
+        [],
+        |row| row.get(0),
+    )?;
+    if count > 1024 {
+        return Err(invalid_schema("native journal exceeds migration capacity"));
+    }
+    let triggers = reference
+        .iter()
+        .filter(|object| {
+            object.kind == "trigger" && object.sql.as_ref().is_some_and(|sql| sql.contains(TABLE))
+        })
+        .collect::<Vec<_>>();
+    for trigger in &triggers {
+        if !trigger
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(invalid_schema("native trigger identifier is not canonical"));
+        }
+        tx.execute_batch(&format!(r#"DROP TRIGGER "{}";"#, trigger.name))?;
+    }
+    tx.execute_batch(create)?;
+    // Exact v18 schema and unchanged column order make this a complete copy;
+    // no native identity or source authority is synthesized from other fields.
+    tx.execute_batch(&format!(
+        "INSERT INTO {next} SELECT * FROM extension_native_ownership_journal;"
+    ))?;
+    let copied: i64 = tx.query_row(&format!("SELECT count(*) FROM {next}"), [], |row| {
+        row.get(0)
+    })?;
+    if copied != count {
+        return Err(invalid_schema("native journal migration lost rows"));
+    }
+    tx.execute_batch(&format!("DROP TABLE extension_native_ownership_journal; ALTER TABLE {next} RENAME TO extension_native_ownership_journal;"))?;
+    for trigger in triggers {
+        tx.execute_batch(
+            trigger
+                .sql
+                .as_deref()
+                .ok_or_else(|| invalid_schema("missing native trigger template"))?,
+        )?;
+    }
+    Ok(())
+}
+
+// Local external admission is a distinct namespace. Existing signed-policy
+// objects retain their historical identities and requirements.
+fn migrate_local_external_native_source(tx: &Transaction) -> rusqlite::Result<()> {
+    let reference = expected_manifest(META, 19)?;
+    let table = reference
+        .iter()
+        .find(|object| {
+            object.kind == "table" && object.name == "extension_native_ownership_journal"
+        })
+        .and_then(|object| object.sql.as_deref())
+        .ok_or_else(|| invalid_schema("missing v19 native journal template"))?;
+    let mut create = table.replacen(
+        "extension_native_ownership_journal",
+        "extension_native_ownership_journal_local_v20",
+        1,
+    );
+    for (existing, local) in [
+        ("x'e3da979db873ec00b4f1b8be4496b5428f961db187b5c4588f3d5b30d60426da',x'4e86c0e24ae61e3cc7078300975eaff4a296bcf1192df0285140e21715fc9239'", "56ffb419362f319ef825913f3727022f7c12c7e69890dc91324a2b7e8cd7b5aa"),
+        ("x'9378c48279f1efef79cd8fb2a8c0227214e13961084dd2c5f64585248c3d1368',x'b8d3da2d3adb78aaa3a4c44ae0402664bd6e9a2600de328b192bd7116076a71e'", "64340b026ee26f834b57ac14d459f241ce92ad2d60a86a6c887288ae98b9a750"),
+    ] {
+        if create.matches(existing).count() != 2 { return Err(invalid_schema("native v19 domain template changed")); }
+        create = create.replace(existing, &format!("{existing},x'{local}'"));
+    }
+    rebuild_native_source_table(
+        tx,
+        &reference,
+        &create,
+        "extension_native_ownership_journal_local_v20",
+    )
 }
 
 pub static META: &[Migration] = &[
@@ -1420,7 +1656,95 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 19,
+        up: migrate_beta_native_source,
+    },
+    Migration {
+        version: 20,
+        up: migrate_local_external_native_source,
+    },
+    Migration {
+        version: 21,
+        up: |tx| {
+            // The previous extension stack's native ownership records. Its
+            // anchors live on tables that stay, so they go explicitly.
+            tx.execute_batch(
+                "DROP TRIGGER extension_native_namespace_profile_anchor_delete;
+                 DROP TRIGGER extension_native_namespace_profile_anchor_update;
+                 DROP TRIGGER extension_native_namespace_deletion_anchor_delete;
+                 DROP TRIGGER extension_native_namespace_deletion_anchor_update;
+                 DROP TRIGGER extension_native_namespace_proof_requires_absence;
+                 DROP TABLE extension_native_namespace_obligations;
+                 DROP TABLE extension_native_ownership_journal;
+                 DROP TABLE extension_native_ownership_journal_state;",
+            )
+        },
+    },
+    Migration {
+        version: 22,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE profile_blocker_sites (
+                    profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE
+                        CHECK (length(CAST(profile_id AS BLOB)) = 26),
+                    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                    payload TEXT NOT NULL CHECK (length(CAST(payload AS BLOB)) BETWEEN 1 AND 2097152)
+                 ) STRICT;
+                 INSERT INTO profile_blocker_sites(profile_id, revision, payload)
+                 SELECT id, 1, '{\"version\":1,\"revision\":1,\"next_hide_id\":1,\"paused\":[],\"hides\":[]}' FROM profiles;",
+            )
+        },
+    },
+    Migration {
+        version: 23,
+        up: |tx| {
+            // One release transition, never a startup override. Subsequent
+            // explicit opt-outs survive reopening. Do not reset revision or
+            // change site pauses/personal hides. Exhaustion aborts atomically.
+            tx.execute_batch(
+                "UPDATE profile_blocker_settings
+                 SET enabled = 1, revision = revision + 1
+                 WHERE enabled = 0;",
+            )
+        },
+    },
 ];
+
+// These statements are the exact extension-branch PROFILE v14 artifact. The
+// schema manifest uses their stored CREATE text to recognize existing files.
+fn create_extension_profile_provenance(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        // No source authority is inferred for existing reviewed installs.
+        // History deliberately has no install FK: uninstall is not a
+        // rollback-protection reset. Profile deletion removes both tables.
+        "CREATE TABLE extension_upstream_history (
+                 publisher BLOB PRIMARY KEY CHECK (typeof(publisher) = 'blob' AND length(publisher) = 32),
+                 checkpoint BLOB NOT NULL CHECK (typeof(checkpoint) = 'blob' AND length(checkpoint) = 105)
+             ) STRICT, WITHOUT ROWID;
+             CREATE TRIGGER extension_upstream_history_capacity BEFORE INSERT ON extension_upstream_history
+             WHEN NOT EXISTS (SELECT 1 FROM extension_upstream_history WHERE publisher = NEW.publisher)
+                  AND (SELECT count(*) FROM extension_upstream_history) >= 128
+             BEGIN SELECT RAISE(ABORT, 'extension upstream history capacity exceeded'); END;
+             CREATE TABLE extension_install_provenance (
+                 install_id BLOB PRIMARY KEY REFERENCES extension_installs(id) ON DELETE CASCADE
+                    CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                 provenance BLOB NOT NULL CHECK (typeof(provenance) = 'blob' AND length(provenance) BETWEEN 1 AND 1024)
+             ) STRICT, WITHOUT ROWID;",
+    )
+}
+
+fn migrate_extension_profile_provenance(tx: &Transaction) -> rusqlite::Result<()> {
+    let already_created: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name='extension_upstream_history'",
+        [],
+        |row| row.get(0),
+    )?;
+    if already_created == 0 {
+        create_extension_profile_provenance(tx)?;
+    }
+    Ok(())
+}
 
 pub static PROFILE: &[Migration] = &[
     Migration {
@@ -2072,11 +2396,89 @@ pub static PROFILE: &[Migration] = &[
         )
         },
     },
+    Migration {
+        version: 22,
+        up: migrate_extension_profile_provenance,
+    },
+    Migration {
+        version: 23,
+        up: |tx| {
+            // The previous extension stack's installs and grants; the current
+            // runtime keeps its registry outside the database.
+            tx.execute_batch(
+                "DROP TABLE extension_install_provenance;
+                 DROP TABLE extension_upstream_history;
+                 DROP TABLE extension_grant_api_permissions;
+                 DROP TABLE extension_grant_host_permissions;
+                 DROP TABLE extension_grants;
+                 DROP TABLE extension_profile_site_denials;
+                 DROP TABLE extension_profile_policy;
+                 DROP TABLE extension_installs;
+                 DROP TABLE extension_install_catalog;",
+            )
+        },
+    },
+    Migration {
+        version: 24,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE blocker_statistics (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 1 AND 512)
+             ) STRICT;",
+            )
+        },
+    },
+    // Work lineage. Appended after the release lineage's 14-21.
+    Migration {
+        version: 25,
+        up: |tx| tx.execute_batch(include_str!("work_schema_v1.sql")),
+    },
+    Migration {
+        version: 26,
+        up: crate::work_migration_v2::migrate,
+    },
+    Migration {
+        version: 27,
+        up: |tx| tx.execute_batch(include_str!("work_runtime_schema_v1.sql")),
+    },
+    Migration {
+        version: 28,
+        up: |tx| tx.execute_batch(include_str!("work_authoring_commands_v1.sql")),
+    },
+    Migration {
+        version: 29,
+        up: |tx| tx.execute_batch(include_str!("work_environment_schema_v1.sql")),
+    },
+    Migration {
+        version: 30,
+        up: |tx| tx.execute_batch(include_str!("work_environment_checkpoints_v1.sql")),
+    },
+    Migration {
+        version: 31,
+        up: |tx| tx.execute_batch(include_str!("user_resources_v28.sql")),
+    },
+    Migration {
+        version: 32,
+        up: |tx| tx.execute_batch(include_str!("work_personal_v29.sql")),
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Beta authority bytes as the previous extension stack derived them, so
+    /// its shipped v19/v20 constraints stay exercised.
+    fn beta_authority(channel: &str, target: &str) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"zephium:beta-source-authority:v1\0");
+        hash.update(channel.as_bytes());
+        hash.update(b"\0");
+        hash.update(target.as_bytes());
+        hash.finalize().into()
+    }
 
     /// Fingerprint of the schema each shipped version produces.
     ///
@@ -2106,6 +2508,11 @@ mod tests {
         (16, 0x2dc6_d332_0299_d29b),
         (17, 0xc06b_3cdd_2a6e_9fc6),
         (18, 0xf8c3_1606_d301_f467),
+        (19, 0xb30f_9566_ea44_65bf),
+        (20, 0xeb32_555e_6d72_1ded),
+        (21, 0xfe22_09ee_a55b_a3f5),
+        (22, 0x6a156db401738842),
+        (23, 0x6a156db401738842),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2129,7 +2536,286 @@ mod tests {
         (19, 0x321a_2e79_d8d2_77da),
         (20, 0x4b37_b9cf_91e8_b507),
         (21, 0x3483_1796_92c9_33a6),
+        (22, 0xd5d5_eec8_ddc1_ca18),
+        (23, 0xfa14_edb0_3a39_f586),
+        (24, 0x7f905292c3b461b8),
+        (25, 0x030c3ec9027a4538),
+        (26, 0xb9c104121d4d71db),
+        (27, 0x6289d36e7af61775),
+        (28, 0xa326a261b19a6901),
+        (29, 0xf08b7bd4e9b17709),
+        (30, 0x6f827893a13c3ccb),
+        (31, 0x55b58f4944aa33b6),
+        (32, 0x6323d1c7efd84e2c),
     ];
+
+    #[test]
+    fn upgrades_drop_every_previous_extension_object_and_keep_user_data() {
+        let extension_objects = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%extension%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        let mut meta = Connection::open_in_memory().unwrap();
+        apply(&mut meta, &META[..20]).unwrap();
+        meta.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES ('01J00000000000000000000000', 'Profile', 'default', 0)",
+            [],
+        )
+        .unwrap();
+        insert_native_ownership_test_row(&meta, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        assert!(extension_objects(&meta) > 0);
+        apply(&mut meta, META).unwrap();
+        assert_eq!(extension_objects(&meta), 0);
+        let profiles: i64 = meta
+            .query_row("SELECT count(*) FROM profiles", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(profiles, 1);
+        meta.execute("DELETE FROM profiles", []).unwrap();
+
+        let mut profile = Connection::open_in_memory().unwrap();
+        apply(&mut profile, &PROFILE[..22]).unwrap();
+        profile
+            .execute(
+                "INSERT INTO history(url, title, visited_at) VALUES ('https://example.com/', 'Kept', 1)",
+                [],
+            )
+            .unwrap();
+        assert!(extension_objects(&profile) > 0);
+        apply(&mut profile, PROFILE).unwrap();
+        assert_eq!(extension_objects(&profile), 0);
+        let title: String = profile
+            .query_row("SELECT title FROM history", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "Kept");
+    }
+
+    #[test]
+    fn meta_v19_preserves_native_rows_and_history_without_inventing_beta_authority() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..18]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        let native_id = b"abcdefghijklmnopabcdefghijklmnop";
+        conn.execute(
+            "UPDATE extension_native_ownership_journal SET revision=3,phase='native_owned',
+             expected_native_identity_kind=1,expected_native_identity=?1,
+             native_identity_kind=1,native_identity=?1",
+            [&native_id[..]],
+        )
+        .unwrap();
+        conn.execute("UPDATE extension_native_ownership_journal_state SET revision=4,operation_high_water=1,native_incarnation_high_water=1 WHERE id=1",[]).unwrap();
+        let before: (i64,i64,i64,i64) = conn.query_row("SELECT revision,operation_high_water,native_incarnation_high_water,grant_rebind_count FROM extension_native_ownership_journal_state",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        apply(&mut conn, &META[..19]).unwrap();
+        apply(&mut conn, &META[..19]).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            19
+        );
+        assert_eq!(conn.query_row("SELECT revision,operation_high_water,native_incarnation_high_water,grant_rebind_count FROM extension_native_ownership_journal_state",[],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?))).unwrap(),before);
+        assert_eq!(conn.query_row("SELECT catalog_role,expected_native_identity,native_identity FROM extension_native_ownership_journal",[],|r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<Vec<u8>>>(2)?))).unwrap(),("active".into(),Some(native_id.to_vec()),Some(native_id.to_vec())));
+        assert_eq!(conn.query_row("SELECT phase,revision,expected_native_identity_kind,native_identity_kind FROM extension_native_ownership_journal",[],|r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?))).unwrap(),("native_owned".into(),3,1,1));
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal_state SET revision=1 WHERE id=1",
+                []
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn meta_v19_rejects_beta_catalog_confusion_atomically_and_preserves_v18() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..18]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        let authority = beta_authority("stable", "macos.wkwebextension.v1");
+        conn.execute(
+            "UPDATE extension_native_ownership_journal SET authority=?1",
+            [&authority[..]],
+        )
+        .unwrap();
+        let error = apply(&mut conn, &META[..19]).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            18
+        );
+        validate_manifest(&conn, META, 18).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT catalog_role FROM extension_native_ownership_journal",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "active"
+        );
+    }
+
+    #[test]
+    fn meta_v19_beta_source_constraints_preserve_native_frontiers() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..19]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        let authority = beta_authority("staging", "macos.wkwebextension.v1");
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET catalog_role='beta'",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET authority=?1",
+                [&authority[..]]
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE extension_native_ownership_journal SET authority=?1,catalog_role='beta',payload_kind=2,archive_length=17,archive_sha256=zeroblob(32)",
+            [&authority[..]],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET runtime_backend='windows_native'",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET browsing_context='private'",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET phase='native_may_own',revision=2",
+                []
+            )
+            .is_err());
+        conn.execute("UPDATE extension_native_ownership_journal SET phase='native_may_own',revision=2,expected_native_identity_kind=1,expected_native_identity=?1",[&b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"[..]]).unwrap();
+        assert!(conn.execute("UPDATE extension_native_ownership_journal SET expected_native_identity=NULL,expected_native_identity_kind=NULL",[]).is_err());
+    }
+
+    fn extension_profile_v14_fixture() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, &PROFILE[..13]).unwrap();
+        let tx = conn.transaction().unwrap();
+        create_extension_profile_provenance(&tx).unwrap();
+        tx.pragma_update(None, "user_version", 14).unwrap();
+        tx.commit().unwrap();
+        conn
+    }
+
+    #[test]
+    fn extension_profile_v14_with_an_unexpected_trigger_is_preserved() {
+        let mut conn = extension_profile_v14_fixture();
+        conn.execute_batch(
+            "CREATE TRIGGER unexpected_extension_trigger BEFORE INSERT ON extension_upstream_history
+             BEGIN SELECT RAISE(ABORT,'unexpected'); END;",
+        )
+        .unwrap();
+        assert!(validate_current(&conn, PROFILE).is_err());
+        assert!(apply(&mut conn, PROFILE).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='user_resources'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn both_release_and_work_qa_lineages_upgrade_without_losing_data() {
+        for version in [13, 24, 29] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            if version == 29 {
+                for migration in PROFILE[..21].iter().chain(PROFILE[24..].iter()) {
+                    let tx = conn.transaction().unwrap();
+                    (migration.up)(&tx).unwrap();
+                    tx.commit().unwrap();
+                }
+                conn.pragma_update(None, "user_version", 29).unwrap();
+                conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES ('00000000000000000000000001', 2, 1, 'draft', 'Keep my work', 1, 1, 'active', 1, 1, 'user')", []).unwrap();
+                conn.execute("INSERT INTO work_memories(id,text,kind,work,execution,created_ms) VALUES ('0000000000000000000000000A','Keep my memory','fact','00000000000000000000000001',NULL,1)", []).unwrap();
+            } else {
+                apply(&mut conn, &PROFILE[..version]).unwrap();
+            }
+            conn.execute("INSERT INTO history(url,title,visited_at) VALUES ('https://example.com/','Kept',1)", []).unwrap();
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
+            apply(&mut conn, PROFILE).unwrap();
+            apply(&mut conn, PROFILE).unwrap();
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 32);
+            assert_eq!(
+                conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "Kept"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%extension%'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            if version == 29 {
+                assert_eq!(
+                    conn.query_row("SELECT objective FROM works", [], |r| r.get::<_, String>(0))
+                        .unwrap(),
+                    "Keep my work"
+                );
+                assert_eq!(
+                    conn.query_row("SELECT text FROM work_memories", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "Keep my memory"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn work_qa_bridge_refuses_an_injected_schema_before_writing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in PROFILE[..21].iter().chain(PROFILE[24..].iter()) {
+            let tx = conn.transaction().unwrap();
+            (migration.up)(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+        conn.pragma_update(None, "user_version", 29).unwrap();
+        conn.execute_batch("CREATE TABLE injected(value TEXT);")
+            .unwrap();
+        assert!(apply(&mut conn, PROFILE).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            29
+        );
+    }
 
     fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
         let manifest = expected_manifest(migrations, version).expect("shipped migrations apply");
@@ -2265,8 +2951,79 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            21
+            PROFILE.last().unwrap().version
         );
+    }
+
+    #[test]
+    fn protection_release_migration_enables_once_and_preserves_site_preferences() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..22]).unwrap();
+        let off = "00000000000000000000000001";
+        let on = "00000000000000000000000002";
+        for (id, enabled, revision) in [(off, 0, 7), (on, 1, 9)] {
+            conn.execute(
+                "INSERT INTO profiles(id,name,kind,position) VALUES(?1,'Test','named',?2)",
+                rusqlite::params![id, enabled],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO profile_blocker_settings VALUES(?1,?2,?3)",
+                rusqlite::params![id, revision, enabled],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO profile_blocker_sites VALUES(?1,5,'unchanged-site-preferences')",
+                [id],
+            )
+            .unwrap();
+        }
+        apply(&mut conn, META).unwrap();
+        let settings = |conn: &Connection, id: &str| {
+            conn.query_row(
+                "SELECT enabled,revision FROM profile_blocker_settings WHERE profile_id=?1",
+                [id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(settings(&conn, off), (1, 8));
+        assert_eq!(settings(&conn, on), (1, 9));
+        assert_eq!(conn.query_row("SELECT count(*) FROM profile_blocker_sites WHERE revision=5 AND payload='unchanged-site-preferences'", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
+        conn.execute(
+            "UPDATE profile_blocker_settings SET enabled=0,revision=9 WHERE profile_id=?1",
+            [off],
+        )
+        .unwrap();
+        apply(&mut conn, META).unwrap();
+        assert_eq!(
+            settings(&conn, off),
+            (0, 9),
+            "later explicit opt-out survives reopening"
+        );
+    }
+
+    #[test]
+    fn protection_release_migration_rolls_back_revision_exhaustion() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..22]).unwrap();
+        conn.execute_batch("INSERT INTO profile_blocker_settings VALUES('00000000000000000000000001',7,0),('00000000000000000000000002',9223372036854775807,0)").unwrap();
+        assert!(apply(&mut conn, META).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            22
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT sum(enabled) FROM profile_blocker_settings",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(conn.query_row("SELECT revision FROM profile_blocker_settings WHERE profile_id='00000000000000000000000001'", [], |r| r.get::<_,i64>(0)).unwrap(), 7);
     }
 
     #[test]
@@ -2518,174 +3275,6 @@ mod tests {
                 [],
             )
             .is_err());
-    }
-
-    #[test]
-    fn profile_v12_invalidates_inexact_legacy_authority_and_preserves_nonreuse_floor() {
-        use zephium_core::extensions::{
-            ExtensionAuthorityId, ExtensionInstallCatalog, ExtensionInstallCatalogApplyError,
-            ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
-            ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-            ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
-        };
-        use zephium_core::ids::ExtensionInstallId;
-
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.pragma_update(None, "foreign_keys", true).unwrap();
-        apply(&mut conn, &PROFILE[..11]).unwrap();
-        let legacy_id = 42_u128;
-        let id = legacy_id.to_be_bytes().to_vec();
-        conn.execute(
-            "UPDATE extension_install_catalog SET revision = 7 WHERE id = 1",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_installs(
-                 id, revision, authority, package_key, package_revision,
-                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
-             ) VALUES (?1, 3, ?2, ?3, 4, ?4, ?5, ?6, 1)",
-            rusqlite::params![
-                &id,
-                vec![2_u8; 32],
-                vec![3_u8; 32],
-                vec![4_u8; 32],
-                vec![5_u8; 32],
-                vec![6_u8; 32],
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grants(
-                 install_id, revision, authority, package_key, package_revision,
-                 archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
-                 file_access, private_access
-             ) VALUES (?1, 5, ?2, ?3, 4, ?4, ?5, ?6, ?7, 1, 1)",
-            rusqlite::params![
-                &id,
-                vec![2_u8; 32],
-                vec![3_u8; 32],
-                vec![4_u8; 32],
-                vec![5_u8; 32],
-                vec![6_u8; 32],
-                vec![7_u8; 32],
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grant_api_permissions(install_id, name)
-             VALUES (?1, 'storage')",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grant_host_permissions(install_id, pattern)
-             VALUES (?1, 'https://example.com/*')",
-            [&id],
-        )
-        .unwrap();
-
-        apply(&mut conn, PROFILE).unwrap();
-
-        let (revision, high_water): (i64, Option<Vec<u8>>) = conn
-            .query_row(
-                "SELECT revision, install_id_high_water
-                 FROM extension_install_catalog WHERE id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(revision, 7);
-        assert_eq!(high_water, Some(id.clone()));
-        for table in [
-            "extension_installs",
-            "extension_grants",
-            "extension_grant_api_permissions",
-            "extension_grant_host_permissions",
-        ] {
-            let count: i64 = conn
-                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            assert_eq!(count, 0, "v12 retained legacy authority in {table}");
-        }
-
-        let revision = ExtensionInstallCatalogRevision::new(7).unwrap();
-        let catalog = ExtensionInstallCatalog::from_persisted(
-            revision,
-            Some(ExtensionInstallId::from(legacy_id)),
-            Vec::new(),
-        )
-        .unwrap();
-        let package = ExtensionPackageIdentity::new(
-            ExtensionAuthorityId::from_bytes([8; 32]),
-            ExtensionPackageKey::from_bytes([9; 32]),
-            ExtensionPackageRevision::INITIAL,
-            ExtensionPackagePayloadIdentity::BundledTree,
-            ExtensionManifestDigest::from_bytes([10; 32]),
-            ExtensionTreeDigest::from_bytes([11; 32]),
-        );
-        assert!(matches!(
-            catalog.apply(
-                revision,
-                ExtensionInstallCatalogMutation::Install {
-                    id: ExtensionInstallId::from(legacy_id),
-                    package,
-                },
-            ),
-            Err(ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater { .. })
-        ));
-    }
-
-    #[test]
-    fn profile_v12_requires_exact_payload_evidence_shape() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, PROFILE).unwrap();
-
-        let insert = |id: u8,
-                      payload_kind: i64,
-                      archive_length: Option<i64>,
-                      archive_sha256: Option<Vec<u8>>| {
-            conn.execute(
-                "INSERT INTO extension_installs(
-                     id, revision, authority, package_key, package_revision,
-                     payload_kind, archive_length, archive_sha256,
-                     manifest_sha256, tree_sha256, desired_enabled
-                 ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, 0)",
-                rusqlite::params![
-                    vec![id; 16],
-                    vec![id; 32],
-                    vec![id.wrapping_add(1); 32],
-                    payload_kind,
-                    archive_length,
-                    archive_sha256,
-                    vec![id.wrapping_add(2); 32],
-                    vec![id.wrapping_add(3); 32],
-                ],
-            )
-        };
-
-        assert!(insert(1, 1, None, None).is_ok());
-        assert!(insert(2, 2, Some(1), Some(vec![2; 32])).is_ok());
-        assert!(insert(3, 2, Some(67_108_864), Some(vec![3; 32])).is_ok());
-        for (index, (kind, length, digest)) in [
-            (1, Some(1), None),
-            (1, None, Some(vec![3; 32])),
-            (2, None, Some(vec![4; 32])),
-            (2, Some(0), Some(vec![5; 32])),
-            (2, Some(67_108_865), Some(vec![6; 32])),
-            (2, Some(1), Some(vec![7; 31])),
-            (3, None, None),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert!(
-                insert(index as u8 + 10, kind, length, digest).is_err(),
-                "accepted malformed payload evidence case {index}"
-            );
-        }
     }
 
     #[test]
@@ -3270,7 +3859,7 @@ mod tests {
     #[test]
     fn meta_v13_enforces_expected_identity_shape_backend_and_owned_match() {
         let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
+        apply(&mut conn, &META[..13]).unwrap();
         insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
         let expected = vec![b'a'; 32];
         conn.execute(
@@ -3415,7 +4004,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(21));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(32));
     }
 
     #[test]
@@ -3750,193 +4339,6 @@ mod tests {
     }
 
     #[test]
-    fn meta_v14_namespace_schema_enforces_canonical_capacity_and_atomic_erasure_join() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
-        let profile = zephium_core::ids::ProfileId::from(u128::MAX).to_string();
-        conn.execute(
-            "INSERT INTO profiles(id, name, kind, position)
-             VALUES (?1, 'Fixture', 'named', 0)",
-            [&profile],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_native_namespace_obligations(
-                 profile_id, namespace_version
-             ) VALUES (?1, 1)",
-            [&profile],
-        )
-        .unwrap();
-        let unanchored = zephium_core::ids::ProfileId::from(u128::MAX - 1).to_string();
-        assert!(conn
-            .execute(
-                "UPDATE extension_native_namespace_obligations
-                 SET profile_id = ?2 WHERE profile_id = ?1",
-                rusqlite::params![&profile, &unanchored],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE extension_native_namespace_obligations
-                 SET namespace_version = 1 WHERE profile_id = ?1",
-                [&profile],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE profiles SET id = ?2 WHERE id = ?1",
-                rusqlite::params![&profile, &unanchored],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "INSERT INTO extension_native_namespace_obligations(
-                     profile_id, namespace_version
-                 ) VALUES (?1, 2)",
-                [&profile],
-            )
-            .is_err());
-
-        let lowercase = profile.to_ascii_lowercase();
-        let invalid_alphabet = format!("{}I", &profile[..25]);
-        let invalid_first = format!("8{}", &profile[1..]);
-        for (position, invalid) in [
-            "short".to_owned(),
-            lowercase,
-            invalid_alphabet,
-            invalid_first,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            conn.execute(
-                "INSERT INTO profiles(id, name, kind, position)
-                 VALUES (?1, 'Invalid fixture', 'named', ?2)",
-                rusqlite::params![&invalid, position as i64 + 1],
-            )
-            .unwrap();
-            assert!(
-                conn.execute(
-                    "INSERT INTO extension_native_namespace_obligations(
-                         profile_id, namespace_version
-                     ) VALUES (?1, 1)",
-                    [&invalid],
-                )
-                .is_err(),
-                "accepted noncanonical namespace profile {invalid:?}"
-            );
-        }
-
-        assert!(conn
-            .execute("DELETE FROM profiles WHERE id = ?1", [&profile])
-            .is_err());
-        conn.execute(
-            "INSERT INTO profile_deletion_journal(profile_id, authorized_at)
-             VALUES (?1, 1)",
-            [&profile],
-        )
-        .unwrap();
-        conn.execute("DELETE FROM profiles WHERE id = ?1", [&profile])
-            .unwrap();
-        assert!(conn
-            .execute(
-                "UPDATE profile_deletion_journal
-                 SET profile_id = ?2 WHERE profile_id = ?1",
-                rusqlite::params![&profile, &unanchored],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE profile_deletion_journal
-                 SET native_erasure_verified = 1 WHERE profile_id = ?1",
-                [&profile],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "DELETE FROM profile_deletion_journal WHERE profile_id = ?1",
-                [&profile],
-            )
-            .is_err());
-
-        {
-            let tx = conn.transaction().unwrap();
-            tx.execute(
-                "DELETE FROM extension_native_namespace_obligations
-                 WHERE profile_id = ?1 AND namespace_version = 1",
-                [&profile],
-            )
-            .unwrap();
-            assert_eq!(
-                tx.query_row(
-                    "SELECT native_erasure_verified
-                     FROM profile_deletion_journal WHERE profile_id = ?1",
-                    [&profile],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-                1
-            );
-            tx.rollback().unwrap();
-        }
-        assert_eq!(
-            conn.query_row(
-                "SELECT native_erasure_verified,
-                        (SELECT count(*)
-                         FROM extension_native_namespace_obligations
-                         WHERE profile_id = ?1)
-                 FROM profile_deletion_journal WHERE profile_id = ?1",
-                [&profile],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .unwrap(),
-            (0, 1)
-        );
-        conn.execute(
-            "DELETE FROM extension_native_namespace_obligations
-             WHERE profile_id = ?1 AND namespace_version = 1",
-            [&profile],
-        )
-        .unwrap();
-        assert_eq!(
-            conn.query_row(
-                "SELECT native_erasure_verified
-                 FROM profile_deletion_journal WHERE profile_id = ?1",
-                [&profile],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-            1
-        );
-        conn.execute(
-            "DELETE FROM profile_deletion_journal WHERE profile_id = ?1",
-            [&profile],
-        )
-        .unwrap();
-
-        for value in 1_u128..=129 {
-            let profile = zephium_core::ids::ProfileId::from(value).to_string();
-            conn.execute(
-                "INSERT OR IGNORE INTO profiles(id, name, kind, position)
-                 VALUES (?1, 'Capacity', 'named', ?2)",
-                rusqlite::params![&profile, value as i64 + 100],
-            )
-            .unwrap();
-            let inserted = conn.execute(
-                "INSERT INTO extension_native_namespace_obligations(
-                     profile_id, namespace_version
-                 ) VALUES (?1, 1)",
-                [&profile],
-            );
-            if value <= 128 {
-                assert!(inserted.is_ok(), "rejected exact capacity row {value}");
-            } else {
-                assert!(inserted.is_err(), "accepted row beyond exact capacity");
-            }
-        }
-    }
-
-    #[test]
     fn meta_v11_schema_rejects_invalid_native_ownership_state() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, META).unwrap();
@@ -4022,24 +4424,6 @@ mod tests {
             [],
         )
         .unwrap();
-    }
-
-    #[test]
-    fn meta_v11_exact_manifest_rejects_native_journal_schema_replacement() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
-        conn.execute_batch(
-            "DROP TABLE extension_native_ownership_journal;
-             CREATE TABLE extension_native_ownership_journal (
-                 profile_id TEXT,
-                 install_id BLOB,
-                 browsing_context TEXT
-             ) STRICT;",
-        )
-        .unwrap();
-
-        let error = apply(&mut conn, META).unwrap_err().to_string();
-        assert!(error.contains("sqlite_schema"), "{error}");
     }
 
     #[test]

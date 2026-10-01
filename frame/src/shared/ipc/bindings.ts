@@ -5,6 +5,93 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 
 /** Commands */
 export const commands = {
+	workCall: (expectedProfile: string, call: WorkCallV1_Deserialize) => __TAURI_INVOKE<WorkResponseV1_Serialize>("work_call", { expectedProfile, call }),
+	workOperation: (expectedProfile: string, operation: WorkCommandId, input: WorkOperationV1_Deserialize) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation", { expectedProfile, operation, input }),
+	workOperationStatus: (expectedProfile: string, work: WorkId, operation: WorkCommandId, acknowledge: boolean) => __TAURI_INVOKE<WorkOperationResponseV1_Serialize>("work_operation_status", { expectedProfile, work, operation, acknowledge }),
+	/**  Manifest preview for the composer. Bodies never cross this boundary. */
+	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1_Deserialize) => __TAURI_INVOKE<WorkContextPreviewV1_Serialize>("work_context_preview", { expectedProfile, purpose, selection }),
+	mediaImport: (expectedProfile: string) => typedError<MediaImportV1_Serialize, null>(__TAURI_INVOKE("media_import", { expectedProfile })),
+	/**
+	 *  Opens a non-image asset with the OS default application. The blob is the
+	 *  profile's own snapshot; nothing outside the media store is reachable.
+	 */
+	mediaOpen: (expectedProfile: string, id: string) => typedError<boolean, null>(__TAURI_INVOKE("media_open", { expectedProfile, id })),
+	mediaAdmitRemote: (expectedProfile: string, environment: string, element: string, url: string) => typedError<MediaAdmitV1, null>(__TAURI_INVOKE("media_admit_remote", { expectedProfile, environment, element, url })),
+	/**
+	 *  Admits one public image for a subject already on the canvas: fetch
+	 *  without cookies, bound and decode in the store, mint the Media resource,
+	 *  add it next to the subject, and relate subject → media.
+	 *  Admits a folder the person dropped or chose so the canvas can hold it
+	 *  and later runs can read inside it. The same policy governs the run.
+	 */
+	workAdmitFolder: (expectedProfile: string, path: string) => typedError<WorkFolderAdmitV1, null>(__TAURI_INVOKE("work_admit_folder", { expectedProfile, path })),
+	/**  Opens the folder picker and admits the choice under the run's policy. */
+	workPickFolder: (expectedProfile: string) => typedError<
+/**  The canonical path and display name to place as a Folder element. */
+{ kind: "admitted"; path: string; name: string } | 
+/**
+ *  Outside the home folder, protected, or missing (`not_a_folder` false),
+ *  or an existing path that is not a folder.
+ */
+{ kind: "refused"; not_a_folder: boolean } | null, null>(__TAURI_INVOKE("work_pick_folder", { expectedProfile })),
+	/**  Reveals an admitted folder, or a file inside one, in Finder. */
+	workRevealPath: (expectedProfile: string, path: string) => typedError<boolean, null>(__TAURI_INVOKE("work_reveal_path", { expectedProfile, path })),
+	/**
+	 *  Empties the memory cache of the calling interface web view, and nothing
+	 *  else: cookies, storage and disk caches stay, and no page's data store is
+	 *  reached (each page has its own).
+	 */
+	workReleaseMemory: () => __TAURI_INVOKE<boolean>("work_release_memory"),
+	/**
+	 *  Opens the folder panel at `start` (or its nearest existing folder) and
+	 *  admits the person's choice.
+	 */
+	workChooseFolder: (expectedProfile: string, start: string) => typedError<
+/**  The canonical path and display name to place as a Folder element. */
+{ kind: "admitted"; path: string; name: string } | 
+/**
+ *  Outside the home folder, protected, or missing (`not_a_folder` false),
+ *  or an existing path that is not a folder.
+ */
+{ kind: "refused"; not_a_folder: boolean } | null, null>(__TAURI_INVOKE("work_choose_folder", { expectedProfile, start })),
+	workActivity: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkActivityResponseV1>("work_activity", { expectedProfile, work }),
+	workHumanPages: (expectedProfile: string, work: WorkId) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_pages", { expectedProfile, work }),
+	workHumanPresent: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, region: WorkHumanRegionV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_present", { expectedProfile, work, page, region }),
+	workHumanContinue: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, account: WorkHumanAccountV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_continue", { expectedProfile, work, page, account }),
+	workHumanRelease: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_release", { expectedProfile, work, page }),
+	workDecisionPreference: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_decision_preference", { expectedProfile }),
+	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
+	workModels: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_models", { expectedProfile }),
+	workModelsReady: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsReadyV1>("work_models_ready", { expectedProfile }),
+	workChooseModel: (expectedProfile: string, role: WorkModelRole, id: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_choose_model", { expectedProfile, role, id }),
+	workSetProviderKey: (expectedProfile: string, provider: WorkModelProvider, key: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_provider_key", { expectedProfile, provider, key }),
+	workTestProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_test_provider_key", { expectedProfile, provider }),
+	workClearProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_clear_provider_key", { expectedProfile, provider }),
+	workSetModelEndpoint: (expectedProfile: string, base: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_model_endpoint", { expectedProfile, base }),
+	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
+	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
+	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
+	/**  The tools found on this Mac and the servers this profile added. */
+	workConnections: (expectedProfile: string) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_connections", { expectedProfile }),
+	/**  Adds or replaces a server; new secrets go to the Keychain. */
+	workSaveConnection: (expectedProfile: string, draft: WorkServerDraftV1) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_save_connection", { expectedProfile, draft }),
+	/**  Connect an unsaved draft, sign in if necessary, and preview its tools. */
+	workPreviewConnection: (expectedProfile: string, draft: WorkServerDraftV1) => __TAURI_INVOKE<WorkServerCheckV1>("work_preview_connection", { expectedProfile, draft }),
+	/**  Removes a server and forgets its secrets. */
+	workRemoveConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkConnectionsResponseV1_Serialize>("work_remove_connection", { expectedProfile, id }),
+	/**  Connects to a server once and lists its tools. */
+	workCheckConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkServerCheckV1>("work_check_connection", { expectedProfile, id }),
+	/**  Signs in to an HTTP server in a new tab, then checks it. */
+	workSignInConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkServerCheckV1>("work_sign_in_connection", { expectedProfile, id }),
+	/**  The browser tab owner cancels only the flow that owns the closed tab. */
+	workCancelConnectionSignIn: (expectedProfile: string, id: string, requestId: string) => __TAURI_INVOKE<boolean>("work_cancel_connection_sign_in", { expectedProfile, id, requestId }),
+	workMemories: (expectedProfile: string, query: WorkMemoryQueryV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_memories", { expectedProfile, query }),
+	/**  Changes one memory, or all of them, and returns the list for `query`. */
+	workChangeMemory: (expectedProfile: string, query: WorkMemoryQueryV1, change: WorkMemoryChangeV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_change_memory", { expectedProfile, query, change }),
+	workSkills: (expectedProfile: string) => __TAURI_INVOKE<WorkSkillsResponseV1>("work_skills", { expectedProfile }),
+	/**  A skill's `SKILL.md`, built-in or the person's, with the list. */
+	workSkillText: (expectedProfile: string, name: string) => __TAURI_INVOKE<WorkSkillsResponseV1>("work_skill_text", { expectedProfile, name }),
+	workChangeSkill: (expectedProfile: string, change: WorkSkillChangeV1) => __TAURI_INVOKE<WorkSkillsResponseV1>("work_change_skill", { expectedProfile, change }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
@@ -24,46 +111,65 @@ export const commands = {
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
 	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
+	/**
+	 *  Shows the transient Work browser pane over a Space tab or a fresh tab at
+	 *  an explicit trusted URL. The rect is the chrome's measured hole.
+	 */
+	workPaneShow: (target: WorkPaneTarget, rect: WorkPaneRect) => __TAURI_INVOKE<OperationAdmission>("work_pane_show", { target, rect }),
+	workPaneSetRect: (rect: WorkPaneRect, generation: number) => __TAURI_INVOKE<void>("work_pane_set_rect", { rect, generation }),
+	workPaneHide: () => __TAURI_INVOKE<OperationAdmission>("work_pane_hide"),
 	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**
-	 *  Opens or closes the one focused-profile management subscription.
-	 *  This is deliberately an explicit, non-polling visibility signal: the Shell
-	 *  retains authenticated management metadata only while privileged chrome is
-	 *  displaying it and performs no extension repository work at browser startup.
+	 *  Downloads and verifies the extension on the active store page, and
+	 *  returns what the user is asked to approve.
 	 */
-	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
+	webExtensionPrepare: (tabId: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_prepare", { tabId })),
+	webExtensionConfirm: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_confirm", { id })),
+	webExtensionCancel: () => __TAURI_INVOKE<void>("web_extension_cancel"),
+	webExtensionList: () => typedError<WebExtensionView[], string>(__TAURI_INVOKE("web_extension_list")),
+	webExtensionSetEnabled: (id: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_enabled", { id, enabled })),
+	webExtensionUninstall: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_uninstall", { id })),
 	/**
-	 *  Requests the one product-sealed extension catalog synchronization. The
-	 *  caller supplies no URL, profile, package, runtime target, or selection;
-	 *  those authorities were bound immutably before the worker was launched.
+	 *  Answers an extension's run-time request for access; granted access is
+	 *  kept for the next launch.
 	 */
-	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
-	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
+	webExtensionAnswerAccess: (request: WebExtensionAccessRequestView, allowed: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_answer_access", { request, allowed })),
 	/**
-	 *  Approves only the exact changed-authority replacement retained by Shell's
-	 *  current focused-profile subscription. Package identity and permission names
-	 *  never cross this IPC boundary.
+	 *  Chooses which sites an extension may use: `all` it asked for, only on
+	 *  `click`, or the listed `sites`.
 	 */
-	extensionManagementApproveUpdate: (reviewId: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_approve_update", { reviewId }),
-	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
+	webExtensionSetAccess: (id: string, mode: string, sites: string[]) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_access", { id, mode, sites })),
+	webExtensionOpenOptions: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_open_options", { id })),
 	/**
-	 *  Mutates only one bounded optional declaration from the exact installed
-	 *  management projection. Permission text never crosses this IPC boundary.
+	 *  Lets the user pick a `.crx` or `.zip` file, or with `folder` an unpacked
+	 *  extension, and returns what they are asked to approve; `None` when they
+	 *  cancel the picker.
 	 */
-	extensionManagementEditOptionalGrant: (installId: string, catalogRevision: string, installRevision: string, grantRevision: string, kind: ExtensionOptionalGrantKindInput, index: number, granted: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_edit_optional_grant", { installId, catalogRevision, installRevision, grantRevision, kind, index, granted }),
-	extensionManagementSetProfilePaused: (policyRevision: string, paused: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_profile_paused", { policyRevision, paused }),
-	extensionManagementSetCurrentSiteEnabled: (policyRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_current_site_enabled", { policyRevision, enabled }),
-	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
-	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
+	webExtensionChooseFile: (folder: boolean) => typedError<{
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	warnings: string[],
+	icon: string | null,
+	update: boolean,
+	/**  Installed from a file, so not checked against the Web Store. */
+	from_file: boolean,
+} | null, string>(__TAURI_INVOKE("web_extension_choose_file", { folder })),
+	/**  Reviews an extension file dropped on the browser. */
+	webExtensionPrepareFile: (path: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_prepare_file", { path })),
 	/**
-	 *  Answers only the exact Shell-projected native permission prompt. The four
-	 *  identities are short-lived stale fences; permission names never cross this
-	 *  command boundary and the actor remains the sole owner of the retained
-	 *  request payload.
+	 *  Reviews the newest store version of an extension whose update waits for
+	 *  the user's approval.
 	 */
-	extensionRuntimeGrantRespond: (profileId: string, installId: string, runtimeGeneration: string, requestId: string, allow: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", { profileId, installId, runtimeGeneration, requestId, allow }),
+	webExtensionReviewUpdate: (id: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_review_update", { id })),
+	/**
+	 *  A recommended extension's icon as a data URL, or `None` while the store
+	 *  can't be reached.
+	 */
+	webExtensionCatalogIcon: (token: string) => typedError<string | null, string>(__TAURI_INVOKE("web_extension_catalog_icon", { token })),
 	/**
 	 *  Reads only platform capability state. It never enumerates credentials,
 	 *  relying parties, or extension-owned vault data and never opens native UI.
@@ -82,7 +188,14 @@ export const commands = {
 	 */
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
+	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
+	blockerSiteChange: (context: BlockerSiteContext, action: BlockerSiteAction) => __TAURI_INVOKE<OperationAdmission>("blocker_site_change", { context, action }),
+	blockerPicker: (context: BlockerSiteContext, action: BlockerPickerAction) => typedError<{
+	session: string,
+	active: boolean,
+	selection: BlockerSelectionView | null,
+} | null, null>(__TAURI_INVOKE("blocker_picker", { context, action })),
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
 	blockerRefreshSources: () => __TAURI_INVOKE<OperationAdmission>("blocker_refresh_sources"),
 	profilesDelete: (profile: string) => __TAURI_INVOKE<OperationAdmission>("profiles_delete", { profile }),
@@ -148,7 +261,7 @@ export const commands = {
 	addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
 	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
-	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
+	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide }),
 	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
 	/**
 	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
@@ -171,6 +284,12 @@ export const commands = {
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
 	noteCall: (expectedProfile: string, call: NoteCall) => __TAURI_INVOKE<NoteReply>("note_call", { expectedProfile, call }),
 	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
+	/**
+	 *  Asks for the site icons of origins chrome shows outside a tab. Held icons
+	 *  arrive on the ordinary favicon event; missing ones are probed anonymously.
+	 *  Returns whether the request was queued.
+	 */
+	faviconProbe: (expectedProfile: string, origins: string[]) => __TAURI_INVOKE<boolean>("favicon_probe", { expectedProfile, origins }),
 	downloadCall: (expectedProfile: string, call: DownloadCall) => __TAURI_INVOKE<DownloadResponse>("download_call", { expectedProfile, call }),
 	/**
 	 *  Opens an address in the focused window. The launcher panel and the history
@@ -192,10 +311,6 @@ export const events = {
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
-	extensionDistributionChanged: makeEvent<ExtensionDistributionChanged>("extension-distribution-changed"),
-	extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>("extension-management-availability-changed"),
-	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
-	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
 	faviconsChanged: makeEvent<FaviconsChanged>("favicons-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
@@ -208,6 +323,12 @@ export const events = {
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
+	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
+	workChanged: makeEvent<WorkChanged>("work-changed"),
+	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
+	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
+	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
+	zephiumWorkModelsChanged: makeEvent<WorkModelsChanged>("zephium:work-models-changed"),
 };
 
 /* Types */
@@ -215,9 +336,18 @@ export const events = {
  *  Stable diagnostics classification. Native/parser text and filter content
  *  never cross the privileged IPC boundary.
  */
-export type BlockerFailure = "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
+export type BlockerFailure = "site_preferences_unavailable" | "generation_exhausted" | "compiler_dispatch_rejected" | "compiler_unavailable" | "compile_source_unavailable" | "compile_invalid_source" | "compile_resource_limit" | "compile_internal" | "compiled_artifact_mismatch" | "native_dispatch_rejected" | "native_unsupported" | "native_unsupported_artifact" | "native_invalid_artifact" | "native_compilation" | "native_installation" | "native_cleanup" | "native_superseded" | "contradictory_native_settlement";
 
 export type BlockerPhase = "unavailable" | "uninitialized" | "compiling" | "installing" | "ready" | "failed" | "retired";
+
+/**  Host-initiated picker controls, available only to privileged main chrome. */
+export type BlockerPickerAction = { kind: "start" } | { kind: "read"; session: string } | { kind: "preview"; session: string; enabled: boolean } | { kind: "stop"; session: string };
+
+export type BlockerPickerView = {
+	session: string,
+	active: boolean,
+	selection: BlockerSelectionView | null,
+};
 
 /**
  *  Authority of the focused profile's durable blocker preference.
@@ -267,6 +397,32 @@ export type BlockerRuntimeDiagnostics = {
 	evaluation_errors: string,
 };
 
+export type BlockerSelectionView = {
+	identity: string,
+	label: string,
+	count: number,
+	positional: boolean,
+};
+
+export type BlockerSiteAction = { kind: "save_selection"; session: string; selection: string } | { kind: "retry" } | { kind: "pause"; paused: boolean } | { kind: "set_hide_enabled"; id: string; enabled: boolean } | { kind: "remove_hide"; id: string };
+
+/**  Exact privileged site-control context; never accepted from ordinary page IPC. */
+export type BlockerSiteContext = {
+	profile: string,
+	tab: string,
+	site: string,
+	revision: string,
+};
+
+export type BlockerSiteView = {
+	context: BlockerSiteContext,
+	paused: boolean,
+	private_session: boolean,
+	ready: boolean,
+	busy: boolean,
+	hides: PersonalHideView[],
+};
+
 /**
  *  Stable package-refresh failure category. Endpoint, parser, and native
  *  strings are intentionally never forwarded to privileged JavaScript.
@@ -289,17 +445,18 @@ export type BlockerSourceIdentities = {
 export type BlockerSourcePhase = "not_configured" | "durable_activation_unsupported" | "storage_unavailable" | "clock_unsafe" | "idle" | "fresh" | "stale" | "refreshing" | "failed" | "shutdown";
 
 /**  Authority which admitted the displayed filter package. */
-export type BlockerSourceProvenance = "release_bundle" | "tuf_repository";
+export type BlockerSourceProvenance = "release_bundle" | "tuf_repository" | "official_https";
+
+export type BlockerStatsView = {
+	today: number | null,
+	last7Days: number | null,
+	days: (number | null)[],
+};
 
 export type BlockerStatusChanged = BlockerStatusView;
 
-/**
- *  Read-only, focused-profile diagnostics delivered only to privileged main
- *  chrome. It deliberately contains no profile selector, URL, origin, request
- *  metadata, native error string, or filter-list text. Runtime health is
- *  represented only by volatile aggregate counters.
- */
 export type BlockerStatusView = {
+	site: BlockerSiteView | null,
 	projection_revision: string,
 	protection: BlockerProtection,
 	phase: BlockerPhase,
@@ -382,22 +539,44 @@ export type DividerView = {
 	vertical: boolean,
 };
 
-export type DocumentAttrs = DocumentAttrs_Serialize | DocumentAttrs_Deserialize;
-
-export type DocumentAttrs_Deserialize = {
+export type DocumentAttrs = {
 	start?: number | null,
 	level?: number | null,
 	resource?: string | null,
 };
 
-export type DocumentAttrs_Serialize = {
-	start?: number | null,
-	level?: number | null,
-	resource?: string | null,
+export type DocumentMark = DocumentMark_Serialize | DocumentMark_Deserialize;
+
+/**
+ *  A link is descriptive: chrome opens it through a native intent, never as
+ *  an anchor navigation inside privileged chrome.
+ */
+export type DocumentMarkAttrs = DocumentMarkAttrs_Serialize | DocumentMarkAttrs_Deserialize;
+
+/**
+ *  A link is descriptive: chrome opens it through a native intent, never as
+ *  an anchor navigation inside privileged chrome.
+ */
+export type DocumentMarkAttrs_Deserialize = {
+	href?: string | null,
 };
 
-export type DocumentMark = {
+/**
+ *  A link is descriptive: chrome opens it through a native intent, never as
+ *  an anchor navigation inside privileged chrome.
+ */
+export type DocumentMarkAttrs_Serialize = {
+	href?: string | null,
+};
+
+export type DocumentMark_Deserialize = {
 	type: string,
+	attrs?: DocumentMarkAttrs_Deserialize | null,
+};
+
+export type DocumentMark_Serialize = {
+	type: string,
+	attrs?: DocumentMarkAttrs_Serialize | null,
 };
 
 /**
@@ -414,8 +593,8 @@ export type DocumentNode_Deserialize = {
 	type: string,
 	content?: DocumentNode_Deserialize[],
 	text?: string | null,
-	attrs?: DocumentAttrs_Deserialize | null,
-	marks?: DocumentMark[],
+	attrs?: DocumentAttrs | null,
+	marks?: DocumentMark_Deserialize[],
 };
 
 /**
@@ -426,8 +605,8 @@ export type DocumentNode_Serialize = {
 	type: string,
 	content?: DocumentNode_Serialize[],
 	text?: string | null,
-	attrs?: DocumentAttrs_Serialize | null,
-	marks?: DocumentMark[],
+	attrs?: DocumentAttrs | null,
+	marks?: DocumentMark_Serialize[],
 };
 
 export type DoubleTap = "off" | "command" | "option";
@@ -557,235 +736,6 @@ export type ExtensionActionsView = {
 	actions: ExtensionActionView[],
 };
 
-export type ExtensionDistributionChanged = ExtensionDistributionView;
-
-/**
- *  Redacted product-distribution failure reason. Network and native error
- *  strings never cross the privileged IPC boundary.
- */
-export type ExtensionDistributionFailureReasonView = "acquisition" | "busy" | "service_unavailable" | "service_rejected" | "service_failed_closed" | "settlement_timed_out" | "settlement_lost" | "submission_panicked" | "outcome_unresolved" | "activation_rejected" | "accounting";
-
-/**  Stable distribution failure stage exposed only to privileged chrome. */
-export type ExtensionDistributionFailureStageView = { type: "catalog" } | { type: "package_fetch"; index: number } | { type: "package_provision"; index: number } | { type: "catalog_activation" };
-
-/**
- *  Closed response for the argument-free product update trigger. This is an
- *  admission result, not completion; authoritative progress and settlement
- *  continue to arrive through `ExtensionDistributionChanged`.
- */
-export type ExtensionDistributionRefreshAdmissionView = "accepted" | "busy" | "quarantined" | "unavailable" | "shutting_down";
-
-/**  Exact replacement state for the dormant product distribution worker. */
-export type ExtensionDistributionStateView = { phase: "idle" } | { phase: "synchronizing" } | { phase: "ready"; package_count: number; materialized_packages: number; reused_packages: number; exact_retries: number; newly_activated: boolean } | { phase: "failed"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "quarantined"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "shutdown" };
-
-/**  Shell-revisioned product-distribution status for privileged extension UI. */
-export type ExtensionDistributionView = {
-	projection_revision: string,
-	state: ExtensionDistributionStateView,
-};
-
-/**
- *  One authenticated package offered by Zephium's current curated catalog.
- *  `candidate_index` is an opaque, short-lived selector into the exact
- *  revisioned catalog retained by Shell. Privileged chrome may only echo it;
- *  it conveys no package, repository, profile, or permission authority.
- */
-export type ExtensionInstallCandidateView = {
-	candidate_index: number,
-	name: string,
-	description: string | null,
-	author: string | null,
-	version: string,
-	source: ExtensionManagementSourceView,
-	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
-	verified_catalog_unix: string | null,
-	provenance: ExtensionManagementProvenanceView | null,
-	required_api: string[],
-	required_hosts: string[],
-	/**
-	 *  Canonically ordered optional API grants. The frontend returns only
-	 *  selected array indexes; Shell rejoins them to its retained candidate.
-	 */
-	optional_api: string[],
-	/**  Canonically ordered optional host grants. */
-	optional_hosts: string[],
-	supports_file_access: boolean,
-	file_access_available: boolean,
-	private_access_available: boolean,
-	compatibility: ExtensionManagementCompatibilityView,
-	limitations: ExtensionManagementLimitationView[],
-};
-
-/**
- *  Installs only a candidate from Shell's latest authenticated, retained
- *  management catalog. The frontend supplies no profile, package path,
- *  manifest declaration, or permission-name authority.
- */
-export type ExtensionInstallGrantSelectionInput = {
-	optional_api_indices: number[],
-	optional_host_indices: number[],
-	file_access: boolean,
-	private_access: boolean,
-};
-
-export type ExtensionManagementAvailabilityChanged = ExtensionManagementAvailabilityChangedView;
-
-/**  Actor-ordered projection of extension-management product availability. */
-export type ExtensionManagementAvailabilityChangedView = {
-	projection_revision: string,
-	availability: ExtensionManagementAvailabilityView,
-};
-
-/**
- *  Process-immutable product availability for the extension-management UX.
- *  This is a non-authorizing presentation fact. It carries no catalog,
- *  package, profile, repository, or runtime identity.
- */
-export type ExtensionManagementAvailabilityView = "configured" | "not_configured" | "unavailable";
-
-export type ExtensionManagementChanged = ExtensionManagementView;
-
-/**  Reviewed compatibility of the exact authenticated manifest. */
-export type ExtensionManagementCompatibilityView = "compatible" | "degraded";
-
-/**  One authenticated installed extension in browser-owned management UI. */
-export type ExtensionManagementEntryView = {
-	install_id: string,
-	install_revision: string,
-	name: string,
-	description: string | null,
-	author: string | null,
-	version: string,
-	has_options_page: boolean,
-	source: ExtensionManagementSourceView,
-	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
-	verified_catalog_unix: string | null,
-	provenance: ExtensionManagementProvenanceView | null,
-	runtime: ExtensionManagementRuntimeView,
-	/**  Present only when `runtime` is `active`. */
-	runtime_generation: string | null,
-	grants: ExtensionManagementGrantView,
-	/**
-	 *  Canonically ordered optional API declarations. Mutations return only
-	 *  the array index plus the exact grant revision.
-	 */
-	optional_api: string[],
-	/**  Canonically ordered optional host declarations. */
-	optional_hosts: string[],
-	compatibility: ExtensionManagementCompatibilityView,
-	limitations: ExtensionManagementLimitationView[],
-};
-
-/**  Non-authorizing summary of the atomic grant row joined to an install. */
-export type ExtensionManagementGrantView = {
-	initialized: boolean,
-	revision: string | null,
-	api_permissions: string[],
-	host_permissions: string[],
-	file_access: boolean,
-	private_access: boolean,
-};
-
-/**  One browser-owned explanation for a reviewed platform degradation. */
-export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" } | { type: "options_page" } | { type: "declarative_net_request" };
-
-/**  Settlement of the focused profile's lazy installed-extension projection. */
-export type ExtensionManagementPhase = "loading" | "ready" | "not_configured" | "catalog_not_synchronized" | "update_consent_required" | "unavailable" | "rejected" | "failed_closed";
-
-/**  Browser-authenticated, inert upstream identity for extension management UI. */
-export type ExtensionManagementProvenanceView = {
-	source_url: string,
-	upstream_version: string,
-	license_expression: string,
-	attribution: string,
-};
-
-/**  Process-local regular-runtime state for one installed extension. */
-export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "profile_paused" | "active";
-
-/**  Browser-authenticated acquisition/support lane for extension management UI. */
-export type ExtensionManagementSourceView = "zephium_verified" | "external_compatibility" | "developer_local";
-
-/**
- *  Exact replacement management cohort for the focused profile.
- *  Loading and failure phases always carry no catalog revision or rows, so a
- *  delayed failure cannot leave stale selectors actionable in privileged UI.
- */
-export type ExtensionManagementView = {
-	projection_revision: string,
-	profile_id: string,
-	phase: ExtensionManagementPhase,
-	catalog_revision: string | null,
-	/**  Present only while `phase` is `ready`. */
-	profile_policy: ExtensionProfilePolicyView | null,
-	entries: ExtensionManagementEntryView[],
-	candidates: ExtensionInstallCandidateView[],
-	/**  Present only while `phase` is `update_consent_required`. */
-	pending_update: ExtensionUpdateConsentView | null,
-};
-
-export type ExtensionOptionalGrantKindInput = "api" | "host";
-
-export type ExtensionProfilePolicyView = {
-	revision: string,
-	paused: boolean,
-	denied_site_count: number,
-	current_site_available: boolean,
-	current_site_denied: boolean,
-};
-
-export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView;
-
-/**
- *  One browser-owned optional-permission consent surface. Every identity is a
- *  short-lived echo token only; the Shell rejoins it to its retained native
- *  request before a user response can reach the serialized grant service.
- */
-export type ExtensionRuntimeGrantPromptEntryView = {
-	profile_id: string,
-	install_id: string,
-	runtime_generation: string,
-	request_id: string,
-	extension_name: string,
-	api_permissions: string[],
-	host_permissions: string[],
-	private_context: boolean,
-	/**
-	 *  True after an Allow gesture while the durable grant transaction is in
-	 *  flight. Chrome must disable both response buttons until replacement.
-	 */
-	processing: boolean,
-};
-
-/**
- *  Exact replacement for the process-wide permission prompt surface. `None`
- *  closes any prior prompt; Shell serializes the bounded native cohort so the
- *  frame never chooses request ordering.
- */
-export type ExtensionRuntimeGrantPromptView = {
-	projection_revision: string,
-	prompt: ExtensionRuntimeGrantPromptEntryView | null,
-};
-
-/**
- *  One exact authenticated replacement awaiting changed-authority or newly
- *  degraded compatibility review. `review_id` is an opaque,
- *  subscription-local echo token; no package identity or permission name is
- *  accepted back from privileged chrome.
- */
-export type ExtensionUpdateConsentView = {
-	review_id: string,
-	name: string,
-	version: string,
-	source: ExtensionManagementSourceView,
-	verified_catalog_unix: string | null,
-	provenance: ExtensionManagementProvenanceView | null,
-	added_required_api: string[],
-	added_required_hosts: string[],
-	compatibility: ExtensionManagementCompatibilityView,
-	limitations: ExtensionManagementLimitationView[],
-};
-
 /**
  *  One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never
  *  decodes a page-controlled image format.
@@ -856,6 +806,8 @@ export type IconRef = {
  */
 export type IconSurface = "chrome" | "panel";
 
+export type ItemId = string;
+
 export type ItemsChanged = ItemsState;
 
 export type ItemsState = {
@@ -893,9 +845,62 @@ export type LayoutChanged = LayoutState;
 
 export type LayoutState = {
 	dividers: DividerView[],
+	work_pane: WorkPaneLayout | null,
 };
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
+
+/**  Outcome of admitting one public image for a subject on the canvas. */
+export type MediaAdmitV1 = 
+/**  The media element now on the canvas, related to the subject. */
+{ kind: "admitted"; element: WorkElementId } | { kind: "refused"; error: ResourceError };
+
+export type MediaAssetV1 = MediaAssetV1_Serialize | MediaAssetV1_Deserialize;
+
+export type MediaAssetV1_Deserialize = {
+	version: number,
+	kind: MediaKind,
+	/**  Sniffed from bytes, never taken from a file name or a server. */
+	mime: string,
+	bytes: number,
+	/**  Hex SHA-256 of the stored bytes; also the blob's address. */
+	digest: string,
+	name: string,
+	origin: MediaOrigin,
+	width?: number | null,
+	height?: number | null,
+};
+
+export type MediaAssetV1_Serialize = {
+	version: number,
+	kind: MediaKind,
+	/**  Sniffed from bytes, never taken from a file name or a server. */
+	mime: string,
+	bytes: number,
+	/**  Hex SHA-256 of the stored bytes; also the blob's address. */
+	digest: string,
+	name: string,
+	origin: MediaOrigin,
+	width?: number | null,
+	height?: number | null,
+};
+
+/**  Outcome of a native file import into the profile's media store. */
+export type MediaImportV1 = MediaImportV1_Serialize | MediaImportV1_Deserialize;
+
+/**  Outcome of a native file import into the profile's media store. */
+export type MediaImportV1_Deserialize = ({ kind: "imported"; record: ResourceRecord_Deserialize }) & { error?: never } | ({ kind: "cancelled" }) & { error?: never; record?: never } | ({ kind: "refused"; error: ResourceError }) & { record?: never };
+
+/**  Outcome of a native file import into the profile's media store. */
+export type MediaImportV1_Serialize = ({ kind: "imported"; record: ResourceRecord_Serialize }) & { error?: never } | ({ kind: "cancelled" }) & { error?: never; record?: never } | ({ kind: "refused"; error: ResourceError }) & { record?: never };
+
+export type MediaKind = "image" | "pdf" | "file";
+
+export type MediaOrigin = 
+/**  A snapshot of a file the user picked; the source path is not retained. */
+{ kind: "imported" } | 
+/**  Fetched by Rust from a public HTTPS URL without cookies. */
+{ kind: "fetched"; url: string; observed_at: string };
 
 export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: string } | { kind: "create"; request_id: string; markdown: string } | 
 /**
@@ -1035,7 +1040,7 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "extension_enablement_pending" | "extension_activation_pending" | "extension_restart_required" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
+export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and
@@ -1119,6 +1124,14 @@ export type PanelState = {
 	corner_radius: number,
 };
 
+export type PersonalHideView = {
+	id: string,
+	label: string,
+	enabled: boolean,
+};
+
+export type ProfileId = string;
+
 export type ProfileKindView = "default" | "named" | "incognito";
 
 /**
@@ -1160,7 +1173,7 @@ export type ResourceCall_Serialize = ({ kind: "acknowledge"; request_id: string 
  */
 ({ kind: "task_overview"; today: string }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; query?: never; request_id?: never; today?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; query?: never; request_id?: never; today?: never };
 
-export type ResourceChangeKind = "task" | "task_list";
+export type ResourceChangeKind = "task" | "task_list" | "object" | "media";
 
 export type ResourceChanged = {
 	profile: string,
@@ -1185,7 +1198,7 @@ export type ResourceCommand_Serialize = {
 
 export type ResourceContent = ResourceContent_Serialize | ResourceContent_Deserialize;
 
-export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { assignee?: never; completed?: never; context?: never; description?: never; details?: never; due_date?: never; due_time?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
+export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
 /**
  *  Fields added after the first release carry `#[serde(default)]` so bodies
  *  written before they existed still load. A later track adding its own
@@ -1213,9 +1226,20 @@ sort_key?: string | null;
  *  the rules binding a task to one. This crate assigns it no meaning
  *  beyond being a same-profile ULID and enforces no reference.
  */
-work?: string | null }) & { document?: never };
+work?: string | null }) & { asset?: never; document?: never; object?: never } | 
+/**
+ *  A user-owned semantic object: a table, checklist, comparison, chart,
+ *  document, or findings, editable like a note.
+ */
+({ kind: "object"; object: WorkObjectV1_Deserialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
+/**
+ *  An imported or admitted file. Bytes live in the profile's
+ *  content-addressed media store; this row is its provenance and shape.
+ *  Only Rust mints it, after bounded sniffing and decoding.
+ */
+({ kind: "media"; asset: MediaAssetV1_Deserialize }) & { assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never };
 
-export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { assignee?: never; completed?: never; context?: never; description?: never; details?: never; due_date?: never; due_time?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
+export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
 /**
  *  Fields added after the first release carry `#[serde(default)]` so bodies
  *  written before they existed still load. A later track adding its own
@@ -1243,7 +1267,18 @@ sort_key?: string | null;
  *  the rules binding a task to one. This crate assigns it no meaning
  *  beyond being a same-profile ULID and enforces no reference.
  */
-work?: string | null }) & { document?: never };
+work?: string | null }) & { asset?: never; document?: never; object?: never } | 
+/**
+ *  A user-owned semantic object: a table, checklist, comparison, chart,
+ *  document, or findings, editable like a note.
+ */
+({ kind: "object"; object: WorkObjectV1_Serialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
+/**
+ *  An imported or admitted file. Bytes live in the profile's
+ *  content-addressed media store; this row is its provenance and shape.
+ *  Only Rust mints it, after bounded sniffing and decoding.
+ */
+({ kind: "media"; asset: MediaAssetV1_Serialize }) & { assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never };
 
 export type ResourceDraft = ResourceDraft_Serialize | ResourceDraft_Deserialize;
 
@@ -1265,23 +1300,35 @@ export type ResourceDraft_Serialize = {
 
 export type ResourceError = "invalid" | "not_found" | "conflict" | "capacity" | "unavailable" | "outcome_unknown";
 
+export type ResourceId = string;
+
 export type ResourceIntent = ResourceIntent_Serialize | ResourceIntent_Deserialize;
 
-export type ResourceIntent_Deserialize = ({ kind: "create_task_list"; title: string }) & { draft?: never; expect?: never; expected_revision?: never; id?: never; set?: never } | ({ kind: "rename_task_list"; id: string; expected_revision: string; title: string }) & { draft?: never; expect?: never; set?: never } | ({ kind: "delete_task_list"; id: string; expected_revision: string }) & { draft?: never; expect?: never; set?: never; title?: never } | ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { expect?: never; expected_revision?: never; id?: never; set?: never; title?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize }) & { expect?: never; set?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never; expect?: never; set?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never; expect?: never; set?: never; title?: never } | 
+export type ResourceIntent_Deserialize = ({ kind: "create_task_list"; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never } | ({ kind: "rename_task_list"; id: string; expected_revision: string; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never } | ({ kind: "delete_task_list"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never; title?: never } | 
+/**
+ *  Copy an artifact (original or the user's revision) into an Object
+ *  resource. Rust resolves data, evidence, review, and provenance.
+ */
+({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expect?: never; expected_revision?: never; id?: never; set?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | 
 /**
  *  Writes individual task properties onto the current revision, whatever
  *  it is, after checking the `expect` preconditions against it.
  */
-({ kind: "update_task"; id: string; set: TaskField[]; expect?: TaskField[] }) & { draft?: never; expected_revision?: never; title?: never };
+({ kind: "update_task"; id: string; set: TaskField[]; expect?: TaskField[] }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expected_revision?: never; objective?: never; title?: never };
 
-export type ResourceIntent_Serialize = ({ kind: "create_task_list"; title: string }) & { draft?: never; expect?: never; expected_revision?: never; id?: never; set?: never } | ({ kind: "rename_task_list"; id: string; expected_revision: string; title: string }) & { draft?: never; expect?: never; set?: never } | ({ kind: "delete_task_list"; id: string; expected_revision: string }) & { draft?: never; expect?: never; set?: never; title?: never } | ({ kind: "create"; draft: ResourceDraft_Serialize }) & { expect?: never; expected_revision?: never; id?: never; set?: never; title?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize }) & { expect?: never; set?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { draft?: never; expect?: never; set?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { draft?: never; expect?: never; set?: never; title?: never } | 
+export type ResourceIntent_Serialize = ({ kind: "create_task_list"; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never } | ({ kind: "rename_task_list"; id: string; expected_revision: string; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never } | ({ kind: "delete_task_list"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "create"; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never; title?: never } | 
+/**
+ *  Copy an artifact (original or the user's revision) into an Object
+ *  resource. Rust resolves data, evidence, review, and provenance.
+ */
+({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expect?: never; expected_revision?: never; id?: never; set?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | 
 /**
  *  Writes individual task properties onto the current revision, whatever
  *  it is, after checking the `expect` preconditions against it.
  */
-({ kind: "update_task"; id: string; set: TaskField[]; expect: TaskField[] }) & { draft?: never; expected_revision?: never; title?: never };
+({ kind: "update_task"; id: string; set: TaskField[]; expect: TaskField[] }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expected_revision?: never; objective?: never; title?: never };
 
-export type ResourceKind = "note" | "task";
+export type ResourceKind = "note" | "task" | "object" | "media";
 
 export type ResourceQuery = {
 	completed?: boolean | null,
@@ -1453,6 +1500,8 @@ export type SidebarNodeView = {
  */
 export type SidebarSectionView = "favorites" | "pinned" | "today";
 
+export type SpaceId = string;
+
 /**  One ordered space owned by the focused profile. */
 export type SpaceView = {
 	id: string,
@@ -1470,6 +1519,12 @@ export type SplitGroupView = {
 
 export type TabChanged = TabView;
 
+/**
+ *  Browser chrome's bounded tab renderer choice. Future extension-owned
+ *  documents can add a separate variant without treating them as page URLs.
+ */
+export type TabContentView = "web" | "settings" | "extensions" | "extension_owned";
+
 export type TabView = {
 	id: string,
 	/**
@@ -1481,6 +1536,8 @@ export type TabView = {
 	projection_revision: string,
 	title: string,
 	url: string | null,
+	/**  Explicit content owner. Internal pages never carry a navigable URL. */
+	content?: TabContentView,
 	loading: boolean,
 	popup_blocked?: boolean,
 	can_go_back: boolean,
@@ -1598,6 +1655,3678 @@ export type UiCommand = string;
 export type UiInfo = {
 	material: Material,
 };
+
+/**  An extension's run-time request for access, awaiting the user's answer. */
+export type WebExtensionAccessRequestView = {
+	profile_id: string,
+	request: string,
+	extension_id: string,
+	warnings: string[],
+	permissions: string[],
+	patterns: string[],
+};
+
+export type WebExtensionAccessRequested = WebExtensionAccessRequestView;
+
+export type WebExtensionReview = {
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	warnings: string[],
+	icon: string | null,
+	update: boolean,
+	/**  Installed from a file, so not checked against the Web Store. */
+	from_file: boolean,
+};
+
+export type WebExtensionView = {
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	enabled: boolean,
+	icon: string | null,
+	/**  `running`, `starting`, `failed` or `off`. */
+	state: string,
+	error: string | null,
+	warnings: string[],
+	/**  `all`, `click` or `sites`; meaningful only when `site_scoped`. */
+	access: string,
+	sites: string[],
+	/**  Whether the extension asked for access to websites at all. */
+	site_scoped: boolean,
+	has_options: boolean,
+	held_update: string | null,
+	sideloaded: boolean,
+};
+
+/**
+ *  The user names the tab, the effect, and (for updates) exact values. Rust
+ *  resolves the page, mints the account identity, and returns the draft the
+ *  user approves; approval is the account attestation.
+ */
+export type WorkAccountApprovalRequestV1 = WorkAccountApprovalRequestV1_Serialize | WorkAccountApprovalRequestV1_Deserialize;
+
+/**
+ *  The user names the tab, the effect, and (for updates) exact values. Rust
+ *  resolves the page, mints the account identity, and returns the draft the
+ *  user approves; approval is the account attestation.
+ */
+export type WorkAccountApprovalRequestV1_Deserialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	environment: WorkEnvironmentId,
+	/**  The attached browser element on the canvas. */
+	element: WorkElementId,
+	effect: WorkAccountEffectV1_Deserialize,
+	/**
+	 *  `origin` drafts a grant to read pages on the tab's origin for the
+	 *  next request, instead of one exact page.
+	 */
+	mode?: WorkAccountModeV1,
+	/**  Signed-in pages an origin grant may open (1–12; 12 when absent). */
+	pages?: number | null,
+};
+
+/**
+ *  The user names the tab, the effect, and (for updates) exact values. Rust
+ *  resolves the page, mints the account identity, and returns the draft the
+ *  user approves; approval is the account attestation.
+ */
+export type WorkAccountApprovalRequestV1_Serialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	environment: WorkEnvironmentId,
+	/**  The attached browser element on the canvas. */
+	element: WorkElementId,
+	effect: WorkAccountEffectV1_Serialize,
+	/**
+	 *  `origin` drafts a grant to read pages on the tab's origin for the
+	 *  next request, instead of one exact page.
+	 */
+	mode?: WorkAccountModeV1,
+	/**  Signed-in pages an origin grant may open (1–12; 12 when absent). */
+	pages?: number | null,
+};
+
+export type WorkAccountEffectV1 = WorkAccountEffectV1_Serialize | WorkAccountEffectV1_Deserialize;
+
+export type WorkAccountEffectV1_Deserialize = ({ kind: "read" }) & { update?: never } | { kind: "update"; update: WorkFieldUpdateV1_Deserialize };
+
+export type WorkAccountEffectV1_Serialize = ({ kind: "read" }) & { update?: never } | { kind: "update"; update: WorkFieldUpdateV1_Serialize };
+
+/**
+ *  One origin read with the profile's signed-in session for one request.
+ *  The person's approval attests the account; Zephium never infers it.
+ */
+export type WorkAccountGrantV1 = WorkAccountGrantV1_Serialize | WorkAccountGrantV1_Deserialize;
+
+/**
+ *  One origin read with the profile's signed-in session for one request.
+ *  The person's approval attests the account; Zephium never infers it.
+ */
+export type WorkAccountGrantV1_Deserialize = {
+	/**  Exact HTTPS origin. */
+	origin: string,
+	/**  Opaque identity minted by Rust when the approval was drafted. */
+	account: string,
+	/**  The attached tab the person approved it from, when there was one. */
+	tab?: ItemId | null,
+	/**  Signed-in pages the request may open on this origin. */
+	pages: number,
+};
+
+/**
+ *  One origin read with the profile's signed-in session for one request.
+ *  The person's approval attests the account; Zephium never infers it.
+ */
+export type WorkAccountGrantV1_Serialize = {
+	/**  Exact HTTPS origin. */
+	origin: string,
+	/**  Opaque identity minted by Rust when the approval was drafted. */
+	account: string,
+	/**  The attached tab the person approved it from, when there was one. */
+	tab?: ItemId | null,
+	/**  Signed-in pages the request may open on this origin. */
+	pages: number,
+};
+
+export type WorkAccountModeV1 = "page" | "origin";
+
+/**
+ *  A page the user chose from an attached tab. Execution opens it in a
+ *  Work-owned page sharing the profile's cookies; the tab itself is untouched.
+ */
+export type WorkAccountScope = {
+	tab: ItemId,
+	url: string,
+	origin: string,
+	/**
+	 *  Opaque account identity minted by Rust at preparation; the approval
+	 *  binds it to this profile and origin.
+	 */
+	account: string,
+};
+
+/**  One granted origin as the request uses it: "Using your session on host". */
+export type WorkAccountUseV1 = {
+	host: string,
+	pages_used: number,
+	pages: number,
+};
+
+export type WorkActivityResponseV1 = {
+	version: number,
+	profile: string,
+	work: WorkId,
+	signals: WorkSignalV1[],
+	pages?: WorkPageV1[],
+	error: WorkFailureV1 | null,
+};
+
+export type WorkActivityV1 = "planning" | "delegating" | "searching" | "reading" | "interacting" | "verifying" | "recovering" | 
+/**  The hosted page waits while its window is hidden or minimized. */
+"paused" | "comparing" | "producing_artifact" | "waiting_for_approval" | "waiting_for_human" | "cancelling" | "finishing";
+
+export type WorkAgentGrantV1 = WorkAgentGrantV1_Serialize | WorkAgentGrantV1_Deserialize;
+
+export type WorkAgentGrantV1_Deserialize = {
+	provider: WorkSearchProvider,
+	model: string,
+	max_turns: number,
+	max_steps: number,
+	browse_hops: number,
+	/**
+	 *  Folders the person granted for this run, as absolute paths. Every file
+	 *  step must resolve inside one of them; the application enforces it.
+	 */
+	folders?: string[],
+	/**  Retired origin grants: accepted in stored runs, refused for new ones. */
+	accounts?: WorkAccountGrantV1_Deserialize[],
+	/**
+	 *  A private run: every page opens in the run's own empty storage and
+	 *  never in the person's sessions.
+	 */
+	private?: boolean,
+	/**
+	 *  The lead agent's model: this run is a lead run with tools, parts and
+	 *  the current object kinds. Absent for the earlier runtime.
+	 */
+	lead?: WorkModelRef | null,
+	/**
+	 *  The workflow the person started the run from: the lead begins with
+	 *  this skill loaded. A name it does not know is ignored.
+	 */
+	skill?: string | null,
+};
+
+export type WorkAgentGrantV1_Serialize = {
+	provider: WorkSearchProvider,
+	model: string,
+	max_turns: number,
+	max_steps: number,
+	browse_hops: number,
+	/**
+	 *  Folders the person granted for this run, as absolute paths. Every file
+	 *  step must resolve inside one of them; the application enforces it.
+	 */
+	folders?: string[],
+	/**  Retired origin grants: accepted in stored runs, refused for new ones. */
+	accounts?: WorkAccountGrantV1_Serialize[],
+	/**
+	 *  A private run: every page opens in the run's own empty storage and
+	 *  never in the person's sessions.
+	 */
+	private?: boolean,
+	/**
+	 *  The lead agent's model: this run is a lead run with tools, parts and
+	 *  the current object kinds. Absent for the earlier runtime.
+	 */
+	lead?: WorkModelRef | null,
+	/**
+	 *  The workflow the person started the run from: the lead begins with
+	 *  this skill loaded. A name it does not know is ignored.
+	 */
+	skill?: string | null,
+};
+
+export type WorkApprovalRequestV1 = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	limits: WorkExecutionLimits,
+	scope: WorkBrowseScope,
+	primary: WorkPlanNodeId | null,
+};
+
+export type WorkArea = {
+	id: WorkAreaId,
+	title: string,
+};
+
+/** Named spatial group, never execution authority. */
+export type WorkAreaId = string;
+
+/**  Area geometry is presentation; membership stays on the element. */
+export type WorkAreaPlacement = {
+	area: WorkAreaId,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+};
+
+export type WorkArtifactDataV1 = WorkArtifactDataV1_Serialize | WorkArtifactDataV1_Deserialize;
+
+export type WorkArtifactDataV1_Deserialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Deserialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Decimal strings preserve values independently of renderer floating point. */
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Deserialize[]; basis?: WorkMeasurementBasis_Deserialize | null; general_knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; y?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Deserialize[]; entries?: WorkSourceEntry_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Deserialize[]; criteria: WorkCriterion[]; 
+/**  Dense: `cells[subject][criterion]`. */
+cells: WorkCell_Deserialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; body?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Deserialize[]; items: WorkFinding_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  A descriptive card, not an interactive native context or navigation grant. */
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Boxes and arrows: an architecture, system, flow or pipeline. */
+({ kind: "diagram"; nodes: WorkDiagramNode_Deserialize[]; edges: WorkDiagramEdge_Deserialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; markdown?: never; medium?: never; more?: never; name?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  An excerpt of source code with notes on line ranges. */
+({ kind: "code"; 
+/**  One of `CODE_LANGUAGES`. */
+language: string; text: string; notes?: WorkCodeNote[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**
+ *  The reply a careful expert would write, in a closed Markdown subset
+ *  (see `answer_faults`); the other objects of its set stand beside it.
+ */
+({ kind: "answer"; markdown: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  The answer, set on the canvas as typography above the result. */
+({ kind: "reply"; headline: string; 
+/**  Inline bold and code only. */
+text: string; figures?: WorkFigureV1_Deserialize[]; points?: string[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Things to choose between, photo-led. */
+({ kind: "picks"; facet: WorkPickFacetV1; items: WorkPickV1_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Time-ordered steps, drawn as a timeline. */
+({ kind: "plan"; steps: WorkPlanStepV1_Deserialize[]; total?: WorkLabelledV1 | null; checkable?: boolean }) & { alternatives?: never; basis?: never; body?: never; cells?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Items without time order. */
+({ kind: "list"; style: WorkListStyleV1; items: WorkListItemV1_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Real data in typed columns; no sentences. */
+({ kind: "sheet"; columns: WorkSheetColumnV1_Deserialize[]; rows: WorkSheetRowV1_Deserialize[]; note?: string | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  A chart in one of the catalogue's styles; maps onto the frame's ChartSpec. */
+({ kind: "plot"; style: WorkPlotStyleV1; x: WorkPlotXV1_Deserialize; y: WorkPlotYV1_Deserialize; series: WorkPlotSeriesV1_Deserialize[]; headline?: WorkLabelledV1 | null; 
+/**  What the values are and where they come from. */
+basis: string; 
+/**  The values are the model's knowledge, not observed. */
+knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x_label?: never; y_label?: never } | 
+/**  A change to one file, read like a code review. */
+({ kind: "diff"; path: string; 
+/**  One of `CODE_LANGUAGES`. */
+language: string; summary: string; hunks: WorkDiffHunkV1[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  A message in the shape of its destination; sent only through Confirm. */
+({ kind: "draft"; destination: WorkDraftDestinationV1; to?: string | null; subject?: string | null; body: string; target_url?: string | null }) & { alternatives?: never; basis?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subjects?: never; summary?: never; text?: never; title?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**
+ *  A folder's overview: what it is, its stack, its structure, its
+ *  scripts and its state.
+ */
+({ kind: "project"; name: string; 
+/**  One line: what the project is. */
+summary: string; 
+/**  The folder, as an absolute path. */
+root: string; stack?: WorkProjectStackV1_Deserialize[]; tree: WorkProjectEntryV1_Deserialize[]; 
+/**  Entries at the root beyond those listed. */
+more?: number | null; scripts?: WorkProjectScriptV1_Deserialize[]; git?: WorkProjectGitV1_Deserialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; rows?: never; series?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "media"; 
+/**  Image, video or audio; `kind` is the object's own tag. */
+medium: WorkMediaKindV1; url: string; title?: string | null; provider?: WorkMediaProviderV1 | null; poster?: string | null; duration?: string | null; start_secs?: number | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never };
+
+export type WorkArtifactDataV1_Serialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Serialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Decimal strings preserve values independently of renderer floating point. */
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Serialize[]; basis?: WorkMeasurementBasis_Serialize | null; general_knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; y?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Serialize[]; entries?: WorkSourceEntry_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Serialize[]; criteria: WorkCriterion[]; 
+/**  Dense: `cells[subject][criterion]`. */
+cells: WorkCell_Serialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; body?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Serialize[]; items: WorkFinding_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  A descriptive card, not an interactive native context or navigation grant. */
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Boxes and arrows: an architecture, system, flow or pipeline. */
+({ kind: "diagram"; nodes: WorkDiagramNode_Serialize[]; edges: WorkDiagramEdge_Serialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; markdown?: never; medium?: never; more?: never; name?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  An excerpt of source code with notes on line ranges. */
+({ kind: "code"; 
+/**  One of `CODE_LANGUAGES`. */
+language: string; text: string; notes?: WorkCodeNote[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**
+ *  The reply a careful expert would write, in a closed Markdown subset
+ *  (see `answer_faults`); the other objects of its set stand beside it.
+ */
+({ kind: "answer"; markdown: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  The answer, set on the canvas as typography above the result. */
+({ kind: "reply"; headline: string; 
+/**  Inline bold and code only. */
+text: string; figures?: WorkFigureV1_Serialize[]; points?: string[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Things to choose between, photo-led. */
+({ kind: "picks"; facet: WorkPickFacetV1; items: WorkPickV1_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Time-ordered steps, drawn as a timeline. */
+({ kind: "plan"; steps: WorkPlanStepV1_Serialize[]; total?: WorkLabelledV1 | null; checkable?: boolean }) & { alternatives?: never; basis?: never; body?: never; cells?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Items without time order. */
+({ kind: "list"; style: WorkListStyleV1; items: WorkListItemV1_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  Real data in typed columns; no sentences. */
+({ kind: "sheet"; columns: WorkSheetColumnV1_Serialize[]; rows: WorkSheetRowV1_Serialize[]; note?: string | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  A chart in one of the catalogue's styles; maps onto the frame's ChartSpec. */
+({ kind: "plot"; style: WorkPlotStyleV1; x: WorkPlotXV1_Serialize; y: WorkPlotYV1_Serialize; series: WorkPlotSeriesV1_Serialize[]; headline?: WorkLabelledV1 | null; 
+/**  What the values are and where they come from. */
+basis: string; 
+/**  The values are the model's knowledge, not observed. */
+knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x_label?: never; y_label?: never } | 
+/**  A change to one file, read like a code review. */
+({ kind: "diff"; path: string; 
+/**  One of `CODE_LANGUAGES`. */
+language: string; summary: string; hunks: WorkDiffHunkV1[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**  A message in the shape of its destination; sent only through Confirm. */
+({ kind: "draft"; destination: WorkDraftDestinationV1; to?: string | null; subject?: string | null; body: string; target_url?: string | null }) & { alternatives?: never; basis?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subjects?: never; summary?: never; text?: never; title?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | 
+/**
+ *  A folder's overview: what it is, its stack, its structure, its
+ *  scripts and its state.
+ */
+({ kind: "project"; name: string; 
+/**  One line: what the project is. */
+summary: string; 
+/**  The folder, as an absolute path. */
+root: string; stack?: WorkProjectStackV1_Serialize[]; tree: WorkProjectEntryV1_Serialize[]; 
+/**  Entries at the root beyond those listed. */
+more?: number | null; scripts?: WorkProjectScriptV1_Serialize[]; git?: WorkProjectGitV1_Serialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; rows?: never; series?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "media"; 
+/**  Image, video or audio; `kind` is the object's own tag. */
+medium: WorkMediaKindV1; url: string; title?: string | null; provider?: WorkMediaProviderV1 | null; poster?: string | null; duration?: string | null; start_secs?: number | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never };
+
+export type WorkArtifactDecision = "accepted" | "rejected";
+
+/** Immutable semantic artifact identity. */
+export type WorkArtifactId = string;
+
+export type WorkArtifactPresentationV1 = "automatic" | "compact" | "expanded";
+
+export type WorkArtifactUserState = WorkArtifactUserState_Serialize | WorkArtifactUserState_Deserialize;
+
+export type WorkArtifactUserState_Deserialize = {
+	artifact: WorkArtifactId,
+	revision: WorkRevision,
+	decision: WorkArtifactDecision | null,
+	edited_data: WorkArtifactDataV1_Deserialize | null,
+	/**  Citations for edited content. Original citations remain on the artifact. */
+	evidence: WorkEvidenceLink[],
+};
+
+export type WorkArtifactUserState_Serialize = {
+	artifact: WorkArtifactId,
+	revision: WorkRevision,
+	decision: WorkArtifactDecision | null,
+	edited_data: WorkArtifactDataV1_Serialize | null,
+	/**  Citations for edited content. Original citations remain on the artifact. */
+	evidence: WorkEvidenceLink[],
+};
+
+export type WorkArtifactV1 = WorkArtifactV1_Serialize | WorkArtifactV1_Deserialize;
+
+export type WorkArtifactV1_Deserialize = {
+	version: number,
+	id: WorkArtifactId,
+	execution: WorkExecutionId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	output: string,
+	title: string,
+	data: WorkArtifactDataV1_Deserialize,
+	evidence: WorkEvidenceLink[],
+	review: WorkOutputReview,
+	presentation: WorkArtifactPresentationV1,
+	/**
+	 *  The whole object answers from the model's own knowledge, shown once on
+	 *  the canvas; it never stands in for an observed source.
+	 */
+	general_knowledge?: boolean,
+	/**
+	 *  This object is the newer version of an earlier one in the same work;
+	 *  the canvas shows it where that one stands. Chains are linear.
+	 */
+	revises?: WorkArtifactId | null,
+	/**  The part that made it: it sits at the end of that part's row. */
+	part?: WorkPartId | null,
+};
+
+export type WorkArtifactV1_Serialize = {
+	version: number,
+	id: WorkArtifactId,
+	execution: WorkExecutionId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	output: string,
+	title: string,
+	data: WorkArtifactDataV1_Serialize,
+	evidence: WorkEvidenceLink[],
+	review: WorkOutputReview,
+	presentation: WorkArtifactPresentationV1,
+	/**
+	 *  The whole object answers from the model's own knowledge, shown once on
+	 *  the canvas; it never stands in for an observed source.
+	 */
+	general_knowledge?: boolean,
+	/**
+	 *  This object is the newer version of an earlier one in the same work;
+	 *  the canvas shows it where that one stands. Chains are linear.
+	 */
+	revises?: WorkArtifactId | null,
+	/**  The part that made it: it sits at the end of that part's row. */
+	part?: WorkPartId | null,
+};
+
+/**  Why a step asks the person. */
+export type WorkAskPurposeV1 = 
+/**  The agent's own question about the request. */
+"question" | 
+/**  Whether the agent may work in the person's session on a site. */
+"entry" | 
+/**  The run spent its budget: keep going or stop. */
+"budget" | 
+/**  Whether the agent may read the person's history, notes or tabs. */
+"context" | 
+/**  Whether the agent may use an installed tool or connected service. */
+"connection" | 
+/**  Any other yes or no before the agent acts. */
+"confirm" | 
+/**
+ *  Whether the agent may read a folder on this Mac the request named;
+ *  the step's local fact carries the folder.
+ */
+"folder";
+
+export type WorkAttemptFact = {
+	id: WorkAttemptId,
+	node: WorkPlanNodeId,
+	status: WorkAttemptStatus,
+	/**
+	 *  Reservation is retained for unknown outcomes. Settled accounting names
+	 *  exact usage or a conservative ceiling; missing means unknown, never zero.
+	 */
+	usage: WorkUsage | null,
+};
+
+/** Exact durable worker attempt identity. */
+export type WorkAttemptId = string;
+
+export type WorkAttemptStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
+
+/**
+ *  Attribution is descriptive history, never authorization. Legacy content has
+ *  unknown attribution; application callers cannot impersonate agent authors.
+ */
+export type WorkAuthor = "user" | "primary_agent" | "other_agent" | "legacy_unknown";
+
+/**
+ *  The command ID is profile-scoped and survives lost replies and restart.
+ *  New Work, question and plan identities are minted by Rust exactly once.
+ */
+export type WorkAuthoringCommandV1 = {
+	version: number,
+	command: WorkCommandId,
+	intent: WorkAuthoringIntent,
+};
+
+export type WorkAuthoringIntent = { kind: "create"; objective: string } | { kind: "edit"; work: WorkId; expected_revision: WorkRevision; edit: WorkUserEdit } | { kind: "delete"; work: WorkId; expected_revision: WorkRevision };
+
+export type WorkAuthoringReceipt = {
+	command: WorkCommandId,
+	work: WorkId,
+	applied_revision: WorkRevision,
+	deleted: boolean,
+};
+
+export type WorkAuthoringStatus = "draft" | "needs_input" | "plan_ready";
+
+export type WorkBrowseCollection = {
+	title: string,
+	columns: WorkBrowseColumn[],
+	max_items: number,
+};
+
+export type WorkBrowseColumn = {
+	name: string,
+	value: WorkBrowseValue,
+	required: boolean,
+	extraction?: WorkBrowseExtraction,
+};
+
+export type WorkBrowseExtraction = "verbatim" | "generate";
+
+export type WorkBrowseRoute = {
+	origin: string,
+	path_prefix: string,
+};
+
+export type WorkBrowseScope = {
+	start_url: string,
+	/**
+	 *  Exact HTTPS origins and path prefixes, interpreted by the browser
+	 *  discovery compiler. Redirects do not implicitly extend this set.
+	 */
+	routes: WorkBrowseRoute[],
+	max_hops: number,
+};
+
+export type WorkBrowseValue = { kind: "text" } | { kind: "money"; permitted_currencies: string[] } | { kind: "url" } | { kind: "image_url" };
+
+/**
+ *  Durable document operations share a bounded, profile-checked transport.
+ *  Provider generation and worker admission have separate lifetimes.
+ */
+export type WorkCallV1 = WorkCallV1_Serialize | WorkCallV1_Deserialize;
+
+/**
+ *  Durable document operations share a bounded, profile-checked transport.
+ *  Provider generation and worker admission have separate lifetimes.
+ */
+export type WorkCallV1_Deserialize = ({ kind: "environment"; version: number; request: WorkEnvironmentCall_Deserialize }) & { command?: never } | ({ kind: "query"; request: WorkQueryV1 }) & { command?: never; version?: never } | ({ kind: "author"; command: WorkAuthoringCommandV1 }) & { request?: never; version?: never } | ({ kind: "execute"; command: WorkCommandV1_Deserialize }) & { request?: never; version?: never };
+
+/**
+ *  Durable document operations share a bounded, profile-checked transport.
+ *  Provider generation and worker admission have separate lifetimes.
+ */
+export type WorkCallV1_Serialize = ({ kind: "environment"; version: number; request: WorkEnvironmentCall_Serialize }) & { command?: never } | ({ kind: "query"; request: WorkQueryV1 }) & { command?: never; version?: never } | ({ kind: "author"; command: WorkAuthoringCommandV1 }) & { request?: never; version?: never } | ({ kind: "execute"; command: WorkCommandV1_Serialize }) & { request?: never; version?: never };
+
+export type WorkCapability = WorkCapability_Serialize | WorkCapability_Deserialize;
+
+export type WorkCapability_Deserialize = 
+/**  One public provider search, without browser state or attached context. */
+({ kind: "public_search"; scope: WorkPublicSearchScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  Direct children can search with this explicit model, browse anonymously,
+ *  or synthesize. Each child's exact query remains separately approved.
+ */
+({ kind: "coordinate_public_research"; provider: WorkSearchProvider; model: string; max_hops: number }) & { grant?: never; scope?: never; update?: never } | 
+/**  Anonymous read-only discovery in a fresh per-resource cookie store. */
+({ kind: "public_discovery"; scope: WorkPublicDiscoveryScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**  Direct-child scheduling and compact synthesis within public discovery. */
+({ kind: "coordinate_public_discovery"; max_hops: number }) & { grant?: never; model?: never; provider?: never; scope?: never; update?: never } | ({ kind: "public_browse"; scope: WorkBrowseScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  A primary agent may assign pre-approved children within this envelope
+ *  and synthesize their results. This is not a direct browser/action port.
+ */
+({ kind: "coordinate"; scope: WorkBrowseScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**  Structured handoffs from completed plan dependencies only. */
+({ kind: "synthesize" }) & { grant?: never; max_hops?: never; model?: never; provider?: never; scope?: never; update?: never } | 
+/**
+ *  Read one exact page with the profile's own signed-in session. The
+ *  approving user attests the account; Zephium cannot verify it.
+ */
+({ kind: "account_read"; scope: WorkAccountScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  One approved field transition on that page, then its restoration,
+ *  each verified from a fresh observation before the next step.
+ */
+({ kind: "account_update"; scope: WorkAccountScope; update: WorkFieldUpdateV1_Deserialize }) & { grant?: never; max_hops?: never; model?: never; provider?: never } | 
+/**
+ *  Routine work under one grant: the agent chooses searches, reads,
+ *  discoveries and published objects turn by turn. Read-only; reads are
+ *  anonymous except inside origins the person approved in `accounts`, and
+ *  effects need their own approval.
+ */
+({ kind: "agent"; grant: WorkAgentGrantV1_Deserialize }) & { max_hops?: never; model?: never; provider?: never; scope?: never; update?: never };
+
+export type WorkCapability_Serialize = 
+/**  One public provider search, without browser state or attached context. */
+({ kind: "public_search"; scope: WorkPublicSearchScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  Direct children can search with this explicit model, browse anonymously,
+ *  or synthesize. Each child's exact query remains separately approved.
+ */
+({ kind: "coordinate_public_research"; provider: WorkSearchProvider; model: string; max_hops: number }) & { grant?: never; scope?: never; update?: never } | 
+/**  Anonymous read-only discovery in a fresh per-resource cookie store. */
+({ kind: "public_discovery"; scope: WorkPublicDiscoveryScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**  Direct-child scheduling and compact synthesis within public discovery. */
+({ kind: "coordinate_public_discovery"; max_hops: number }) & { grant?: never; model?: never; provider?: never; scope?: never; update?: never } | ({ kind: "public_browse"; scope: WorkBrowseScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  A primary agent may assign pre-approved children within this envelope
+ *  and synthesize their results. This is not a direct browser/action port.
+ */
+({ kind: "coordinate"; scope: WorkBrowseScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**  Structured handoffs from completed plan dependencies only. */
+({ kind: "synthesize" }) & { grant?: never; max_hops?: never; model?: never; provider?: never; scope?: never; update?: never } | 
+/**
+ *  Read one exact page with the profile's own signed-in session. The
+ *  approving user attests the account; Zephium cannot verify it.
+ */
+({ kind: "account_read"; scope: WorkAccountScope }) & { grant?: never; max_hops?: never; model?: never; provider?: never; update?: never } | 
+/**
+ *  One approved field transition on that page, then its restoration,
+ *  each verified from a fresh observation before the next step.
+ */
+({ kind: "account_update"; scope: WorkAccountScope; update: WorkFieldUpdateV1_Serialize }) & { grant?: never; max_hops?: never; model?: never; provider?: never } | 
+/**
+ *  Routine work under one grant: the agent chooses searches, reads,
+ *  discoveries and published objects turn by turn. Read-only; reads are
+ *  anonymous except inside origins the person approved in `accounts`, and
+ *  effects need their own approval.
+ */
+({ kind: "agent"; grant: WorkAgentGrantV1_Serialize }) & { max_hops?: never; model?: never; provider?: never; scope?: never; update?: never };
+
+export type WorkCell = WorkCell_Serialize | WorkCell_Deserialize;
+
+export type WorkCellValue = WorkCellValue_Serialize | WorkCellValue_Deserialize;
+
+export type WorkCellValue_Deserialize = ({ kind: "text"; text: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; value?: never } | 
+/**  Decimal string; the criterion supplies unit and basis. */
+({ kind: "measurement"; value: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "money"; amount: string; currency: string; observed_at?: string | null }) & { present?: never; text?: never; value?: never } | ({ kind: "rating"; value: number }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "presence"; present: boolean }) & { amount?: never; currency?: never; observed_at?: never; text?: never; value?: never } | ({ kind: "unknown" }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never; value?: never };
+
+export type WorkCellValue_Serialize = ({ kind: "text"; text: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; value?: never } | 
+/**  Decimal string; the criterion supplies unit and basis. */
+({ kind: "measurement"; value: string }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "money"; amount: string; currency: string; observed_at?: string | null }) & { present?: never; text?: never; value?: never } | ({ kind: "rating"; value: number }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never } | ({ kind: "presence"; present: boolean }) & { amount?: never; currency?: never; observed_at?: never; text?: never; value?: never } | ({ kind: "unknown" }) & { amount?: never; currency?: never; observed_at?: never; present?: never; text?: never; value?: never };
+
+export type WorkCell_Deserialize = {
+	value: WorkCellValue_Deserialize,
+	/**  Indices into the artifact evidence array. */
+	evidence?: number[],
+	note?: string | null,
+	/**
+	 *  Well-known general knowledge, labeled as such; never a substitute for
+	 *  evidence on uncertain or web-derived values.
+	 */
+	general_knowledge?: boolean,
+};
+
+export type WorkCell_Serialize = {
+	value: WorkCellValue_Serialize,
+	/**  Indices into the artifact evidence array. */
+	evidence?: number[],
+	note?: string | null,
+	/**
+	 *  Well-known general knowledge, labeled as such; never a substitute for
+	 *  evidence on uncertain or web-derived values.
+	 */
+	general_knowledge?: boolean,
+};
+
+export type WorkChanged = WorkChangedV1;
+
+/**
+ *  Invalidation only. Consumers read current facts; delivery grants no authority
+ *  and is neither an ordered event log nor proof that a command succeeded.
+ */
+export type WorkChangedV1 = {
+	profile: string,
+	work: WorkId,
+};
+
+export type WorkChartPoint = WorkChartPoint_Serialize | WorkChartPoint_Deserialize;
+
+export type WorkChartPoint_Deserialize = {
+	label: string,
+	value: string,
+	evidence?: number[],
+};
+
+export type WorkChartPoint_Serialize = {
+	label: string,
+	value: string,
+	evidence?: number[],
+};
+
+export type WorkChartSeries = WorkChartSeries_Serialize | WorkChartSeries_Deserialize;
+
+export type WorkChartSeries_Deserialize = {
+	name: string,
+	points: WorkChartPoint_Deserialize[],
+};
+
+export type WorkChartSeries_Serialize = {
+	name: string,
+	points: WorkChartPoint_Serialize[],
+};
+
+export type WorkChecklistItem = {
+	text: string,
+	completed: boolean,
+};
+
+/**  A command-line tool as Settings shows it. */
+export type WorkCliRowV1 = WorkCliRowV1_Serialize | WorkCliRowV1_Deserialize;
+
+/**  A command-line tool as Settings shows it. */
+export type WorkCliRowV1_Deserialize = {
+	/**  `gh`, `git`, `codex` or `claude`. */
+	id: string,
+	status: WorkCliStatusV1,
+	version: string | null,
+	path?: string | null,
+	/**  The account the tool says it uses: a login, an email, "ChatGPT". */
+	account: string | null,
+};
+
+/**  A command-line tool as Settings shows it. */
+export type WorkCliRowV1_Serialize = {
+	/**  `gh`, `git`, `codex` or `claude`. */
+	id: string,
+	status: WorkCliStatusV1,
+	version: string | null,
+	path?: string | null,
+	/**  The account the tool says it uses: a login, an email, "ChatGPT". */
+	account: string | null,
+};
+
+export type WorkCliStatusV1 = "signed_in" | "signed_out" | 
+/**  Installed and needs no account (git). */
+"ready" | "missing" | "unknown";
+
+export type WorkCloudStatusV1 = {
+	signed_in: boolean,
+	plan: string | null,
+};
+
+/**  Lines `from..=to` of the code text, counted from 1. */
+export type WorkCodeNote = {
+	from: number,
+	to: number,
+	text: string,
+};
+
+export type WorkCommandApprovalScopeV1 = "none" | "folder" | "command";
+
+export type WorkCommandClassV1 = "read" | "write" | "ask";
+
+export type WorkCommandEvidenceV1 = {
+	cwd: string,
+	command: string,
+	exit: number | null,
+	signal: number | null,
+	elapsed_ms: number,
+	bytes: number,
+	digest: string,
+	text: string,
+	truncated: boolean,
+};
+
+/** Idempotency correlation only, never an entity capability. */
+export type WorkCommandId = string;
+
+export type WorkCommandOutcomeV1 = {
+	exit: number | null,
+	signal: number | null,
+	elapsed_ms: number,
+	bytes: number,
+	digest: string,
+};
+
+export type WorkCommandOutputV1 = {
+	/**  Present with output only after the process starts; excludes approval time. */
+	elapsed_ms?: number,
+	text: string,
+	bytes: number,
+	truncated: boolean,
+};
+
+export type WorkCommandPolicyV1 = {
+	class: WorkCommandClassV1,
+	reason: WorkCommandReasonV1,
+	scope: WorkCommandApprovalScopeV1,
+	root: string,
+};
+
+export type WorkCommandReasonV1 = "inspection" | "project_execution" | "file_change" | "unknown_program" | "network" | "destructive" | "privilege" | "outside_roots" | "shell_syntax";
+
+export type WorkCommandReceipt = {
+	command: WorkCommandId,
+	applied_revision: WorkRevision,
+	execution: WorkExecutionId,
+};
+
+export type WorkCommandRecordV1 = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	command: WorkCommandEvidenceV1,
+};
+
+/**
+ *  Retry the same command and expected revision after a lost reply. The Store
+ *  returns its original receipt plus current facts. Reusing an ID with changed
+ *  operands is a conflict. Receipt eviction is never automatic.
+ */
+export type WorkCommandV1 = WorkCommandV1_Serialize | WorkCommandV1_Deserialize;
+
+/**
+ *  Retry the same command and expected revision after a lost reply. The Store
+ *  returns its original receipt plus current facts. Reusing an ID with changed
+ *  operands is a conflict. Receipt eviction is never automatic.
+ */
+export type WorkCommandV1_Deserialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	command: WorkCommandId,
+	intent: WorkRuntimeIntent_Deserialize,
+};
+
+/**
+ *  Retry the same command and expected revision after a lost reply. The Store
+ *  returns its original receipt plus current facts. Reusing an ID with changed
+ *  operands is a conflict. Receipt eviction is never automatic.
+ */
+export type WorkCommandV1_Serialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	command: WorkCommandId,
+	intent: WorkRuntimeIntent_Serialize,
+};
+
+export type WorkComparisonAlternative = {
+	name: string,
+	values: string[],
+};
+
+export type WorkConfidence = "supported" | "inferred" | "unverified" | "contradicted";
+
+/**  What a held step would commit. */
+export type WorkConfirmCategoryV1 = 
+/**  Send, post, reply, share or invite. */
+"communication" | 
+/**  Pay, buy, book or order. */
+"purchase" | 
+/**  Delete, remove or cancel. */
+"destructive" | 
+/**  Save or submit a change. */
+"save" | 
+/**  Type into a document that saves as it is typed. */
+"edit";
+
+export type WorkConfirmDecisionV1 = "approved" | 
+/**  Approved, and later edits on this site in this run need no question. */
+"allowed_for_run" | "declined";
+
+export type WorkConfirmFactV1 = {
+	label: string,
+	value: string,
+};
+
+export type WorkConfirmV1 = WorkConfirmV1_Serialize | WorkConfirmV1_Deserialize;
+
+export type WorkConfirmV1_Deserialize = {
+	site: string,
+	category: WorkConfirmCategoryV1,
+	/**  "Send to #design as you?", from a fixed template and page text. */
+	headline: string,
+	/**  "press Send". */
+	action: string,
+	/**  The exact text the step would send or save, as the page holds it. */
+	text?: string | null,
+	facts?: WorkConfirmFactV1[],
+	/**  The page step whose captured frame shows the page as it stands. */
+	page?: WorkStepId | null,
+	/**  Other sites whose page text appears in `text`. */
+	provenance?: string[],
+	/**  "Allow edits on <site> for this run" is offered. */
+	run_option?: boolean,
+	decision?: WorkConfirmDecisionV1 | null,
+};
+
+export type WorkConfirmV1_Serialize = {
+	site: string,
+	category: WorkConfirmCategoryV1,
+	/**  "Send to #design as you?", from a fixed template and page text. */
+	headline: string,
+	/**  "press Send". */
+	action: string,
+	/**  The exact text the step would send or save, as the page holds it. */
+	text?: string | null,
+	facts?: WorkConfirmFactV1[],
+	/**  The page step whose captured frame shows the page as it stands. */
+	page?: WorkStepId | null,
+	/**  Other sites whose page text appears in `text`. */
+	provenance?: string[],
+	/**  "Allow edits on <site> for this run" is offered. */
+	run_option?: boolean,
+	decision?: WorkConfirmDecisionV1 | null,
+};
+
+/**
+ *  What one connection call touched, in closed fields the frame writes its
+ *  row from.
+ */
+export type WorkConnectionCallV1 = WorkConnectionCallV1_Serialize | WorkConnectionCallV1_Deserialize;
+
+/**
+ *  What one connection call touched, in closed fields the frame writes its
+ *  row from.
+ */
+export type WorkConnectionCallV1_Deserialize = {
+	/**  "github", or an MCP server's id. */
+	service: string,
+	/**  The namespaced tool: `github_issue`, `notion__search`. */
+	tool: string,
+	/**  What kind of call it was: `issue`, `issues`, `pr`, `comment`. */
+	verb: string,
+	/**  What it touched: "#123", "octo/app". */
+	target?: string | null,
+	/**  A title it read, such as the issue's. */
+	title?: string | null,
+	/**  Items it listed. */
+	count?: number | null,
+	/**  The page the call is about, when it has one. */
+	url?: string | null,
+};
+
+/**
+ *  What one connection call touched, in closed fields the frame writes its
+ *  row from.
+ */
+export type WorkConnectionCallV1_Serialize = {
+	/**  "github", or an MCP server's id. */
+	service: string,
+	/**  The namespaced tool: `github_issue`, `notion__search`. */
+	tool: string,
+	/**  What kind of call it was: `issue`, `issues`, `pr`, `comment`. */
+	verb: string,
+	/**  What it touched: "#123", "octo/app". */
+	target?: string | null,
+	/**  A title it read, such as the issue's. */
+	title?: string | null,
+	/**  Items it listed. */
+	count?: number | null,
+	/**  The page the call is about, when it has one. */
+	url?: string | null,
+};
+
+export type WorkConnectionsResponseV1 = WorkConnectionsResponseV1_Serialize | WorkConnectionsResponseV1_Deserialize;
+
+export type WorkConnectionsResponseV1_Deserialize = {
+	version: number,
+	profile: string,
+	clis: WorkCliRowV1_Deserialize[],
+	servers: WorkServerRowV1[],
+	error: WorkFailureV1 | null,
+};
+
+export type WorkConnectionsResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	clis: WorkCliRowV1_Serialize[],
+	servers: WorkServerRowV1[],
+	error: WorkFailureV1 | null,
+};
+
+/**
+ *  The persisted manifest: bound to the plan revision or execution spec it
+ *  informed, renderable by chrome before dispatch from the same struct.
+ */
+export type WorkContextDisclosureV1 = WorkContextDisclosureV1_Serialize | WorkContextDisclosureV1_Deserialize;
+
+/**
+ *  The persisted manifest: bound to the plan revision or execution spec it
+ *  informed, renderable by chrome before dispatch from the same struct.
+ */
+export type WorkContextDisclosureV1_Deserialize = {
+	version: number,
+	environment: WorkEnvironmentId,
+	environment_revision: WorkRevision,
+	purpose: WorkContextPurpose,
+	items: WorkContextItemV1_Deserialize[],
+	total_bytes: number,
+	/**
+	 *  Open tabs the person consented to list; the canvas shows them as page
+	 *  cards without a read.
+	 */
+	tabs?: WorkContextTabV1_Deserialize[],
+};
+
+/**
+ *  The persisted manifest: bound to the plan revision or execution spec it
+ *  informed, renderable by chrome before dispatch from the same struct.
+ */
+export type WorkContextDisclosureV1_Serialize = {
+	version: number,
+	environment: WorkEnvironmentId,
+	environment_revision: WorkRevision,
+	purpose: WorkContextPurpose,
+	items: WorkContextItemV1_Serialize[],
+	total_bytes: number,
+	/**
+	 *  Open tabs the person consented to list; the canvas shows them as page
+	 *  cards without a read.
+	 */
+	tabs?: WorkContextTabV1_Serialize[],
+};
+
+export type WorkContextItemKind = "note" | "task" | "object" | "tab" | "objective" | "artifact" | "subject" | "finding" | "source" | 
+/**  The user's recorded choice about an element; added by Rust, not selected. */
+"decision";
+
+export type WorkContextItemV1 = WorkContextItemV1_Serialize | WorkContextItemV1_Deserialize;
+
+export type WorkContextItemV1_Deserialize = {
+	element: WorkElementId,
+	kind: WorkContextItemKind,
+	title: string,
+	revision: string,
+	/**  Hex SHA-256 of the admitted body after truncation. */
+	digest: string,
+	bytes: number,
+	truncated: boolean,
+	visibility: WorkContextVisibility,
+	/**  Added by Rust from durable Work state (decisions), not by selection. */
+	implicit?: boolean,
+};
+
+export type WorkContextItemV1_Serialize = {
+	element: WorkElementId,
+	kind: WorkContextItemKind,
+	title: string,
+	revision: string,
+	/**  Hex SHA-256 of the admitted body after truncation. */
+	digest: string,
+	bytes: number,
+	truncated: boolean,
+	visibility: WorkContextVisibility,
+	/**  Added by Rust from durable Work state (decisions), not by selection. */
+	implicit?: boolean,
+};
+
+/**
+ *  The manifest chrome renders before dispatch, computed by the same
+ *  admission that later binds it to the operation.
+ */
+export type WorkContextPreviewV1 = WorkContextPreviewV1_Serialize | WorkContextPreviewV1_Deserialize;
+
+/**
+ *  The manifest chrome renders before dispatch, computed by the same
+ *  admission that later binds it to the operation.
+ */
+export type WorkContextPreviewV1_Deserialize = ({ kind: "admitted"; disclosure: WorkContextDisclosureV1_Deserialize }) & { error?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { disclosure?: never };
+
+/**
+ *  The manifest chrome renders before dispatch, computed by the same
+ *  admission that later binds it to the operation.
+ */
+export type WorkContextPreviewV1_Serialize = ({ kind: "admitted"; disclosure: WorkContextDisclosureV1_Serialize }) & { error?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { disclosure?: never };
+
+export type WorkContextPurpose = "planning" | "public_read" | 
+/**
+ *  The routine agent loop: the model sees the bodies; Rust refuses search
+ *  text that repeats private context.
+ */
+"agent";
+
+export type WorkContextSelectionItem = {
+	element: WorkElementId,
+	revision: string,
+};
+
+/**
+ *  The user's selection as displayed: element ids plus the identity token the
+ *  UI saw for each (resource revision, artifact id, tab URL, Work revision).
+ */
+export type WorkContextSelectionV1 = WorkContextSelectionV1_Serialize | WorkContextSelectionV1_Deserialize;
+
+/**
+ *  The user's selection as displayed: element ids plus the identity token the
+ *  UI saw for each (resource revision, artifact id, tab URL, Work revision).
+ */
+export type WorkContextSelectionV1_Deserialize = {
+	environment: WorkEnvironmentId,
+	items: WorkContextSelectionItem[],
+	/**
+	 *  The person's consent, for this request, to list their open tabs of
+	 *  the current window as context: title, host and path, never content.
+	 */
+	tabs?: boolean,
+};
+
+/**
+ *  The user's selection as displayed: element ids plus the identity token the
+ *  UI saw for each (resource revision, artifact id, tab URL, Work revision).
+ */
+export type WorkContextSelectionV1_Serialize = {
+	environment: WorkEnvironmentId,
+	items: WorkContextSelectionItem[],
+	/**
+	 *  The person's consent, for this request, to list their open tabs of
+	 *  the current window as context: title, host and path, never content.
+	 */
+	tabs?: boolean,
+};
+
+/**  One open tab: never its page content or query. */
+export type WorkContextTabV1 = WorkContextTabV1_Serialize | WorkContextTabV1_Deserialize;
+
+/**  One open tab: never its page content or query. */
+export type WorkContextTabV1_Deserialize = {
+	title: string,
+	host: string,
+	path: string,
+	/**
+	 *  The profile holds a first-party cookie for this host: a closed fact,
+	 *  never an account or a name. It offers a grant; it never grants one.
+	 */
+	signed_in?: boolean,
+};
+
+/**  One open tab: never its page content or query. */
+export type WorkContextTabV1_Serialize = {
+	title: string,
+	host: string,
+	path: string,
+	/**
+	 *  The profile holds a first-party cookie for this host: a closed fact,
+	 *  never an account or a name. It offers a grant; it never grants one.
+	 */
+	signed_in?: boolean,
+};
+
+/**
+ *  Public items originate from public provider research and may accompany a
+ *  user-directed public read. Everything the user wrote or browsed is private.
+ */
+export type WorkContextVisibility = "public" | "private";
+
+/**  How exactly a measured cost is known, weakest call first. */
+export type WorkCostBasis = 
+/**  Every settled call reported exact provider cost. */
+"exact" | 
+/**  Exact tokens, and at least one cost priced from the trusted catalog. */
+"priced" | 
+/**  At least one call charged its reservation ceiling or was in flight. */
+"reserved";
+
+export type WorkCriterion = {
+	name: string,
+	kind: WorkCriterionKind,
+};
+
+export type WorkCriterionKind = { kind: "text" } | { kind: "measurement"; unit: string; basis: string } | { kind: "rating"; rubric: string; scale_max: number } | { kind: "presence" };
+
+/**
+ *  A user's durable choice about one element: the selected product, the
+ *  preferred option, the rejected candidate. Context for later work, never a
+ *  permission or an executed effect.
+ */
+export type WorkDecision = {
+	element: WorkElementId,
+	choice: string,
+};
+
+/**  Trusted per-profile choice; page and model output cannot select it. */
+export type WorkDecisionChoiceV1 = "recommended" | "standard" | "off";
+
+export type WorkDecisionPreferenceChanged = WorkDecisionPreferenceChangedV1;
+
+/**  Invalidation only: read the current preference after delivery. */
+export type WorkDecisionPreferenceChangedV1 = {
+	profile: string,
+};
+
+export type WorkDecisionPreferenceV1 = {
+	version: number,
+	profile: string,
+	choice: WorkDecisionChoiceV1,
+	effective: WorkDecisionChoiceV1,
+	typesafe_key_present: boolean,
+	error: WorkFailureV1 | null,
+};
+
+export type WorkDiagramEdge = WorkDiagramEdge_Serialize | WorkDiagramEdge_Deserialize;
+
+export type WorkDiagramEdge_Deserialize = {
+	from: string,
+	to: string,
+	label?: string | null,
+};
+
+export type WorkDiagramEdge_Serialize = {
+	from: string,
+	to: string,
+	label?: string | null,
+};
+
+export type WorkDiagramLayer = {
+	id: string,
+	name: string,
+};
+
+export type WorkDiagramNode = WorkDiagramNode_Serialize | WorkDiagramNode_Deserialize;
+
+export type WorkDiagramNodeKind = "client" | "edge" | "gateway" | "service" | "worker" | "model" | "store" | "queue" | "cache" | "storage" | "external" | "other";
+
+export type WorkDiagramNode_Deserialize = {
+	/**  ASCII identifier edges refer to; never shown. */
+	id: string,
+	name: string,
+	kind: WorkDiagramNodeKind,
+	/**
+	 *  A bare public host (postgresql.org), used only to fetch the vendor's
+	 *  icon; never a link or a navigation grant.
+	 */
+	vendor?: string | null,
+	note?: string | null,
+	/**  A layer id of this diagram. */
+	layer?: string | null,
+};
+
+export type WorkDiagramNode_Serialize = {
+	/**  ASCII identifier edges refer to; never shown. */
+	id: string,
+	name: string,
+	kind: WorkDiagramNodeKind,
+	/**
+	 *  A bare public host (postgresql.org), used only to fetch the vendor's
+	 *  icon; never a link or a navigation grant.
+	 */
+	vendor?: string | null,
+	note?: string | null,
+	/**  A layer id of this diagram. */
+	layer?: string | null,
+};
+
+export type WorkDiffHunkV1 = {
+	old_start: number,
+	new_start: number,
+	lines: WorkDiffLineV1[],
+};
+
+export type WorkDiffLineV1 = {
+	op: WorkDiffOpV1,
+	text: string,
+};
+
+export type WorkDiffOpV1 = "ctx" | "add" | "del";
+
+export type WorkDraftDestinationV1 = "slack" | "email" | "linkedin" | "x" | "github" | "message";
+
+/** One resource representation in a Work environment. */
+export type WorkElementId = string;
+
+/**
+ *  Integer canvas coordinates avoid non-finite or precision-dependent values.
+ *  They are descriptive geometry, never native-page geometry or authority.
+ */
+export type WorkElementPlacement = WorkElementPlacement_Serialize | WorkElementPlacement_Deserialize;
+
+/**
+ *  Integer canvas coordinates avoid non-finite or precision-dependent values.
+ *  They are descriptive geometry, never native-page geometry or authority.
+ */
+export type WorkElementPlacement_Deserialize = {
+	element: WorkElementId,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	/**
+	 *  0: an absolute position from before lanes, which the canvas re-derives;
+	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 */
+	revision?: number,
+};
+
+/**
+ *  Integer canvas coordinates avoid non-finite or precision-dependent values.
+ *  They are descriptive geometry, never native-page geometry or authority.
+ */
+export type WorkElementPlacement_Serialize = {
+	element: WorkElementId,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	/**
+	 *  0: an absolute position from before lanes, which the canvas re-derives;
+	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 */
+	revision?: number,
+};
+
+export type WorkEnvironmentCall = WorkEnvironmentCall_Serialize | WorkEnvironmentCall_Deserialize;
+
+export type WorkEnvironmentCall_Deserialize = 
+/**  Revision-scoped presentation save; stale identities never execute again. */
+({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Deserialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never } | 
+/**  Idempotent user selection; updates only the Space's last-opened Work. */
+({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; view?: never };
+
+export type WorkEnvironmentCall_Serialize = 
+/**  Revision-scoped presentation save; stale identities never execute again. */
+({ kind: "checkpoint"; id: WorkEnvironmentId; expected: WorkRevision; view: WorkEnvironmentView_Serialize }) & { after?: never; command?: never; intent?: never; limit?: never; space?: never } | 
+/**  Idempotent user selection; updates only the Space's last-opened Work. */
+({ kind: "open"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "read"; id: WorkEnvironmentId }) & { after?: never; command?: never; expected?: never; intent?: never; limit?: never; space?: never; view?: never } | ({ kind: "list"; space: SpaceId; after: WorkEnvironmentId | null; limit: number }) & { command?: never; expected?: never; id?: never; intent?: never; view?: never } | ({ kind: "command"; command: WorkCommandId; intent: WorkEnvironmentIntent }) & { after?: never; expected?: never; id?: never; limit?: never; space?: never; view?: never };
+
+export type WorkEnvironmentChanged = WorkEnvironmentChangedV1;
+
+export type WorkEnvironmentChangedV1 = {
+	profile: string,
+	environment: WorkEnvironmentId,
+};
+
+export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null } | { kind: "relate"; from: WorkElementId; to: WorkElementId; relation: WorkRelationKind } | { kind: "unrelate"; relation: WorkRelationId } | 
+/**  Records or replaces the user's choice about one element. */
+{ kind: "decide"; element: WorkElementId; choice: string } | { kind: "undecide"; element: WorkElementId };
+
+export type WorkEnvironmentElement = {
+	id: WorkElementId,
+	reference: WorkEnvironmentReference,
+	area: WorkAreaId | null,
+};
+
+/** Persistent working environment, independent of objective execution. */
+export type WorkEnvironmentId = string;
+
+export type WorkEnvironmentIntent = { kind: "create"; space: SpaceId; title: string } | { kind: "edit"; id: WorkEnvironmentId; expected: WorkRevision; edit: WorkEnvironmentEdit };
+
+export type WorkEnvironmentReference = { kind: "browser"; tab: ItemId } | { kind: "resource"; resource: ResourceId } | { kind: "objective"; objective: WorkId } | 
+/**
+ *  A retained result from one historical execution, not a mutable copy or
+ *  a capability to rerun its producer.
+ */
+{ kind: "artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId } | 
+/**  One subject inside an immutable artifact, addressed by index. */
+{ kind: "subject"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } | 
+/**  One finding inside an immutable artifact, addressed by index. */
+{ kind: "finding"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } | 
+/**
+ *  One cited source entry inside an immutable sources artifact. A card,
+ *  never a navigation grant: opening it goes through the ordinary pane.
+ */
+{ kind: "source"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; index: number } | 
+/**
+ *  A folder the person placed on this canvas. Runs started here may
+ *  read and, with approval, change files inside it; the application
+ *  admitted the path before it was placed.
+ */
+{ kind: "folder"; path: string; name: string } | 
+/**
+ *  A public link the person placed on this canvas: a card and a page
+ *  the agent may read, never a navigation grant by itself.
+ */
+{ kind: "link"; url: string; title: string };
+
+export type WorkEnvironmentReply = WorkEnvironmentReply_Serialize | WorkEnvironmentReply_Deserialize;
+
+export type WorkEnvironmentReply_Deserialize = ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; command?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Deserialize }) & { expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; replayed?: never; snapshot?: never };
+
+export type WorkEnvironmentReply_Serialize = ({ kind: "checkpointed"; expected: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; command?: never; next?: never; selected?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkEnvironmentSnapshot_Serialize }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; next?: never; replayed?: never; selected?: never; works?: never } | ({ kind: "applied"; command: WorkCommandId; applied_revision: WorkRevision; applied_view_revision: WorkRevision; replayed: boolean; snapshot: WorkEnvironmentSnapshot_Serialize }) & { expected?: never; next?: never; selected?: never; works?: never } | ({ kind: "page"; works: WorkEnvironmentSummary[]; next: WorkEnvironmentId | null; selected: WorkEnvironmentId | null }) & { applied_revision?: never; applied_view_revision?: never; command?: never; expected?: never; replayed?: never; snapshot?: never };
+
+export type WorkEnvironmentSnapshot = WorkEnvironmentSnapshot_Serialize | WorkEnvironmentSnapshot_Deserialize;
+
+export type WorkEnvironmentSnapshot_Deserialize = {
+	version: number,
+	id: WorkEnvironmentId,
+	profile: ProfileId,
+	space: SpaceId,
+	title: string,
+	lifecycle: WorkLifecycle,
+	revision: WorkRevision,
+	elements: WorkEnvironmentElement[],
+	areas: WorkArea[],
+	relations?: WorkRelation[],
+	decisions?: WorkDecision[],
+	view: WorkEnvironmentView_Deserialize,
+};
+
+export type WorkEnvironmentSnapshot_Serialize = {
+	version: number,
+	id: WorkEnvironmentId,
+	profile: ProfileId,
+	space: SpaceId,
+	title: string,
+	lifecycle: WorkLifecycle,
+	revision: WorkRevision,
+	elements: WorkEnvironmentElement[],
+	areas: WorkArea[],
+	relations?: WorkRelation[],
+	decisions?: WorkDecision[],
+	view: WorkEnvironmentView_Serialize,
+};
+
+export type WorkEnvironmentSummary = {
+	id: WorkEnvironmentId,
+	space: SpaceId,
+	title: string,
+	lifecycle: WorkLifecycle,
+	revision: WorkRevision,
+	/**  What the work's first run called it: its title, else its reply's. */
+	name: string | null,
+	/**  Every request in the work, first one first, each cut to a line's length. */
+	requests: string[],
+	/**  When the work was last worked in, Unix epoch milliseconds as decimal text. */
+	touched_ms: string,
+	/**  It holds nothing yet. */
+	empty: boolean,
+};
+
+export type WorkEnvironmentView = WorkEnvironmentView_Serialize | WorkEnvironmentView_Deserialize;
+
+export type WorkEnvironmentView_Deserialize = {
+	revision: WorkRevision,
+	x: number,
+	y: number,
+	zoom_milli: number,
+	placements: WorkElementPlacement_Deserialize[],
+	areas?: WorkAreaPlacement[],
+};
+
+export type WorkEnvironmentView_Serialize = {
+	revision: WorkRevision,
+	x: number,
+	y: number,
+	zoom_milli: number,
+	placements: WorkElementPlacement_Serialize[],
+	areas?: WorkAreaPlacement[],
+};
+
+export type WorkEvidenceLink = {
+	/**
+	 *  Reference to a source in the original persisted extraction, never a URL
+	 *  invented by an artifact-producing model.
+	 */
+	extraction_id: WorkArtifactId,
+	source_id: number,
+};
+
+/**
+ *  Selected historical source content. This cannot restore a browser context,
+ *  action reference, or execution authority. It remains untrusted source data.
+ */
+export type WorkEvidencePreviewV1 = WorkEvidencePreviewV1_Serialize | WorkEvidencePreviewV1_Deserialize;
+
+/**
+ *  Selected historical source content. This cannot restore a browser context,
+ *  action reference, or execution authority. It remains untrusted source data.
+ */
+export type WorkEvidencePreviewV1_Deserialize = {
+	version: number,
+	link: WorkEvidenceLink,
+	origin: string,
+	role: string,
+	text: string,
+	truncated: boolean,
+	/**  Decimal byte count avoids JavaScript integer precision loss. */
+	source_bytes: string,
+	/**  Exact archived link destination, distinct from the source page origin. */
+	link_destination?: string | null,
+	source?: WorkEvidenceSourceV1,
+};
+
+/**
+ *  Selected historical source content. This cannot restore a browser context,
+ *  action reference, or execution authority. It remains untrusted source data.
+ */
+export type WorkEvidencePreviewV1_Serialize = {
+	version: number,
+	link: WorkEvidenceLink,
+	origin: string,
+	role: string,
+	text: string,
+	truncated: boolean,
+	/**  Decimal byte count avoids JavaScript integer precision loss. */
+	source_bytes: string,
+	/**  Exact archived link destination, distinct from the source page origin. */
+	link_destination?: string | null,
+	source: WorkEvidenceSourceV1,
+};
+
+export type WorkEvidenceSourceV1 = { kind: "native_extraction" } | 
+/**  A file step inside a granted folder. */
+{ kind: "file"; path: string; name: string; file_kind: WorkFileKindV1 } | { kind: "command"; cwd: string; command: string; outcome: WorkCommandOutcomeV1 } | { kind: "provider_search"; provider: WorkSearchProvider; model: string; url: string; title: string; response_id: string; search_call_id: string };
+
+export type WorkExecutionAuthorization = "reviewed_plan" | "user_directed_public_read" | 
+/**  The user sent an objective; the routine public envelope is the grant. */
+"user_directed_agent";
+
+export type WorkExecutionFact = WorkExecutionFact_Serialize | WorkExecutionFact_Deserialize;
+
+export type WorkExecutionFact_Deserialize = {
+	authorization?: WorkExecutionAuthorization,
+	id: WorkExecutionId,
+	approved_revision: WorkRevision,
+	spec: WorkExecutionSpec_Deserialize,
+	status: WorkExecutionStatus,
+	attempts: WorkAttemptFact[],
+	artifacts: WorkArtifactV1_Deserialize[],
+	provider_evidence?: WorkProviderSearchRecordV1_Deserialize[],
+	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
+	file_evidence?: WorkFileRecordV1_Deserialize[],
+	command_evidence?: WorkCommandRecordV1[],
+	folder_approvals?: WorkFolderApprovalV1[],
+	/**  User edits and decisions never overwrite the original agent output. */
+	user_artifacts?: WorkArtifactUserState_Deserialize[],
+	/**  Why automation stopped for a person. Continuation is a fresh approval. */
+	intervention?: WorkInterventionV1_Deserialize | null,
+	/**  Admitted agent operations in order, committed as each one settles. */
+	steps?: WorkStepFact_Deserialize[],
+	/**
+	 *  Granted signed-in origins and their page budgets, derived from the
+	 *  grant and the steps; see `refresh_accounts`.
+	 */
+	accounts?: WorkAccountUseV1[],
+	/**  The parts a lead run split into, in the order they were started. */
+	parts?: WorkPartFactV1_Deserialize[],
+	/**  What a lead run pulled in: skills, notes, tabs, files. */
+	inputs?: WorkInputFactV1_Deserialize[],
+	/**  The name its finish gave the work, derived from the finish step. */
+	title?: string | null,
+};
+
+export type WorkExecutionFact_Serialize = {
+	authorization: WorkExecutionAuthorization,
+	id: WorkExecutionId,
+	approved_revision: WorkRevision,
+	spec: WorkExecutionSpec_Serialize,
+	status: WorkExecutionStatus,
+	attempts: WorkAttemptFact[],
+	artifacts: WorkArtifactV1_Serialize[],
+	provider_evidence: WorkProviderSearchRecordV1_Serialize[],
+	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
+	file_evidence?: WorkFileRecordV1_Serialize[],
+	command_evidence?: WorkCommandRecordV1[],
+	folder_approvals?: WorkFolderApprovalV1[],
+	/**  User edits and decisions never overwrite the original agent output. */
+	user_artifacts: WorkArtifactUserState_Serialize[],
+	/**  Why automation stopped for a person. Continuation is a fresh approval. */
+	intervention?: WorkInterventionV1_Serialize | null,
+	/**  Admitted agent operations in order, committed as each one settles. */
+	steps?: WorkStepFact_Serialize[],
+	/**
+	 *  Granted signed-in origins and their page budgets, derived from the
+	 *  grant and the steps; see `refresh_accounts`.
+	 */
+	accounts?: WorkAccountUseV1[],
+	/**  The parts a lead run split into, in the order they were started. */
+	parts?: WorkPartFactV1_Serialize[],
+	/**  What a lead run pulled in: skills, notes, tabs, files. */
+	inputs?: WorkInputFactV1_Serialize[],
+	/**  The name its finish gave the work, derived from the finish step. */
+	title?: string | null,
+};
+
+/** Durable execution identity, never a live admission. */
+export type WorkExecutionId = string;
+
+export type WorkExecutionLimits = {
+	model_tokens: number,
+	cost_micro_usd: number,
+	operations: number,
+	timeout_seconds: number,
+	max_workers: number,
+};
+
+export type WorkExecutionOwnership = {
+	execution: WorkExecutionId,
+	/**  Observation identity only. Never a worker token or restart authority. */
+	owner: WorkRuntimeSessionId,
+};
+
+export type WorkExecutionSpec = WorkExecutionSpec_Serialize | WorkExecutionSpec_Deserialize;
+
+export type WorkExecutionSpec_Deserialize = {
+	plan_revision: WorkRevision,
+	limits: WorkExecutionLimits,
+	nodes: WorkNodeExecutionSpec_Deserialize[],
+	/**  Admitted canvas context disclosed to this execution's provider calls. */
+	context?: WorkContextDisclosureV1_Deserialize | null,
+	/**
+	 *  The person's request this execution serves: the work's objective when
+	 *  it began. Earlier executions of a work keep theirs, forming the thread.
+	 */
+	request?: string | null,
+};
+
+export type WorkExecutionSpec_Serialize = {
+	plan_revision: WorkRevision,
+	limits: WorkExecutionLimits,
+	nodes: WorkNodeExecutionSpec_Serialize[],
+	/**  Admitted canvas context disclosed to this execution's provider calls. */
+	context?: WorkContextDisclosureV1_Serialize | null,
+	/**
+	 *  The person's request this execution serves: the work's objective when
+	 *  it began. Earlier executions of a work keep theirs, forming the thread.
+	 */
+	request?: string | null,
+};
+
+export type WorkExecutionStatus = "approved" | "running" | "cancel_requested" | "completed" | "needs_review" | "cancelled" | "failed" | "interrupted";
+
+export type WorkExpectedOutput = {
+	name: string,
+	description: string,
+	review: WorkOutputReview,
+};
+
+export type WorkFactKindV1 = "text" | "yes" | "no" | "partial" | "rating";
+
+export type WorkFailureV1 = "invalid" | "capacity" | "conflict" | "not_found" | "profile_unavailable" | "unavailable" | "shutdown" | "outcome_unknown" | "review_required";
+
+export type WorkFieldUpdateV1 = WorkFieldUpdateV1_Serialize | WorkFieldUpdateV1_Deserialize;
+
+export type WorkFieldUpdateV1_Deserialize = {
+	/**  Accessible field name when the page has several candidates. */
+	field?: string | null,
+	from: string,
+	to: string,
+};
+
+export type WorkFieldUpdateV1_Serialize = {
+	/**  Accessible field name when the page has several candidates. */
+	field?: string | null,
+	from: string,
+	to: string,
+};
+
+export type WorkFigureV1 = WorkFigureV1_Serialize | WorkFigureV1_Deserialize;
+
+export type WorkFigureV1_Deserialize = {
+	label: string,
+	value: string,
+	note?: string | null,
+};
+
+export type WorkFigureV1_Serialize = {
+	label: string,
+	value: string,
+	note?: string | null,
+};
+
+/**  What one file step disclosed, bounded and never the whole file system. */
+export type WorkFileEvidenceV1 = WorkFileEvidenceV1_Serialize | WorkFileEvidenceV1_Deserialize;
+
+/**  What one file step disclosed, bounded and never the whole file system. */
+export type WorkFileEvidenceV1_Deserialize = {
+	path: string,
+	name: string,
+	kind: WorkFileKindV1,
+	bytes: number,
+	/**  Hex SHA-256 of the file bytes; empty for directories and searches. */
+	digest: string,
+	/**  The excerpt, listing, hits or applied diff shown to the agent. */
+	text: string,
+	truncated: boolean,
+	before_digest?: string | null,
+	after_digest?: string | null,
+	lines?: WorkFileLinesV1 | null,
+};
+
+/**  What one file step disclosed, bounded and never the whole file system. */
+export type WorkFileEvidenceV1_Serialize = {
+	path: string,
+	name: string,
+	kind: WorkFileKindV1,
+	bytes: number,
+	/**  Hex SHA-256 of the file bytes; empty for directories and searches. */
+	digest: string,
+	/**  The excerpt, listing, hits or applied diff shown to the agent. */
+	text: string,
+	truncated: boolean,
+	before_digest?: string | null,
+	after_digest?: string | null,
+	lines?: WorkFileLinesV1 | null,
+};
+
+export type WorkFileKindV1 = "directory" | "text" | "binary" | "search" | "written" | "moved" | "deleted";
+
+export type WorkFileLinesV1 = {
+	first: number,
+	last: number,
+	total: number,
+};
+
+export type WorkFileRecordV1 = WorkFileRecordV1_Serialize | WorkFileRecordV1_Deserialize;
+
+export type WorkFileRecordV1_Deserialize = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	file: WorkFileEvidenceV1_Deserialize,
+};
+
+export type WorkFileRecordV1_Serialize = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	file: WorkFileEvidenceV1_Serialize,
+};
+
+export type WorkFileReplacementV1 = {
+	old: string,
+	new: string,
+};
+
+export type WorkFinding = WorkFinding_Serialize | WorkFinding_Deserialize;
+
+export type WorkFinding_Deserialize = {
+	claim: string,
+	subject?: number | null,
+	evidence?: number[],
+	confidence: WorkConfidence,
+	detail?: string | null,
+	general_knowledge?: boolean,
+};
+
+export type WorkFinding_Serialize = {
+	claim: string,
+	subject?: number | null,
+	evidence?: number[],
+	confidence: WorkConfidence,
+	detail?: string | null,
+	general_knowledge?: boolean,
+};
+
+/**  Outcome of admitting one folder the person dropped or named for a canvas. */
+export type WorkFolderAdmitV1 = 
+/**  The canonical path and display name to place as a Folder element. */
+{ kind: "admitted"; path: string; name: string } | 
+/**
+ *  Outside the home folder, protected, or missing (`not_a_folder` false),
+ *  or an existing path that is not a folder.
+ */
+{ kind: "refused"; not_a_folder: boolean };
+
+export type WorkFolderApprovalV1 = {
+	root: string,
+	/**  Unix seconds as decimal text, without a JavaScript integer precision loss. */
+	at: string,
+};
+
+export type WorkHelperV1 = "browser" | "computer" | "connection" | "research";
+
+/**  Explicit user attestation; neither choice permits sensitive provider disclosure. */
+export type WorkHumanAccountV1 = "anonymous" | "signed_in_public_only";
+
+export type WorkHumanChanged = WorkHumanChangedV1;
+
+/**  Invalidation, including document changes; read current pages after delivery. */
+export type WorkHumanChangedV1 = {
+	profile: string,
+	work: WorkId,
+};
+
+export type WorkHumanPageIdV1 = {
+	attempt: WorkAttemptId,
+	step: WorkStepId,
+	generation: number,
+};
+
+export type WorkHumanPageV1 = {
+	id: WorkHumanPageIdV1,
+	phase: WorkHumanPhaseV1,
+	reason: WorkHumanReasonV1,
+	remaining_millis: number,
+	document_revision: string,
+	can_continue: boolean,
+};
+
+export type WorkHumanPhaseV1 = "reading" | "waiting_for_human" | "presenting" | "presented" | "continuing" | "released";
+
+export type WorkHumanReasonV1 = "sign_in" | "challenge" | "permission" | "verification" | "user_decision" | "sensitive_effect" | "unsupported_interaction";
+
+/**  Logical points relative to the native content view's top-left corner. */
+export type WorkHumanRegionV1 = {
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+};
+
+export type WorkHumanResponseV1 = {
+	version: number,
+	profile: string,
+	work: WorkId,
+	accepted: boolean,
+	pages: WorkHumanPageV1[],
+	error: WorkFailureV1 | null,
+};
+
+/** Durable profile-owned Work identity; never an execution capability. */
+export type WorkId = string;
+
+/**  Something the run pulled in, drawn left of the request. */
+export type WorkInputFactV1 = WorkInputFactV1_Serialize | WorkInputFactV1_Deserialize;
+
+/**  Something the run pulled in, drawn left of the request. */
+export type WorkInputFactV1_Deserialize = {
+	kind: WorkInputKindV1,
+	label: string,
+	count?: number | null,
+	/**  A skill's name, a note's or work's id: never content. */
+	reference?: string | null,
+};
+
+/**  Something the run pulled in, drawn left of the request. */
+export type WorkInputFactV1_Serialize = {
+	kind: WorkInputKindV1,
+	label: string,
+	count?: number | null,
+	/**  A skill's name, a note's or work's id: never content. */
+	reference?: string | null,
+};
+
+export type WorkInputKindV1 = "memory" | "skill" | "history" | "notes" | "tabs" | "files" | "connection" | "work";
+
+export type WorkInterventionKindV1 = 
+/**  Authentication or account selection needs a person. */
+"sign_in" | 
+/**  A CAPTCHA or equivalent human challenge is present. */
+"challenge" | 
+/**  A permission or operating-system boundary needs a person. */
+"permission" | 
+/**  The page needs an interaction Zephium cannot automate safely. */
+"unsupported_interaction" | 
+/**  The effect or its verification needs the user's review. */
+"review" | 
+/**  The user took the page over; automation was revoked and drained. */
+"human_takeover";
+
+export type WorkInterventionV1 = WorkInterventionV1_Serialize | WorkInterventionV1_Deserialize;
+
+export type WorkInterventionV1_Deserialize = {
+	kind: WorkInterventionKindV1,
+	origin?: string | null,
+};
+
+export type WorkInterventionV1_Serialize = {
+	kind: WorkInterventionKindV1,
+	origin?: string | null,
+};
+
+export type WorkKeyStateV1 = "missing" | "set" | "valid" | "invalid";
+
+export type WorkLabelledV1 = {
+	label: string,
+	value: string,
+};
+
+export type WorkLifecycle = "active" | "archived";
+
+/**  Where an item came from: the app or site, who, when, their words. */
+export type WorkListFromV1 = WorkListFromV1_Serialize | WorkListFromV1_Deserialize;
+
+/**  Where an item came from: the app or site, who, when, their words. */
+export type WorkListFromV1_Deserialize = {
+	host?: string | null,
+	app?: string | null,
+	who?: string | null,
+	when?: string | null,
+	quote?: string | null,
+	url?: string | null,
+};
+
+/**  Where an item came from: the app or site, who, when, their words. */
+export type WorkListFromV1_Serialize = {
+	host?: string | null,
+	app?: string | null,
+	who?: string | null,
+	when?: string | null,
+	quote?: string | null,
+	url?: string | null,
+};
+
+export type WorkListItemV1 = WorkListItemV1_Serialize | WorkListItemV1_Deserialize;
+
+export type WorkListItemV1_Deserialize = {
+	title: string,
+	detail?: string | null,
+	due?: string | null,
+	priority?: WorkListPriorityV1 | null,
+	from?: WorkListFromV1_Deserialize | null,
+	source?: number | null,
+};
+
+export type WorkListItemV1_Serialize = {
+	title: string,
+	detail?: string | null,
+	due?: string | null,
+	priority?: WorkListPriorityV1 | null,
+	from?: WorkListFromV1_Serialize | null,
+	source?: number | null,
+};
+
+export type WorkListPriorityV1 = "high";
+
+export type WorkListStyleV1 = "todo" | "messages" | "reading" | "requirements";
+
+export type WorkLocalStepV1 = WorkLocalStepV1_Serialize | WorkLocalStepV1_Deserialize;
+
+export type WorkLocalStepV1_Deserialize = {
+	/**  Observed public title for a read step's URL, retained after settlement. */
+	page_title?: string | null,
+	policy?: WorkCommandPolicyV1 | null,
+	output?: WorkCommandOutputV1 | null,
+	proposal?: string | null,
+	before_digest?: string | null,
+	/**  The folder a `folder` question asks to read, as an absolute path. */
+	folder?: string | null,
+};
+
+export type WorkLocalStepV1_Serialize = {
+	/**  Observed public title for a read step's URL, retained after settlement. */
+	page_title?: string | null,
+	policy?: WorkCommandPolicyV1 | null,
+	output?: WorkCommandOutputV1 | null,
+	proposal?: string | null,
+	before_digest?: string | null,
+	/**  The folder a `folder` question asks to read, as an absolute path. */
+	folder?: string | null,
+};
+
+export type WorkMeasurementBasis = WorkMeasurementBasis_Serialize | WorkMeasurementBasis_Deserialize;
+
+export type WorkMeasurementBasis_Deserialize = {
+	method: string,
+	conditions?: string | null,
+	versions?: string | null,
+	observed_at?: string | null,
+};
+
+export type WorkMeasurementBasis_Serialize = {
+	method: string,
+	conditions?: string | null,
+	versions?: string | null,
+	observed_at?: string | null,
+};
+
+export type WorkMediaKindV1 = "image" | "video" | "audio";
+
+export type WorkMediaProviderV1 = "youtube" | "vimeo" | "file";
+
+export type WorkMemoryChangeV1 = 
+/**  A fact the person writes themselves. */
+{ kind: "add"; text: string; memory: WorkMemoryKindV1 } | { kind: "edit"; id: string; text: string; memory: WorkMemoryKindV1 } | { kind: "forget"; id: string } | { kind: "forget_all" };
+
+/**  What kind of thing a memory is; the canvas and Settings group by it. */
+export type WorkMemoryKindV1 = 
+/**  "Prefers aisle seats", "Writes in British English". */
+"preference" | 
+/**  "Anna is the design lead", "My manager is Tom". */
+"person" | 
+/**  "Zephium ships from the work-mode-integration branch". */
+"project" | "fact";
+
+/**  Which memories to list: the words to look for, or one work's. */
+export type WorkMemoryQueryV1 = {
+	query: string | null,
+	work: WorkId | null,
+};
+
+export type WorkMemoryRefusalV1 = "empty" | "too_long" | "lines" | "secret";
+
+export type WorkMemoryResponseV1 = WorkMemoryResponseV1_Serialize | WorkMemoryResponseV1_Deserialize;
+
+export type WorkMemoryResponseV1_Deserialize = {
+	version: number,
+	profile: string,
+	memories: WorkMemoryV1_Deserialize[],
+	/**  Why a fact was refused: it looks like a secret, or is too long. */
+	refused: WorkMemoryRefusalV1 | null,
+	error: WorkFailureV1 | null,
+};
+
+export type WorkMemoryResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	memories: WorkMemoryV1_Serialize[],
+	/**  Why a fact was refused: it looks like a secret, or is too long. */
+	refused: WorkMemoryRefusalV1 | null,
+	error: WorkFailureV1 | null,
+};
+
+/**  One remembered fact. */
+export type WorkMemoryV1 = WorkMemoryV1_Serialize | WorkMemoryV1_Deserialize;
+
+/**  One remembered fact. */
+export type WorkMemoryV1_Deserialize = {
+	/**  A ULID. */
+	id: string,
+	text: string,
+	kind: WorkMemoryKindV1,
+	/**
+	 *  The work whose run remembered it; absent when the person wrote it or
+	 *  the work is gone.
+	 */
+	work?: WorkId | null,
+	execution?: WorkExecutionId | null,
+	/**  What that work was asked, clipped, so the person knows where it came from. */
+	source?: string | null,
+	/**  Unix epoch milliseconds as decimal text. */
+	created_ms: string,
+	/**  When a run last drew on it. */
+	used_ms?: string | null,
+};
+
+/**  One remembered fact. */
+export type WorkMemoryV1_Serialize = {
+	/**  A ULID. */
+	id: string,
+	text: string,
+	kind: WorkMemoryKindV1,
+	/**
+	 *  The work whose run remembered it; absent when the person wrote it or
+	 *  the work is gone.
+	 */
+	work?: WorkId | null,
+	execution?: WorkExecutionId | null,
+	/**  What that work was asked, clipped, so the person knows where it came from. */
+	source?: string | null,
+	/**  Unix epoch milliseconds as decimal text. */
+	created_ms: string,
+	/**  When a run last drew on it. */
+	used_ms?: string | null,
+};
+
+export type WorkModelEntry = WorkModelEntry_Serialize | WorkModelEntry_Deserialize;
+
+export type WorkModelEntry_Deserialize = {
+	/**  Stable catalog id, such as `anthropic/claude-sonnet-5`. */
+	id: string,
+	model: WorkModelRef,
+	display_name: string,
+	roles: WorkModelRole[],
+	recommended: boolean,
+	context_window: number,
+	max_output: number,
+	supports: WorkModelSupports,
+	price?: WorkModelPrice | null,
+};
+
+export type WorkModelEntry_Serialize = {
+	/**  Stable catalog id, such as `anthropic/claude-sonnet-5`. */
+	id: string,
+	model: WorkModelRef,
+	display_name: string,
+	roles: WorkModelRole[],
+	recommended: boolean,
+	context_window: number,
+	max_output: number,
+	supports: WorkModelSupports,
+	price?: WorkModelPrice | null,
+};
+
+/**  Per million tokens, in millionths of a US dollar. */
+export type WorkModelPrice = {
+	input: number,
+	cached_input: number,
+	output: number,
+};
+
+export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek" | "open_router" | 
+/**  Any OpenAI-compatible chat endpoint the person configured. */
+"compatible" | 
+/**  Zephium Cloud: the upstream's native body, our base URL and bearer. */
+"cloud";
+
+export type WorkModelRef = {
+	provider: WorkModelProvider,
+	wire: WorkModelWire,
+	/**  The provider's model id, sent as is. */
+	model: string,
+};
+
+export type WorkModelRole = "lead" | "page" | "light" | "decision";
+
+export type WorkModelRolesV1 = {
+	lead: string | null,
+	page: string | null,
+	light: string | null,
+};
+
+export type WorkModelSupports = {
+	tools: boolean,
+	vision: boolean,
+	prompt_cache: boolean,
+	reasoning: boolean,
+	native_search: boolean,
+};
+
+/**  The wire family a model speaks; Cloud models name their upstream's. */
+export type WorkModelWire = "open_ai_responses" | "anthropic_messages" | "gemini" | "chat_completions";
+
+/**  Something in the picker or Settings → AI changed; read it again. */
+export type WorkModelsChanged = {
+	version: number,
+};
+
+/**  Why the last action did not do what was asked. Closed; no provider text. */
+export type WorkModelsFaultV1 = 
+/**  The provider refused the key. */
+"key_refused" | 
+/**  The provider could not be reached. */
+"unreachable" | "billing" | "rate_limited" | "provider_down" | "request" | 
+/**  The Keychain refused. */
+"keychain" | 
+/**  The request was malformed (an unknown model, a bad address). */
+"invalid" | 
+/**  Models are unavailable in this build or profile. */
+"unavailable";
+
+/**  A narrow readiness contract for the Work composer. Only a missing lead blocks. */
+export type WorkModelsReadyV1 = {
+	version: number,
+	profile: string,
+	ready: boolean,
+	missing_roles: WorkModelRole[],
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkModelsV1 = WorkModelsV1_Serialize | WorkModelsV1_Deserialize;
+
+export type WorkModelsV1_Deserialize = {
+	version: number,
+	profile: string,
+	entries: WorkModelEntry_Deserialize[],
+	/**  What the person chose per role. */
+	chosen: WorkModelRolesV1,
+	/**  What each role runs with now; null when no provider is usable. */
+	effective: WorkModelRolesV1,
+	providers: WorkProviderStatusV1_Deserialize[],
+	cloud: WorkCloudStatusV1,
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkModelsV1_Serialize = {
+	version: number,
+	profile: string,
+	entries: WorkModelEntry_Serialize[],
+	/**  What the person chose per role. */
+	chosen: WorkModelRolesV1,
+	/**  What each role runs with now; null when no provider is usable. */
+	effective: WorkModelRolesV1,
+	providers: WorkProviderStatusV1_Serialize[],
+	cloud: WorkCloudStatusV1,
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkMoreModelsV1 = WorkMoreModelsV1_Serialize | WorkMoreModelsV1_Deserialize;
+
+export type WorkMoreModelsV1_Deserialize = {
+	provider: WorkModelProvider,
+	entries: WorkModelEntry_Deserialize[],
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkMoreModelsV1_Serialize = {
+	provider: WorkModelProvider,
+	entries: WorkModelEntry_Serialize[],
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkNodeExecutionSpec = WorkNodeExecutionSpec_Serialize | WorkNodeExecutionSpec_Deserialize;
+
+export type WorkNodeExecutionSpec_Deserialize = {
+	node: WorkPlanNodeId,
+	/**
+	 *  A direct delegation edge, independent from data dependencies. Its
+	 *  authority must be contained in its parent's approved capability.
+	 */
+	parent: WorkPlanNodeId | null,
+	capability: WorkCapability_Deserialize,
+	limits: WorkExecutionLimits,
+};
+
+export type WorkNodeExecutionSpec_Serialize = {
+	node: WorkPlanNodeId,
+	/**
+	 *  A direct delegation edge, independent from data dependencies. Its
+	 *  authority must be contained in its parent's approved capability.
+	 */
+	parent: WorkPlanNodeId | null,
+	capability: WorkCapability_Serialize,
+	limits: WorkExecutionLimits,
+};
+
+export type WorkNodeProposal = {
+	key: number,
+	objective: string,
+	dependencies: number[],
+	outputs: WorkExpectedOutput[],
+};
+
+export type WorkObjectBasis = { kind: "original" } | { kind: "user_revision"; revision: WorkRevision };
+
+export type WorkObjectProvenance = {
+	objective: WorkId,
+	execution: WorkExecutionId,
+	artifact: WorkArtifactId,
+	basis: WorkObjectBasis,
+	review: WorkOutputReview,
+};
+
+export type WorkObjectV1 = WorkObjectV1_Serialize | WorkObjectV1_Deserialize;
+
+export type WorkObjectV1_Deserialize = {
+	version: number,
+	data: WorkArtifactDataV1_Deserialize,
+	evidence?: WorkEvidenceLink[],
+	/**  Set only by Rust when preserving an artifact; never accepted from callers. */
+	provenance?: WorkObjectProvenance | null,
+};
+
+export type WorkObjectV1_Serialize = {
+	version: number,
+	data: WorkArtifactDataV1_Serialize,
+	evidence?: WorkEvidenceLink[],
+	/**  Set only by Rust when preserving an artifact; never accepted from callers. */
+	provenance?: WorkObjectProvenance | null,
+};
+
+export type WorkOperationResponseV1 = WorkOperationResponseV1_Serialize | WorkOperationResponseV1_Deserialize;
+
+export type WorkOperationResponseV1_Deserialize = {
+	version: number,
+	profile: string,
+	operation: WorkCommandId,
+	state: WorkOperationStateV1_Deserialize,
+};
+
+export type WorkOperationResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	operation: WorkCommandId,
+	state: WorkOperationStateV1_Serialize,
+};
+
+export type WorkOperationStateV1 = WorkOperationStateV1_Serialize | WorkOperationStateV1_Deserialize;
+
+export type WorkOperationStateV1_Deserialize = 
+/**
+ *  No retained observation. Reconcile durable Work; do not replay a model
+ *  call or reconstruct an execution from this state after a restart.
+ */
+({ kind: "unknown" }) & { error?: never; response?: never; work?: never } | ({ kind: "pending"; work: WorkId }) & { error?: never; response?: never } | ({ kind: "planned"; response: WorkPlanningResponseV1_Deserialize }) & { error?: never; work?: never } | ({ kind: "settled"; response: WorkResponseV1_Deserialize }) & { error?: never; work?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { response?: never; work?: never };
+
+export type WorkOperationStateV1_Serialize = 
+/**
+ *  No retained observation. Reconcile durable Work; do not replay a model
+ *  call or reconstruct an execution from this state after a restart.
+ */
+({ kind: "unknown" }) & { error?: never; response?: never; work?: never } | ({ kind: "pending"; work: WorkId }) & { error?: never; response?: never } | ({ kind: "planned"; response: WorkPlanningResponseV1_Serialize }) & { error?: never; work?: never } | ({ kind: "settled"; response: WorkResponseV1_Serialize }) & { error?: never; work?: never } | ({ kind: "refused"; error: WorkFailureV1 }) & { response?: never; work?: never };
+
+/**
+ *  On-demand operations have an application lifetime independent of a view.
+ *  Their correlation IDs do not constitute durable commands or worker handles.
+ */
+export type WorkOperationV1 = WorkOperationV1_Serialize | WorkOperationV1_Deserialize;
+
+/**
+ *  On-demand operations have an application lifetime independent of a view.
+ *  Their correlation IDs do not constitute durable commands or worker handles.
+ */
+export type WorkOperationV1_Deserialize = ({ kind: "read_public"; command: WorkCommandV1_Deserialize; 
+/**  Selected public canvas objects to accompany the query. */
+context?: WorkContextSelectionV1_Deserialize | null }) & { request?: never; signed_in?: never } | 
+/**  The routine agent loop on the objective; the command carries the grant. */
+({ kind: "run"; command: WorkCommandV1_Deserialize; context?: WorkContextSelectionV1_Deserialize | null; 
+/**  How a request without accounts treats the person's sessions. */
+signed_in?: WorkSignedInV1 }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never; signed_in?: never } | 
+/**  Approval draft for one signed-in page chosen from an attached tab. */
+({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Deserialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never; signed_in?: never };
+
+/**
+ *  On-demand operations have an application lifetime independent of a view.
+ *  Their correlation IDs do not constitute durable commands or worker handles.
+ */
+export type WorkOperationV1_Serialize = ({ kind: "read_public"; command: WorkCommandV1_Serialize; 
+/**  Selected public canvas objects to accompany the query. */
+context?: WorkContextSelectionV1_Serialize | null }) & { request?: never; signed_in?: never } | 
+/**  The routine agent loop on the objective; the command carries the grant. */
+({ kind: "run"; command: WorkCommandV1_Serialize; context?: WorkContextSelectionV1_Serialize | null; 
+/**  How a request without accounts treats the person's sessions. */
+signed_in?: WorkSignedInV1 }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never; signed_in?: never } | 
+/**  Approval draft for one signed-in page chosen from an attached tab. */
+({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Serialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never; signed_in?: never };
+
+/**  Requested output review level, never evidence that a requirement was met. */
+export type WorkOutputReview = "mechanical" | "source_mapped_needs_review" | "user_acceptance";
+
+/**  A page item read under a grant: the canvas draws the account badge. */
+export type WorkPageAccountV1 = {
+	host: string,
+	badge: boolean,
+};
+
+export type WorkPageFrameV1 = {
+	generation: number,
+	width: number,
+	height: number,
+};
+
+/**
+ *  A page one browser step opened, with its newest bounded frame for the
+ *  canvas. Frames are transient and person-facing only.
+ */
+export type WorkPageV1 = {
+	execution: WorkExecutionId,
+	attempt: WorkAttemptId,
+	step: WorkStepId,
+	url: string,
+	live: boolean,
+	frame: WorkPageFrameV1 | null,
+	/**  The part that reads it; none when the lead reads it itself. */
+	part?: WorkPartId | null,
+	/**  The page's public title once it was read; never a signed-in page's. */
+	title?: string | null,
+};
+
+/**
+ *  The Work browser pane's applied native hole in window logical coordinates.
+ *  `presented` is false while the pane's tab has no live view (crash, discard,
+ *  or a modal prompt that removes content from the stage).
+ */
+export type WorkPaneLayout = {
+	tab: string,
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+	presented: boolean,
+	generation: number,
+};
+
+export type WorkPaneRect = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
+export type WorkPaneTarget = { kind: "tab"; id: string } | { kind: "url"; url: string };
+
+export type WorkPartFactV1 = WorkPartFactV1_Serialize | WorkPartFactV1_Deserialize;
+
+export type WorkPartFactV1_Deserialize = {
+	id: WorkPartId,
+	/**  "Stay", "Flights", "Entry". */
+	title: string,
+	helper: WorkHelperV1,
+	service?: WorkPartServiceV1_Deserialize | null,
+	goal: string,
+	state: WorkPartStateV1,
+	/**  Unix epoch milliseconds as decimal text. */
+	started_ms?: string | null,
+	ended_ms?: string | null,
+	/**  What it found, for people: "3 homes". */
+	summary?: string | null,
+	/**
+	 *  What the person can do so the part can do its job. Only a part that
+	 *  is waiting or ended without doing it carries one.
+	 */
+	need?: WorkPartNeedV1_Deserialize | null,
+};
+
+export type WorkPartFactV1_Serialize = {
+	id: WorkPartId,
+	/**  "Stay", "Flights", "Entry". */
+	title: string,
+	helper: WorkHelperV1,
+	service?: WorkPartServiceV1_Serialize | null,
+	goal: string,
+	state: WorkPartStateV1,
+	/**  Unix epoch milliseconds as decimal text. */
+	started_ms?: string | null,
+	ended_ms?: string | null,
+	/**  What it found, for people: "3 homes". */
+	summary?: string | null,
+	/**
+	 *  What the person can do so the part can do its job. Only a part that
+	 *  is waiting or ended without doing it carries one.
+	 */
+	need?: WorkPartNeedV1_Serialize | null,
+};
+
+/** One helper's share of a run: a row of the canvas, never a capability. */
+export type WorkPartId = string;
+
+/**
+ *  What a part that could not do its job needs from the person, with the
+ *  thing it concerns. The fix sits on the part's row.
+ */
+export type WorkPartNeedV1 = WorkPartNeedV1_Serialize | WorkPartNeedV1_Deserialize;
+
+/**
+ *  What a part that could not do its job needs from the person, with the
+ *  thing it concerns. The fix sits on the part's row.
+ */
+export type WorkPartNeedV1_Deserialize = 
+/**  Sign in on the site, then the part can run again. */
+({ kind: "sign_in"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Let the agent work on the site as the person. */
+({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Let the agent read a folder on this Mac. */
+({ kind: "allow_folder"; path: string }) & { connection?: never; host?: never; reason?: never } | 
+/**
+ *  Use an installed tool or connected service: "gh", "Linear"; the
+ *  reason says why its website did not do.
+ */
+({ kind: "use_connection"; connection: string; reason?: WorkPartReasonV1 | null }) & { host?: never; path?: never } | 
+/**
+ *  Connect a service in Settings → Connections first: the person has no
+ *  connection for it, and it has one people add ("Linear").
+ */
+({ kind: "connect"; connection: string }) & { host?: never; path?: never; reason?: never } | 
+/**  Trying again may work; the reason says what went wrong. */
+({ kind: "retry"; host?: string | null; reason?: WorkPartReasonV1 | null }) & { connection?: never; path?: never };
+
+/**
+ *  What a part that could not do its job needs from the person, with the
+ *  thing it concerns. The fix sits on the part's row.
+ */
+export type WorkPartNeedV1_Serialize = 
+/**  Sign in on the site, then the part can run again. */
+({ kind: "sign_in"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Let the agent work on the site as the person. */
+({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } | 
+/**  Let the agent read a folder on this Mac. */
+({ kind: "allow_folder"; path: string }) & { connection?: never; host?: never; reason?: never } | 
+/**
+ *  Use an installed tool or connected service: "gh", "Linear"; the
+ *  reason says why its website did not do.
+ */
+({ kind: "use_connection"; connection: string; reason?: WorkPartReasonV1 | null }) & { host?: never; path?: never } | 
+/**
+ *  Connect a service in Settings → Connections first: the person has no
+ *  connection for it, and it has one people add ("Linear").
+ */
+({ kind: "connect"; connection: string }) & { host?: never; path?: never; reason?: never } | 
+/**  Trying again may work; the reason says what went wrong. */
+({ kind: "retry"; host?: string | null; reason?: WorkPartReasonV1 | null }) & { connection?: never; path?: never };
+
+/**  Why a part could not do its job, in closed words the canvas phrases. */
+export type WorkPartReasonV1 = 
+/**  The page loaded but what it shows could not be read. */
+"couldnt_read" | 
+/**  The site showed its signed-out view. */
+"signed_out" | 
+/**  The site asked for a human check. */
+"blocked_by_check" | 
+/**  The site answered, but what was asked for is not there. */
+"not_found" | 
+/**  The site or service failed on its side. */
+"site_error" | 
+/**  The site or service did not answer in time. */
+"no_answer";
+
+/**  What the part's mark shows: a site's host or a connection's name. */
+export type WorkPartServiceV1 = WorkPartServiceV1_Serialize | WorkPartServiceV1_Deserialize;
+
+/**  What the part's mark shows: a site's host or a connection's name. */
+export type WorkPartServiceV1_Deserialize = {
+	host?: string | null,
+	connection?: string | null,
+};
+
+/**  What the part's mark shows: a site's host or a connection's name. */
+export type WorkPartServiceV1_Serialize = {
+	host?: string | null,
+	connection?: string | null,
+};
+
+export type WorkPartStateV1 = "planned" | "running" | 
+/**  Waiting on the person: an entry question, a sign-in or a Confirm. */
+"waiting" | "done" | "failed" | "stopped";
+
+export type WorkPickFacetV1 = "stay" | "flight" | "product" | "place" | "restaurant" | "job" | "course" | "video" | "repo" | "service" | "company" | "person" | "event" | "article" | "other";
+
+export type WorkPickFactV1 = {
+	label: string,
+	value: string,
+	kind: WorkFactKindV1,
+};
+
+export type WorkPickRefV1 = {
+	artifact: WorkArtifactId,
+	index: number,
+};
+
+export type WorkPickV1 = WorkPickV1_Serialize | WorkPickV1_Deserialize;
+
+export type WorkPickV1_Deserialize = {
+	name: string,
+	subtitle?: string | null,
+	/**  Public HTTPS pictures of the subject itself, from its sources. */
+	image_candidates?: string[],
+	/**  A bare public host whose logo stands for the subject. */
+	logo_host?: string | null,
+	url?: string | null,
+	price?: WorkPriceV1_Deserialize | null,
+	facts?: WorkPickFactV1[],
+	rating?: WorkRatingV1_Deserialize | null,
+	why?: string | null,
+	tags?: string[],
+	recommended?: boolean,
+	route?: WorkRouteV1_Deserialize | null,
+	when?: string | null,
+	duration?: string | null,
+	/**  Index into the artifact's evidence. */
+	source?: number | null,
+};
+
+export type WorkPickV1_Serialize = {
+	name: string,
+	subtitle?: string | null,
+	/**  Public HTTPS pictures of the subject itself, from its sources. */
+	image_candidates?: string[],
+	/**  A bare public host whose logo stands for the subject. */
+	logo_host?: string | null,
+	url?: string | null,
+	price?: WorkPriceV1_Serialize | null,
+	facts?: WorkPickFactV1[],
+	rating?: WorkRatingV1_Serialize | null,
+	why?: string | null,
+	tags?: string[],
+	recommended?: boolean,
+	route?: WorkRouteV1_Serialize | null,
+	when?: string | null,
+	duration?: string | null,
+	/**  Index into the artifact's evidence. */
+	source?: number | null,
+};
+
+export type WorkPlanDraft = {
+	id: WorkPlanId,
+	nodes: WorkPlanNode[],
+};
+
+/** Durable plan identity, independent of its immutable revisions. */
+export type WorkPlanId = string;
+
+export type WorkPlanNode = {
+	id: WorkPlanNodeId,
+	objective: string,
+	dependencies: WorkPlanNodeId[],
+	outputs: WorkExpectedOutput[],
+};
+
+/** Durable responsibility in a draft; not an execution lease or a Task. */
+export type WorkPlanNodeId = string;
+
+export type WorkPlanProposal = {
+	nodes: WorkNodeProposal[],
+};
+
+/**
+ *  One non-replayable provider operation. After a lost result, refresh Work;
+ *  never automatically repeat generation or interpret missing usage as zero.
+ */
+export type WorkPlanRequestV1 = WorkPlanRequestV1_Serialize | WorkPlanRequestV1_Deserialize;
+
+/**
+ *  One non-replayable provider operation. After a lost result, refresh Work;
+ *  never automatically repeat generation or interpret missing usage as zero.
+ */
+export type WorkPlanRequestV1_Deserialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	/**  Selected canvas objects to admit as planning context. */
+	context?: WorkContextSelectionV1_Deserialize | null,
+};
+
+/**
+ *  One non-replayable provider operation. After a lost result, refresh Work;
+ *  never automatically repeat generation or interpret missing usage as zero.
+ */
+export type WorkPlanRequestV1_Serialize = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	/**  Selected canvas objects to admit as planning context. */
+	context?: WorkContextSelectionV1_Serialize | null,
+};
+
+export type WorkPlanRevision = WorkPlanRevision_Serialize | WorkPlanRevision_Deserialize;
+
+export type WorkPlanRevision_Deserialize = {
+	author: WorkAuthor,
+	revision: WorkRevision,
+	/**  Exact Work context from which the proposal was accepted. */
+	basis_revision: WorkRevision,
+	draft: WorkPlanDraft,
+	/**  The manifest of admitted canvas context the planner saw, if any. */
+	context?: WorkContextDisclosureV1_Deserialize | null,
+};
+
+export type WorkPlanRevision_Serialize = {
+	author: WorkAuthor,
+	revision: WorkRevision,
+	/**  Exact Work context from which the proposal was accepted. */
+	basis_revision: WorkRevision,
+	draft: WorkPlanDraft,
+	/**  The manifest of admitted canvas context the planner saw, if any. */
+	context?: WorkContextDisclosureV1_Serialize | null,
+};
+
+export type WorkPlanStepKindV1 = "travel" | "stay" | "event" | "task" | "milestone" | "note";
+
+export type WorkPlanStepV1 = WorkPlanStepV1_Serialize | WorkPlanStepV1_Deserialize;
+
+export type WorkPlanStepV1_Deserialize = {
+	when?: string | null,
+	title: string,
+	detail?: string | null,
+	kind: WorkPlanStepKindV1,
+	cost?: string | null,
+	place?: string | null,
+	/**  A pick this step stands for, in a picks object of the same work. */
+	pick?: WorkPickRefV1 | null,
+	source?: number | null,
+};
+
+export type WorkPlanStepV1_Serialize = {
+	when?: string | null,
+	title: string,
+	detail?: string | null,
+	kind: WorkPlanStepKindV1,
+	cost?: string | null,
+	place?: string | null,
+	/**  A pick this step stands for, in a picks object of the same work. */
+	pick?: WorkPickRefV1 | null,
+	source?: number | null,
+};
+
+export type WorkPlanningFailureV1 = { kind: "invalid" } | { kind: "capacity" } | { kind: "unavailable" } | { kind: "cancelled" } | { kind: "timeout" } | { kind: "stale" } | { kind: "needs_input" } | { kind: "privacy" } | { kind: "provider_outcome_unknown" } | { kind: "provider_refused" } | { kind: "store"; error: WorkFailureV1 };
+
+export type WorkPlanningOutcomeV1 = WorkPlanningOutcomeV1_Serialize | WorkPlanningOutcomeV1_Deserialize;
+
+export type WorkPlanningOutcomeV1_Deserialize = ({ kind: "settled"; response: WorkResponseV1_Deserialize }) & { reason?: never } | ({ kind: "refused"; reason: WorkPlanningFailureV1 }) & { response?: never };
+
+export type WorkPlanningOutcomeV1_Serialize = ({ kind: "settled"; response: WorkResponseV1_Serialize }) & { reason?: never } | ({ kind: "refused"; reason: WorkPlanningFailureV1 }) & { response?: never };
+
+export type WorkPlanningResponseV1 = WorkPlanningResponseV1_Serialize | WorkPlanningResponseV1_Deserialize;
+
+export type WorkPlanningResponseV1_Deserialize = {
+	version: number,
+	profile: string,
+	work: WorkId,
+	basis_revision: WorkRevision,
+	usage: WorkPlanningUsageV1 | null,
+	outcome: WorkPlanningOutcomeV1_Deserialize,
+};
+
+export type WorkPlanningResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	work: WorkId,
+	basis_revision: WorkRevision,
+	usage: WorkPlanningUsageV1 | null,
+	outcome: WorkPlanningOutcomeV1_Serialize,
+};
+
+export type WorkPlanningUsageV1 = {
+	input_tokens: number,
+	output_tokens: number,
+	cost_ceiling_micro_usd: string,
+};
+
+export type WorkPlotAxisKindV1 = "category" | "time" | "linear";
+
+export type WorkPlotFormatV1 = "number" | "money" | "duration" | "percent" | "bytes";
+
+/**  Decimal strings keep values exact; a missing `y` is a gap. */
+export type WorkPlotPointV1 = WorkPlotPointV1_Serialize | WorkPlotPointV1_Deserialize;
+
+/**  Decimal strings keep values exact; a missing `y` is a gap. */
+export type WorkPlotPointV1_Deserialize = {
+	x: string,
+	y?: string | null,
+	y2?: string | null,
+};
+
+/**  Decimal strings keep values exact; a missing `y` is a gap. */
+export type WorkPlotPointV1_Serialize = {
+	x: string,
+	y?: string | null,
+	y2?: string | null,
+};
+
+export type WorkPlotSeriesV1 = WorkPlotSeriesV1_Serialize | WorkPlotSeriesV1_Deserialize;
+
+export type WorkPlotSeriesV1_Deserialize = {
+	name: string,
+	points: WorkPlotPointV1_Deserialize[],
+};
+
+export type WorkPlotSeriesV1_Serialize = {
+	name: string,
+	points: WorkPlotPointV1_Serialize[],
+};
+
+export type WorkPlotStyleV1 = "bar" | "bar_horizontal" | "bar_stacked" | "bar_grouped" | "line" | "area" | "area_stacked" | "donut" | "radial" | "radar" | "range";
+
+export type WorkPlotXV1 = WorkPlotXV1_Serialize | WorkPlotXV1_Deserialize;
+
+export type WorkPlotXV1_Deserialize = {
+	label?: string | null,
+	kind: WorkPlotAxisKindV1,
+};
+
+export type WorkPlotXV1_Serialize = {
+	label?: string | null,
+	kind: WorkPlotAxisKindV1,
+};
+
+export type WorkPlotYV1 = WorkPlotYV1_Serialize | WorkPlotYV1_Deserialize;
+
+export type WorkPlotYV1_Deserialize = {
+	label?: string | null,
+	unit?: string | null,
+	format: WorkPlotFormatV1,
+	currency?: string | null,
+};
+
+export type WorkPlotYV1_Serialize = {
+	label?: string | null,
+	unit?: string | null,
+	format: WorkPlotFormatV1,
+	currency?: string | null,
+};
+
+export type WorkPriceV1 = WorkPriceV1_Serialize | WorkPriceV1_Deserialize;
+
+export type WorkPriceV1_Deserialize = {
+	/**  As a person reads it: "$1,240 total", "€89 / night". */
+	display: string,
+	amount?: string | null,
+	currency?: string | null,
+	/**
+	 *  The price before a reduction the source shows, as a person reads it:
+	 *  "$129.99".
+	 */
+	was?: string | null,
+};
+
+export type WorkPriceV1_Serialize = {
+	/**  As a person reads it: "$1,240 total", "€89 / night". */
+	display: string,
+	amount?: string | null,
+	currency?: string | null,
+	/**
+	 *  The price before a reduction the source shows, as a person reads it:
+	 *  "$129.99".
+	 */
+	was?: string | null,
+};
+
+export type WorkProjectEntryKindV1 = "folder" | "file";
+
+/**  One folder or file of the project's structure, parents before children. */
+export type WorkProjectEntryV1 = WorkProjectEntryV1_Serialize | WorkProjectEntryV1_Deserialize;
+
+/**  One folder or file of the project's structure, parents before children. */
+export type WorkProjectEntryV1_Deserialize = {
+	/**  Relative to the root, `/`-separated, at most three names deep. */
+	path: string,
+	kind: WorkProjectEntryKindV1,
+	/**  Entries the folder holds beyond those listed under it. */
+	more?: number | null,
+};
+
+/**  One folder or file of the project's structure, parents before children. */
+export type WorkProjectEntryV1_Serialize = {
+	/**  Relative to the root, `/`-separated, at most three names deep. */
+	path: string,
+	kind: WorkProjectEntryKindV1,
+	/**  Entries the folder holds beyond those listed under it. */
+	more?: number | null,
+};
+
+export type WorkProjectGitV1 = WorkProjectGitV1_Serialize | WorkProjectGitV1_Deserialize;
+
+export type WorkProjectGitV1_Deserialize = {
+	/**  Absent on a detached head. */
+	branch?: string | null,
+	/**  Files changed, staged or untracked. */
+	changed: number,
+	ahead?: number | null,
+	behind?: number | null,
+};
+
+export type WorkProjectGitV1_Serialize = {
+	/**  Absent on a detached head. */
+	branch?: string | null,
+	/**  Files changed, staged or untracked. */
+	changed: number,
+	ahead?: number | null,
+	behind?: number | null,
+};
+
+export type WorkProjectScriptV1 = WorkProjectScriptV1_Serialize | WorkProjectScriptV1_Deserialize;
+
+export type WorkProjectScriptV1_Deserialize = {
+	/**  "dev", "test", "build". */
+	name: string,
+	/**  What it runs, exactly as the project defines it. */
+	command: string,
+	/**  Where it is defined: "package.json", "Makefile". */
+	source?: string | null,
+};
+
+export type WorkProjectScriptV1_Serialize = {
+	/**  "dev", "test", "build". */
+	name: string,
+	/**  What it runs, exactly as the project defines it. */
+	command: string,
+	/**  Where it is defined: "package.json", "Makefile". */
+	source?: string | null,
+};
+
+/**  One technology the project uses, read from a manifest. */
+export type WorkProjectStackV1 = WorkProjectStackV1_Serialize | WorkProjectStackV1_Deserialize;
+
+/**  One technology the project uses, read from a manifest. */
+export type WorkProjectStackV1_Deserialize = {
+	/**  "SvelteKit", "Rust", "Tauri". */
+	name: string,
+	version?: string | null,
+	/**  What it is for here: "Frontend", "Desktop shell", "Language". */
+	role?: string | null,
+	/**  A bare public host whose logo marks it: svelte.dev. */
+	host?: string | null,
+	/**  The manifest it was read from, relative to the project root. */
+	manifest?: string | null,
+};
+
+/**  One technology the project uses, read from a manifest. */
+export type WorkProjectStackV1_Serialize = {
+	/**  "SvelteKit", "Rust", "Tauri". */
+	name: string,
+	version?: string | null,
+	/**  What it is for here: "Frontend", "Desktop shell", "Language". */
+	role?: string | null,
+	/**  A bare public host whose logo marks it: svelte.dev. */
+	host?: string | null,
+	/**  The manifest it was read from, relative to the project root. */
+	manifest?: string | null,
+};
+
+export type WorkProviderSearchCitation = {
+	url: string,
+	title: string,
+	start_index: number,
+	end_index: number,
+};
+
+export type WorkProviderSearchEvidenceV1 = {
+	version: number,
+	provider: WorkSearchProvider,
+	model: string,
+	/**  Catalog-validated actual snapshot returned by the provider. */
+	response_model: string,
+	response_id: string,
+	search_call_id: string,
+	answer: string,
+	citations: WorkProviderSearchCitation[],
+	/**  Provider-reported usage, distinct from fixed billed search-content units. */
+	actual_input_tokens: number,
+	actual_output_tokens: number,
+};
+
+/**
+ *  Original provider attribution committed with its attempt's outputs. This
+ *  carries no native browser reference or authority to open its source URLs.
+ */
+export type WorkProviderSearchRecordV1 = WorkProviderSearchRecordV1_Serialize | WorkProviderSearchRecordV1_Deserialize;
+
+/**
+ *  Original provider attribution committed with its attempt's outputs. This
+ *  carries no native browser reference or authority to open its source URLs.
+ */
+export type WorkProviderSearchRecordV1_Deserialize = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	evidence: WorkProviderSearchEvidenceV1,
+	ranking?: WorkPublicSearchRanking | null,
+};
+
+/**
+ *  Original provider attribution committed with its attempt's outputs. This
+ *  carries no native browser reference or authority to open its source URLs.
+ */
+export type WorkProviderSearchRecordV1_Serialize = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	evidence: WorkProviderSearchEvidenceV1,
+	ranking?: WorkPublicSearchRanking | null,
+};
+
+export type WorkProviderStatusV1 = WorkProviderStatusV1_Serialize | WorkProviderStatusV1_Deserialize;
+
+export type WorkProviderStatusV1_Deserialize = {
+	provider: WorkModelProvider,
+	key: WorkKeyStateV1,
+	fault?: WorkModelsFaultV1 | null,
+	/**  The OpenAI-compatible endpoint's base URL. */
+	base: string | null,
+};
+
+export type WorkProviderStatusV1_Serialize = {
+	provider: WorkModelProvider,
+	key: WorkKeyStateV1,
+	fault?: WorkModelsFaultV1 | null,
+	/**  The OpenAI-compatible endpoint's base URL. */
+	base: string | null,
+};
+
+export type WorkPublicDiscoveryScope = {
+	/**  Exact initial public search disclosure reviewed before execution. */
+	search_query: string,
+	max_hops: number,
+};
+
+/**  Advisory source priority; IDs are one-based indices into the unchanged citations. */
+export type WorkPublicSearchRanking = {
+	preferred: number[],
+	usage: WorkUsage,
+};
+
+export type WorkPublicSearchScope = {
+	provider: WorkSearchProvider,
+	model: string,
+	query: string,
+};
+
+export type WorkQueryKindV1 = { kind: "projection"; work: WorkId } | { kind: "list"; after: WorkId | null; limit: number } | { kind: "plan_history"; work: WorkId } | { kind: "plan"; work: WorkId; revision: WorkRevision } | { kind: "evidence"; work: WorkId; link: WorkEvidenceLink };
+
+export type WorkQueryV1 = {
+	version: number,
+	query: WorkQueryKindV1,
+};
+
+export type WorkQuestion = {
+	basis_revision: WorkRevision | null,
+	objective_revision: WorkRevision | null,
+	state: WorkQuestionState,
+	author: WorkAuthor,
+	answer_author: WorkAuthor | null,
+	id: WorkQuestionId,
+	prompt: string,
+	options: string[],
+	answer: string | null,
+};
+
+/** Durable clarification question identity. */
+export type WorkQuestionId = string;
+
+export type WorkQuestionState = "active" | "answered" | "superseded" | "dismissed";
+
+export type WorkRatingV1 = WorkRatingV1_Serialize | WorkRatingV1_Deserialize;
+
+export type WorkRatingV1_Deserialize = {
+	value: string,
+	max: number,
+	count?: number | null,
+};
+
+export type WorkRatingV1_Serialize = {
+	value: string,
+	max: number,
+	count?: number | null,
+};
+
+export type WorkRelation = {
+	id: WorkRelationId,
+	from: WorkElementId,
+	to: WorkElementId,
+	kind: WorkRelationKind,
+	origin: WorkRelationOrigin,
+};
+
+/** Explicit relationship between two canvas elements. */
+export type WorkRelationId = string;
+
+export type WorkRelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
+
+export type WorkRelationOrigin = { kind: "user" } | { kind: "agent"; execution: WorkExecutionId };
+
+export type WorkReplyV1 = WorkReplyV1_Serialize | WorkReplyV1_Deserialize;
+
+export type WorkReplyV1_Deserialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec_Deserialize }) & { error?: never; evidence?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | 
+/**
+ *  An origin grant for the next request: the person approves it, and
+ *  `Run` carries it in the agent grant's `accounts`.
+ */
+({ kind: "account_grant_draft"; work: WorkId; grant: WorkAccountGrantV1_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Deserialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1_Deserialize }) & { error?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision_Deserialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
+
+export type WorkReplyV1_Serialize = ({ kind: "public_read_admitted"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt; replayed: boolean }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "environment"; reply: WorkEnvironmentReply_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "approval_draft"; work: WorkId; expected_revision: WorkRevision; spec: WorkExecutionSpec_Serialize }) & { error?: never; evidence?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; works?: never } | 
+/**
+ *  An origin grant for the next request: the person approves it, and
+ *  `Run` carries it in the agent grant's `accounts`.
+ */
+({ kind: "account_grant_draft"; work: WorkId; grant: WorkAccountGrantV1_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; works?: never } | ({ kind: "projection"; projection: WorkRuntimeProjection_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "authoring_applied"; receipt: WorkAuthoringReceipt }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "execution_applied"; projection: WorkRuntimeProjection_Serialize; receipt: WorkCommandReceipt }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "evidence"; evidence: WorkEvidencePreviewV1_Serialize }) & { error?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "snapshot"; snapshot: WorkSnapshot_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan"; plan: WorkPlanRevision_Serialize }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "plan_history"; revisions: WorkRevision[] }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; snapshot?: never; spec?: never; work?: never; works?: never } | ({ kind: "page"; works: WorkSummary[]; next: WorkId | null }) & { error?: never; evidence?: never; expected_revision?: never; grant?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never } | ({ kind: "error"; error: WorkFailureV1 }) & { evidence?: never; expected_revision?: never; grant?: never; next?: never; plan?: never; projection?: never; receipt?: never; replayed?: never; reply?: never; revisions?: never; snapshot?: never; spec?: never; work?: never; works?: never };
+
+/**
+ *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
+ *  cross this conversion, so a read or JSON round trip cannot mint an attempt.
+ */
+export type WorkResponseV1 = WorkResponseV1_Serialize | WorkResponseV1_Deserialize;
+
+/**
+ *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
+ *  cross this conversion, so a read or JSON round trip cannot mint an attempt.
+ */
+export type WorkResponseV1_Deserialize = {
+	version: number,
+	profile: string,
+	reply: WorkReplyV1_Deserialize,
+};
+
+/**
+ *  Closed product reply grammar: the host-only RuntimeStarted reply cannot
+ *  cross this conversion, so a read or JSON round trip cannot mint an attempt.
+ */
+export type WorkResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	reply: WorkReplyV1_Serialize,
+};
+
+/**
+ *  SQLite- and JavaScript-safe ordered revision. The wire representation is a
+ *  decimal string, so later revisions cannot be rounded by a frontend number.
+ */
+export type WorkRevision = string;
+
+export type WorkRouteV1 = WorkRouteV1_Serialize | WorkRouteV1_Deserialize;
+
+export type WorkRouteV1_Deserialize = {
+	from: string,
+	to: string,
+	depart?: string | null,
+	arrive?: string | null,
+	duration?: string | null,
+	stops: number,
+	carrier?: string | null,
+	carrier_host?: string | null,
+};
+
+export type WorkRouteV1_Serialize = {
+	from: string,
+	to: string,
+	depart?: string | null,
+	arrive?: string | null,
+	duration?: string | null,
+	stops: number,
+	carrier?: string | null,
+	carrier_host?: string | null,
+};
+
+/**
+ *  Internal Store grammar. User commands and host-only attempt facts have
+ *  separate variants at the application edge; IPC never accepts settlements.
+ */
+export type WorkRuntimeIntent = WorkRuntimeIntent_Serialize | WorkRuntimeIntent_Deserialize;
+
+/**
+ *  Internal Store grammar. User commands and host-only attempt facts have
+ *  separate variants at the application edge; IPC never accepts settlements.
+ */
+export type WorkRuntimeIntent_Deserialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; for_run?: never; grant?: never; intervention?: never; spec?: never; step?: never; text?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { answer?: never; approve?: never; data?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Deserialize; evidence: WorkEvidenceLink[] }) & { answer?: never; approve?: never; decision?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Deserialize }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; step?: never; text?: never } | ({ kind: "cancel"; execution: WorkExecutionId; 
+/**
+ *  Present when a person takes the page over rather than abandoning
+ *  the work; persisted with the execution.
+ */
+intervention?: WorkInterventionV1_Deserialize | null }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | 
+/**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | 
+/**
+ *  Start the routine agent loop on the objective. Mints the single-step
+ *  plan and the execution in one transaction; the grant is the approval.
+ */
+({ kind: "begin_agent"; grant: WorkAgentGrantV1_Deserialize; limits: WorkExecutionLimits }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; for_run?: never; intervention?: never; scope?: never; spec?: never; step?: never; text?: never } | 
+/**  Answer a question the running agent asked; allowed while it runs. */
+({ kind: "answer_step"; execution: WorkExecutionId; step: WorkStepId; answer: string }) & { approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; text?: never } | 
+/**  Hand the running agent a message; it reads it at its next turn. */
+({ kind: "steer"; execution: WorkExecutionId; text: string }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } | 
+/**
+ *  Decide a proposed file change or held site step the running agent
+ *  is waiting on. `for_run` accepts a site's offered run-wide allowance.
+ */
+({ kind: "approve_step"; execution: WorkExecutionId; step: WorkStepId; approve: boolean; for_run?: boolean }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; text?: never };
+
+/**
+ *  Internal Store grammar. User commands and host-only attempt facts have
+ *  separate variants at the application edge; IPC never accepts settlements.
+ */
+export type WorkRuntimeIntent_Serialize = ({ kind: "read_public"; scope: WorkPublicSearchScope; limits: WorkExecutionLimits }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; for_run?: never; grant?: never; intervention?: never; spec?: never; step?: never; text?: never } | ({ kind: "review_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; decision: WorkArtifactDecision }) & { answer?: never; approve?: never; data?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "edit_artifact"; execution: WorkExecutionId; artifact: WorkArtifactId; data: WorkArtifactDataV1_Serialize; evidence: WorkEvidenceLink[] }) & { answer?: never; approve?: never; decision?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | ({ kind: "approve"; spec: WorkExecutionSpec_Serialize }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; step?: never; text?: never } | ({ kind: "cancel"; execution: WorkExecutionId; 
+/**
+ *  Present when a person takes the page over rather than abandoning
+ *  the work; persisted with the execution.
+ */
+intervention?: WorkInterventionV1_Serialize | null }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | 
+/**  Explicitly acknowledge that an old owner is gone. Cannot restart it. */
+({ kind: "acknowledge_interruption"; execution: WorkExecutionId }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never; text?: never } | 
+/**
+ *  Start the routine agent loop on the objective. Mints the single-step
+ *  plan and the execution in one transaction; the grant is the approval.
+ */
+({ kind: "begin_agent"; grant: WorkAgentGrantV1_Serialize; limits: WorkExecutionLimits }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; execution?: never; for_run?: never; intervention?: never; scope?: never; spec?: never; step?: never; text?: never } | 
+/**  Answer a question the running agent asked; allowed while it runs. */
+({ kind: "answer_step"; execution: WorkExecutionId; step: WorkStepId; answer: string }) & { approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; text?: never } | 
+/**  Hand the running agent a message; it reads it at its next turn. */
+({ kind: "steer"; execution: WorkExecutionId; text: string }) & { answer?: never; approve?: never; artifact?: never; data?: never; decision?: never; evidence?: never; for_run?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; step?: never } | 
+/**
+ *  Decide a proposed file change or held site step the running agent
+ *  is waiting on. `for_run` accepts a site's offered run-wide allowance.
+ */
+({ kind: "approve_step"; execution: WorkExecutionId; step: WorkStepId; approve: boolean; for_run?: boolean }) & { answer?: never; artifact?: never; data?: never; decision?: never; evidence?: never; grant?: never; intervention?: never; limits?: never; scope?: never; spec?: never; text?: never };
+
+export type WorkRuntimeProjection = WorkRuntimeProjection_Serialize | WorkRuntimeProjection_Deserialize;
+
+export type WorkRuntimeProjection_Deserialize = {
+	version: number,
+	work: WorkSnapshot_Deserialize,
+	executions: WorkExecutionFact_Deserialize[],
+	/**  Old incarnation has no live authority. Facts and reservations remain. */
+	interrupted: WorkExecutionId[],
+	/**
+	 *  Exact original execution owners. Older projections without this field
+	 *  remain readable, but cannot admit transient activity.
+	 */
+	owners?: WorkExecutionOwnership[],
+};
+
+export type WorkRuntimeProjection_Serialize = {
+	version: number,
+	work: WorkSnapshot_Serialize,
+	executions: WorkExecutionFact_Serialize[],
+	/**  Old incarnation has no live authority. Facts and reservations remain. */
+	interrupted: WorkExecutionId[],
+	/**
+	 *  Exact original execution owners. Older projections without this field
+	 *  remain readable, but cannot admit transient activity.
+	 */
+	owners: WorkExecutionOwnership[],
+};
+
+/** Store incarnation; never serialized as execution authority. */
+export type WorkRuntimeSessionId = string;
+
+export type WorkSearchProvider = "open_ai";
+
+export type WorkServerAuthV1 = "none" | 
+/**  A token the person pasted, sent as `Authorization: Bearer`. */
+"bearer" | 
+/**  Sign in with the service in the browser. */
+"oauth";
+
+/**  What testing a server found. */
+export type WorkServerCheckV1 = {
+	version: number,
+	profile: string,
+	id: string,
+	outcome: WorkServerOutcomeV1,
+	/**  The name the server gives itself. */
+	server_name: string | null,
+	tools: WorkServerToolV1[],
+	error: WorkFailureV1 | null,
+};
+
+/**  Adds a server, or replaces the one with the same id. */
+export type WorkServerDraftV1 = {
+	server: WorkServerV1,
+	secrets: WorkServerSecretV1[],
+	/**  The id it had before an edit renamed it. */
+	previous: string | null,
+};
+
+/**  One environment variable a stdio server gets. */
+export type WorkServerEnvV1 = {
+	name: string,
+	/**  Kept in the Keychain; `value` is then always absent. */
+	secret: boolean,
+	value: string | null,
+};
+
+export type WorkServerOutcomeV1 = "ready" | 
+/**  The server wants the person to sign in. */
+"sign_in" | 
+/**  Sign-in was closed or timed out. */
+"cancelled" | 
+/**  The program was not found or could not start. */
+"not_found" | 
+/**  It did not answer in time. */
+"timeout" | 
+/**  It answered outside the protocol or closed. */
+"failed";
+
+export type WorkServerRowV1 = {
+	server: WorkServerV1,
+	/**  Secret names the Keychain holds: `bearer`, `env.NAME`. */
+	secrets: string[],
+	/**  OAuth credentials are held. */
+	signed_in: boolean,
+};
+
+/**  A new secret for a server; an absent one keeps what the Keychain holds. */
+export type WorkServerSecretV1 = {
+	/**  `bearer` or `env.NAME`. */
+	account: string,
+	value: string,
+};
+
+export type WorkServerToolV1 = {
+	name: string,
+	title: string | null,
+	/**  Calls stop for a Confirm. */
+	asks: boolean,
+};
+
+export type WorkServerTransportV1 = { kind: "stdio"; 
+/**  A program name found on the login shell's PATH, or an absolute path. */
+command: string; args: string[]; env: WorkServerEnvV1[] } | { kind: "http"; url: string; auth: WorkServerAuthV1 };
+
+/**  An MCP server the person added, as stored per profile. */
+export type WorkServerV1 = {
+	/**  Lowercase letters, digits and dashes; namespaces its tools. */
+	id: string,
+	/**  "Linear", "Notion". */
+	name: string,
+	transport: WorkServerTransportV1,
+	enabled: boolean,
+};
+
+export type WorkSheetBestV1 = "max" | "min";
+
+export type WorkSheetColumnKindV1 = "text" | "number" | "money" | "percent" | "date" | "duration" | "yes_no" | "rating" | "link" | "entity" | "tag";
+
+export type WorkSheetColumnV1 = WorkSheetColumnV1_Serialize | WorkSheetColumnV1_Deserialize;
+
+export type WorkSheetColumnV1_Deserialize = {
+	label: string,
+	kind: WorkSheetColumnKindV1,
+	unit?: string | null,
+	currency?: string | null,
+	best?: WorkSheetBestV1 | null,
+};
+
+export type WorkSheetColumnV1_Serialize = {
+	label: string,
+	kind: WorkSheetColumnKindV1,
+	unit?: string | null,
+	currency?: string | null,
+	best?: WorkSheetBestV1 | null,
+};
+
+export type WorkSheetEntityV1 = WorkSheetEntityV1_Serialize | WorkSheetEntityV1_Deserialize;
+
+export type WorkSheetEntityV1_Deserialize = {
+	logo_host?: string | null,
+	image?: string | null,
+};
+
+export type WorkSheetEntityV1_Serialize = {
+	logo_host?: string | null,
+	image?: string | null,
+};
+
+export type WorkSheetRowV1 = WorkSheetRowV1_Serialize | WorkSheetRowV1_Deserialize;
+
+export type WorkSheetRowV1_Deserialize = {
+	/**  One per column, typed by it; empty reads as unknown. */
+	cells: string[],
+	entity?: WorkSheetEntityV1_Deserialize | null,
+	source?: number | null,
+};
+
+export type WorkSheetRowV1_Serialize = {
+	/**  One per column, typed by it; empty reads as unknown. */
+	cells: string[],
+	entity?: WorkSheetEntityV1_Serialize | null,
+	source?: number | null,
+};
+
+/**
+ *  A stale, missed or reordered signal never changes durable execution state.
+ *  Render only for the matching owner, Work and durable revision.
+ */
+export type WorkSignalV1 = {
+	version: number,
+	owner: WorkRuntimeSessionId,
+	profile: string,
+	work: WorkId,
+	basis_revision: WorkRevision,
+	execution: WorkExecutionId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	activity: WorkActivityV1,
+};
+
+/**
+ *  A run sent without accounts may stop at a drafted origin grant instead of
+ *  starting: the reply is then `account_grant_draft`, and the person's answer
+ *  sends the request again with the grant or declined. Nothing is granted
+ *  without that answer.
+ */
+export type WorkSignedInV1 = 
+/**
+ *  Draft a grant when the request names the site of an attached tab the
+ *  profile holds a session for.
+ */
+{ kind: "offer" } | 
+/**  The person said not now: this request reads anonymously. */
+{ kind: "declined" } | 
+/**  The person signed in to this origin and asked to read it as themselves. */
+{ kind: "origin"; origin: string };
+
+export type WorkSiteAccessResponseV1 = {
+	version: number,
+	profile: string,
+	sites: WorkSiteRowV1[],
+	error: WorkFailureV1 | null,
+};
+
+/**  A standing answer for one site. Absent means the agent asks once per run. */
+export type WorkSiteAccessV1 = 
+/**  Work in the person's session without asking. */
+"always" | 
+/**  Ask once per run, including on a site Zephium treats as sensitive. */
+"ask" | 
+/**  Never use the person's session here; pages open privately. */
+"never";
+
+/**  Sets one site's standing answer, or clears it with `access: null`. */
+export type WorkSiteChangeV1 = {
+	site: string,
+	access: WorkSiteAccessV1 | null,
+};
+
+/**  One site as Settings lists it. */
+export type WorkSiteRowV1 = {
+	/**  Registrable domain, such as slack.com. */
+	site: string,
+	/**  What people call it, such as Slack. */
+	name: string,
+	access: WorkSiteAccessV1,
+	/**  Banks, password managers and health or tax portals: Always is refused. */
+	sensitive: boolean,
+};
+
+export type WorkSkillChangeV1 = 
+/**
+ *  Writes the person's skill from its `SKILL.md` text; `previous` is the
+ *  name it had when it is renamed.
+ */
+{ kind: "save"; previous: string | null; text: string } | { kind: "delete"; name: string } | { kind: "set_enabled"; name: string; enabled: boolean };
+
+/**  Why a skill change was refused, in closed words. */
+export type WorkSkillFaultV1 = "no_frontmatter" | "name" | "description" | "role" | "too_large" | "empty" | "not_found" | "built_in" | "taken" | "full";
+
+/**  One skill as Settings lists it. */
+export type WorkSkillRowV1 = {
+	name: string,
+	description: string,
+	/**  Ships with the app, unchanged. */
+	builtin: boolean,
+	/**  The person's own version of a built-in. */
+	customized: boolean,
+	enabled: boolean,
+	tools: string[],
+	/**  lead, page or light. */
+	role: string | null,
+};
+
+export type WorkSkillsResponseV1 = {
+	version: number,
+	profile: string,
+	skills: WorkSkillRowV1[],
+	/**  A skill's `SKILL.md`, when one was read. */
+	text: string | null,
+	fault: WorkSkillFaultV1 | null,
+	error: WorkFailureV1 | null,
+};
+
+/**  Bounded full-resynchronization projection. Serialized facts grant nothing. */
+export type WorkSnapshot = WorkSnapshot_Serialize | WorkSnapshot_Deserialize;
+
+/**  Bounded full-resynchronization projection. Serialized facts grant nothing. */
+export type WorkSnapshot_Deserialize = {
+	lifecycle: WorkLifecycle,
+	objective_revision: WorkRevision,
+	context_revision: WorkRevision,
+	objective_author: WorkAuthor,
+	schema_version: number,
+	id: WorkId,
+	profile: ProfileId,
+	revision: WorkRevision,
+	objective: string,
+	status: WorkAuthoringStatus,
+	plan: WorkPlanRevision_Deserialize | null,
+	questions: WorkQuestion[],
+};
+
+/**  Bounded full-resynchronization projection. Serialized facts grant nothing. */
+export type WorkSnapshot_Serialize = {
+	lifecycle: WorkLifecycle,
+	objective_revision: WorkRevision,
+	context_revision: WorkRevision,
+	objective_author: WorkAuthor,
+	schema_version: number,
+	id: WorkId,
+	profile: ProfileId,
+	revision: WorkRevision,
+	objective: string,
+	status: WorkAuthoringStatus,
+	plan: WorkPlanRevision_Serialize | null,
+	questions: WorkQuestion[],
+};
+
+export type WorkSourceEntry = WorkSourceEntry_Serialize | WorkSourceEntry_Deserialize;
+
+export type WorkSourceEntry_Deserialize = {
+	evidence: number,
+	title: string,
+	role: string,
+	subject?: number | null,
+};
+
+export type WorkSourceEntry_Serialize = {
+	evidence: number,
+	title: string,
+	role: string,
+	subject?: number | null,
+};
+
+export type WorkStartRequestV1 = {
+	version: number,
+	work: WorkId,
+	expected_revision: WorkRevision,
+	execution: WorkExecutionId,
+};
+
+export type WorkStepFact = WorkStepFact_Serialize | WorkStepFact_Deserialize;
+
+export type WorkStepFact_Deserialize = {
+	id: WorkStepId,
+	turn: number,
+	kind: WorkStepKindV1_Deserialize,
+	status: WorkStepStatus,
+	/**  Present once a model or browser step settled; turn-local steps carry none. */
+	usage?: WorkUsage | null,
+	artifacts?: WorkArtifactId[],
+	/**  Provider search record produced by this step. */
+	evidence?: WorkArtifactId | null,
+	/**  A short line for people: what the agent said or what this step found. */
+	note?: string | null,
+	/**  Closed measurements of a settled browser step; absent for other kinds. */
+	measurements?: WorkStepMeasurementsV1 | null,
+	local?: WorkLocalStepV1_Deserialize | null,
+	/**  A page opened in the person's own session on its site. */
+	account?: WorkPageAccountV1 | null,
+	/**  The part of a lead run this step works for. */
+	part?: WorkPartId | null,
+};
+
+export type WorkStepFact_Serialize = {
+	id: WorkStepId,
+	turn: number,
+	kind: WorkStepKindV1_Serialize,
+	status: WorkStepStatus,
+	/**  Present once a model or browser step settled; turn-local steps carry none. */
+	usage?: WorkUsage | null,
+	artifacts?: WorkArtifactId[],
+	/**  Provider search record produced by this step. */
+	evidence?: WorkArtifactId | null,
+	/**  A short line for people: what the agent said or what this step found. */
+	note?: string | null,
+	/**  Closed measurements of a settled browser step; absent for other kinds. */
+	measurements?: WorkStepMeasurementsV1 | null,
+	local?: WorkLocalStepV1_Serialize | null,
+	/**  A page opened in the person's own session on its site. */
+	account?: WorkPageAccountV1 | null,
+	/**  The part of a lead run this step works for. */
+	part?: WorkPartId | null,
+};
+
+/** One admitted agent operation inside an execution. */
+export type WorkStepId = string;
+
+export type WorkStepKindV1 = WorkStepKindV1_Serialize | WorkStepKindV1_Deserialize;
+
+export type WorkStepKindV1_Deserialize = 
+/**  One model turn; `note` on the step is what the agent said. */
+({ kind: "turn" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null; 
+/**  A page task: the agent works toward this goal on the url's site. */
+goal?: string | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  Objects the agent placed on the canvas from this turn. */
+({ kind: "publish" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null; 
+/**  Why it asks, so the question shows where it belongs. */
+purpose?: WorkAskPurposeV1 | null }) & { call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**
+ *  A message the person sent while the agent ran; the agent reads it at
+ *  its next turn.
+ */
+({ kind: "steer"; text: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  Directory listing inside a granted folder. */
+({ kind: "list"; path: string; depth?: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read_file"; path: string; offset?: number | null; limit?: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; new?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search_files"; path: string; query: string; glob?: string | null; regex?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  A proposed whole-file write; `decision` is the person's answer. */
+({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  A proposed replacement of one exact passage. */
+({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; offset?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "move_file"; from: string; to: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; url?: never } | ({ kind: "delete_file"; path: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs?: number | null; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; confirm?: never; content?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; title?: never; to?: never; url?: never } | ({ kind: "finish"; 
+/**  Up to three short next requests the person may choose. */
+followups?: string[]; 
+/**  The work's name, given by its first run: a short noun phrase. */
+title?: string | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
+/**
+ *  A step on a site that commits something for the person, held until
+ *  they decide. Every field is Rust's reading of the page, never the
+ *  model's words; the status is the receipt once it settles.
+ */
+({ kind: "confirm"; confirm: WorkConfirmV1_Deserialize }) & { answer?: never; call?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**
+ *  A call to an installed tool or connected service, settled as it is
+ *  recorded; the note is its row for people.
+ */
+({ kind: "call"; call: WorkConnectionCallV1_Deserialize }) & { answer?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never };
+
+export type WorkStepKindV1_Serialize = 
+/**  One model turn; `note` on the step is what the agent said. */
+({ kind: "turn" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null; 
+/**  A page task: the agent works toward this goal on the url's site. */
+goal?: string | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  Objects the agent placed on the canvas from this turn. */
+({ kind: "publish" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null; 
+/**  Why it asks, so the question shows where it belongs. */
+purpose?: WorkAskPurposeV1 | null }) & { call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**
+ *  A message the person sent while the agent ran; the agent reads it at
+ *  its next turn.
+ */
+({ kind: "steer"; text: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  Directory listing inside a granted folder. */
+({ kind: "list"; path: string; depth: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read_file"; path: string; offset: number | null; limit: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; new?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search_files"; path: string; query: string; glob: string | null; regex: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  A proposed whole-file write; `decision` is the person's answer. */
+({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**  A proposed replacement of one exact passage. */
+({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; offset?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "move_file"; from: string; to: string; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; url?: never } | ({ kind: "delete_file"; path: string; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs: number | null; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; confirm?: never; content?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; title?: never; to?: never; url?: never } | ({ kind: "finish"; 
+/**  Up to three short next requests the person may choose. */
+followups?: string[]; 
+/**  The work's name, given by its first run: a short noun phrase. */
+title?: string | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
+/**
+ *  A step on a site that commits something for the person, held until
+ *  they decide. Every field is Rust's reading of the page, never the
+ *  model's words; the status is the receipt once it settles.
+ */
+({ kind: "confirm"; confirm: WorkConfirmV1_Serialize }) & { answer?: never; call?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | 
+/**
+ *  A call to an installed tool or connected service, settled as it is
+ *  recorded; the note is its row for people.
+ */
+({ kind: "call"; call: WorkConnectionCallV1_Serialize }) & { answer?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never };
+
+/**
+ *  Closed counts for one browser step: durations, call counts and exact
+ *  accounting beside the conservative ceiling in `usage`. Never page, model
+ *  or provider text.
+ */
+export type WorkStepMeasurementsV1 = {
+	/**  Wall time from the step's resource launch to its settled outcome. */
+	wall_millis: number,
+	/**  Typed decision calls answered by the recommended backend. */
+	decision_calls: number,
+	/**  Typed decision calls answered by the LLM emulation. */
+	emulation_calls: number,
+	/**  Page-model calls, including focused generation and extraction. */
+	planner_calls: number,
+	/**  Native actions the page agent started. */
+	native_actions: number,
+	/**  Tokens charged by settled provider calls. */
+	model_tokens: number,
+	/**  Micro-USD charged by settled provider calls. */
+	cost_micro_usd: number,
+	/**  How exactly `cost_micro_usd` is known. */
+	cost_basis: WorkCostBasis,
+};
+
+export type WorkStepStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
+
+/**  A named thing the work is about: a library, a listing, a flight, a concept. */
+export type WorkSubject = WorkSubject_Serialize | WorkSubject_Deserialize;
+
+/**  A named thing the work is about: a library, a listing, a flight, a concept. */
+export type WorkSubject_Deserialize = {
+	name: string,
+	descriptor?: string | null,
+	/**  Descriptive link only; never a navigation grant. */
+	homepage?: string | null,
+	/**
+	 *  Public HTTPS image URLs from cited sources that depict the subject.
+	 *  Candidates only: Rust fetches, bounds, decodes, and stores an admitted
+	 *  copy with provenance before anything renders.
+	 */
+	image_candidates?: string[],
+};
+
+/**  A named thing the work is about: a library, a listing, a flight, a concept. */
+export type WorkSubject_Serialize = {
+	name: string,
+	descriptor?: string | null,
+	/**  Descriptive link only; never a navigation grant. */
+	homepage?: string | null,
+	/**
+	 *  Public HTTPS image URLs from cited sources that depict the subject.
+	 *  Candidates only: Rust fetches, bounds, decodes, and stores an admitted
+	 *  copy with provenance before anything renders.
+	 */
+	image_candidates?: string[],
+};
+
+export type WorkSummary = {
+	lifecycle: WorkLifecycle,
+	schema_version: number,
+	id: WorkId,
+	revision: WorkRevision,
+	status: WorkAuthoringStatus,
+	objective: string,
+};
+
+export type WorkUsage = {
+	model_tokens: number,
+	cost_micro_usd: number,
+	operations: number,
+	accounting: WorkUsageAccounting,
+};
+
+export type WorkUsageAccounting = "exact" | "conservative_reservation";
+
+export type WorkUserEdit = { kind: "set_objective"; objective: string } | { kind: "open_question"; prompt: string; options: string[] } | { kind: "answer_question"; id: WorkQuestionId; answer: string } | { kind: "dismiss_question"; id: WorkQuestionId } | { kind: "replace_draft"; proposal: WorkPlanProposal } | { kind: "archive" } | { kind: "restore" } | { kind: "compact_history" };
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

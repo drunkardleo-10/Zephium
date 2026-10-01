@@ -574,6 +574,17 @@ fn write_full_node(
     if let Some(level) = node.heading_level() {
         checked_write(output, format_args!(" level={}", level.get()))?;
     }
+    if let Some(kind) = node.landmark_kind() {
+        checked_write(output, format_args!(" landmark={}", kind.label()))?;
+    }
+    if let Some(target) = node.link_destination() {
+        output.push(" destination=")?;
+        write_quoted(output, target.as_url().as_str())?;
+    }
+    if node.image_source().is_some() {
+        output.push(" image_source_available=true")?;
+    }
+    crate::semantic_model::write_disclosure(output, node)?;
     write_states(output, node.states())?;
     write_operations(output, node.operations())?;
     if let Some(name) = node.name() {
@@ -619,6 +630,20 @@ fn write_changed_fields(
         output.push(" name=")?;
         write_optional_text(output, node.name().map(|value| value.as_str()))?;
     }
+    if changes.contains(SemanticNodeChange::LinkDestination) {
+        output.push(" destination=")?;
+        write_optional_text(
+            output,
+            node.link_destination()
+                .map(|target| target.as_url().as_str()),
+        )?;
+    }
+    if changes.contains(SemanticNodeChange::ImageSource) {
+        checked_write(
+            output,
+            format_args!(" image_source_available={}", node.image_source().is_some()),
+        )?;
+    }
     if changes.contains(SemanticNodeChange::Text) {
         output.push(" text=")?;
         write_optional_text(output, node.text().map(|value| value.as_str()))?;
@@ -649,6 +674,15 @@ fn write_changed_fields(
     // Rust-side freshness, hit-testing, and occlusion checks. Coordinates are
     // deliberately not projected into the model transcript, which acts only
     // through opaque references.
+    if changes.contains(SemanticNodeChange::LandmarkKind) {
+        checked_write(
+            output,
+            format_args!(
+                " landmark={}",
+                node.landmark_kind().map_or("-", |kind| kind.label())
+            ),
+        )?;
+    }
     if changes.contains(SemanticNodeChange::HeadingLevel) {
         output.push(" level=")?;
         match node.heading_level() {
@@ -723,7 +757,7 @@ fn write_operation_inventory(
     Ok(())
 }
 
-fn change_labels() -> [(SemanticNodeChange, &'static str); 9] {
+fn change_labels() -> [(SemanticNodeChange, &'static str); 12] {
     [
         (SemanticNodeChange::Name, "name"),
         (SemanticNodeChange::Text, "text"),
@@ -734,6 +768,9 @@ fn change_labels() -> [(SemanticNodeChange, &'static str); 9] {
         (SemanticNodeChange::Trust, "trust"),
         (SemanticNodeChange::Geometry, "geometry"),
         (SemanticNodeChange::HeadingLevel, "heading_level"),
+        (SemanticNodeChange::LandmarkKind, "landmark_kind"),
+        (SemanticNodeChange::LinkDestination, "link_destination"),
+        (SemanticNodeChange::ImageSource, "image_source"),
     ]
 }
 
@@ -787,6 +824,24 @@ mod tests {
         snapshot_generation: u64,
         nodes: Value,
     ) -> SemanticObservation {
+        observation_with_budget(
+            context,
+            observation_id,
+            invocation,
+            snapshot_generation,
+            nodes,
+            SemanticObservationBudget::try_new(64, 8192, 1).expect("budget"),
+        )
+    }
+
+    fn observation_with_budget(
+        context: crate::ContextJoin,
+        observation_id: u64,
+        invocation: u64,
+        snapshot_generation: u64,
+        nodes: Value,
+        budget: SemanticObservationBudget,
+    ) -> SemanticObservation {
         let frame = SemanticFrameJoin::try_new(
             context,
             FrameId::MAIN,
@@ -816,7 +871,7 @@ mod tests {
         let request = SemanticObservationRequest::initial(
             SemanticObservationId::new(observation_id).expect("observation id"),
             context,
-            SemanticObservationBudget::try_new(64, 8192, 1).expect("budget"),
+            budget,
         );
         SemanticObservationAssembler::new(request, snapshot)
             .expect("assembler")
@@ -990,6 +1045,190 @@ mod tests {
                 panic!("unexpected value fresh snapshot: {reason:?}")
             }
         }
+    }
+
+    #[test]
+    fn oversized_public_link_capture_keeps_exact_bounded_prefix_and_truthful_evidence() {
+        use crate::*;
+        let context = context();
+        let mut nodes = vec![json!({"k":9001,"r":"landmark","lm":"main"})];
+        for index in 0..72 {
+            nodes.push(
+                json!({"k":9002+index,"p":0,"r":"link","n":format!("Result {index}"),
+                "u":format!("https://public.example.test/{index}/{}", "a".repeat(170))}),
+            );
+        }
+        let raw = observation_with_budget(
+            context,
+            1,
+            11,
+            21,
+            Value::Array(nodes),
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        assert!(raw.total_text_bytes() <= 16 * 1024);
+        let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
+        assert!(matches!(
+            encode_semantic_observation(&raw, budget),
+            Err(SemanticModelEncodingError::OutputLimit)
+        ));
+        let projected = fit_semantic_observation_for_model(raw.clone(), budget).unwrap();
+        assert!(projected.node_count() > 1 && projected.node_count() < raw.node_count());
+        assert_eq!(projected.request(), raw.request());
+        assert_eq!(projected.frames()[0].frame(), raw.frames()[0].frame());
+        assert_eq!(
+            projected.frames()[0].invocation(),
+            raw.frames()[0].invocation()
+        );
+        assert_eq!(
+            projected.frames()[0].generation(),
+            raw.frames()[0].generation()
+        );
+        assert_eq!(
+            projected.frames()[0].nodes(),
+            &raw.frames()[0].nodes()[..usize::from(projected.node_count())]
+        );
+        assert_eq!(
+            projected.frames()[0].completeness(),
+            SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit)
+        );
+        let payload = encode_semantic_observation(&projected, budget)
+            .unwrap()
+            .admit_conservative_utf8(&revision())
+            .unwrap();
+        assert!(payload.as_str().len() <= 16 * 1024);
+        assert!(payload
+            .as_str()
+            .contains("complete=truncated_model_projection"));
+        let ack = payload
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .unwrap();
+        assert!(ack.matches(&projected));
+        assert!(
+            !ack.matches(&raw),
+            "full capture cannot borrow reduced delivery authority"
+        );
+        let removed = raw.frames()[0].nodes()[usize::from(projected.node_count())].reference();
+        assert!(projected
+            .resolve_node(removed, projected.frames()[0].frame())
+            .is_err());
+        let anchor = projected.frames()[0].nodes()[0].reference();
+        assert!(projected
+            .begin_expansion(
+                SemanticObservationId::new(2).unwrap(),
+                anchor,
+                projected.frames()[0].frame(),
+                SemanticExpansionKind::Region,
+                SemanticObservationBudget::INITIAL_FILTERED
+            )
+            .is_ok());
+        assert!(read_semantic_observation(
+            &projected,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD
+        )
+        .is_ok());
+        let larger = raw
+            .model_prefix(usize::from(projected.node_count()) + 1)
+            .unwrap();
+        assert!(matches!(
+            encode_semantic_observation(&larger, budget),
+            Err(SemanticModelEncodingError::OutputLimit)
+        ));
+        let tiny = SemanticModelEncodingBudget::try_new(1, 1, SemanticTokenCountRequirement::Exact)
+            .unwrap();
+        assert!(matches!(
+            fit_semantic_observation_for_model(raw, tiny),
+            Err(SemanticModelEncodingError::OutputLimit)
+        ));
+    }
+
+    #[test]
+    fn image_availability_survives_full_and_incremental_projection_without_url_replay() {
+        let context = context();
+        let make = |id, nodes| observation(context, id, id + 10, id + 20, nodes);
+        let empty = make(1, json!([{"k":9001,"r":"document"}]));
+        let image = make(
+            2,
+            json!([
+                {"k":9001,"r":"document"},
+                {"k":9002,"p":0,"r":"image","n":"Product","m":"https://images.example.test/product.png"}
+            ]),
+        );
+        let unloaded = make(
+            3,
+            json!([
+                {"k":9001,"r":"document"}, {"k":9002,"p":0,"r":"image","n":"Product"}
+            ]),
+        );
+        let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
+        let full = encode_semantic_observation(&image, budget)
+            .unwrap()
+            .admit_conservative_utf8(&revision())
+            .unwrap();
+        assert!(full.as_str().contains("image_source_available=true"));
+        assert!(!full.as_str().contains("images.example.test"));
+        for (previous, current, expected) in [
+            (&empty, &image, "image_source_available=true"),
+            (&image, &unloaded, "image_source_available=false"),
+        ] {
+            let SemanticDiffOutcome::Diff(diff) = compute_semantic_diff(
+                previous,
+                &acknowledge(previous),
+                current,
+                SemanticDiffBudget::ACTION,
+            ) else {
+                panic!("bounded image diff")
+            };
+            let encoded = encode_semantic_diff(&diff, budget).unwrap();
+            assert!(encoded.content.contains(expected));
+            assert!(!encoded.content.contains("images.example.test"));
+        }
+    }
+
+    #[test]
+    fn landmark_kind_is_projected_and_changes_retire_the_exact_fingerprint() {
+        let context = context();
+        let previous = observation(
+            context,
+            1,
+            11,
+            21,
+            json!([{"k":9001,"r":"document"},{"k":9002,"p":0,"r":"landmark","lm":"navigation"}]),
+        );
+        let current = observation(
+            context,
+            2,
+            12,
+            22,
+            json!([{"k":9001,"r":"document"},{"k":9002,"p":0,"r":"landmark","lm":"main"}]),
+        );
+        let budget =
+            SemanticModelEncodingBudget::try_new(8192, 1000, SemanticTokenCountRequirement::Exact)
+                .unwrap();
+        let full = encode_semantic_observation(&current, budget)
+            .unwrap()
+            .admit(&exact_counter(100), &revision())
+            .unwrap();
+        assert!(full.as_str().contains("r=landmark landmark=main"));
+        assert!(
+            !full.as_str().contains("name="),
+            "subtype must not invent an accessible name"
+        );
+        let SemanticDiffOutcome::Diff(diff) = compute_semantic_diff(
+            &previous,
+            &acknowledge(&previous),
+            &current,
+            SemanticDiffBudget::ACTION,
+        ) else {
+            panic!("bounded subtype diff")
+        };
+        let encoded = encode_semantic_diff(&diff, budget).unwrap();
+        assert!(encoded.content.contains("landmark=main"));
+        assert!(encoded.content.contains("landmark_kind"));
+        assert!(!encoded.content.contains("navigation"));
     }
 
     #[test]

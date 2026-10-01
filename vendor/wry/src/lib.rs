@@ -750,6 +750,18 @@ struct WebViewAttributes<'a> {
   /// `true` allows to navigate and `false` does not.
   pub navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
 
+  /// Apple-only navigation policy callback with native action provenance.
+  ///
+  /// When set, this callback replaces [`Self::navigation_handler`] for Apple
+  /// navigation actions. It lets security-sensitive embedders distinguish a
+  /// browser history traversal from page-driven links, forms, and reloads.
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
+  pub apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
+  /// Accepted main-frame navigation attempts, before a document commits.
+  /// The callback is observational and must not grant page authority.
+  #[cfg(target_os = "macos")]
+  pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+
   /// A download started handler to manage incoming downloads.
   ///
   /// The closure takes two parameters, the first is a `String` representing the url being downloaded from and the
@@ -893,7 +905,11 @@ struct WebViewAttributes<'a> {
   ///
   /// ## Platform-specific:
   ///
-  /// - **macOS / Android / iOS:** Unsupported.
+  /// - **macOS:** `false` suppresses construction-time application activation.
+  ///   Child WebViews additionally preserve existing first-responder ownership;
+  ///   non-child construction still installs and focuses its content view. Use
+  ///   [`WebView::focus`] when exact child first-responder focus is required.
+  /// - **Android / iOS:** Unsupported.
   pub focused: bool,
 
   /// The webview bounds. Defaults to `x: 0, y: 0, width: 200, height: 200`.
@@ -932,7 +948,9 @@ struct WebViewAttributes<'a> {
   /// ## Platform-specific:
   ///
   /// - **Windows**: Fully supported via WebView2's PermissionRequested event.
-  /// - **macOS / iOS**: Fully supported via WKUIDelegate's requestMediaCapturePermission.
+  /// - **macOS / iOS**: Camera and microphone via WKUIDelegate's public media
+  ///   capture callback (macOS 12+ / iOS 15+). This is not a deny-all capability
+  ///   boundary: display capture, geolocation and WebAuthn are not routed here.
   /// - **Linux**: Fully supported via WebKitGTK's permission-request signal.
   /// - **Android**: Supported via JNI bridge for geolocation, microphone, camera,
   ///   protected media, and MIDI requests. Android runtime permissions may still
@@ -988,6 +1006,10 @@ impl Default for WebViewAttributes<'_> {
       ipc_handler: None,
       drag_drop_handler: None,
       navigation_handler: None,
+      #[cfg(any(target_os = "macos", target_os = "ios"))]
+      apple_navigation_action_handler: None,
+      #[cfg(target_os = "macos")]
+      main_frame_navigation_attempt_handler: None,
       download_started_handler: Some(Box::new(|_, _| true)),
       download_completed_handler: None,
       download_policy: DownloadPolicy::UseHandlers,
@@ -1031,7 +1053,7 @@ impl WebViewAttributes<'_> {
   /// WebKitGTK keeps a guarded child unmapped through construction, then lets
   /// the embedder's presentation stage perform its first map at validated
   /// offscreen geometry. Other backends use their native hidden state.
-  #[cfg(any(gtk, test))]
+  #[cfg(any(gtk, target_os = "macos", test))]
   fn guards_initial_presentation(&self) -> bool {
     self.navigation_presentation_guard.is_some()
   }
@@ -1041,7 +1063,7 @@ impl WebViewAttributes<'_> {
     self.visible && !self.guards_initial_presentation()
   }
 
-  #[cfg(any(gtk, test))]
+  #[cfg(any(gtk, target_os = "macos", test))]
   fn focuses_during_initial_construction(&self) -> bool {
     self.focused && !self.guards_initial_presentation()
   }
@@ -1483,6 +1505,29 @@ impl<'a> WebViewBuilder<'a> {
     self
   }
 
+  /// Set an Apple navigation policy handler that also receives immutable
+  /// native action provenance. This replaces the URL-only callback on macOS
+  /// and iOS and is unavailable on other platforms.
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
+  pub fn with_apple_navigation_action_handler(
+    mut self,
+    callback: impl Fn(String, AppleNavigationAction) -> bool + 'static,
+  ) -> Self {
+    self.attrs.apple_navigation_action_handler = Some(Box::new(callback));
+    self
+  }
+
+  /// Observe an admitted macOS main-frame request before its document commits.
+  /// This does not change navigation policy or report a committed page URL.
+  #[cfg(target_os = "macos")]
+  pub fn with_main_frame_navigation_attempt_handler(
+    mut self,
+    callback: impl Fn(String) + 'static,
+  ) -> Self {
+    self.attrs.main_frame_navigation_attempt_handler = Some(Box::new(callback));
+    self
+  }
+
   /// Set a handler to intercept permission requests from the webview.
   ///
   /// The handler receives the [`PermissionKind`] and should return
@@ -1496,7 +1541,9 @@ impl<'a> WebViewBuilder<'a> {
   /// ## Platform-specific:
   ///
   /// - **Windows**: Fully supported via WebView2's PermissionRequested event.
-  /// - **macOS / iOS**: Fully supported via WKUIDelegate's requestMediaCapturePermission.
+  /// - **macOS / iOS**: Camera and microphone via WKUIDelegate's public media
+  ///   capture callback (macOS 12+ / iOS 15+). This is not a deny-all capability
+  ///   boundary: display capture, geolocation and WebAuthn are not routed here.
   /// - **Linux**: Fully supported via WebKitGTK's permission-request signal.
   /// - **Android**: Supported via JNI bridge for geolocation, microphone, camera,
   ///   protected media, and MIDI requests. Android runtime permissions may still
@@ -1708,7 +1755,11 @@ impl<'a> WebViewBuilder<'a> {
   ///
   /// ## Platform-specific:
   ///
-  /// - **macOS / Android / iOS:** Unsupported.
+  /// - **macOS:** `false` suppresses construction-time application activation.
+  ///   Child WebViews additionally preserve existing first-responder ownership;
+  ///   non-child construction still installs and focuses its content view. Use
+  ///   [`WebView::focus`] when exact child first-responder focus is required.
+  /// - **Android / iOS:** Unsupported.
   pub fn with_focused(mut self, focused: bool) -> Self {
     self.attrs.focused = focused;
     self
@@ -2964,6 +3015,20 @@ impl WebViewExtDarwin for WebView {
 /// Additional methods on `WebView` that are specific to macOS.
 #[cfg(target_os = "macos")]
 pub trait WebViewExtMacOS {
+  /// Observes only the exact host-owned subscription rule list. Returns false
+  /// if the optional private WebKit action class/getter is unavailable.
+  fn set_content_block_counter(
+    &self,
+    identifier: &str,
+    aggregate: std::sync::Arc<(
+      std::sync::atomic::AtomicU64,
+      std::sync::atomic::AtomicBool,
+      std::sync::atomic::AtomicBool,
+    )>,
+  ) -> bool;
+  /// Transfers the plain per-view counter without inspecting request metadata.
+  fn collect_content_block_counter(&self, reset: bool);
+
   /// Returns WKWebView handle
   fn webview(&self) -> Retained<WryWebView>;
   /// Returns WKWebView manager [(userContentController)](https://developer.apple.com/documentation/webkit/wkscriptmessagehandler/1396222-usercontentcontroller) handle
@@ -2995,6 +3060,78 @@ pub trait WebViewExtMacOS {
 
 #[cfg(target_os = "macos")]
 impl WebViewExtMacOS for WebView {
+  fn set_content_block_counter(
+    &self,
+    identifier: &str,
+    aggregate: std::sync::Arc<(
+      std::sync::atomic::AtomicU64,
+      std::sync::atomic::AtomicBool,
+      std::sync::atomic::AtomicBool,
+    )>,
+  ) -> bool {
+    use objc2::{msg_send, sel, DefinedClass};
+    let Some(class) = objc2::runtime::AnyClass::get(c"_WKContentRuleListAction") else {
+      aggregate
+        .2
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+      return false;
+    };
+    let available: bool =
+      unsafe { msg_send![class, instancesRespondToSelector: sel!(blockedLoad)] };
+    if !available {
+      aggregate
+        .2
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+      return false;
+    }
+    let mut slot = self
+      .webview
+      .navigation_policy_delegate
+      .ivars()
+      .blocked_loads
+      .borrow_mut();
+    let identifier = objc2_foundation::NSString::from_str(identifier);
+    if slot.as_ref().is_some_and(|c| {
+      c.identifier.isEqualToString(&identifier) && std::sync::Arc::ptr_eq(&c.aggregate, &aggregate)
+    }) {
+      return true;
+    }
+    let previous_identifier = slot
+      .as_ref()
+      .filter(|c| std::sync::Arc::ptr_eq(&c.aggregate, &aggregate))
+      .map(|c| c.identifier.clone());
+    *slot = Some(crate::wkwebview::BlockedLoadCounter {
+      identifier,
+      previous_identifier,
+      count: Default::default(),
+      aggregate,
+    });
+    drop(slot);
+    // WebKit caches optional delegate capabilities when this property is set.
+    unsafe {
+      self
+        .webview
+        .webview
+        .setNavigationDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
+          &*self.webview.navigation_policy_delegate,
+        )));
+    }
+    true
+  }
+  fn collect_content_block_counter(&self, reset: bool) {
+    use objc2::DefinedClass;
+    if let Some(counter) = self
+      .webview
+      .navigation_policy_delegate
+      .ivars()
+      .blocked_loads
+      .borrow()
+      .as_ref()
+    {
+      counter.flush(reset);
+    }
+  }
+
   fn webview(&self) -> Retained<WryWebView> {
     self.webview.webview.clone()
   }
@@ -3138,6 +3275,37 @@ pub struct NavigationEvent {
   /// Bounded URL safely attributed to this native navigation phase. See
   /// [`NavigationEventPhase::Redirected`] for the platform fallback.
   pub url: String,
+}
+
+/// Native cause of an Apple WebKit navigation policy decision.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleNavigationType {
+  /// A user or page activated a link.
+  LinkActivated,
+  /// A form submitted for the first time.
+  FormSubmitted,
+  /// WebKit requested a back/forward-list traversal.
+  BackForward,
+  /// The current document was reloaded.
+  Reload,
+  /// A form submission was replayed.
+  FormResubmitted,
+  /// WebKit reported another navigation cause.
+  Other,
+}
+
+/// Bounded native provenance accompanying an Apple navigation policy request.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppleNavigationAction {
+  /// Native navigation cause.
+  pub navigation_type: AppleNavigationType,
+  /// Whether the request method is exactly `GET`.
+  pub is_get: bool,
+  /// Whether WebKit identified the target as the main frame. `None` denotes a
+  /// target-less/new-window action and must not be treated as main-frame work.
+  pub target_is_main_frame: Option<bool>,
 }
 
 /// Background throttling policy

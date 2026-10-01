@@ -20,6 +20,8 @@ pub const MAX_SEMANTIC_NODES: usize = 512;
 pub const MAX_SEMANTIC_DEPTH: usize = 32;
 /// Maximum UTF-8 bytes in one accessible name.
 pub const MAX_SEMANTIC_NAME_BYTES: usize = 512;
+/// Maximum exact UTF-8 bytes in one disclosed public link destination.
+pub const MAX_SEMANTIC_LINK_DESTINATION_BYTES: usize = 2048;
 /// Maximum UTF-8 bytes in one visible-text segment.
 pub const MAX_SEMANTIC_TEXT_BYTES: usize = 4 * 1024;
 /// Maximum UTF-8 bytes in one safe value summary.
@@ -305,7 +307,7 @@ pub enum SemanticOperationClass {
 }
 
 impl SemanticOperationClass {
-    const fn bit(self) -> u8 {
+    pub(crate) const fn bit(self) -> u8 {
         1 << (self as u8)
     }
 }
@@ -388,7 +390,7 @@ pub enum SemanticState {
 }
 
 impl SemanticState {
-    const fn bit(self) -> u8 {
+    pub(crate) const fn bit(self) -> u8 {
         1 << (self as u8)
     }
 }
@@ -585,6 +587,13 @@ pub struct SemanticValuePreview<'a> {
 }
 
 impl<'a> SemanticValuePreview<'a> {
+    pub(crate) fn retained(text: &'a str, source_bytes: usize, truncated: bool) -> Self {
+        Self {
+            text,
+            source_bytes,
+            truncated,
+        }
+    }
     /// Model-visible UTF-8 prefix, never larger than 1 KiB.
     pub const fn text(self) -> &'a str {
         self.text
@@ -744,12 +753,16 @@ pub enum SemanticTruncation {
     NodeLimit,
     /// Fixed total text ceiling reached.
     TextLimit,
+    /// One bounded name/prose field was clipped; other evidence may still be retained.
+    FieldLimit,
     /// Fixed tree-depth ceiling reached.
     DepthLimit,
     /// Fixed DOM/open-shadow inspection ceiling reached before the scope completed.
     InspectionLimit,
     /// Fixed encoded response ceiling omitted a suffix of otherwise valid nodes.
     WireLimit,
+    /// Trusted host omitted whole trailing nodes to fit the model projection budget.
+    ModelProjectionLimit,
     /// Requested progressive-observation boundary reached.
     ScopeBoundary,
     /// Child frame could not be observed safely.
@@ -881,6 +894,189 @@ impl fmt::Debug for SemanticReference {
     }
 }
 
+/// Closed, content-free explanation of fixed Fill support. Diagnostic only;
+/// never grants an operation or weakens native revalidation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticFillSupport {
+    /// The fixed native recipe supports this observed control.
+    Supported,
+    /// No explicit supported contenteditable attribute was present.
+    MissingExplicitEditable,
+    /// Native isContentEditable was false.
+    NativeNotEditable,
+    /// Editing host tag is outside the fixed recipe allowlist.
+    UnsupportedTag,
+    /// A nested host lacks proven text-only shape or a safe editing context.
+    EditableAncestor,
+    /// Direct child count exceeds the bounded host inspection limit.
+    ChildLimit,
+    /// At least one direct element child would be erased by textContent.
+    ElementChild,
+    /// A direct non-text, non-element child is outside the recipe.
+    OtherChild,
+    /// Native host inspection failed; support was not proven.
+    NativeReadFailed,
+    /// The control declares read-only state.
+    ReadOnly,
+    /// The control declares disabled state.
+    Disabled,
+    /// Native control type is outside the fixed Fill recipe.
+    UnsupportedControl,
+}
+
+/// Content-free direct-child shape of an explicit editable target. Host-only
+/// evidence, never edit authority or a description of arbitrary descendants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticEditableStructure {
+    pub(crate) child_count: u16,
+    pub(crate) child_kinds: u8,
+    pub(crate) editable_parent: bool,
+}
+
+impl SemanticEditableStructure {
+    /// Exact direct-child count when at most 128; 129 means at least 129.
+    pub const fn child_count(self) -> u16 {
+        self.child_count
+    }
+    /// Whether inspection stopped at the 128-child ceiling.
+    pub const fn truncated(self) -> bool {
+        self.child_count == 129
+    }
+    /// Whether any inspected direct child was a DOM text node.
+    pub const fn has_text(self) -> bool {
+        self.child_kinds & 1 != 0
+    }
+    /// Whether any inspected direct child was a DOM element.
+    pub const fn has_elements(self) -> bool {
+        self.child_kinds & 2 != 0
+    }
+    /// Whether any inspected direct child was neither text nor an element.
+    pub const fn has_other(self) -> bool {
+        self.child_kinds & 4 != 0
+    }
+    /// Whether the immediate parent was natively contenteditable.
+    pub const fn editable_parent(self) -> bool {
+        self.editable_parent
+    }
+}
+
+/// Descriptive native/ARIA landmark subtype. This never grants an operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticLandmarkKind {
+    /// Primary page content.
+    Main,
+    /// Navigation region.
+    Navigation,
+    /// Header/banner region.
+    Banner,
+    /// Complementary/aside content.
+    Complementary,
+    /// Footer/content information.
+    Contentinfo,
+    /// Named form region.
+    Form,
+    /// Search region.
+    Search,
+    /// Other explicitly named region.
+    Region,
+}
+impl SemanticLandmarkKind {
+    /// Closed model label, distinct from the page's accessible name.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Navigation => "navigation",
+            Self::Banner => "banner",
+            Self::Complementary => "complementary",
+            Self::Contentinfo => "contentinfo",
+            Self::Form => "form",
+            Self::Search => "search",
+            Self::Region => "region",
+        }
+    }
+}
+
+/// Native default activation, not a prediction of page JavaScript effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SemanticActivation {
+    /// No native submission, reset, navigation or surrounding form.
+    Ordinary = 1,
+    /// Native form submission.
+    Submit = 2,
+    /// Native form reset.
+    Reset = 3,
+    /// Link activation, including an enclosing link.
+    Navigation = 4,
+    /// A control inside or associated with a form.
+    Form = 5,
+    /// Ordinary control exposing an explicit expanded state.
+    Disclosure = 6,
+}
+
+/// Method of the form a control submits or belongs to.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SemanticFormMethod {
+    /// A GET submission.
+    Get,
+    /// A POST submission.
+    Post,
+    /// A dialog-closing submission, with no request.
+    Dialog,
+}
+
+/// Browser-derived facts about a control's form, read with pristine getters.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SemanticFormFacts {
+    method: SemanticFormMethod,
+    same_origin: bool,
+    search: bool,
+}
+
+impl SemanticFormFacts {
+    pub(crate) fn decode(bits: u8) -> Option<Self> {
+        if bits & !0b1111 != 0 {
+            return None;
+        }
+        let method = match bits & 0b11 {
+            1 => SemanticFormMethod::Get,
+            2 => SemanticFormMethod::Post,
+            3 => SemanticFormMethod::Dialog,
+            _ => return None,
+        };
+        Some(Self {
+            method,
+            same_origin: bits & 4 != 0,
+            search: bits & 8 != 0,
+        })
+    }
+
+    /// Facts for fixtures and trusted callers.
+    pub const fn new(method: SemanticFormMethod, same_origin: bool, search: bool) -> Self {
+        Self {
+            method,
+            same_origin,
+            search,
+        }
+    }
+
+    /// Effective submission method, including a control's override.
+    pub const fn method(self) -> SemanticFormMethod {
+        self.method
+    }
+
+    /// The submission target shares the document's origin.
+    pub const fn same_origin(self) -> bool {
+        self.same_origin
+    }
+
+    /// The form is a search form: role search, a search landmark, or a searchbox.
+    pub const fn search(self) -> bool {
+        self.search
+    }
+}
+
 /// One bounded allowlisted semantic node.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticNode {
@@ -889,11 +1085,19 @@ pub struct SemanticNode {
     depth: u8,
     role: SemanticRole,
     heading_level: Option<SemanticHeadingLevel>,
+    landmark_kind: Option<SemanticLandmarkKind>,
+    link_destination: Option<crate::ContextNavigationTarget>,
+    image_source: Option<crate::ContextNavigationTarget>,
     name: Option<SemanticText>,
     text: Option<SemanticText>,
     value: Option<SemanticValueSummary>,
     states: SemanticStates,
     operations: SemanticOperations,
+    fill_support: Option<SemanticFillSupport>,
+    activation: Option<SemanticActivation>,
+    form: Option<SemanticFormFacts>,
+    editable_structure: Option<SemanticEditableStructure>,
+    fields_complete: Option<bool>,
     sensitivity: SemanticSensitivity,
     trust: SemanticTrust,
     geometry: Option<SemanticRect>,
@@ -916,9 +1120,25 @@ impl SemanticNode {
         self.role
     }
 
+    /// Optional descriptive subtype; absent on legacy captures.
+    pub const fn landmark_kind(&self) -> Option<SemanticLandmarkKind> {
+        self.landmark_kind
+    }
+
     /// Heading level, present exactly for heading nodes.
     pub const fn heading_level(&self) -> Option<SemanticHeadingLevel> {
         self.heading_level
+    }
+
+    /// Bounded public HTTP(S) destination observed on this exact link.
+    /// Page data, never a navigation permit.
+    pub const fn link_destination(&self) -> Option<&crate::ContextNavigationTarget> {
+        self.link_destination.as_ref()
+    }
+
+    /// Exact observed public image URL; data only, never a navigation target grant.
+    pub const fn image_source(&self) -> Option<&crate::ContextNavigationTarget> {
+        self.image_source.as_ref()
     }
 
     /// Bounded accessible name.
@@ -944,6 +1164,32 @@ impl SemanticNode {
     /// Complete operation set.
     pub const fn operations(&self) -> SemanticOperations {
         self.operations
+    }
+
+    /// Native activation boundary, revalidated immediately before dispatch.
+    pub const fn activation(&self) -> Option<SemanticActivation> {
+        self.activation
+    }
+
+    /// Browser-derived facts about the form this control submits or belongs to.
+    pub const fn form(&self) -> Option<SemanticFormFacts> {
+        self.form
+    }
+
+    /// Optional host-only closed Fill diagnostic, not provider context or authority.
+    pub const fn fill_support(&self) -> Option<SemanticFillSupport> {
+        self.fill_support
+    }
+
+    /// Bounded host-only direct-child shape, omitted from provider context.
+    pub const fn editable_structure(&self) -> Option<SemanticEditableStructure> {
+        self.editable_structure
+    }
+
+    /// Whether the fixed runtime completely retained this node's local fields.
+    /// Absent on older wire records; never inferred from bounded field lengths.
+    pub const fn fields_complete(&self) -> Option<bool> {
+        self.fields_complete
     }
 
     /// Deterministic sensitivity label.
@@ -980,6 +1226,9 @@ impl fmt::Debug for SemanticNode {
             .field("depth", &self.depth)
             .field("role", &self.role)
             .field("heading_level", &self.heading_level)
+            .field("landmark_kind", &self.landmark_kind)
+            .field("has_link_destination", &self.link_destination.is_some())
+            .field("has_image_source", &self.image_source.is_some())
             .field("name_bytes", &self.name.as_ref().map(SemanticText::len))
             .field("text_bytes", &self.text.as_ref().map(SemanticText::len))
             .field("has_value", &self.value.is_some())
@@ -999,11 +1248,19 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) depth: u8,
     pub(crate) role: SemanticRole,
     pub(crate) heading_level: Option<SemanticHeadingLevel>,
+    pub(crate) landmark_kind: Option<SemanticLandmarkKind>,
+    pub(crate) link_destination: Option<crate::ContextNavigationTarget>,
+    pub(crate) image_source: Option<crate::ContextNavigationTarget>,
     pub(crate) name: Option<SemanticText>,
     pub(crate) text: Option<SemanticText>,
     pub(crate) value: Option<SemanticValueSummary>,
     pub(crate) states: SemanticStates,
     pub(crate) operations: SemanticOperations,
+    pub(crate) fill_support: Option<SemanticFillSupport>,
+    pub(crate) activation: Option<SemanticActivation>,
+    pub(crate) form: Option<SemanticFormFacts>,
+    pub(crate) editable_structure: Option<SemanticEditableStructure>,
+    pub(crate) fields_complete: Option<bool>,
     pub(crate) sensitivity: SemanticSensitivity,
     pub(crate) trust: SemanticTrust,
     pub(crate) geometry: Option<SemanticRect>,
@@ -1012,6 +1269,8 @@ pub(crate) struct SemanticNodeInput {
 /// One exact bounded semantic frame snapshot.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticSnapshot {
+    pub(crate) scroll_sample: Option<crate::semantic_wire::ScrollSample>,
+    pub(crate) page_dialog_sample: Option<crate::semantic_wire::PageDialogSample>,
     invocation: SemanticInvocationId,
     frame: SemanticFrameJoin,
     generation: SemanticSnapshotGeneration,
@@ -1022,6 +1281,47 @@ pub struct SemanticSnapshot {
 }
 
 impl SemanticSnapshot {
+    pub(crate) fn retain_model_prefix(&mut self, count: usize) {
+        self.nodes.truncate(count);
+        self.references.truncate(count);
+        self.completeness =
+            SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit);
+        self.total_text_bytes = self
+            .nodes
+            .iter()
+            .map(|node| {
+                node.name.as_ref().map_or(0, SemanticText::len)
+                    + node.text.as_ref().map_or(0, SemanticText::len)
+                    + node
+                        .link_destination
+                        .as_ref()
+                        .map_or(0, |target| target.as_url().as_str().len())
+                    + node
+                        .image_source
+                        .as_ref()
+                        .map_or(0, |target| target.as_url().as_str().len())
+                    + match node.value.as_ref() {
+                        Some(SemanticValueSummary::Text(text)) => text.len(),
+                        _ => 0,
+                    }
+            })
+            .sum::<usize>() as u32;
+    }
+
+    /// Local positive evidence can survive unrelated field clipping. Any
+    /// structural/global truncation still refuses action evidence, and legacy
+    /// records without an explicit local witness remain closed on FieldLimit.
+    pub(crate) fn has_complete_node_fields(&self, key: SemanticNodeKey) -> bool {
+        match self.completeness {
+            SemanticCompleteness::Complete => true,
+            SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => self
+                .nodes
+                .iter()
+                .find(|node| node.key == key)
+                .is_some_and(|node| node.fields_complete == Some(true)),
+            SemanticCompleteness::Truncated(_) => false,
+        }
+    }
     /// Exact native invocation correlation.
     pub const fn invocation(&self) -> SemanticInvocationId {
         self.invocation
@@ -1176,11 +1476,19 @@ impl SemanticSnapshot {
                 depth: input.depth,
                 role: input.role,
                 heading_level: input.heading_level,
+                landmark_kind: input.landmark_kind,
+                link_destination: input.link_destination,
+                image_source: input.image_source,
                 name: input.name,
                 text: input.text,
                 value: input.value,
                 states: input.states,
                 operations: input.operations,
+                fill_support: input.fill_support,
+                activation: input.activation,
+                form: input.form,
+                editable_structure: input.editable_structure,
+                fields_complete: input.fields_complete,
                 sensitivity: input.sensitivity,
                 trust: input.trust,
                 geometry: input.geometry,
@@ -1192,6 +1500,8 @@ impl SemanticSnapshot {
             frame,
             generation,
             completeness,
+            page_dialog_sample: None,
+            scroll_sample: None,
             nodes,
             references,
             total_text_bytes: u32::try_from(total_text_bytes)
@@ -1320,11 +1630,19 @@ mod tests {
             depth: 0,
             role: SemanticRole::Button,
             heading_level: None,
+            landmark_kind: None,
+            link_destination: None,
+            image_source: None,
             name: Some(SemanticText::try_new("Save".to_owned(), 10).expect("name")),
             text: None,
             value: None,
             states: SemanticStates::NONE,
             operations,
+            fill_support: None,
+            activation: None,
+            form: None,
+            editable_structure: None,
+            fields_complete: None,
             sensitivity: SemanticSensitivity::Public,
             trust: SemanticTrust::UntrustedPage,
             geometry: Some(SemanticRect::try_new(1, 2, 30, 40).expect("rect")),

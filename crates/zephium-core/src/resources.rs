@@ -1,13 +1,13 @@
 //! User knowledge and unfinished work. These records are resources, not system
 //! memory, execution attempts, browser leases or agent capabilities.
 use serde::{Deserialize, Serialize};
-use specta::Type;
 
 pub const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_DOCUMENT_NODES: usize = 4096;
 pub const MAX_RESOURCES: usize = 10_000;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct NoteDocument {
     pub version: u8,
@@ -16,7 +16,8 @@ pub struct NoteDocument {
 
 /// Constrained ProseMirror JSON. Allowed node/mark/attribute combinations are
 /// checked before persistence, independently from editor-side validation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentNode {
     #[serde(rename = "type")]
@@ -30,25 +31,39 @@ pub struct DocumentNode {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub marks: Vec<DocumentMark>,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentAttrs {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub start: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub level: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub resource: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentMark {
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attrs: Option<DocumentMarkAttrs>,
+}
+/// A link is descriptive: chrome opens it through a native intent, never as
+/// an anchor navigation inside privileged chrome.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct DocumentMarkAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
 }
 /// Who holds the next move on a task. People and agents share one list; this
 /// records which of them is expected to act, not which of them is permitted to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum TaskActor {
     #[default]
@@ -59,7 +74,8 @@ pub enum TaskActor {
 /// A task's own lifecycle. `Blocked` is where a delegated task lands when it
 /// cannot proceed without a person, so a stalled delegation stays visible
 /// instead of sitting in `Active` forever.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     #[default]
@@ -72,7 +88,8 @@ pub enum TaskStatus {
 /// The page a task came from, so it can reopen its own context. The URL passes
 /// the same commit gate as any navigation; a stored task can never become a
 /// route to a scheme the browser would refuse to open.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct TaskContext {
     pub url: String,
@@ -87,7 +104,8 @@ impl TaskContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum TaskPriority {
     #[default]
@@ -96,14 +114,16 @@ pub enum TaskPriority {
     Medium,
     High,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct TaskStep {
     pub id: String,
     pub title: String,
     pub completed: bool,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(default, deny_unknown_fields)]
 pub struct TaskDetails {
     pub list: Option<String>,
@@ -120,7 +140,8 @@ pub struct TaskDetails {
 }
 /// Longest estimate a task may carry: a week of wall-clock minutes.
 pub const MAX_TASK_DURATION: u32 = 7 * 24 * 60;
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct TaskList {
     pub id: String,
     pub title: String,
@@ -128,7 +149,8 @@ pub struct TaskList {
     pub count: u32,
     pub deleted: bool,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct TaskMetadata {
     pub id: String,
     pub list: Option<String>,
@@ -145,7 +167,8 @@ pub struct TaskMetadata {
 /// Fields are written independently so two actors editing different properties
 /// of one task never conflict; a caller that must not overwrite a concurrent
 /// change to the same property states its expected value in `expect`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "field", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskField {
     Title {
@@ -296,7 +319,8 @@ pub fn update_task(
     }
     Ok(next)
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceContent {
     Note {
@@ -336,8 +360,174 @@ pub enum ResourceContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         work: Option<String>,
     },
+    /// A user-owned semantic object: a table, checklist, comparison, chart,
+    /// document, or findings, editable like a note.
+    Object {
+        object: WorkObjectV1,
+    },
+    /// An imported or admitted file. Bytes live in the profile's
+    /// content-addressed media store; this row is its provenance and shape.
+    /// Only Rust mints it, after bounded sniffing and decoding.
+    Media {
+        asset: MediaAssetV1,
+    },
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+
+pub const MAX_MEDIA_IMAGE_BYTES: u32 = 8 * 1024 * 1024;
+pub const MAX_MEDIA_FETCHED_IMAGE_BYTES: u32 = 2 * 1024 * 1024;
+pub const MAX_MEDIA_FILE_BYTES: u32 = 32 * 1024 * 1024;
+pub const MAX_MEDIA_DIMENSION: u32 = 8192;
+pub const MAX_MEDIA_NAME_BYTES: usize = 255;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Pdf,
+    File,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MediaOrigin {
+    /// A snapshot of a file the user picked; the source path is not retained.
+    Imported,
+    /// Fetched by Rust from a public HTTPS URL without cookies.
+    Fetched { url: String, observed_at: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct MediaAssetV1 {
+    pub version: u16,
+    pub kind: MediaKind,
+    /// Sniffed from bytes, never taken from a file name or a server.
+    pub mime: String,
+    pub bytes: u32,
+    /// Hex SHA-256 of the stored bytes; also the blob's address.
+    pub digest: String,
+    pub name: String,
+    pub origin: MediaOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+impl MediaAssetV1 {
+    pub fn validate(&self) -> bool {
+        let mime_ok = match self.kind {
+            MediaKind::Image => matches!(
+                self.mime.as_str(),
+                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+            ),
+            MediaKind::Pdf => self.mime == "application/pdf",
+            MediaKind::File => self.mime == "application/octet-stream",
+        };
+        let size_ok = self.bytes > 0
+            && match (self.kind, &self.origin) {
+                (MediaKind::Image, MediaOrigin::Fetched { .. }) => {
+                    self.bytes <= MAX_MEDIA_FETCHED_IMAGE_BYTES
+                }
+                (MediaKind::Image, MediaOrigin::Imported) => self.bytes <= MAX_MEDIA_IMAGE_BYTES,
+                (_, MediaOrigin::Fetched { .. }) => false,
+                _ => self.bytes <= MAX_MEDIA_FILE_BYTES,
+            };
+        let dimensions_ok = match self.kind {
+            MediaKind::Image => {
+                matches!((self.width, self.height), (Some(w), Some(h)) if (1..=MAX_MEDIA_DIMENSION).contains(&w) && (1..=MAX_MEDIA_DIMENSION).contains(&h))
+            }
+            _ => self.width.is_none() && self.height.is_none(),
+        };
+        let origin_ok = match &self.origin {
+            MediaOrigin::Imported => true,
+            MediaOrigin::Fetched { url, observed_at } => {
+                url.len() <= 4096
+                    && url.starts_with("https://")
+                    && !url.chars().any(char::is_control)
+                    && valid_date(observed_at)
+            }
+        };
+        self.version == 1
+            && mime_ok
+            && size_ok
+            && dimensions_ok
+            && origin_ok
+            && self.digest.len() == 64
+            && self.digest.bytes().all(|b| b.is_ascii_hexdigit())
+            && !self.name.is_empty()
+            && self.name.len() <= MAX_MEDIA_NAME_BYTES
+            && !self
+                .name
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
+    }
+}
+
+/// A Rust-owned import request: the bytes never cross the IPC boundary.
+#[derive(Clone)]
+pub struct MediaImport {
+    pub request_id: String,
+    pub name: String,
+    pub origin: MediaOrigin,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+impl std::fmt::Debug for MediaImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MediaImport([redacted])")
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct WorkObjectV1 {
+    pub version: u16,
+    pub data: crate::work::artifact::WorkArtifactDataV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<crate::work::artifact::WorkEvidenceLink>,
+    /// Set only by Rust when preserving an artifact; never accepted from callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<WorkObjectProvenance>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
+pub struct WorkObjectProvenance {
+    pub objective: crate::work::WorkId,
+    pub execution: crate::work::WorkExecutionId,
+    pub artifact: crate::work::WorkArtifactId,
+    pub basis: WorkObjectBasis,
+    pub review: crate::work::WorkOutputReview,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkObjectBasis {
+    Original,
+    UserRevision { revision: crate::work::WorkRevision },
+}
+impl WorkObjectV1 {
+    pub fn validate(&self) -> bool {
+        use crate::work::artifact::WorkArtifactDataV1;
+        if self.version != 1 || self.evidence.len() > 64 {
+            return false;
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        if !self
+            .evidence
+            .iter()
+            .all(|link| link.source_id != 0 && unique.insert((link.extraction_id, link.source_id)))
+        {
+            return false;
+        }
+        !matches!(self.data, WorkArtifactDataV1::BrowserResourcePreview { .. })
+            && self.data.validate(self.evidence.len()).is_ok()
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceDraft {
     pub title: String,
@@ -346,7 +536,8 @@ pub struct ResourceDraft {
     /// Same-profile resources, never permission grants or copied entities.
     pub related: Vec<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceRecord {
     pub id: String,
@@ -357,7 +548,8 @@ pub struct ResourceRecord {
     pub trashed: bool,
     pub draft: ResourceDraft,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceIntent {
     CreateTaskList {
@@ -374,6 +566,16 @@ pub enum ResourceIntent {
     },
     Create {
         draft: ResourceDraft,
+    },
+    /// Copy an artifact (original or the user's revision) into an Object
+    /// resource. Rust resolves data, evidence, review, and provenance.
+    PreserveArtifact {
+        objective: crate::work::WorkId,
+        execution: crate::work::WorkExecutionId,
+        artifact: crate::work::WorkArtifactId,
+        basis: WorkObjectBasis,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     Replace {
         id: String,
@@ -397,14 +599,16 @@ pub enum ResourceIntent {
         expect: Vec<TaskField>,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceCommand {
     pub version: u8,
     pub request_id: String,
     pub intent: ResourceIntent,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ResourceQuery {
     #[serde(default)]
@@ -417,7 +621,8 @@ pub struct ResourceQuery {
 }
 /// Task views are filtered and ordered before pagination, independently of the
 /// generic resource browser. `today` is the caller's local calendar date.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum TaskView {
     Inbox,
@@ -427,7 +632,8 @@ pub enum TaskView {
     Completed,
     Trash,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct TaskQuery {
     #[serde(default)]
@@ -438,7 +644,8 @@ pub struct TaskQuery {
     pub after: Option<String>,
     pub limit: u16,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct TaskCounts {
     pub inbox: u32,
     pub today: u32,
@@ -448,15 +655,19 @@ pub struct TaskCounts {
     pub completed: u32,
     pub trash: u32,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     Note,
     Task,
+    Object,
+    Media,
 }
 /// Everything a list row draws, so a populated list costs one query rather than
 /// one query and a fetch per row. Task-only fields are `None` for a note.
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct ResourceSummary {
     pub id: String,
     pub revision: String,
@@ -473,7 +684,8 @@ pub struct ResourceSummary {
     pub sort_key: Option<String>,
     pub work: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceResponse {
     Acknowledged,
@@ -508,7 +720,8 @@ pub enum ResourceResponse {
         error: ResourceError,
     },
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceError {
     Invalid,
@@ -520,10 +733,20 @@ pub enum ResourceError {
 }
 
 impl ResourceDraft {
+    /// Callers never supply provenance or media; only Rust admission mints them.
+    pub fn caller_owned(&self) -> bool {
+        match &self.content {
+            ResourceContent::Object { object } => object.provenance.is_none(),
+            ResourceContent::Media { .. } => false,
+            _ => true,
+        }
+    }
     pub fn kind(&self) -> ResourceKind {
         match self.content {
             ResourceContent::Note { .. } => ResourceKind::Note,
             ResourceContent::Task { .. } => ResourceKind::Task,
+            ResourceContent::Object { .. } => ResourceKind::Object,
+            ResourceContent::Media { .. } => ResourceKind::Media,
         }
     }
     pub fn validate(&self) -> bool {
@@ -583,6 +806,8 @@ impl ResourceDraft {
                     && sort_key.as_deref().is_none_or(valid_sort_key)
                     && work.as_deref().is_none_or(valid_id)
             }
+            ResourceContent::Object { object } => object.validate(),
+            ResourceContent::Media { asset } => asset.validate(),
         }
     }
 }
@@ -662,6 +887,25 @@ fn valid_date(value: &str) -> bool {
     year >= 1 && (1..=12).contains(&month) && (1..=days[month - 1]).contains(&day)
 }
 impl NoteDocument {
+    /// Text content in document order; headings and paragraphs separated by newlines.
+    pub fn plain_text(&self) -> String {
+        let mut text = String::new();
+        let mut pending = vec![&self.document];
+        while let Some(node) = pending.pop() {
+            if let Some(value) = &node.text {
+                text.push_str(value);
+            } else if matches!(
+                node.kind.as_str(),
+                "paragraph" | "heading" | "listItem" | "codeBlock" | "blockquote"
+            ) && !text.is_empty()
+                && !text.ends_with('\n')
+            {
+                text.push('\n');
+            }
+            pending.extend(node.content.iter().rev());
+        }
+        text
+    }
     pub fn validate(&self) -> bool {
         let mut count = 0;
         let mut bytes = 0;
@@ -768,9 +1012,18 @@ fn valid_node(
     };
     let mut marks = std::collections::HashSet::new();
     attrs_ok
-        && node.marks.len() <= 3
+        && node.marks.len() <= 4
         && node.marks.iter().all(|mark| {
-            matches!(mark.kind.as_str(), "bold" | "italic" | "code") && marks.insert(&mark.kind)
+            let shape = match mark.kind.as_str() {
+                "bold" | "italic" | "code" => mark.attrs.is_none(),
+                "link" => mark.attrs.as_ref().is_some_and(|attrs| {
+                    attrs.href.as_deref().is_some_and(|href| {
+                        href.len() <= 2048 && crate::navigation::is_allowed_str(href)
+                    })
+                }),
+                _ => false,
+            };
+            shape && marks.insert(&mark.kind)
         })
         && node
             .content
@@ -782,7 +1035,8 @@ fn valid_node(
 #[path = "resources/tests.rs"]
 mod tests;
 
-#[derive(Clone, Serialize, Deserialize, Type)]
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResourceCall {
     Acknowledge {
@@ -807,7 +1061,8 @@ pub enum ResourceCall {
         command: Box<ResourceCommand>,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct ResourceReply {
     pub profile: Option<String>,
     pub response: ResourceResponse,
@@ -854,7 +1109,12 @@ impl ResourceCall {
                             id,
                             expected_revision,
                         } => valid_id(id) && revision(expected_revision).is_some(),
-                        ResourceIntent::Create { draft } => draft.validate(),
+                        ResourceIntent::Create { draft } => {
+                            draft.validate() && draft.caller_owned()
+                        }
+                        ResourceIntent::PreserveArtifact { title, .. } => title
+                            .as_deref()
+                            .is_none_or(|t| !t.trim().is_empty() && t.len() <= 1024),
                         ResourceIntent::Replace {
                             id,
                             expected_revision,
@@ -863,6 +1123,7 @@ impl ResourceCall {
                             valid_id(id)
                                 && revision(expected_revision).is_some()
                                 && draft.validate()
+                                && draft.caller_owned()
                         }
                         ResourceIntent::Trash {
                             id,

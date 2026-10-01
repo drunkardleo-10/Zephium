@@ -2,7 +2,19 @@
   import * as m from "$shared/i18n/messages";
   import { Briefcase02Icon, Globe02Icon } from "@hugeicons/core-free-icons";
   import { surface } from "$domain/surface";
+  import { preferences } from "$domain/preferences";
   import SegmentedControl from "$shared/ui/SegmentedControl";
+  import ModeWord from "./ModeWord.svelte";
+
+  let {
+    compact = false,
+    standalone = false,
+  }: {
+    /** The rail's width: the environment's name, opening onto the other. */
+    compact?: boolean;
+    /** Heads a rail beside a tool panel, with no header under it to end it. */
+    standalone?: boolean;
+  } = $props();
 
   let inWork = $derived(surface.currentPage() === "work");
   const options = [
@@ -17,17 +29,20 @@
   request, so the thumb only travels once the environment has actually
   changed and can never be left on a side native refused.
 -->
-<div class="modes">
-  <SegmentedControl
-    label={m.ui_mode_work_hint()}
-    {options}
-    full
-    bind:value={
-      () => (inWork ? "work" : "browse"),
-      (next) => void surface.open(next === "work" ? "work" : null)
-    }
-  />
-</div>
+{#if preferences.value("work.enabled") === "false"}{:else if compact}<ModeWord
+    {standalone}
+  />{:else}<div class="modes">
+    <SegmentedControl
+      label={m.ui_mode_work_hint()}
+      {options}
+      full
+      size="regular"
+      bind:value={
+        () => (inWork ? "work" : "browse"),
+        (next) => void surface.open(next === "work" ? "work" : null)
+      }
+    />
+  </div>{/if}
 
 <style>
   .modes {

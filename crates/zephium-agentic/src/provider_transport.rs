@@ -4,7 +4,7 @@
 //! sees it. This crate adds only provider credentials, exact HTTPS endpoints,
 //! bounded concurrency, cancellation, response framing, and the existing
 //! provider-neutral stream decoder. It exposes no arbitrary URL, generic HTTP
-//! request, provider-native browser tool, raw response body, or automatic retry.
+//! request, provider-native browser tool, raw response body, or generation retry.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -13,6 +13,19 @@
     not(test),
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
+
+/// Bounded objective/context planning over the shared fixed-endpoint transport.
+pub mod agent;
+/// Typed decisions over admitted, enumerated questions.
+pub mod decision;
+/// General tool-calling transports for the lead agent.
+pub mod lead;
+pub mod planning;
+mod rig;
+/// Bounded non-reasoning provider-native public search.
+pub mod search;
+/// Bounded semantic artifacts from admitted dependency context.
+pub mod synthesis;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,7 +86,7 @@ const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const OPENAI_INPUT_TOKENS_URL: &str = "https://api.openai.com/v1/responses/input_tokens";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const PRODUCT_USER_AGENT: &str = "Zephium-Agent-Browser/0.1";
+pub(crate) const PRODUCT_USER_AGENT: &str = "Zephium-Agent-Browser/0.1";
 const OPENAI_CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 const OPENAI_CLIENT_REQUEST_ID_DOMAIN: &[u8] = b"ZEPHIUM-OPENAI-CLIENT-REQUEST-ID-1\0";
 
@@ -156,29 +169,43 @@ pub enum AgentProviderTransportConfigError {
 
 /// Move-only, provider-bound credential whose owned bytes are zeroized on drop.
 #[must_use]
-pub struct AgentProviderCredential {
-    provider: AgentProviderKind,
+pub struct AgentProviderCredential<P: AgentCredentialBinding = AgentProviderKind> {
+    provider: P,
     secret: Zeroizing<Vec<u8>>,
 }
 
-impl AgentProviderCredential {
+mod credential_binding {
+    pub trait Sealed {}
+    impl Sealed for crate::AgentProviderKind {}
+    impl Sealed for super::DecisionCredentialProvider {}
+}
+
+/// Closed provider identity carried by the shared zeroizing credential owner.
+pub trait AgentCredentialBinding: credential_binding::Sealed + Copy + fmt::Debug {}
+impl AgentCredentialBinding for AgentProviderKind {}
+impl AgentCredentialBinding for DecisionCredentialProvider {}
+
+/// Separate decision protocol identities; these cannot authenticate LLM transports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionCredentialProvider {
+    /// Direct TypeSafe BYOK endpoint.
+    TypeSafe,
+    /// Session bearer for the Zephium decision proxy.
+    ZephiumCloud,
+}
+
+impl<P: AgentCredentialBinding> AgentProviderCredential<P> {
     /// Consumes and validates one visible-ASCII provider secret.
-    pub fn try_new(
-        provider: AgentProviderKind,
-        secret: String,
-    ) -> Result<Self, AgentProviderCredentialError> {
+    pub fn try_new(provider: P, secret: String) -> Result<Self, AgentProviderCredentialError> {
         Self::try_from_bytes(provider, secret.into_bytes())
     }
 
-    fn try_from_bytes(
-        provider: AgentProviderKind,
-        secret: Vec<u8>,
-    ) -> Result<Self, AgentProviderCredentialError> {
+    fn try_from_bytes(provider: P, secret: Vec<u8>) -> Result<Self, AgentProviderCredentialError> {
         Self::try_from_zeroizing(provider, Zeroizing::new(secret))
     }
 
     fn try_from_zeroizing(
-        provider: AgentProviderKind,
+        provider: P,
         secret: Zeroizing<Vec<u8>>,
     ) -> Result<Self, AgentProviderCredentialError> {
         if secret.is_empty()
@@ -191,7 +218,7 @@ impl AgentProviderCredential {
     }
 
     /// Exact provider protocol this credential may authenticate.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub const fn provider(&self) -> P {
         self.provider
     }
 
@@ -229,84 +256,112 @@ pub enum MacosAgentProviderCredentialError {
 #[cfg(target_os = "macos")]
 pub fn load_macos_development_openai_credential(
 ) -> Result<AgentProviderCredential, MacosAgentProviderCredentialError> {
-    use security_framework::os::macos::passwords::find_generic_password;
-    use security_framework_sys::base::errSecItemNotFound;
-
-    let (password, _item) = find_generic_password(
-        None,
+    load_keychain_login_credential(
+        AgentProviderKind::OpenAiResponses,
         MACOS_OPENAI_KEYCHAIN_SERVICE,
         MACOS_OPENAI_KEYCHAIN_ACCOUNT,
     )
-    .map_err(|error| {
-        if error.code() == errSecItemNotFound {
-            MacosAgentProviderCredentialError::Missing
-        } else {
-            MacosAgentProviderCredentialError::Inaccessible
+}
+
+/// Fixed TypeSafe item in the person's login Keychain.
+#[cfg(target_os = "macos")]
+pub const MACOS_TYPESAFE_KEYCHAIN_SERVICE: &str = "app.zephium.agent-provider.typesafe";
+/// Fixed development account for TypeSafe BYOK.
+#[cfg(target_os = "macos")]
+pub const MACOS_TYPESAFE_KEYCHAIN_ACCOUNT: &str = "development";
+
+/// Loads TypeSafe BYOK into the same provider-bound zeroizing owner as OpenAI.
+/// Parallel page reads load it at the same moment, and a read whose load
+/// failed ran on the paid emulation for its whole life: loads take turns,
+/// and an inaccessible Keychain is asked once more before falling back.
+#[cfg(target_os = "macos")]
+pub fn load_macos_development_typesafe_credential(
+) -> Result<AgentProviderCredential<DecisionCredentialProvider>, MacosAgentProviderCredentialError>
+{
+    static LOADS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = LOADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let load = || {
+        load_keychain_login_credential(
+            DecisionCredentialProvider::TypeSafe,
+            MACOS_TYPESAFE_KEYCHAIN_SERVICE,
+            MACOS_TYPESAFE_KEYCHAIN_ACCOUNT,
+        )
+    };
+    match load() {
+        Err(MacosAgentProviderCredentialError::Inaccessible) => load(),
+        loaded => loaded,
+    }
+}
+
+/// One Keychain call at a time across the process: concurrent reads of the
+/// login keychain fail transiently, so every caller takes a turn.
+#[cfg(target_os = "macos")]
+pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(target_os = "macos")]
+fn load_keychain_login_credential<P: AgentCredentialBinding>(
+    provider: P,
+    service: &'static str,
+    account: &'static str,
+) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
+    let _turn = keychain_turn();
+    match read_keychain_login_credential(provider, service, account) {
+        Err(MacosAgentProviderCredentialError::Inaccessible) => {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            read_keychain_login_credential(provider, service, account)
         }
-    })?;
+        loaded => loaded,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_keychain_login_credential<P: AgentCredentialBinding>(
+    provider: P,
+    service: &'static str,
+    account: &'static str,
+) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
+    use security_framework::os::macos::keychain::SecKeychain;
+    use security_framework::os::macos::passwords::find_generic_password;
+    use security_framework_sys::base::errSecItemNotFound;
+
+    let login_path = dirs::home_dir()
+        .ok_or(MacosAgentProviderCredentialError::Inaccessible)?
+        .join("Library/Keychains/login.keychain-db");
+    let login = SecKeychain::open(login_path)
+        .map_err(|_| MacosAgentProviderCredentialError::Inaccessible)?;
+    let (password, _item) =
+        find_generic_password(Some(&[login]), service, account).map_err(|error| {
+            if error.code() == errSecItemNotFound {
+                MacosAgentProviderCredentialError::Missing
+            } else {
+                MacosAgentProviderCredentialError::Inaccessible
+            }
+        })?;
     let mut secret = Zeroizing::new(Vec::new());
     secret
         .try_reserve_exact(password.len())
         .map_err(|_| MacosAgentProviderCredentialError::Capacity)?;
     secret.extend_from_slice(password.as_ref());
-    AgentProviderCredential::try_from_zeroizing(AgentProviderKind::OpenAiResponses, secret).map_err(
-        |error| match error {
-            AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
-            AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
-        },
-    )
+    AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
+        AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
+        AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
+    })
 }
 
-/// Loads the development OpenAI key through Apple's fixed `security` tool.
-///
-/// This release-forbidden probe path is useful for repeatedly rebuilt Cargo
-/// binaries: the Keychain item was created by `/usr/bin/security`, so access is
-/// evaluated against that stable Apple-signed executable instead of each new
-/// ad-hoc probe binary. Standard input and stderr are closed, the environment
-/// is cleared, the secret is accepted only from the child's private stdout
-/// pipe, and those bytes enter zeroizing storage before validation.
+/// Uses the signed probe's own Keychain identity, just like the development app.
 #[cfg(all(target_os = "macos", feature = "probe-harness"))]
 pub fn load_macos_probe_openai_credential(
 ) -> Result<AgentProviderCredential, MacosAgentProviderCredentialError> {
-    use std::process::{Command, Stdio};
-
-    let output = Command::new("/usr/bin/security")
-        .args([
-            "find-generic-password",
-            "-s",
-            MACOS_OPENAI_KEYCHAIN_SERVICE,
-            "-a",
-            MACOS_OPENAI_KEYCHAIN_ACCOUNT,
-            "-w",
-        ])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| MacosAgentProviderCredentialError::Inaccessible)?;
-    if !output.status.success() {
-        return Err(if output.status.code() == Some(44) {
-            MacosAgentProviderCredentialError::Missing
-        } else {
-            MacosAgentProviderCredentialError::Inaccessible
-        });
-    }
-    let mut secret = Zeroizing::new(output.stdout);
-    if secret.last() == Some(&b'\n') {
-        secret.pop();
-        if secret.last() == Some(&b'\r') {
-            secret.pop();
-        }
-    }
-    AgentProviderCredential::try_from_zeroizing(AgentProviderKind::OpenAiResponses, secret).map_err(
-        |error| match error {
-            AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
-            AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
-        },
-    )
+    load_macos_development_openai_credential()
 }
 
-impl fmt::Debug for AgentProviderCredential {
+impl<P: AgentCredentialBinding> fmt::Debug for AgentProviderCredential<P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentProviderCredential")
@@ -611,7 +666,7 @@ fn exact_loopback_path(path: &str) -> bool {
 
 struct TransportState {
     sealed: bool,
-    active: Vec<AgentProviderCallIdentity>,
+    active: Vec<TransportSlotKey>,
 }
 
 struct SharedTransportState {
@@ -1051,6 +1106,9 @@ impl AgentProviderTransport {
     }
 
     fn reserve(&self, call: AgentProviderCallIdentity) -> Result<AgentProviderSlot, ReserveError> {
+        self.reserve_key(TransportSlotKey::Browser(call))
+    }
+    fn reserve_key(&self, call: TransportSlotKey) -> Result<AgentProviderSlot, ReserveError> {
         let mut state = match self.shared.state.lock() {
             Ok(state) => state,
             Err(poisoned) => {
@@ -1120,9 +1178,15 @@ impl From<ReserveError> for AgentProviderAdmissionError {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TransportSlotKey {
+    Browser(AgentProviderCallIdentity),
+    Planning(ulid::Ulid),
+}
+
 struct AgentProviderSlot {
     shared: Arc<SharedTransportState>,
-    call: AgentProviderCallIdentity,
+    call: TransportSlotKey,
     committed: bool,
     completed: bool,
 }
@@ -2044,7 +2108,7 @@ impl AgentProviderAttempt {
         )
     }
 
-    /// Calls OpenAI's authenticated exact input-token endpoint once.
+    /// Counts immutable input, with one bounded retry for explicit server overload.
     ///
     /// This borrows the operation. Dropping its future after it reaches the
     /// send point preserves the terminal authority for [`Self::abort`].
@@ -2124,31 +2188,69 @@ impl AgentProviderAttempt {
         self.mark_input_count_disclosed();
         let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline));
         tokio::pin!(deadline);
-        let response = tokio::select! {
-            biased;
-            () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
-            () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
-            () = &mut deadline => return self.counted_failure(timeout_failure()),
-            response = request.send() => response,
-        };
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => return self.counted_failure(network_failure(&error)),
-        };
-        if response.url() != &endpoint
-            || !response_headers_admitted(response.headers())
-            || !response_content_length_admitted(
-                response.headers(),
-                MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES as u32,
-            )
-            || !response_encoding_admitted(response.headers())
-        {
-            return self.counted_failure(protocol_failure());
-        }
-        if response.status() != StatusCode::OK {
+        let mut retries = 0_u8;
+        let response = loop {
+            let Some(send) = request.try_clone() else {
+                return self.counted_failure(protocol_failure());
+            };
+            let response = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = &mut deadline => return self.counted_failure(timeout_failure()),
+                response = send.send() => response,
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => return self.counted_failure(network_failure(&error)),
+            };
+            if response.url() != &endpoint
+                || !response_headers_admitted(response.headers())
+                || !response_content_length_admitted(
+                    response.headers(),
+                    MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES as u32,
+                )
+                || !response_encoding_admitted(response.headers())
+            {
+                return self.counted_failure(protocol_failure());
+            }
+            if response.status() == StatusCode::OK {
+                break response;
+            }
             let failure = status_failure(response.status(), response.headers());
-            return self.counted_failure(AgentProviderTransportOutcomeOwned::Failed(failure));
-        }
+            let jitter =
+                openai_client_request_id(call, ProviderRequestPhase::InputTokens).map_or(0, |id| {
+                    id.as_bytes()
+                        .iter()
+                        .fold(0_u64, |sum, byte| (sum * 31 + u64::from(*byte)) % 251)
+                });
+            let delay = Duration::from_millis(
+                failure
+                    .retry_after()
+                    .map_or(500 + jitter, |hint| hint.millis()),
+            );
+            let retry = retries == 0
+                && failure.class() == AgentProviderFailureClass::Overloaded
+                && (!response.headers().contains_key(RETRY_AFTER)
+                    || failure.retry_after().is_some())
+                && Instant::now()
+                    .checked_add(delay)
+                    .is_some_and(|wake| wake < self.deadline);
+            if !retry {
+                return self.counted_failure(AgentProviderTransportOutcomeOwned::Failed(failure));
+            }
+            // Counting has dispatched no model or browser effect. Keep the same
+            // bytes, admission, disclosure owner and absolute deadline.
+            drop(response);
+            retries += 1;
+            tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = &mut deadline => return self.counted_failure(timeout_failure()),
+                () = tokio::time::sleep(delay) => {},
+            }
+        };
         if !response_json_content_type_admitted(response.headers()) {
             return self.counted_failure(protocol_failure());
         }
@@ -2493,6 +2595,16 @@ fn provider_request(
     credential: HeaderValue,
     body: Vec<u8>,
 ) -> Option<reqwest::RequestBuilder> {
+    #[cfg(feature = "probe-harness")]
+    if serde_json::from_slice::<serde_json::Value>(&body)
+        .is_ok_and(|body| body.get("store") == Some(&serde_json::Value::Bool(true)))
+    {
+        static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let index = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 128;
+        let directory = "target/work-runtime-proof/native-requests";
+        let _ = std::fs::create_dir_all(directory);
+        let _ = std::fs::write(format!("{directory}/{index:03}.json"), &body);
+    }
     let request = client
         .post(endpoint)
         .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -3689,6 +3801,15 @@ mod tests {
 
     impl SequenceServer {
         fn spawn(scripts: Vec<ScriptedResponse>) -> Self {
+            Self::spawn_with_statuses(
+                scripts
+                    .into_iter()
+                    .map(|script| ("200 OK", script))
+                    .collect(),
+            )
+        }
+
+        fn spawn_with_statuses(scripts: Vec<(&'static str, ScriptedResponse)>) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
             let address = listener.local_addr().expect("loopback address");
             let openai = Url::parse(&format!("http://{address}/v1/responses")).expect("openai URL");
@@ -3698,7 +3819,7 @@ mod tests {
             let thread = thread::spawn(move || {
                 let mut captured = Vec::with_capacity(scripts.len());
                 let result = (|| {
-                    for script in scripts {
+                    for (status, script) in scripts {
                         let (mut stream, _) = listener.accept().map_err(|_| "accept failed")?;
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -3706,7 +3827,7 @@ mod tests {
                         captured.push(read_request(&mut stream)?);
                         thread::sleep(script.delay);
                         let head = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nContent-Encoding: identity\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: {}\r\nContent-Encoding: identity\r\nConnection: close\r\n\r\n",
                             script.body.len(),
                             script.content_type,
                         );
@@ -4483,6 +4604,146 @@ mod tests {
         }
         for required in ["model", "instructions", "input", "tools", "tool_choice"] {
             assert!(body.get(required).is_some(), "token-relevant field omitted");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_overload_retry_preserves_request_and_stops_after_one_retry() {
+        for recovered in [true, false] {
+            let server = SequenceServer::spawn_with_statuses(vec![
+                (
+                    "503 Service Unavailable",
+                    ScriptedResponse {
+                        delay: Duration::ZERO,
+                        content_type: "application/json",
+                        body: b"{}".to_vec(),
+                    },
+                ),
+                (
+                    if recovered {
+                        "200 OK"
+                    } else {
+                        "503 Service Unavailable"
+                    },
+                    ScriptedResponse {
+                        delay: Duration::ZERO,
+                        content_type: "application/json",
+                        body: br#"{"object":"response.input_tokens","input_tokens":17}"#.to_vec(),
+                    },
+                ),
+            ]);
+            let transport = AgentProviderTransport::try_new_loopback(
+                AgentProviderTransportConfig::STANDARD,
+                server.openai.as_str(),
+                server.anthropic.as_str(),
+            )
+            .unwrap();
+            let credential = AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-openai-key".into(),
+            )
+            .unwrap();
+            let (mut policy, input) = provider_exact_fixture();
+            let mut attempt = transport
+                .try_admit(
+                    input,
+                    &mut policy,
+                    &credential,
+                    AgentProviderCancellation::new(),
+                )
+                .unwrap();
+            let result = match attempt.count_openai_input_tokens().await {
+                AgentProviderExactCountOutcome::Counted(counted) => {
+                    assert!(recovered);
+                    assert_eq!(counted.count().measurement().tokens(), 17);
+                    counted.cancel_without_model_dispatch().unwrap()
+                }
+                AgentProviderExactCountOutcome::Failed(result) => {
+                    assert!(!recovered);
+                    assert!(
+                        matches!(result.outcome(), AgentProviderTransportOutcome::Failed(failure) if failure.class() == AgentProviderFailureClass::Overloaded)
+                    );
+                    result
+                }
+                other => panic!("unexpected count: {other:?}"),
+            };
+            assert_eq!(
+                result.disclosure_stage(),
+                AgentProviderDisclosureStage::InputTokenCountDisclosed
+            );
+            assert_eq!(
+                result.usage_knowledge(),
+                AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+            );
+            let AgentProviderPolicySettlement::Immediate(settlement) =
+                result.into_policy_settlement()
+            else {
+                panic!("no generation");
+            };
+            let receipt = settlement.settle(&mut policy).unwrap();
+            assert_eq!((receipt.input_tokens(), receipt.output_tokens()), (0, 0));
+            assert!(transport.snapshot().unwrap().is_idle());
+            let requests = server.finish();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].body, requests[1].body);
+            assert_eq!(requests[0].head, requests[1].head);
+            assert!(std::str::from_utf8(&requests[0].head)
+                .unwrap()
+                .starts_with("POST /v1/responses/input_tokens "));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_overload_backoff_honors_cancellation_and_original_deadline() {
+        for cancel in [true, false] {
+            let server = OneShotServer::spawn(
+                "503 Service Unavailable",
+                &[("Retry-After", "1")],
+                vec![b"{}".to_vec()],
+            );
+            let transport = test_transport(&server);
+            let credential = AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-openai-key".into(),
+            )
+            .unwrap();
+            let (mut policy, input) = provider_exact_fixture();
+            let cancellation = AgentProviderCancellation::new();
+            let mut attempt = transport
+                .try_admit(input, &mut policy, &credential, cancellation.clone())
+                .unwrap();
+            if !cancel {
+                attempt.deadline = Instant::now() + Duration::from_millis(250);
+            }
+            let task = cancel.then(|| {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    cancellation.cancel();
+                })
+            });
+            let AgentProviderExactCountOutcome::Failed(result) =
+                attempt.count_openai_input_tokens().await
+            else {
+                panic!("count should stop");
+            };
+            assert_eq!(
+                result.usage_knowledge(),
+                AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+            );
+            let AgentProviderPolicySettlement::Immediate(settlement) =
+                result.into_policy_settlement()
+            else {
+                panic!("no generation");
+            };
+            settlement.settle(&mut policy).unwrap();
+            if let Some(task) = task {
+                task.await.unwrap();
+            }
+            let request = server.finish();
+            assert!(std::str::from_utf8(&request.head)
+                .unwrap()
+                .starts_with("POST /v1/responses/input_tokens "));
+            assert!(transport.snapshot().unwrap().is_idle());
         }
     }
 
@@ -6460,16 +6721,22 @@ mod tests {
             AgentProviderKind::OpenAiResponses => {
                 assert_eq!(body["text"]["format"]["type"], "json_schema");
                 assert_eq!(body["text"]["format"]["strict"], true);
-                assert_eq!(body["input"][2]["type"], "function_call");
-                assert_eq!(body["input"][2]["name"], "extract");
-                assert_eq!(body["input"][3]["type"], "function_call_output");
+                assert_eq!(body["input"].as_array().unwrap().len(), 2);
+                assert_eq!(body["input"][1]["role"], "user");
+                assert!(body["input"][1]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("ZEXTRACT1"));
                 &body["text"]["format"]["schema"]
             }
             AgentProviderKind::AnthropicMessages => {
                 assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-                assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
-                assert_eq!(body["messages"][1]["content"][0]["name"], "extract");
-                assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+                assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+                assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
+                assert!(body["messages"][0]["content"][1]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("ZEXTRACT1"));
                 &body["output_config"]["format"]["schema"]
             }
         };

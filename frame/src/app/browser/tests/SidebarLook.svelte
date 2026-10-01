@@ -5,7 +5,7 @@
   import { EssentialTile, EssentialsRail } from "$features/essentials";
   import { SidebarBody, TabList, TabRail, sidebarTree } from "$features/tabs";
   import { Dock } from "$features/dock";
-  import { ModePicker, ModeTabs } from "$features/sidebar";
+  import { ModeTabs } from "$features/sidebar";
   import * as m from "$shared/i18n/messages";
 
   let { compact = false }: { compact?: boolean } = $props();
@@ -37,7 +37,7 @@
   <div class="sidebar-columns">
     <div class="sidebar-browser-column">
       {#if compact}
-        <ModePicker standalone />
+        <ModeTabs compact standalone />
         <TabRail entries={open} onSelect={noop} />
         <Dock compact>
           {#snippet sites()}<EssentialsRail entries={kept.slice(0, 2)} onSelect={noop} />{/snippet}

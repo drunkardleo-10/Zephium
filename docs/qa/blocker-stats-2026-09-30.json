@@ -1,0 +1,127 @@
+{
+  "platform": "macOS 26.6.2, Mac mini M4",
+  "build": "opt-level 2, debug assertions, isolated app.zephium.counting-bench profile, no extensions",
+  "load_metric": "WKNavigation Finished minus Started; three warm reloads of https://www.yahoo.com/?guccounter=1, optional cookies rejected",
+  "ui_metric": "estimated non-idle main-thread time from sample, over a 60-second window containing three reloads; includes automation overhead",
+  "idle_metric": "five minutes, ten fully loaded static local tabs; kernel package-idle wakeups; no stack sampler during idle",
+  "yahoo": {
+    "on": {
+      "loads_ms": [
+        159.88875,
+        303.722334,
+        71.573625
+      ],
+      "main_thread": {
+        "samples": 47986,
+        "run_loop_idle_samples": 47643,
+        "estimated_non_idle_ms": 428.87508856749884
+      },
+      "process_family": {
+        "duration_ms": 60012,
+        "peak_processes": 10,
+        "terminal_processes": 10,
+        "application_idle_wakeups": 415,
+        "family_idle_wakeups": 538,
+        "application_cpu_ms": 485.352083
+      },
+      "median_load_ms": 159.88875
+    },
+    "off": {
+      "loads_ms": [
+        190.550667,
+        331.654667,
+        274.801375
+      ],
+      "main_thread": {
+        "samples": 46821,
+        "run_loop_idle_samples": 45568,
+        "estimated_non_idle_ms": 1605.689754597296
+      },
+      "process_family": {
+        "duration_ms": 60009,
+        "peak_processes": 12,
+        "terminal_processes": 12,
+        "application_idle_wakeups": 1466,
+        "family_idle_wakeups": 1974,
+        "application_cpu_ms": 1392.703624
+      },
+      "median_load_ms": 274.801375
+    }
+  },
+  "callback_body": {
+    "yahoo": {
+      "events": 31,
+      "total_ns": 24250,
+      "mean_ns": 782.258064516129
+    },
+    "bloomberg": {
+      "events": 41,
+      "total_ns": 74498,
+      "mean_ns": 1817.0243902439024
+    }
+  },
+  "idle": {
+    "on": {
+      "duration_ms": 300014,
+      "peak_processes": 19,
+      "terminal_processes": 19,
+      "application_idle_wakeups": 274,
+      "family_idle_wakeups": 532,
+      "application_cpu_ms": 301.119583
+    },
+    "off": {
+      "requested_duration_ms": 300000,
+      "sample_count": 297,
+      "observed_processes": 18,
+      "family_idle_wakeups": 845,
+      "family_interrupt_wakeups": 10516,
+      "family_user_cpu_ms": 1780,
+      "family_system_cpu_ms": 991,
+      "peak_physical_footprint_bytes": 782777056,
+      "terminal_physical_footprint_bytes": 508934880,
+      "detailed_report": null,
+      "note": "Measurement-complete stderr summary survived; JSON output failed with ENOSPC. Per-role details unavailable."
+    }
+  },
+  "limitations": [
+    "Live-site content and process counts varied; the faster counting-on results do not establish a causal speedup.",
+    "Callback-body timings include timing instrumentation and exclude surrounding WebKit notification construction.",
+    "One paired idle run is not a battery-life benchmark.",
+    "Windows runtime measurements and minimum-macOS physical qualification remain separate.",
+    "The idle control encountered disk exhaustion when writing its report. Aggregate values are the captured sampler summary; the paired idle comparison is indicative, not a controlled proof of zero overhead."
+  ],
+  "implementation": {
+    "network_loads_only": true,
+    "private_storage": false,
+    "additional_polling_timers": 0,
+    "stats_ui": "query on show, tab/calendar changes and visibility restoration",
+    "batch_day": "local collection day; may cross midnight or sleep",
+    "spi_probe": {
+      "own_blocked": 2,
+      "foreign_blocked_excluded": 1,
+      "cosmetic_hides_counted": 0
+    },
+    "native_qa": [
+      "New Tab showed 0 initially, then 1 after one blocked fixture load",
+      "Paused reload loaded the ad resource and the count stayed at 1",
+      "Fresh-load waiting and explicit new-profile zero fixed after native QA",
+      "Quit menu and Cmd+Q now use coordinated shutdown; after Cmd+Q the closed profile database contained 21 and the reopened New Tab displayed 21",
+      "Dock Quit and OS termination have not been separately qualified"
+    ]
+  },
+  "verification": {
+    "rust_tests": {
+      "app": 336,
+      "core": 213,
+      "desktop": 107,
+      "engine": 206,
+      "ipc": 1,
+      "store": 224
+    },
+    "clippy_all_touched_crates": "passed -D warnings",
+    "frame": "check/build/style checks passed; 295 unit tests",
+    "windows_engine_cross_check": "passed before generated-cache cleanup; runtime qualification pending",
+    "qa_binary_sha256": "576baa610536453eeffb98deeeaf5502dec4505541a68242b3c9191486434ee8",
+    "instrumentation_removed": true
+  }
+}

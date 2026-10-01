@@ -5,9 +5,13 @@ use std::fmt;
 
 use ulid::Ulid;
 
+pub use crate::work::{WorkId, WorkPlanId, WorkPlanNodeId, WorkQuestionId};
+
 macro_rules! ulid_id {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+        #[cfg_attr(feature = "ipc-types", specta(type = String))]
         pub struct $name(Ulid);
 
         impl $name {
@@ -66,6 +70,7 @@ macro_rules! ulid_id {
 }
 
 ulid_id!(DownloadId);
+ulid_id!(ClosedSessionId);
 ulid_id!(ItemId);
 ulid_id!(SpaceId);
 ulid_id!(ProfileId);

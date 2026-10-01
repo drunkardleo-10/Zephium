@@ -14,10 +14,17 @@ use zephium_store::SqliteStore;
 /// effect assessment, account attestation, manifest or profile assignment.
 /// This layer intentionally has no default task or implicit effect permission.
 pub struct TrustedWorkRequest {
+    pub(crate) construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
+    page: Option<zephium_app::RetainedPageAdmission>,
+    anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    work: Option<zephium_agentic::WorkId>,
     pub(crate) input: AgentWorkRunInput,
     pub(crate) config: AgentWorkApplicationConfig,
     pub(crate) credential: AgentProviderCredential,
     pub(crate) task: Box<dyn AgentWorkTask>,
+    browser_profile: Option<zephium_app::AgentWorkProfileBinding>,
+    #[cfg(feature = "public-qualification")]
+    public_qualification: bool,
 }
 
 impl TrustedWorkRequest {
@@ -29,11 +36,56 @@ impl TrustedWorkRequest {
         task: Box<dyn AgentWorkTask>,
     ) -> Self {
         Self {
+            construction_attempt: Default::default(),
+            page: None,
+            anonymous_session: None,
+            work: None,
             input,
             config,
             credential,
             task,
+            browser_profile: None,
+            #[cfg(feature = "public-qualification")]
+            public_qualification: false,
         }
+    }
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_construction_attempt(
+        mut self,
+        attempt: zephium_agentic::WorkBrowserConstructionAttempt,
+    ) -> Self {
+        self.construction_attempt = attempt;
+        self
+    }
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_page_admission(mut self, page: zephium_app::RetainedPageAdmission) -> Self {
+        self.page = Some(page);
+        self
+    }
+    pub(crate) fn with_anonymous_session(
+        mut self,
+        session: zephium_agentic::WorkBrowserSession,
+    ) -> Self {
+        self.anonymous_session = Some(session);
+        self
+    }
+    /// Bind the aggregate owning this fresh dispatch; no authority is added.
+    pub fn with_work_identity(mut self, work: zephium_agentic::WorkId) -> Self {
+        self.work = Some(work);
+        self
+    }
+    /// Requests the exact actor-selected browser session, revalidated by Shell.
+    pub fn with_browser_profile(mut self, binding: zephium_app::AgentWorkProfileBinding) -> Self {
+        self.browser_profile = Some(binding);
+        self
+    }
+
+    /// Explicit public-only diagnostic retention. Absent from release graphs;
+    /// it does not change the ordinary profile-bound application admission.
+    #[cfg(feature = "public-qualification")]
+    pub fn with_public_qualification_retention(mut self) -> Self {
+        self.public_qualification = true;
+        self
     }
 }
 
@@ -46,6 +98,8 @@ impl std::fmt::Debug for TrustedWorkRequest {
 /// Dormant, move-only desktop owners. Construction neither claims persistence
 /// nor takes native authority. The shell checks both exact Arc identities.
 pub struct MacosWorkComposition {
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) human_pages: crate::human::HumanPages,
     engine: Arc<WebviewEngine>,
     store: Arc<SqliteStore>,
     native: Arc<Mutex<NativeLifetimeOwner>>,
@@ -58,12 +112,68 @@ enum NativeLifetimeOwner {
 }
 
 impl MacosWorkComposition {
+    #[cfg(feature = "retained-lifetime-diagnostic")]
+    pub fn retained_resource_failure_cause(
+        &self,
+        view: &zephium_app::RetainedWorkHandle,
+    ) -> Option<zephium_engine::WorkResourceFailureCause> {
+        self.engine
+            .work_resource_failure_cause(&view.construction_resource_for_qualification()?)
+    }
+    /// Launches a stateless, single-page retained Work request through the
+    /// original Shell. No qualification owner, rendering or navigation lease
+    /// is substituted. Queue acceptance is not profile/durable admission;
+    /// observe the returned bounded handle for the actual outcome.
+    pub fn launch_retained(
+        &self,
+        shell: &CallbackHandle,
+        request: TrustedWorkRequest,
+    ) -> Result<Option<zephium_app::RetainedWorkHandle>, AgentWorkFailure> {
+        let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
+        let ports = zephium_app::RetainedWorkPorts::new(
+            self.engine.clone(),
+            self.store.clone(),
+            self.store.clone(),
+            self.native_factory_for_group(request.page.as_ref().map(|page| page.native_group())),
+        );
+        let prepare = zephium_app::PreparedRetainedWork::try_new;
+        #[cfg(feature = "public-qualification")]
+        let prepare = if request.public_qualification {
+            zephium_app::PreparedRetainedWork::try_new_for_public_qualification
+        } else {
+            prepare
+        };
+        let prepared = prepare(
+            request.input,
+            binding,
+            request.config,
+            request.credential,
+            request.task,
+            ports,
+        )?;
+        let prepared = prepared.with_construction_attempt(request.construction_attempt)?;
+        let prepared = match request.work {
+            Some(work) => prepared.with_work_identity(work),
+            None => prepared,
+        };
+        let prepared = match request.anonymous_session {
+            Some(session) => prepared.with_anonymous_session(session)?,
+            None => prepared,
+        };
+        let prepared = match request.page {
+            Some(page) => prepared.with_page_admission(page)?,
+            None => prepared,
+        };
+        Ok(shell.attach_retained_work(prepared))
+    }
     /// Uses the same owners passed to the normal application shell.
     pub fn new(engine: Arc<WebviewEngine>, store: Arc<SqliteStore>) -> Self {
         Self {
             engine,
             store,
             native: Arc::new(Mutex::new(NativeLifetimeOwner::Dormant)),
+            #[cfg(feature = "durable-runtime")]
+            human_pages: crate::human::HumanPages::default(),
         }
     }
 
@@ -90,38 +200,74 @@ impl MacosWorkComposition {
         &self,
         request: TrustedWorkRequest,
     ) -> Result<PreparedAgentWork, AgentWorkFailure> {
-        PreparedAgentWork::try_new(
+        if request.anonymous_session.is_some() || request.page.is_some() {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
+        #[cfg(feature = "public-qualification")]
+        if request.public_qualification {
+            return PreparedAgentWork::try_new_for_public_probe(
+                request.input,
+                request.config,
+                request.credential,
+                request.task,
+                self.ports(),
+            )?
+            .with_browser_profile(binding);
+        }
+        let prepared = PreparedAgentWork::try_new(
             request.input,
             request.config,
             request.credential,
             request.task,
             self.ports(),
-        )
+        )?;
+        prepared.with_browser_profile(binding)
     }
 
     pub(crate) fn ports(&self) -> AgentWorkApplicationPorts {
         let engine = self.engine.clone();
-        let native = self.native.clone();
+        let factory = self.native_factory();
         AgentWorkApplicationPorts::new(
             engine.clone(),
             self.store.clone(),
             Box::new(move |sink| {
-                let mut native = native.lock().ok()?;
-                if matches!(*native, NativeLifetimeOwner::Dormant) {
-                    *native = engine.take_agent_browser_lifetime_factory().map_or(
-                        NativeLifetimeOwner::Unavailable,
-                        NativeLifetimeOwner::Factory,
-                    );
-                }
-                let NativeLifetimeOwner::Factory(factory) = &mut *native else {
-                    return None;
-                };
-                factory
-                    .begin(move |event| {
-                        let _ = sink.publish(event);
-                    })
-                    .ok()
+                factory(Arc::new(move |event| {
+                    let _ = sink.publish(event);
+                }))
             }),
         )
+    }
+
+    // Both product lifetimes share the original one-shot factory acquisition;
+    // neither composition can reopen a port or fork native lifetime ownership.
+    fn native_factory(&self) -> zephium_app::RetainedWorkNativeFactory {
+        self.native_factory_for_group(None)
+    }
+
+    fn native_factory_for_group(
+        &self,
+        group: Option<(zephium_agentic::WorkId, u8)>,
+    ) -> zephium_app::RetainedWorkNativeFactory {
+        let engine = self.engine.clone();
+        let native = self.native.clone();
+        Box::new(move |sink| {
+            let mut native = native.lock().ok()?;
+            if matches!(*native, NativeLifetimeOwner::Dormant) {
+                *native = engine.take_agent_browser_lifetime_factory().map_or(
+                    NativeLifetimeOwner::Unavailable,
+                    NativeLifetimeOwner::Factory,
+                );
+            }
+            let NativeLifetimeOwner::Factory(factory) = &mut *native else {
+                return None;
+            };
+            match group {
+                Some((work, capacity)) => factory
+                    .begin_work_page(work, capacity, move |event| sink(event))
+                    .ok(),
+                None => factory.begin(move |event| sink(event)).ok(),
+            }
+        })
     }
 }

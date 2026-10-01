@@ -181,6 +181,12 @@ pub enum SemanticNodeChange {
     Geometry,
     /// Heading level changed.
     HeadingLevel,
+    /// Observed public link destination changed.
+    LinkDestination,
+    /// Descriptive landmark subtype changed.
+    LandmarkKind,
+    /// Exact public image source changed.
+    ImageSource,
 }
 
 impl SemanticNodeChange {
@@ -593,8 +599,35 @@ impl SemanticObservationAcknowledgement {
         Self { fingerprint }
     }
 
+    /// Rust's own baseline for a code-owned capture of this whole document,
+    /// with no provider in between: the main frame's document root, when the
+    /// observation has one. It grants no action or model authority.
+    pub fn whole_page_scope(
+        observation: &SemanticObservation,
+    ) -> Option<(Self, crate::SemanticReferenceId)> {
+        let root = observation
+            .frames()
+            .first()?
+            .nodes()
+            .first()
+            .filter(|node| node.role() == crate::SemanticRole::Document)?
+            .reference();
+        Some((
+            Self::from_fingerprint(SemanticObservationFingerprint::from_observation(
+                observation,
+            )),
+            root,
+        ))
+    }
+
     pub(crate) fn matches(&self, observation: &SemanticObservation) -> bool {
         self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
+    }
+
+    /// Verifies that this opaque delivery acknowledgement authenticates the
+    /// complete exact observation supplied by a trusted runtime boundary.
+    pub fn authenticates(&self, observation: &SemanticObservation) -> bool {
+        self.matches(observation)
     }
 
     pub(crate) const fn guard(&self) -> [u8; 32] {
@@ -848,6 +881,16 @@ fn semantic_diff_guard(baseline_guard: [u8; 32], current_guard: [u8; 32]) -> [u8
 
 fn scopes_match(previous: &SemanticScope, current: &SemanticScope) -> bool {
     match (previous, current) {
+        (
+            SemanticScope::TextSearch {
+                anchor: before,
+                query: before_query,
+            },
+            SemanticScope::TextSearch {
+                anchor: after,
+                query: after_query,
+            },
+        ) => before_query == after_query && anchors_match(before.capability(), after.capability()),
         (SemanticScope::Initial, SemanticScope::Initial) => true,
         (SemanticScope::Region(before), SemanticScope::Region(after))
         | (SemanticScope::Subtree(before), SemanticScope::Subtree(after))
@@ -946,6 +989,14 @@ fn shared_node_positions(
 fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNodeChanges {
     let mut changes = SemanticNodeChanges::NONE;
     for (changed, field) in [
+        (
+            previous.link_destination() != current.link_destination(),
+            SemanticNodeChange::LinkDestination,
+        ),
+        (
+            previous.image_source() != current.image_source(),
+            SemanticNodeChange::ImageSource,
+        ),
         (previous.name() != current.name(), SemanticNodeChange::Name),
         (previous.text() != current.text(), SemanticNodeChange::Text),
         (
@@ -971,6 +1022,10 @@ fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNo
         (
             previous.geometry() != current.geometry(),
             SemanticNodeChange::Geometry,
+        ),
+        (
+            previous.landmark_kind() != current.landmark_kind(),
+            SemanticNodeChange::LandmarkKind,
         ),
         (
             previous.heading_level() != current.heading_level(),
@@ -1036,7 +1091,7 @@ struct FingerprintHasher(Sha256);
 impl FingerprintHasher {
     fn new() -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"zephium-semantic-observation-ack-v1\0");
+        hasher.update(b"zephium-semantic-observation-ack-v2\0");
         Self(hasher)
     }
 
@@ -1133,6 +1188,11 @@ fn hash_frame(hasher: &mut FingerprintHasher, frame: &SemanticFrameJoin) {
 
 fn hash_scope(hasher: &mut FingerprintHasher, scope: &SemanticScope) {
     match scope {
+        SemanticScope::TextSearch { anchor, query } => {
+            hasher.byte(7);
+            hash_scope_anchor(hasher, anchor);
+            hasher.bytes(query.as_str().as_bytes());
+        }
         SemanticScope::Initial => hasher.byte(1),
         SemanticScope::Region(anchor) => {
             hasher.byte(2);
@@ -1191,7 +1251,20 @@ fn hash_node(hasher: &mut FingerprintHasher, node: &SemanticNode) {
         }
         None => hasher.byte(0),
     }
+    if let Some(kind) = node.landmark_kind() {
+        hasher.byte(0xfa);
+        hasher.byte(kind as u8);
+    }
     hash_text(hasher, node.name().map(|value| value.as_str()));
+    hash_text(
+        hasher,
+        node.link_destination()
+            .map(|target| target.as_url().as_str()),
+    );
+    if let Some(source) = node.image_source() {
+        hasher.byte(0xfb);
+        hash_text(hasher, Some(source.as_url().as_str()));
+    }
     hash_text(hasher, node.text().map(|value| value.as_str()));
     match node.value() {
         None => hasher.byte(0),
@@ -1211,6 +1284,10 @@ fn hash_node(hasher: &mut FingerprintHasher, node: &SemanticNode) {
     }
     hasher.byte(node.states().bits());
     hasher.byte(node.operations().bits());
+    if let Some(activation) = node.activation() {
+        hasher.byte(0xf9);
+        hasher.byte(activation as u8);
+    }
     hasher.byte(match node.sensitivity() {
         SemanticSensitivity::Public => 1,
         SemanticSensitivity::Sensitive => 2,
@@ -1253,6 +1330,8 @@ fn hash_completeness(hasher: &mut FingerprintHasher, completeness: SemanticCompl
         SemanticCompleteness::Truncated(SemanticTruncation::UnsupportedFrame) => 6,
         SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit) => 7,
         SemanticCompleteness::Truncated(SemanticTruncation::WireLimit) => 8,
+        SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit) => 9,
+        SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => 10,
     });
 }
 
@@ -1671,6 +1750,82 @@ mod tests {
                 SemanticDiffBudget::ACTION,
             )),
             SemanticFreshSnapshotReason::NotAcknowledged
+        );
+    }
+
+    #[test]
+    fn link_destination_changes_revoke_acknowledgement_and_are_projected_as_changes() {
+        let context = context(2);
+        let nodes = |destination: &str| {
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"link","n":"Source","u":destination}
+            ])
+        };
+        let first = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/first"),
+        );
+        let swapped = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/second"),
+        );
+        let acknowledgement = acknowledge(&first);
+        assert!(!acknowledgement.matches(&swapped));
+        let changes = changed_fields(
+            &first.frames()[0].nodes()[1],
+            &swapped.frames()[0].nodes()[1],
+        );
+        assert!(changes.contains(SemanticNodeChange::LinkDestination));
+        assert_eq!(changes.len(), 1);
+        assert!(
+            SemanticObservationFingerprint::from_observation(&first)
+                != SemanticObservationFingerprint::from_observation(&swapped)
+        );
+    }
+
+    #[test]
+    fn image_source_changes_revoke_acknowledgement_and_are_projected_as_changes() {
+        let context = context(2);
+        let nodes = |destination: &str| {
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"image","n":"Source","m":destination}
+            ])
+        };
+        let first = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/first"),
+        );
+        let swapped = observation(
+            context,
+            20,
+            200,
+            21,
+            "complete",
+            nodes("https://example.test/second"),
+        );
+        let acknowledgement = acknowledge(&first);
+        assert!(!acknowledgement.matches(&swapped));
+        let changes = changed_fields(
+            &first.frames()[0].nodes()[1],
+            &swapped.frames()[0].nodes()[1],
+        );
+        assert!(changes.contains(SemanticNodeChange::ImageSource));
+        assert_eq!(changes.len(), 1);
+        assert!(
+            SemanticObservationFingerprint::from_observation(&first)
+                != SemanticObservationFingerprint::from_observation(&swapped)
         );
     }
 

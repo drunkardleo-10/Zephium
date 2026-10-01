@@ -9,8 +9,8 @@
 //! Closed macOS semantic-action adapter.
 //!
 //! Exact target revalidation and action dispatch start inside the immutable
-//! isolated runtime. Click and native-select changes use fixed isolated-world
-//! recipes; Fill uses the separately attested page-world compatibility shim.
+//! isolated runtime. Click, Fill and native-select changes use fixed
+//! isolated-world recipes; no page-world relay is installed.
 //! Every result is only a correlated provisional terminal until the core's
 //! fresh semantic postcondition verification. Engine-native responder delivery
 //! remains excluded because physical evidence shows that it grants page user
@@ -20,7 +20,7 @@
 use std::time::Instant;
 
 use zephium_agentic::{
-    encode_semantic_action_runtime_invocation, SemanticActionExecutionInstant, SemanticActionKind,
+    encode_semantic_action_runtime_invocation, SemanticActionExecutionInstant,
     SemanticActionNativeFailure, SemanticActionNativeRequest, SemanticActionNativeSettlement,
     SemanticActionRuntimeFault, SemanticActionRuntimeResultError,
 };
@@ -37,10 +37,18 @@ pub(super) fn dispatch(
     admitted_at: Instant,
     completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
 ) {
-    if !matches!(
-        request.kind(),
-        SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
-    ) {
+    dispatch_guarded(_view, semantic, request, admitted_at, None, completion);
+}
+
+pub(super) fn dispatch_guarded(
+    _view: &wry::WebView,
+    semantic: &AgentSemanticRuntimeController,
+    request: SemanticActionNativeRequest,
+    admitted_at: Instant,
+    authority: Option<Box<dyn Fn() -> bool>>,
+    completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
+) {
+    if !zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.kind()) {
         let completed_at = failure_instant(
             &request,
             admitted_at,
@@ -64,7 +72,7 @@ pub(super) fn dispatch(
             return;
         }
     };
-    let _ = semantic.dispatch_action(invocation, move |outcome| {
+    let _ = semantic.dispatch_action_guarded(invocation, authority, move |outcome| {
         let settlement = match outcome {
             Ok(evidence) => complete_runtime_recipe(request, evidence, admitted_at),
             Err(failure) => {
@@ -173,10 +181,16 @@ const fn map_runtime_failure(
     }
 }
 
-const fn map_runtime_fault(fault: SemanticActionRuntimeFault) -> SemanticActionNativeFailure {
+pub(super) const fn map_runtime_fault(
+    fault: SemanticActionRuntimeFault,
+) -> SemanticActionNativeFailure {
     match fault {
         SemanticActionRuntimeFault::StaleReference => SemanticActionNativeFailure::StaleReference,
-        SemanticActionRuntimeFault::TargetChanged => SemanticActionNativeFailure::TargetChanged,
+        SemanticActionRuntimeFault::TargetChanged
+        | SemanticActionRuntimeFault::TargetDescriptorChanged
+        | SemanticActionRuntimeFault::TargetGeometryChanged => {
+            SemanticActionNativeFailure::TargetChanged
+        }
         SemanticActionRuntimeFault::TargetDisabled => SemanticActionNativeFailure::TargetDisabled,
         SemanticActionRuntimeFault::CredentialBoundary => {
             SemanticActionNativeFailure::CredentialBoundary
@@ -185,11 +199,34 @@ const fn map_runtime_fault(fault: SemanticActionRuntimeFault) -> SemanticActionN
         SemanticActionRuntimeFault::UnsupportedInteraction => {
             SemanticActionNativeFailure::UnsupportedInteraction
         }
-        SemanticActionRuntimeFault::AppliedUnverified => {
+        SemanticActionRuntimeFault::AppliedUnverified
+        | SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputCancelled
+        | SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputRevalidation
+        | SemanticActionRuntimeFault::AppliedUnverifiedMutation
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelay
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayDeadline
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandGone
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandChanged
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayDetached
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayRoot
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalMalformed
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalForeign
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalUnknown
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayRead
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelaySetup
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayPublication
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayCleanup
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayOverflow
+        | SemanticActionRuntimeFault::AppliedUnverifiedRelayPageException
+        | SemanticActionRuntimeFault::AppliedUnverifiedPostcondition
+        | SemanticActionRuntimeFault::AppliedUnverifiedLogicalEditor => {
             SemanticActionNativeFailure::AppliedUnverified
         }
-        SemanticActionRuntimeFault::Busy => SemanticActionNativeFailure::ResourceExhausted,
+        SemanticActionRuntimeFault::Busy | SemanticActionRuntimeFault::PageDialogSampleLimit => {
+            SemanticActionNativeFailure::ResourceExhausted
+        }
         SemanticActionRuntimeFault::DocumentLoading
+        | SemanticActionRuntimeFault::PageDialogSampleUnavailable
         | SemanticActionRuntimeFault::PageRelayNotReady => {
             SemanticActionNativeFailure::TargetChanged
         }
@@ -202,6 +239,49 @@ const fn map_runtime_fault(fault: SemanticActionRuntimeFault) -> SemanticActionN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_dialog_baselines_preserve_predispatch_failure_class() {
+        assert_eq!(
+            map_runtime_fault(SemanticActionRuntimeFault::PageDialogSampleLimit),
+            SemanticActionNativeFailure::ResourceExhausted
+        );
+        assert_eq!(
+            map_runtime_fault(SemanticActionRuntimeFault::PageDialogSampleUnavailable),
+            SemanticActionNativeFailure::TargetChanged
+        );
+    }
+
+    #[test]
+    fn content_free_fill_diagnostics_never_make_an_observed_action_retryable() {
+        for fault in [
+            SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputCancelled,
+            SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputRevalidation,
+            SemanticActionRuntimeFault::AppliedUnverifiedMutation,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelay,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayDeadline,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandGone,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandChanged,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayDetached,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayRoot,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalMalformed,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalForeign,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalUnknown,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayRead,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelaySetup,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayPublication,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayCleanup,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayOverflow,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayPageException,
+            SemanticActionRuntimeFault::AppliedUnverifiedPostcondition,
+            SemanticActionRuntimeFault::AppliedUnverifiedLogicalEditor,
+        ] {
+            assert_eq!(
+                map_runtime_fault(fault),
+                SemanticActionNativeFailure::AppliedUnverified
+            );
+        }
+    }
 
     #[test]
     fn execution_clock_mapping_is_checked_and_monotonic() {

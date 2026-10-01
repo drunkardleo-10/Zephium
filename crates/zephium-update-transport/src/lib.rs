@@ -2,11 +2,15 @@
 //!
 //! This crate owns only the untrusted network boundary shared by independent
 //! update domains. It grants no package, catalog, activation, or filesystem
-//! authority. Callers must authenticate every returned byte through their own
-//! signed repository and product policy.
+//! authority. Repository callers authenticate returned bytes with their signed
+//! policy. The official-filter API explicitly provides only HTTPS server trust
+//! and requires independent source validation and last-known-good activation.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
+
+pub mod chrome_store;
+pub mod official_filters;
 
 use std::fmt;
 use std::time::Duration;
@@ -16,7 +20,7 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING,
-    CONTENT_LENGTH, TRANSFER_ENCODING,
+    CONTENT_LENGTH, IF_NONE_MATCH, TRANSFER_ENCODING,
 };
 use reqwest::redirect::Policy;
 use reqwest::{Client, Response, StatusCode};
@@ -24,6 +28,30 @@ use thiserror::Error;
 #[cfg(feature = "tough")]
 use tough::{Transport, TransportError, TransportErrorKind, TransportStream};
 use url::Url;
+
+/// Untrusted conditional HTTP result. A cache hit is not a signature check
+/// and does not extend signed metadata expiry or policy freshness.
+#[derive(Debug, Eq, PartialEq)]
+#[must_use = "conditional responses require cached-byte revalidation or authentication of new bytes"]
+pub enum ConditionalFixedOriginResponse {
+    /// Complete bounded bytes; the caller must authenticate before caching.
+    Modified(Box<[u8]>),
+    /// The server reports the caller's exact cached content hash unchanged.
+    /// The caller must revalidate its cached bytes and signed deadlines.
+    NotModified,
+}
+
+/// Strong ETag derived only from a shared content digest, never an opaque
+/// server-selected token that could become a persistent client identifier.
+pub fn content_digest_etag(sha256: [u8; 32]) -> HeaderValue {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [b'"'; 66];
+    for (index, byte) in sha256.into_iter().enumerate() {
+        bytes[1 + index * 2] = HEX[usize::from(byte >> 4)];
+        bytes[2 + index * 2] = HEX[usize::from(byte & 15)];
+    }
+    HeaderValue::from_bytes(&bytes).expect("fixed quoted hexadecimal digest is an HTTP header")
+}
 
 /// Configuration failure before any request can be issued.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -176,6 +204,35 @@ impl FixedOriginTransport {
             return Err(FixedOriginFetchError::ResponseTooLarge);
         }
         let response = self.send(url).await?;
+        Self::read_bounded_response(response, max_bytes).await
+    }
+
+    /// Conditionally fetches shared metadata using SHA-256 of the caller's
+    /// authenticated cached bytes. Arbitrary server ETags are never replayed.
+    /// A 304 without a supplied cache digest is rejected. This method retains
+    /// the ordinary redirect, encoding, size, and response-length boundaries.
+    pub async fn fetch_bounded_conditional(
+        &self,
+        url: Url,
+        max_bytes: usize,
+        cached_sha256: Option<[u8; 32]>,
+    ) -> Result<ConditionalFixedOriginResponse, FixedOriginFetchError> {
+        if max_bytes == 0 {
+            return Err(FixedOriginFetchError::ResponseTooLarge);
+        }
+        let response = self.send_conditional(url, cached_sha256).await?;
+        if response.status() == StatusCode::NOT_MODIFIED {
+            return Ok(ConditionalFixedOriginResponse::NotModified);
+        }
+        Self::read_bounded_response(response, max_bytes)
+            .await
+            .map(ConditionalFixedOriginResponse::Modified)
+    }
+
+    async fn read_bounded_response(
+        response: Response,
+        max_bytes: usize,
+    ) -> Result<Box<[u8]>, FixedOriginFetchError> {
         let declared = exact_content_length(response.headers())?;
         if declared > max_bytes {
             return Err(FixedOriginFetchError::ResponseTooLarge);
@@ -210,10 +267,18 @@ impl FixedOriginTransport {
     }
 
     async fn send(&self, url: Url) -> Result<Response, FixedOriginFetchError> {
-        if !self.admits(&url) {
+        self.send_conditional(url, None).await
+    }
+
+    fn request(
+        &self,
+        url: &Url,
+        cached_sha256: Option<[u8; 32]>,
+    ) -> Result<reqwest::RequestBuilder, FixedOriginFetchError> {
+        if !self.admits(url) {
             return Err(FixedOriginFetchError::Boundary);
         }
-        let response = self
+        let mut request = self
             .client
             .get(url.clone())
             .header(
@@ -223,7 +288,20 @@ impl FixedOriginTransport {
                 ),
             )
             .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
-            .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+            .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        if let Some(digest) = cached_sha256 {
+            request = request.header(IF_NONE_MATCH, content_digest_etag(digest));
+        }
+        Ok(request)
+    }
+
+    async fn send_conditional(
+        &self,
+        url: Url,
+        cached_sha256: Option<[u8; 32]>,
+    ) -> Result<Response, FixedOriginFetchError> {
+        let response = self
+            .request(&url, cached_sha256)?
             .send()
             .await
             .map_err(|error| classify_network_error(&error))?;
@@ -235,7 +313,7 @@ impl FixedOriginTransport {
             return Err(FixedOriginFetchError::ResponseEncoding);
         }
         let status = response.status();
-        if !status.is_success() {
+        if !response_status_admitted(status, cached_sha256.is_some()) {
             return Err(
                 if matches!(
                     status,
@@ -249,6 +327,10 @@ impl FixedOriginTransport {
         }
         Ok(response)
     }
+}
+
+fn response_status_admitted(status: StatusCode, has_cached_digest: bool) -> bool {
+    status == StatusCode::OK || (status == StatusCode::NOT_MODIFIED && has_cached_digest)
 }
 
 #[cfg(feature = "tough")]
@@ -369,6 +451,56 @@ fn redacted_origin(url: &Url) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conditional_status_cannot_authorize_an_unsolicited_cache_hit_or_partial_body() {
+        assert!(response_status_admitted(StatusCode::OK, false));
+        assert!(response_status_admitted(StatusCode::NOT_MODIFIED, true));
+        assert!(!response_status_admitted(StatusCode::NOT_MODIFIED, false));
+        for status in [
+            StatusCode::PARTIAL_CONTENT,
+            StatusCode::NO_CONTENT,
+            StatusCode::FOUND,
+            StatusCode::NOT_FOUND,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert!(!response_status_admitted(status, false));
+            assert!(!response_status_admitted(status, true));
+        }
+    }
+
+    #[test]
+    fn conditional_requests_replay_only_a_shared_content_digest() {
+        let transport = transport();
+        let url = Url::parse("https://updates.example/metadata/timestamp.json").unwrap();
+        let request = transport
+            .request(&url, Some([0xab; 32]))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[IF_NONE_MATCH],
+            format!("\"{}\"", "ab".repeat(32))
+        );
+        assert!(!request.headers().contains_key(reqwest::header::COOKIE));
+        assert!(!request
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
+        assert!(!transport
+            .request(&url, None)
+            .unwrap()
+            .build()
+            .unwrap()
+            .headers()
+            .contains_key(IF_NONE_MATCH));
+        assert!(transport
+            .request(
+                &Url::parse("https://evil.example/metadata/timestamp.json").unwrap(),
+                Some([0; 32])
+            )
+            .is_err());
+    }
 
     fn transport() -> FixedOriginTransport {
         FixedOriginTransport::new(

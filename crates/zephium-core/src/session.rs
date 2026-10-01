@@ -6,8 +6,10 @@ use std::collections::HashSet;
 
 use url::Url;
 
-use crate::ids::{ItemId, ProfileId, SpaceId};
-use crate::item::{sanitize_page_title, Item, ItemKind, Placement, TabState};
+use crate::ids::{ClosedSessionId, ItemId, ProfileId, SpaceId};
+use crate::item::{
+    sanitize_page_title, BrowserOwnedTab, Item, ItemKind, Placement, TabContent, TabState,
+};
 use crate::items::Items;
 use crate::navigation;
 use crate::profiles::{Profile, ProfileKind, Profiles};
@@ -67,6 +69,10 @@ pub enum PersistedKind {
         title: String,
         zoom: f64,
     },
+    /// Browser-owned pages have no navigable URL or native content view.
+    BrowserTab {
+        page: BrowserOwnedTab,
+    },
 }
 
 /// Bounded browser-owned state for restoring a recently closed regular tab.
@@ -79,6 +85,12 @@ pub struct PersistedClosedTab {
     pub url: String,
     pub title: String,
     pub zoom: f64,
+    /// Absent on legacy snapshots. Never manufacture historical metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ClosedSessionId>,
+    /// Real Unix close time, bounded to JavaScript's exact integer range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at_ms: Option<u64>,
 }
 
 pub fn snapshot(
@@ -184,13 +196,17 @@ fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
         };
         let kind = match &item.kind {
             ItemKind::Folder { name } => PersistedKind::Folder { name: name.clone() },
-            ItemKind::Tab(tab) => match &tab.url {
-                // A tab without a url (empty New Tab) is not worth persisting.
-                None => return,
-                Some(url) => PersistedKind::Tab {
-                    url: url.to_string(),
-                    title: tab.title.clone(),
-                    zoom: tab.zoom,
+            ItemKind::Tab(tab) => match tab.content {
+                TabContent::BrowserOwned(page) => PersistedKind::BrowserTab { page },
+                TabContent::ExtensionOwned => return,
+                TabContent::Web => match &tab.url {
+                    // A tab without a url (empty New Tab) is not worth persisting.
+                    None => return,
+                    Some(url) => PersistedKind::Tab {
+                        url: url.to_string(),
+                        title: tab.title.clone(),
+                        zoom: tab.zoom,
+                    },
                 },
             },
         };
@@ -260,6 +276,7 @@ pub fn restore(state: SessionState) -> Restored {
     }
 
     let mut items = Items::default();
+    let mut browser_tabs = HashSet::new();
     for i in state.items.into_iter().take(MAX_SESSION_ITEMS) {
         let placement_ok = match i.placement {
             Placement::Favorites { profile } => profiles.get(profile).is_some(),
@@ -276,7 +293,7 @@ pub fn restore(state: SessionState) -> Restored {
                 let Ok(url) = Url::parse(&url) else {
                     continue;
                 };
-                if !navigation::is_allowed(&url) {
+                if !navigation::is_browser_target(&url) {
                     continue;
                 }
                 let mut tab = TabState::new();
@@ -288,6 +305,15 @@ pub fn restore(state: SessionState) -> Restored {
                     1.0
                 };
                 ItemKind::Tab(tab)
+            }
+            PersistedKind::BrowserTab { page } => {
+                let Placement::Space { space, .. } = i.placement else {
+                    continue;
+                };
+                if i.parent.is_some() || !browser_tabs.insert((space, page)) {
+                    continue;
+                }
+                ItemKind::Tab(TabState::browser_owned(page))
             }
         };
         // insert() enforces parent existence and placement consistency; DFS
@@ -331,6 +357,7 @@ fn canonical_recently_closed(
     input: &[PersistedClosedTab],
     owns_entry: impl Fn(&PersistedClosedTab) -> bool,
 ) -> Vec<PersistedClosedTab> {
+    let mut seen = HashSet::new();
     let mut output = input
         .iter()
         .rev()
@@ -338,7 +365,19 @@ fn canonical_recently_closed(
             if !owns_entry(entry) {
                 return None;
             }
-            let url = Url::parse(&entry.url).ok().filter(navigation::is_allowed)?;
+            if entry.session_id.is_some() != entry.closed_at_ms.is_some()
+                || entry
+                    .closed_at_ms
+                    .is_some_and(|ms| !(1_000..=9_007_199_254_740_991).contains(&ms))
+            {
+                return None;
+            }
+            let url = Url::parse(&entry.url)
+                .ok()
+                .filter(navigation::is_browser_target)?;
+            if entry.session_id.is_some_and(|id| !seen.insert(id)) {
+                return None;
+            }
             Some(PersistedClosedTab {
                 profile: entry.profile,
                 space: entry.space,
@@ -349,6 +388,8 @@ fn canonical_recently_closed(
                 } else {
                     1.0
                 },
+                session_id: entry.session_id,
+                closed_at_ms: entry.closed_at_ms,
             })
         })
         .take(MAX_RECENTLY_CLOSED_TABS)
@@ -385,7 +426,13 @@ fn valid_split_tree(tree: &Pane, items: &Items, spaces: &Spaces, space: SpaceId)
             return false;
         }
         match tree {
-            Pane::Leaf(id) => item_in_space_scope(items, spaces, *id, space) && unique.insert(*id),
+            Pane::Leaf(id) => {
+                item_in_space_scope(items, spaces, *id, space)
+                    && items
+                        .tab(*id)
+                        .is_some_and(|tab| tab.content == TabContent::Web)
+                    && unique.insert(*id)
+            }
             Pane::Branch { ratio, a, b, .. } => {
                 ratio.is_finite()
                     && (0.05..=0.95).contains(ratio)
@@ -495,6 +542,8 @@ mod tests {
                 url: format!("https://example.com/{index}"),
                 title: format!("Title {index}\u{202e}"),
                 zoom: 2.0,
+                session_id: None,
+                closed_at_ms: None,
             })
             .collect::<Vec<_>>();
         recent.push(PersistedClosedTab {
@@ -503,6 +552,8 @@ mod tests {
             url: "https://foreign.example/".into(),
             title: "Foreign".into(),
             zoom: 1.0,
+            session_id: None,
+            closed_at_ms: None,
         });
         recent.push(PersistedClosedTab {
             profile,
@@ -510,6 +561,8 @@ mod tests {
             url: "file:///private.txt".into(),
             title: "Local".into(),
             zoom: 1.0,
+            session_id: None,
+            closed_at_ms: None,
         });
 
         let state = snapshot_with_recently_closed(
@@ -535,6 +588,40 @@ mod tests {
     }
 
     #[test]
+    fn closed_session_metadata_is_paired_unique_and_legacy_records_remain_reopenable() {
+        let (profiles, spaces, items, profile, space) = seed();
+        let record = |suffix: &str, session_id, closed_at_ms| PersistedClosedTab {
+            profile,
+            space,
+            url: format!("https://example.test/{suffix}"),
+            title: suffix.into(),
+            zoom: 1.0,
+            session_id,
+            closed_at_ms,
+        };
+        let same_id = ClosedSessionId::from(7);
+        let state = snapshot_with_recently_closed(
+            &profiles,
+            &spaces,
+            &items,
+            Some(space),
+            None,
+            None,
+            &[
+                record("legacy", None, None),
+                record("older", Some(same_id), Some(1_700_000_000_000)),
+                record("newer", Some(same_id), Some(1_700_000_001_000)),
+                record("partial", Some(ClosedSessionId::from(8)), None),
+            ],
+        );
+        assert_eq!(state.recently_closed.len(), 2);
+        assert_eq!(state.recently_closed[0].title, "legacy");
+        assert_eq!(state.recently_closed[0].session_id, None);
+        assert_eq!(state.recently_closed[1].title, "newer");
+        assert_eq!(state.recently_closed[1].session_id, Some(same_id));
+    }
+
+    #[test]
     fn snapshot_skips_incognito_and_urlless_tabs() {
         let (mut profiles, spaces, mut items, _profile, space) = seed();
         let incognito = ProfileId::from(9);
@@ -556,6 +643,86 @@ mod tests {
             .iter()
             .all(|p| p.kind != ProfileKind::Incognito));
         assert_eq!(state.active_item, None);
+    }
+
+    #[test]
+    fn browser_owned_tabs_restore_without_urls_and_extension_tabs_do_not_persist() {
+        let (profiles, spaces, mut items, _profile, space) = seed();
+        let extensions_tab = ItemId::from(31);
+        let extension = ItemId::from(32);
+        assert!(items.insert_browser_tab(
+            extensions_tab,
+            today(space),
+            BrowserOwnedTab::Extensions,
+        ));
+        assert!(!items.insert_browser_tab(
+            ItemId::from(34),
+            today(space),
+            BrowserOwnedTab::Settings
+        ));
+        assert!(items.insert_extension_tab(extension, today(space)));
+        let mut state = snapshot(
+            &profiles,
+            &spaces,
+            &items,
+            Some(space),
+            Some(extensions_tab),
+            None,
+        );
+        assert!(state.items.iter().any(|item| {
+            item.id == extensions_tab
+                && matches!(
+                    item.kind,
+                    PersistedKind::BrowserTab {
+                        page: BrowserOwnedTab::Extensions
+                    }
+                )
+        }));
+        assert!(!state.items.iter().any(|item| item.id == extension));
+        let duplicate = ItemId::from(33);
+        state.items.push(PersistedItem {
+            id: duplicate,
+            parent: None,
+            placement: today(space),
+            kind: PersistedKind::BrowserTab {
+                page: BrowserOwnedTab::Extensions,
+            },
+        });
+        let mut restored = restore(state);
+        assert_eq!(restored.active_item, Some(extensions_tab));
+        assert_eq!(
+            restored.items.tab(extensions_tab).map(|tab| tab.content),
+            Some(TabContent::BrowserOwned(BrowserOwnedTab::Extensions)),
+        );
+        assert!(restored.items.tab(duplicate).is_none());
+        assert!(restored.items.ensure_view(extensions_tab).is_empty());
+        assert!(restored
+            .items
+            .navigate(extensions_tab, "https://example.test/")
+            .is_empty());
+    }
+
+    #[test]
+    fn qa_settings_tab_remains_canonical_until_shell_migrates_it() {
+        let (profiles, spaces, items, _profile, space) = seed();
+        let mut state = snapshot(&profiles, &spaces, &items, Some(space), None, None);
+        let qa_settings = ItemId::from(35);
+        state.items.push(PersistedItem {
+            id: qa_settings,
+            parent: None,
+            placement: today(space),
+            kind: PersistedKind::BrowserTab {
+                page: BrowserOwnedTab::Settings,
+            },
+        });
+        state.active_item = Some(qa_settings);
+        let restored = restore(state.clone());
+        assert_eq!(restored.active_item, Some(qa_settings));
+        assert_eq!(
+            restored.items.tab(qa_settings).map(|tab| tab.content),
+            Some(TabContent::BrowserOwned(BrowserOwnedTab::Settings)),
+        );
+        assert_eq!(canonicalize(state.clone()), state);
     }
 
     #[test]

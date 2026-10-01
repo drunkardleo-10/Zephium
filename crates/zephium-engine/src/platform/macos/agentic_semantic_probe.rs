@@ -1,5 +1,17 @@
 //! Release-excluded live qualification for the production semantic adapter.
 
+#[path = "agentic_accessibility_fill_probe.rs"]
+mod accessibility_fill;
+
+#[path = "agentic_responder_fill_probe.rs"]
+mod responder_fill;
+
+#[path = "agentic_trusted_edit_probe.rs"]
+mod trusted_edit;
+
+#[path = "agentic_owned_surface_probe.rs"]
+mod owned_surface;
+
 #[path = "agentic_rendering_probe.rs"]
 mod rendering;
 pub use rendering::MacosAgenticRenderingProbeReport;
@@ -26,14 +38,17 @@ use std::time::{Duration, Instant};
 
 use objc2::{
     rc::{Retained, Weak},
+    runtime::AnyObject,
     MainThreadOnly as _,
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
     NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSDate, NSPoint, NSRect, NSRunLoop, NSSize};
-use objc2_web_kit::{WKWebView, WKWebsiteDataStore};
+use objc2_foundation::{
+    MainThreadMarker, NSDate, NSError, NSPoint, NSRect, NSRunLoop, NSSize, NSString,
+};
+use objc2_web_kit::{WKBackForwardListItem, WKWebView, WKWebsiteDataStore};
 use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
 };
@@ -223,6 +238,14 @@ impl ProbeNativeState<'_> {
     }
 }
 
+/// The fixture one probe case runs against, with the run's capture counters.
+struct ProbeCase<'a> {
+    url: &'a str,
+    case: &'a str,
+    next_invocation: &'a mut u64,
+    successful_snapshots: &'a mut u8,
+}
+
 struct ProbeRuntime<'a, 'native> {
     callbacks: &'a CallbackState,
     run_loop: &'a NSRunLoop,
@@ -309,6 +332,7 @@ enum ProbeMode<'a> {
         opportunity: RenderingOpportunity,
         report: &'a mut Option<MacosAgenticRenderingOpportunityReport>,
     },
+    HistoryRuntime(&'a mut Option<MacosAgenticHistoryRuntimeProbeReport>),
     ModelClick(&'a mut ModelInitialCallback<'a>),
     ModelPublicFill(&'a mut ModelInitialCallback<'a>),
     ModelWorkflow {
@@ -321,6 +345,22 @@ enum ProbeMode<'a> {
         prepare_continuation: &'a mut ModelContinuationCallback<'a>,
         finish: &'a mut ModelFinishCallback<'a>,
     },
+}
+
+/// Release-excluded evidence for exact native history identity and restoration
+/// lifecycle. It contains no page text or URL.
+#[derive(Debug)]
+pub struct MacosAgenticHistoryRuntimeProbeReport {
+    /// The immediate predecessor was the exact retained native item.
+    pub exact_item_identity: bool,
+    /// WebKit restored the original JavaScript document rather than cold-loading it.
+    pub bfcache_restored: bool,
+    /// A trusted pageshow notification ran after the exact history traversal.
+    pub pageshow_observed: bool,
+    /// The pageshow event identified a BFCache restoration.
+    pub pageshow_persisted: bool,
+    /// The parked isolated-world runtime resumed and produced a fresh snapshot.
+    pub semantic_runtime_reactivated: bool,
 }
 
 /// Fixed run authority bound to one live release-excluded semantic context.
@@ -411,6 +451,15 @@ pub(crate) fn run() -> Result<(), &'static str> {
     let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::Full))?;
     match finish(pending)? {
         None => Ok(()),
+        Some(_) => Err("unexpected_model_terminal"),
+    }
+}
+
+pub(crate) fn run_history_runtime() -> Result<MacosAgenticHistoryRuntimeProbeReport, &'static str> {
+    let mut report = None;
+    let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::HistoryRuntime(&mut report)))?;
+    match finish(pending)? {
+        None => report.ok_or("history_probe_report"),
         Some(_) => Err("unexpected_model_terminal"),
     }
 }
@@ -547,6 +596,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         ProbeMode::Rendering(_)
             | ProbeMode::RenderingOpportunity { .. }
             | ProbeMode::RenderingPresented(_)
+            | ProbeMode::HistoryRuntime(_)
     );
     let public_fill_probe = matches!(
         &mode,
@@ -558,6 +608,34 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             }
     );
     let page_relay_probe = full_probe && page_world_fill_relay_probe_enabled();
+    let ax_fill_probe = full_probe
+        && std::env::var_os(accessibility_fill::ENV).as_deref() == Some(std::ffi::OsStr::new("1"));
+    let responder_case = if full_probe {
+        responder_fill::case_from_env()?
+    } else {
+        None
+    };
+    let trusted_case = if full_probe {
+        trusted_edit::case_from_env()?
+    } else {
+        None
+    };
+    let surface_case = if full_probe {
+        owned_surface::case_from_env()?
+    } else {
+        None
+    };
+    if surface_case.is_some()
+        && (trusted_case.is_some() || responder_case.is_some() || ax_fill_probe || page_relay_probe)
+    {
+        return Err("surface_conflicting_probe");
+    }
+    if (responder_case.is_some() && (ax_fill_probe || page_relay_probe))
+        || (trusted_case.is_some()
+            && (ax_fill_probe || page_relay_probe || responder_case.is_some()))
+    {
+        return Err("responder_conflicting_probe");
+    }
     let hostile_relay_probe = full_probe && page_world_fill_relay_hostile_probe_enabled();
     if hostile_relay_probe && !page_relay_probe {
         return Err("relay_hostile_requires_page_relay");
@@ -571,7 +649,12 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     if app.isActive() {
         return Err("focus_baseline");
     }
-    if matches!(&mode, ProbeMode::RenderingPresented(_)) {
+    if matches!(&mode, ProbeMode::RenderingPresented(_))
+        || ax_fill_probe
+        || responder_case.is_some()
+        || trusted_case.is_some()
+        || surface_case.is_some()
+    {
         rendering_presented::initialize_inactive(&app)?;
     } else {
         if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
@@ -673,7 +756,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         // A public page may autofocus within its own hidden, non-key window.
         // That internal responder state is not user focus theft; visibility,
         // key-window, main-window, and application activation remain strict.
-        allow_hidden_responder_change: public_fill_probe,
+        allow_hidden_responder_change: public_fill_probe || ax_fill_probe,
         failure: Cell::new(None),
     });
     native_guard.sample();
@@ -686,6 +769,89 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let mut next_invocation = 1_u64;
     let mut successful_snapshots = 0_u8;
     let execution = (|| {
+        if let ProbeMode::HistoryRuntime(report) = &mut mode {
+            let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+            if version.majorVersion < 26 {
+                return Err("history_probe_requires_macos_26");
+            }
+            let first_url = server.url(FixtureRoute::SemanticRuntime);
+            let second_url = server.url(FixtureRoute::SemanticRuntimeReplacement);
+            let (_first_context, _) = navigate_with_receipt(
+                &mut view,
+                &mut registry,
+                identity.id(),
+                2,
+                &first_url,
+                &runtime,
+            )?;
+            view.enroll_current_work_history_get(
+                ContextNavigationTarget::parse(&first_url)
+                    .map_err(|_| "history_probe_first_target")?,
+            )
+            .map_err(|_| "history_probe_first_enrollment")?;
+            install_history_lifecycle_witness(&page, &runtime)?;
+            let first_item = native_current_history_item(&page)?;
+            if native_item_url(&first_item).as_deref() != Some(first_url.as_str()) {
+                return Err("history_probe_first_item");
+            }
+            park_semantic_runtime(&mut view, &runtime)?;
+            let (_second_context, _) = navigate_with_receipt(
+                &mut view,
+                &mut registry,
+                identity.id(),
+                3,
+                &second_url,
+                &runtime,
+            )?;
+            view.enroll_current_work_history_get(
+                ContextNavigationTarget::parse(&second_url)
+                    .map_err(|_| "history_probe_second_target")?,
+            )
+            .map_err(|_| "history_probe_second_enrollment")?;
+            let list = unsafe { page.backForwardList() };
+            let current = unsafe { list.currentItem() }.ok_or("history_probe_current_item")?;
+            let predecessor = unsafe { list.backItem() }.ok_or("history_probe_back_item")?;
+            let exact_item_identity = Retained::as_ptr(&predecessor)
+                == Retained::as_ptr(&first_item)
+                && native_item_url(&current).as_deref() == Some(second_url.as_str());
+            if !exact_item_identity {
+                return Err("history_probe_item_identity");
+            }
+            let restored_context = history_back_with_receipt(
+                &mut view,
+                &mut registry,
+                identity.id(),
+                4,
+                &first_url,
+                &first_item,
+                &runtime,
+            )?;
+            let restored = native_current_history_item(&page)?;
+            if Retained::as_ptr(&restored) != Retained::as_ptr(&first_item) {
+                return Err("history_probe_restored_item");
+            }
+            let lifecycle = read_history_lifecycle_witness(&page, &runtime)?;
+            let restored_capture = capture_snapshot(
+                &view,
+                restored_context,
+                &first_url,
+                SemanticSnapshotGeneration::INITIAL,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            let semantic_runtime_reactivated = restored_capture.snapshot.frame().context()
+                == restored_context
+                && restored_capture.snapshot.generation() == SemanticSnapshotGeneration::INITIAL;
+            **report = Some(MacosAgenticHistoryRuntimeProbeReport {
+                exact_item_identity,
+                bfcache_restored: lifecycle[0],
+                pageshow_observed: lifecycle[1],
+                pageshow_persisted: lifecycle[2],
+                semantic_runtime_reactivated,
+            });
+            return Ok(None);
+        }
         if let ProbeMode::RenderingPresented(report) = &mut mode {
             let url = server.url(FixtureRoute::SemanticRendering);
             let (context, operation) =
@@ -723,7 +889,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             )?);
             return Ok(None);
         }
-        let first_url = if public_fill_probe {
+        let mut first_url = if public_fill_probe {
             PUBLIC_DISCOVERY_PROBE_URL.to_owned()
         } else {
             server.url(if page_relay_probe {
@@ -736,6 +902,26 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 FixtureRoute::SemanticRuntime
             })
         };
+        if ax_fill_probe {
+            first_url.push_str("#native-ax-fill");
+        }
+        if let Some(case) = surface_case {
+            // localhost is a valid local WebAuthn RP host; a numeric IP would
+            // reject before reaching its native capability path.
+            first_url = server
+                .url(FixtureRoute::OwnedSurfaceProbe)
+                .replace("127.0.0.1", "localhost");
+            first_url.push('#');
+            first_url.push_str(case);
+        }
+        if let Some(case) = responder_case {
+            first_url.push_str("#native-responder-");
+            first_url.push_str(case);
+        }
+        if let Some(case) = trusted_case {
+            first_url.push_str("#native-unit-");
+            first_url.push_str(case);
+        }
         let first = navigate(
             &mut view,
             &mut registry,
@@ -753,10 +939,91 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             &mut successful_snapshots,
             &runtime,
         )?;
+        if let Some(case) = surface_case {
+            view.attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
+                .map_err(|_| "surface_hidden_attestation")?;
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                owned_surface::run(
+                    &view,
+                    &window,
+                    &store,
+                    first_capture,
+                    ProbeCase {
+                        url: &first_url,
+                        case,
+                        next_invocation: &mut next_invocation,
+                        successful_snapshots: &mut successful_snapshots,
+                    },
+                    presented,
+                )
+            })?;
+            return Ok(None);
+        }
+        if let Some(case) = trusted_case {
+            view.attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
+                .map_err(|_| "trusted_hidden_attestation")?;
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                trusted_edit::run(
+                    &view,
+                    &window,
+                    &store,
+                    first_capture,
+                    ProbeCase {
+                        url: &first_url,
+                        case,
+                        next_invocation: &mut next_invocation,
+                        successful_snapshots: &mut successful_snapshots,
+                    },
+                    presented,
+                )
+            })?;
+            return Ok(None);
+        }
+        if let Some(case) = responder_case {
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                responder_fill::run(
+                    &view,
+                    &window,
+                    first_capture,
+                    ProbeCase {
+                        url: &first_url,
+                        case,
+                        next_invocation: &mut next_invocation,
+                        successful_snapshots: &mut successful_snapshots,
+                    },
+                    presented,
+                )
+            })?;
+            return Ok(None);
+        }
+        if ax_fill_probe {
+            rendering_presented::with_ax_fixture(&runtime, &host.view, |presented| {
+                accessibility_fill::run(
+                    &view,
+                    &window,
+                    first_capture,
+                    &first_url,
+                    presented,
+                    &mut next_invocation,
+                    &mut successful_snapshots,
+                )
+            })?;
+            return Ok(None);
+        }
         if public_fill_probe {
             verify_public_discovery_snapshot(&first_capture.snapshot)?;
         } else {
             verify_first_snapshot(&first_capture.snapshot)?;
+        }
+        let page_origin_blocked = !hostile_relay_probe
+            || snapshot_contains(&first_capture.snapshot, "Semantic page-origin fill blocked");
+        if hostile_relay_probe
+            && !snapshot_contains(
+                &first_capture.snapshot,
+                "Semantic relay transport legacy command-gone reproduced",
+            )
+        {
+            return Err("relay_batching_filter_or_overflow");
         }
         let first_generation = first_capture.snapshot.generation();
         let first_observation = assemble_observation(first_capture)?;
@@ -829,7 +1096,8 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             ProbeMode::ModelWorkflow { .. }
             | ProbeMode::Rendering(_)
             | ProbeMode::RenderingPresented(_)
-            | ProbeMode::RenderingOpportunity { .. } => return Err("workflow_state"),
+            | ProbeMode::RenderingOpportunity { .. }
+            | ProbeMode::HistoryRuntime(_) => return Err("workflow_state"),
             ProbeMode::Full => PendingInitialClick::Fixed(Box::new(execute_primary_click(
                 &view,
                 &first_observation,
@@ -973,7 +1241,8 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                     | ProbeMode::ModelWorkflow { .. }
                     | ProbeMode::Rendering(_)
                     | ProbeMode::RenderingPresented(_)
-                    | ProbeMode::RenderingOpportunity { .. } => return Err("model_mode_state"),
+                    | ProbeMode::RenderingOpportunity { .. }
+                    | ProbeMode::HistoryRuntime(_) => return Err("model_mode_state"),
                 }
             }
         }
@@ -1131,7 +1400,131 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             verify_hostile_credential_recovery(&after_credential_recovery.snapshot)?;
             prior_capture = after_credential_recovery;
         }
-        drop(prior_capture);
+        let editable_generation = prior_capture.snapshot.generation();
+        let editable_observation = assemble_observation(prior_capture)?;
+        let editable_fill = execute_primary_fill(
+            &view,
+            &editable_observation,
+            &runtime,
+            "Semantic fill editable",
+            "  Zephium fixed editable\nline two  ",
+            10,
+            10,
+        )?;
+        wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+        let after_editable = capture_snapshot(
+            &view,
+            first,
+            &first_url,
+            editable_generation.next().ok_or("action_identity")?,
+            &mut next_invocation,
+            &mut successful_snapshots,
+            &runtime,
+        )?;
+        verify_primary_fill_execution(editable_fill, &after_editable.snapshot)?;
+        if hostile_relay_probe
+            && !snapshot_contains(
+                &after_editable.snapshot,
+                "Semantic captured-payload retarget blocked",
+            )
+        {
+            return Err("captured_payload_retarget_unauthorized");
+        }
+        if !page_origin_blocked {
+            return Err("page_origin_fill_unauthorized");
+        }
+        if hostile_relay_probe
+            && !snapshot_contains(
+                &after_editable.snapshot,
+                "Semantic relay attribute interference avoided",
+            )
+        {
+            return Err("relay_editable_transport_interference");
+        }
+        verify_primary_fill(
+            &after_editable.snapshot,
+            "Semantic fill editable",
+            "  Zephium fixed editable\nline two  ",
+            SemanticRole::Textbox,
+            if hostile_relay_probe { 5 } else { 4 },
+        )?;
+        let mut nested_capture = after_editable;
+        for (index, desired) in [
+            "nested replacement",
+            "nested move",
+            "nested relabel",
+            "nested protected",
+            "nested credential",
+            "nested editability",
+            "nested rich",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let generation = nested_capture.snapshot.generation();
+            let observation = assemble_observation(nested_capture)?;
+            let pending = execute_primary_fill(
+                &view,
+                &observation,
+                &runtime,
+                "Fill support editable ancestor",
+                desired,
+                20 + index as u64,
+                20 + index as u64,
+            )?;
+            wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+            nested_capture = capture_snapshot(
+                &view,
+                first,
+                &first_url,
+                generation.next().ok_or("action_identity")?,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            if index == 0 {
+                verify_primary_fill_execution(pending, &nested_capture.snapshot)?;
+                if !snapshot_contains(
+                    &nested_capture.snapshot,
+                    "Nested editor delegated model retained",
+                ) {
+                    return Err("nested_editor_model_retention");
+                }
+            } else {
+                if pending.settlement.qualification_failure()
+                    != Some(zephium_agentic::SemanticActionNativeFailure::AppliedUnverified)
+                {
+                    return Err("nested_editor_refusal_not_indeterminate");
+                }
+                let elapsed = u64::try_from(pending.admitted_at.elapsed().as_millis())
+                    .map_err(|_| "nested_editor_clock")?;
+                let observed_at = SemanticSettleInstant::from_millis(10_000 + elapsed);
+                if !matches!(
+                    pending.execution.settle_and_verify(
+                        pending.settlement,
+                        &nested_capture.snapshot,
+                        observed_at
+                    ),
+                    Err(SemanticActionQualificationError::Settlement)
+                ) {
+                    return Err("nested_editor_retryable_terminal");
+                }
+                if !snapshot_contains(
+                    &nested_capture.snapshot,
+                    &format!("Nested editor refused {desired} intact"),
+                ) {
+                    return Err("nested_editor_context_security");
+                }
+            }
+            if !snapshot_value_is(
+                &nested_capture.snapshot,
+                "Fill support editable ancestor",
+                "nested replacement",
+            ) {
+                return Err("nested_editor_value");
+            }
+        }
+        drop(nested_capture);
         registry
             .acknowledge_observation(identity.id(), first)
             .map_err(|_| "first_observation")?;
@@ -1337,7 +1730,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         if !server.is_healthy() {
             return Err("fixture_verification");
         }
-        let expected_snapshots = if hostile_relay_probe { 14 } else { 10 };
+        let expected_snapshots = if hostile_relay_probe { 22 } else { 18 };
         if successful_snapshots != expected_snapshots {
             return Err("snapshot_count_verification");
         }
@@ -1531,6 +1924,209 @@ fn navigate_with_receipt(
         .join(id)
         .map(|context| (context, operation))
         .map_err(|_| "navigation_settle")
+}
+
+fn park_semantic_runtime(
+    view: &mut AgentOwnedView,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<(), &'static str> {
+    let result = Rc::new(Cell::new(None));
+    let completion = result.clone();
+    view.park_semantic_runtime(move |parked| completion.set(Some(parked)))
+        .map_err(|_| "history_probe_park_dispatch")?;
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_TIMEOUT)
+        .ok_or("history_probe_park_timeout")?;
+    while result.get().is_none() && !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if result.get() != Some(true) || !view.semantic_runtime_parked() || runtime.failed() {
+        return Err("history_probe_park_terminal");
+    }
+    Ok(())
+}
+
+fn history_back_with_receipt(
+    view: &mut AgentOwnedView,
+    registry: &mut ContextRegistry,
+    id: ContextId,
+    operation_id: u64,
+    expected_url: &str,
+    item: &WKBackForwardListItem,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<zephium_agentic::ContextJoin, &'static str> {
+    if runtime.failed() || runtime.callbacks.navigation.borrow().is_some() {
+        return Err("history_probe_navigation_state");
+    }
+    let page = super::native_webview(view.view());
+    let current =
+        unsafe { page.backForwardList().currentItem() }.ok_or("history_probe_current_item")?;
+    let back = unsafe { page.backForwardList().backItem() }.ok_or("history_probe_back_item")?;
+    if std::ptr::eq(&*current, item) || !std::ptr::eq(&*back, item) {
+        return Err("history_probe_pre_dispatch_identity");
+    }
+    let ticket = view
+        .prepare_history_back()
+        .map_err(|_| "history_probe_back_authority")?;
+    park_semantic_runtime(view, runtime)?;
+    let reactivated_target = view
+        .reactivate_history_destination(ticket)
+        .map_err(|_| "history_probe_reactivate")?;
+    let operation = registry
+        .begin_navigation(
+            id,
+            ContextOperationId::new(operation_id).ok_or("history_probe_navigation_state")?,
+        )
+        .map_err(|_| "history_probe_navigation_state")?;
+    let target = ContextNavigationTarget::parse(expected_url)
+        .map_err(|_| "history_probe_navigation_target")?;
+    if reactivated_target != target {
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        let _ = view.refuse_history_back(ticket);
+        return Err("history_probe_back_target");
+    }
+    let terminal_claimed = Arc::new(AtomicBool::new(false));
+    if view
+        .navigation()
+        .arm(operation, target.clone(), Arc::clone(&terminal_claimed))
+        .is_err()
+    {
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        return Err("history_probe_navigation_arm");
+    }
+    if !view.dispatch_history_back(ticket) {
+        let _ = view.navigation().disarm(operation);
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        let _ = view.refuse_history_back(ticket);
+        return Err("history_probe_native_dispatch");
+    }
+    let deadline = Instant::now()
+        .checked_add(NAVIGATION_TIMEOUT)
+        .ok_or("history_probe_navigation_timeout")?;
+    while !runtime.failed()
+        && runtime.callbacks.navigation.borrow().is_none()
+        && Instant::now() < deadline
+    {
+        runtime.pump();
+    }
+    let terminal = runtime
+        .callbacks
+        .navigation
+        .try_borrow_mut()
+        .map_err(|_| "history_probe_navigation_state")?
+        .take();
+    let disarmed = view.navigation().disarm(operation);
+    let applied = terminal.is_some_and(|terminal| {
+        terminal.operation() == operation
+            && matches!(
+                terminal.into_outcome(),
+                Ok(AgentNavigationCommit::Web(committed)) if committed == target
+            )
+    });
+    registry
+        .settle_navigation(
+            id,
+            operation,
+            if applied {
+                ContextSettlement::Applied
+            } else {
+                ContextSettlement::Refused
+            },
+        )
+        .map_err(|_| "history_probe_navigation_settle")?;
+    if !applied || !disarmed || runtime.failed() || !terminal_claimed.load(Ordering::Acquire) {
+        let _ = view.refuse_history_back(ticket);
+        return Err("history_probe_navigation_terminal");
+    }
+    view.settle_history_back(ticket)
+        .map_err(|_| "history_probe_history_settle")?;
+    registry
+        .join(id)
+        .map_err(|_| "history_probe_navigation_settle")
+}
+
+fn native_current_history_item(
+    page: &WKWebView,
+) -> Result<Retained<WKBackForwardListItem>, &'static str> {
+    unsafe { page.backForwardList().currentItem() }.ok_or("history_probe_current_item")
+}
+
+fn native_item_url(item: &WKBackForwardListItem) -> Option<String> {
+    let url = unsafe { item.URL() };
+    url.absoluteString().map(|value| value.to_string())
+}
+
+fn evaluate_history_probe(
+    page: &WKWebView,
+    source: &str,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<String, &'static str> {
+    let result = Rc::new(RefCell::new(None));
+    let callback_result = Rc::clone(&result);
+    let completion: block2::RcBlock<dyn Fn(*mut AnyObject, *mut NSError)> =
+        block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let value = if error.is_null() {
+                unsafe { value.as_ref() }
+                    .and_then(AnyObject::downcast_ref::<NSString>)
+                    .map(ToString::to_string)
+            } else {
+                None
+            };
+            callback_result.replace(Some(value));
+        });
+    let source = NSString::from_str(source);
+    unsafe { page.evaluateJavaScript_completionHandler(&source, Some(&completion)) };
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_TIMEOUT)
+        .ok_or("history_probe_evaluation_timeout")?;
+    while result.borrow().is_none() && !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if runtime.failed() || Instant::now() >= deadline {
+        return Err("history_probe_evaluation_timeout");
+    }
+    let value = result
+        .borrow_mut()
+        .take()
+        .flatten()
+        .ok_or("history_probe_evaluation");
+    value
+}
+
+fn install_history_lifecycle_witness(
+    page: &WKWebView,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<(), &'static str> {
+    let result = evaluate_history_probe(
+        page,
+        "(()=>{const s={pageshow:0,persisted:false};Object.defineProperty(globalThis,'__zephiumHistoryWitness',{value:s,configurable:false});addEventListener('pageshow',e=>{s.pageshow+=1;s.persisted=Boolean(e.persisted);},{capture:true});return 'armed';})()",
+        runtime,
+    )?;
+    (result == "armed")
+        .then_some(())
+        .ok_or("history_probe_witness_install")
+}
+
+fn read_history_lifecycle_witness(
+    page: &WKWebView,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<[bool; 3], &'static str> {
+    let encoded = evaluate_history_probe(
+        page,
+        "(()=>{const s=globalThis.__zephiumHistoryWitness;return JSON.stringify({resident:Boolean(s),pageshow:s?.pageshow||0,persisted:Boolean(s?.persisted)});})()",
+        runtime,
+    )?;
+    let value: serde_json::Value =
+        serde_json::from_str(&encoded).map_err(|_| "history_probe_witness_decode")?;
+    Ok([
+        value.get("resident").and_then(serde_json::Value::as_bool) == Some(true),
+        value
+            .get("pageshow")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            > 0,
+        value.get("persisted").and_then(serde_json::Value::as_bool) == Some(true),
+    ])
 }
 
 fn assemble_observation(
@@ -1796,19 +2392,31 @@ fn execute_primary_fill(
     let admitted_at = Instant::now();
     let result = Rc::new(RefCell::new(None));
     let completion = Rc::clone(&result);
-    view.dispatch_semantic_action(request, admitted_at, move |settlement| {
-        if let Ok(mut slot) = completion.try_borrow_mut() {
-            if slot.is_none() {
-                *slot = Some(settlement);
-            }
-        }
-    });
     let deadline = Instant::now()
         .checked_add(SNAPSHOT_TIMEOUT)
         .ok_or("fill_timeout")?;
+    let preparation_authority = Rc::new(std::cell::Cell::new(true));
+    let checked_preparation = preparation_authority.clone();
+    view.dispatch_retained_semantic_action(
+        request,
+        admitted_at,
+        Box::new(move || checked_preparation.get() && Instant::now() < deadline),
+        move |settlement| {
+            if let Ok(mut slot) = completion.try_borrow_mut() {
+                if slot.is_none() {
+                    *slot = Some(settlement);
+                }
+            }
+        },
+    );
     while result.borrow().is_none() && !runtime.failed() && Instant::now() < deadline {
         runtime.pump();
+        preparation_authority.set(!runtime.failed() && Instant::now() < deadline);
+        if let Some(semantic) = view.semantic() {
+            semantic.poll_prepared_fill();
+        }
     }
+    preparation_authority.set(false);
     if runtime.failed() {
         return Err("fill_native_state");
     }
@@ -1920,7 +2528,7 @@ fn verify_primary_fill_execution(
             SemanticActionQualificationError::Settlement => "fill_verification_settlement",
             SemanticActionQualificationError::Verification => "fill_verification_effect",
         })?;
-    if applied.backend() != SemanticActionExecutionBackend::PageWorldCompatibilityFill
+    if applied.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
         || applied.readiness() != SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
         || applied.completed_at() > SemanticActionExecutionInstant::from_millis(11_000)
     {
@@ -1955,7 +2563,7 @@ fn verify_hostile_fill_refusal(
     ) {
         return Err("hostile_fill_retryable_terminal");
     }
-    let expected = "Semantic hostile relay refused untrusted target unchanged recovery unchanged type restored target-marker clear recovery-marker forged popup denied activation during inactive sticky inactive settle inactive sticky inactive";
+    let expected = "Semantic hostile relay refused untrusted target unchanged recovery unchanged type restored target-marker clear recovery-marker missing popup denied activation during inactive sticky inactive settle inactive sticky inactive";
     if !snapshot_contains(snapshot, expected) {
         return Err("hostile_fill_security_evidence");
     }
@@ -2197,6 +2805,9 @@ fn dispatch_invocation(
         return Err("snapshot_completion_state");
     }
     if let Some(stage) = runtime.failure_stage() {
+        if let Some(Err(failure)) = result.borrow().as_ref() {
+            eprintln!("semantic-fixture-closed-failure: {failure:?}");
+        }
         return Err(stage);
     }
     let outcome = result
@@ -2276,6 +2887,81 @@ fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str
     if snapshot.completeness() != SemanticCompleteness::Complete {
         return Err("first_incomplete");
     }
+    use zephium_agentic::SemanticFillSupport;
+    for (label, support) in [
+        ("Semantic fill editable", SemanticFillSupport::Supported),
+        (
+            "Fill support missing attribute",
+            SemanticFillSupport::MissingExplicitEditable,
+        ),
+        (
+            "Fill support unsupported tag",
+            SemanticFillSupport::UnsupportedTag,
+        ),
+        (
+            "Fill support editable ancestor",
+            SemanticFillSupport::Supported,
+        ),
+        (
+            "Fill support rich editable ancestor",
+            SemanticFillSupport::EditableAncestor,
+        ),
+        (
+            "Fill support element child",
+            SemanticFillSupport::ElementChild,
+        ),
+        ("Fill support other child", SemanticFillSupport::OtherChild),
+        ("Fill support readonly", SemanticFillSupport::ReadOnly),
+        ("Fill support disabled", SemanticFillSupport::Disabled),
+        (
+            "Fill support unsupported control",
+            SemanticFillSupport::UnsupportedControl,
+        ),
+        ("Fill support child limit", SemanticFillSupport::ChildLimit),
+    ] {
+        let node = snapshot
+            .nodes()
+            .iter()
+            .find(|node| node.name().is_some_and(|name| name.as_str() == label))
+            .ok_or("fill_support_fixture_missing")?;
+        if node.fill_support() != Some(support)
+            || node.operations().contains(SemanticOperationClass::Fill)
+                != (support == SemanticFillSupport::Supported)
+        {
+            use std::io::Write as _;
+            writeln!(
+                std::io::stdout().lock(),
+                "fill-support-fixture: expected={support:?} actual={:?} fill={} content=redacted",
+                node.fill_support(),
+                node.operations().contains(SemanticOperationClass::Fill)
+            )
+            .map_err(|_| "fill_support_diagnostic")?;
+            return Err("fill_support_fixture_mismatch");
+        }
+        let expected_shape = match label {
+            "Semantic fill editable" | "Fill support readonly" | "Fill support disabled" => {
+                Some((1, 1, false))
+            }
+            "Fill support editable ancestor" => Some((1, 1, true)),
+            "Fill support rich editable ancestor" => Some((1, 2, true)),
+            "Fill support element child" => Some((1, 2, false)),
+            "Fill support other child" => Some((2, 5, false)),
+            "Fill support child limit" => Some((129, 1, false)),
+            _ => None,
+        };
+        let actual_shape = node.editable_structure().map(|shape| {
+            (
+                shape.child_count(),
+                u8::from(shape.has_text())
+                    | (u8::from(shape.has_elements()) << 1)
+                    | (u8::from(shape.has_other()) << 2),
+                shape.editable_parent(),
+            )
+        });
+        if actual_shape != expected_shape {
+            return Err("editable_structure_fixture_mismatch");
+        }
+    }
     for (needle, stage) in [
         ("First semantic epoch", "first_epoch_missing"),
         ("Page bridge absent", "first_bridge_absence_missing"),
@@ -2338,6 +3024,7 @@ fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str
         ("Semantic fill text", SemanticRole::Textbox),
         ("Semantic fill search", SemanticRole::Searchbox),
         ("Semantic fill textarea", SemanticRole::Textbox),
+        ("Semantic fill editable", SemanticRole::Textbox),
         ("Semantic hostile fill", SemanticRole::Textbox),
         ("Semantic hostile recovery", SemanticRole::Textbox),
         ("Semantic hostile credential fill", SemanticRole::Textbox),
@@ -2628,12 +3315,53 @@ pub(crate) fn run_work_actor(
         Arc<dyn zephium_agentic::AgentBrowserPort>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    run_work_host(profile, WorkProbeTeardown::Host, move |engine| {
-        let port = engine
-            .take_agent_browser_port(sink)
-            .ok_or("actor_port_taken")?;
-        start(port)
-    })
+    run_work_host(
+        profile,
+        WorkProbeTeardown::Host,
+        crate::MacosWorkProbeInput::LifecycleOnly,
+        None,
+        Duration::from_secs(180),
+        move |engine| {
+            let port = engine
+                .take_agent_browser_port(sink)
+                .ok_or("actor_port_taken")?;
+            start(port)
+        },
+    )
+}
+
+#[cfg(feature = "agentic-browser-qa")]
+pub(crate) fn run_construction_host(
+    profile: ProfileId,
+    start: impl FnOnce(
+        Arc<dyn zephium_agentic::AgentBrowserPort>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    run_construction_host_with_input(profile, crate::MacosWorkProbeInput::LifecycleOnly, start)
+}
+
+#[cfg(feature = "agentic-browser-qa")]
+pub(crate) fn run_construction_host_with_input(
+    profile: ProfileId,
+    input: crate::MacosWorkProbeInput,
+    start: impl FnOnce(
+        Arc<dyn zephium_agentic::AgentBrowserPort>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    run_work_host(
+        profile,
+        WorkProbeTeardown::ForegroundHost,
+        input,
+        None,
+        Duration::from_secs(45),
+        move |engine| {
+            start(
+                engine
+                    .take_agent_browser_port(|_| {})
+                    .ok_or("construction_port")?,
+            )
+        },
+    )
 }
 
 /// Excluded native host for the real application composition. It hands over
@@ -2644,18 +3372,46 @@ pub(crate) fn run_work_application(
         Arc<crate::WebviewEngine>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    run_work_host(profile, WorkProbeTeardown::Application, start)
+    run_work_host(
+        profile,
+        WorkProbeTeardown::Application,
+        crate::MacosWorkProbeInput::LifecycleOnly,
+        None,
+        Duration::from_secs(180),
+        start,
+    )
+}
+
+pub(crate) fn run_work_application_with_events(
+    profile: ProfileId,
+    input: crate::MacosWorkProbeInput,
+    timeout: Duration,
+    events: impl Fn(crate::EngineEvent) + Send + Sync + 'static,
+    start: impl FnOnce(
+        Arc<crate::WebviewEngine>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    run_work_host(
+        profile,
+        WorkProbeTeardown::Application,
+        input,
+        Some(Arc::new(events)),
+        timeout,
+        start,
+    )
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum WorkProbeTeardown {
     Host,
     Application,
+    #[cfg(feature = "agentic-browser-qa")]
+    ForegroundHost,
 }
 
 impl WorkProbeTeardown {
     fn host_required(self, application_succeeded: bool) -> bool {
-        self == Self::Host || !application_succeeded
+        self != Self::Application || !application_succeeded
     }
 }
 
@@ -2668,21 +3424,79 @@ fn work_probe_teardown_keeps_exactly_one_success_owner_and_failure_cleanup() {
     assert!(WorkProbeTeardown::Application.host_required(false));
 }
 
+/// Probe only: a hidden host's profile gets these content rules instead of
+/// none, to compare a page with and without the release lists.
+static PROBE_CONTENT_RULES: std::sync::OnceLock<Arc<zephium_core::blocker::ContentRules>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn use_probe_content_rules(rules: Arc<zephium_core::blocker::ContentRules>) -> bool {
+    PROBE_CONTENT_RULES.set(rules).is_ok()
+}
+
 fn run_work_host(
     profile: ProfileId,
     teardown: WorkProbeTeardown,
+    input: crate::MacosWorkProbeInput,
+    events: Option<Arc<dyn Fn(crate::EngineEvent) + Send + Sync>>,
+    timeout: Duration,
     start: impl FnOnce(
         Arc<crate::WebviewEngine>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
     use zephium_core::ports::engine::Engine as _;
+    if timeout.is_zero() || timeout > Duration::from_secs(900) {
+        return Err("actor_host_timeout");
+    }
+    let application_policy = events.is_some();
+    #[cfg(feature = "agentic-browser-qa")]
+    let foreground = application_policy || teardown == WorkProbeTeardown::ForegroundHost;
+    #[cfg(not(feature = "agentic-browser-qa"))]
+    let foreground = application_policy;
     let mtm = MainThreadMarker::new().ok_or("actor_main_thread")?;
     let app = NSApplication::sharedApplication(mtm);
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+    let activation = if foreground {
+        NSApplicationActivationPolicy::Regular
+    } else {
+        NSApplicationActivationPolicy::Accessory
+    };
+    if app.activationPolicy() != activation && !app.setActivationPolicy(activation) {
         return Err("actor_activation_policy");
     }
     app.finishLaunching();
-    let window = new_window(mtm)?;
+    let mut application_events = 0_u32;
+    let window = if foreground {
+        // This explicit live product qualifier supplies the normal foreground
+        // host required by shipping observation presentation. Legacy hidden
+        // port probes keep their original focus-isolation contract.
+        // SAFETY: AppKit main-thread marker owns construction and close below.
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(80.0, 80.0), NSSize::new(760.0, 640.0)),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: the retained host is explicitly closed exactly once below.
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setTitle(&NSString::from_str("Zephium Work qualification"));
+        app.activate();
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        window.makeKeyAndOrderFront(None);
+        window.makeMainWindow();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !(app.isActive() && window.isKeyWindow() && window.isMainWindow())
+            && Instant::now() < until
+        {
+            pump_once(&NSRunLoop::currentRunLoop(), None);
+            pump_work_application_event(&app, &mut application_events, input)?;
+        }
+        window
+    } else {
+        new_window(mtm)?
+    };
     let view = window.contentView().ok_or("actor_host_view")?;
     let parent = RawWindowHandle::AppKit(AppKitWindowHandle::new(
         NonNull::from(&*view).cast::<c_void>(),
@@ -2713,9 +3527,9 @@ fn run_work_host(
                     profile: settled,
                     requested,
                     settlement,
-                } = event
+                } = &event
                 {
-                    if settled == profile && requested == generation {
+                    if *settled == profile && *requested == generation {
                         policy_sink.store(
                             if matches!(
                                 settlement,
@@ -2728,6 +3542,9 @@ fn run_work_host(
                             Ordering::Release,
                         );
                     }
+                }
+                if let Some(events) = &events {
+                    events(event);
                 }
             },
             move |reason| {
@@ -2742,32 +3559,41 @@ fn run_work_host(
     let main = window.isMainWindow();
     let run_loop = NSRunLoop::currentRunLoop();
     let result = (|| {
-        if engine.install_content_rules(
-            profile,
-            generation,
-            zephium_core::blocker::ContentRules::allow_all(
-                zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
-            ),
-        ) != zephium_core::ports::engine::NativeDispatch::Scheduled
-        {
-            return Err("actor_profile_policy_dispatch");
-        }
-        let policy_deadline = Instant::now() + Duration::from_secs(5);
-        while policy.load(Ordering::Acquire) == 0 && Instant::now() < policy_deadline {
-            for _ in 0..256 {
-                let Ok(operation) = receiver.try_recv() else {
-                    break;
-                };
-                run_work_operation(operation);
+        if !application_policy {
+            let probe_rules = PROBE_CONTENT_RULES.get().cloned();
+            let compiling = if probe_rules.is_some() { 60 } else { 5 };
+            if engine.install_content_rules(
+                profile,
+                generation,
+                probe_rules.unwrap_or_else(|| {
+                    zephium_core::blocker::ContentRules::allow_all(
+                        zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
+                    )
+                }),
+            ) != zephium_core::ports::engine::NativeDispatch::Scheduled
+            {
+                return Err("actor_profile_policy_dispatch");
             }
-            pump_once(&run_loop, None);
-        }
-        if policy.load(Ordering::Acquire) != 1 {
-            return Err("actor_profile_policy");
+            let policy_deadline = Instant::now() + Duration::from_secs(compiling);
+            while policy.load(Ordering::Acquire) == 0 && Instant::now() < policy_deadline {
+                for _ in 0..256 {
+                    let Ok(operation) = receiver.try_recv() else {
+                        break;
+                    };
+                    run_work_operation(operation);
+                }
+                pump_once(&run_loop, None);
+            }
+            if policy.load(Ordering::Acquire) != 1 {
+                return Err("actor_profile_policy");
+            }
         }
         let mut poll = start(engine.clone())?;
-        let deadline = Instant::now() + Duration::from_secs(180);
+        let deadline = Instant::now() + timeout;
         loop {
+            if foreground {
+                pump_work_application_event(&app, &mut application_events, input)?;
+            }
             for _ in 0..256 {
                 let Ok(operation) = receiver.try_recv() else {
                     break;
@@ -2778,10 +3604,14 @@ fn run_work_host(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let failure = failure.or_else(|| {
-                (window.isVisible()
-                    || window.isKeyWindow()
-                    || window.isMainWindow() != main
-                    || app.isActive() != active)
+                // Hidden port probes must never acquire foreground. The full
+                // application host permits normal focus changes; each shipping
+                // observation independently enforces exact foreground ownership.
+                (!foreground
+                    && (window.isVisible()
+                        || window.isKeyWindow()
+                        || window.isMainWindow() != main
+                        || app.isActive() != active))
                     .then_some("actor_focus_isolation")
             });
             if let Some(result) = poll(failure.is_some()) {
@@ -2807,6 +3637,9 @@ fn run_work_host(
     }));
     let deadline = Instant::now() + TEARDOWN_TIMEOUT;
     while shutdown.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+        if foreground {
+            let _ = pump_work_application_event(&app, &mut application_events, input);
+        }
         for _ in 0..256 {
             let Ok(operation) = receiver.try_recv() else {
                 break;
@@ -2821,6 +3654,106 @@ fn run_work_host(
         return Err("actor_host_teardown");
     }
     Ok(())
+}
+
+fn pump_work_application_event(
+    app: &NSApplication,
+    count: &mut u32,
+    input: crate::MacosWorkProbeInput,
+) -> Result<(), &'static str> {
+    // NSRunLoop does not deliver NSApplication's queued lifecycle events.
+    // Dequeue all event types so AppKit updates occlusion; filter input before delivery.
+    if *count >= 8192 {
+        return Err("actor_application_event_capacity");
+    }
+    objc2::rc::autoreleasepool(|_| {
+        if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            objc2_app_kit::NSEventMask::Any,
+            None,
+            objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
+            true,
+        ) {
+            *count += 1;
+            use objc2_app_kit::NSEventType;
+            if !work_probe_delivers_event(input, event.r#type()) {
+                return;
+            }
+            let input_kind = match event.r#type() {
+                NSEventType::LeftMouseDown
+                | NSEventType::RightMouseDown
+                | NSEventType::OtherMouseDown => Some("PointerDown"),
+                NSEventType::KeyDown => Some("KeyDown"),
+                NSEventType::ScrollWheel => Some("Scroll"),
+                _ => None,
+            };
+            if let Some(kind) = input_kind {
+                eprintln!("work_probe input={kind} application_event={count}");
+            }
+            app.sendEvent(&event);
+        }
+    });
+    Ok(())
+}
+
+fn work_probe_delivers_event(
+    input: crate::MacosWorkProbeInput,
+    event: objc2_app_kit::NSEventType,
+) -> bool {
+    use objc2_app_kit::NSEventType;
+    match input {
+        crate::MacosWorkProbeInput::LifecycleOnly => event == NSEventType::AppKitDefined,
+        crate::MacosWorkProbeInput::Human => true,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn only_explicit_human_probe_delivers_physical_input() {
+    use objc2_app_kit::NSEventType;
+    for event in [
+        NSEventType::LeftMouseDown,
+        NSEventType::LeftMouseUp,
+        NSEventType::RightMouseDown,
+        NSEventType::RightMouseUp,
+        NSEventType::OtherMouseDown,
+        NSEventType::OtherMouseUp,
+        NSEventType::MouseMoved,
+        NSEventType::LeftMouseDragged,
+        NSEventType::RightMouseDragged,
+        NSEventType::KeyDown,
+        NSEventType::KeyUp,
+        NSEventType::FlagsChanged,
+        NSEventType::ScrollWheel,
+        NSEventType::TabletPoint,
+        NSEventType::TabletProximity,
+        NSEventType::Gesture,
+        NSEventType::Magnify,
+        NSEventType::Swipe,
+        NSEventType::Rotate,
+        NSEventType::BeginGesture,
+        NSEventType::EndGesture,
+        NSEventType::DirectTouch,
+        NSEventType::Pressure,
+        NSEventType::QuickLook,
+        NSEventType::SystemDefined,
+        NSEventType::ApplicationDefined,
+        NSEventType::Periodic,
+        NSEventType::CursorUpdate,
+        NSEventType(63),
+    ] {
+        assert!(!work_probe_delivers_event(
+            crate::MacosWorkProbeInput::LifecycleOnly,
+            event
+        ));
+        assert!(work_probe_delivers_event(
+            crate::MacosWorkProbeInput::Human,
+            event
+        ));
+    }
+    assert!(work_probe_delivers_event(
+        crate::MacosWorkProbeInput::LifecycleOnly,
+        NSEventType::AppKitDefined
+    ));
 }
 
 fn run_work_operation(operation: Box<dyn FnOnce() + Send>) {

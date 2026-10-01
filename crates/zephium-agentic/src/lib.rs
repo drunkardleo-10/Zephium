@@ -33,6 +33,12 @@ mod agent_progress_metrics;
 mod agent_provider;
 mod agent_supervisor;
 mod agent_work_artifact;
+mod agent_work_evidence;
+pub use agent_work_evidence::{
+    WorkEvidenceBudget, WorkEvidenceBuilder, WorkEvidenceDescriptor, WorkEvidenceEntry,
+    WorkEvidenceEntryId, WorkEvidenceError, WorkEvidenceReview, WorkEvidenceSet,
+    MAX_WORK_EVIDENCE_CONTENT_BYTES, MAX_WORK_EVIDENCE_ENTRIES,
+};
 /// Existing product profile identity used by durable Work result contracts.
 pub use zephium_core::ids::ProfileId as AgentWorkProfileId;
 mod agent_work_journal;
@@ -47,13 +53,26 @@ mod context_port;
 mod context_registry;
 mod work_browser_document;
 mod work_browser_resource;
-pub use work_browser_document::WorkBrowserDocumentPolicy;
+mod work_browser_session;
+pub use work_browser_document::{
+    registrable_site, same_site as same_work_site, WorkBrowserDocumentPolicy,
+};
+pub use work_browser_resource::WorkBrowserConstructionAttempt;
 pub use work_browser_resource::{
-    WorkBrowserExecutionLease, WorkBrowserLeaseDeliveryCompletion,
+    brand_family, same_work_human_site, WorkBrowserActionCompletion,
+    WorkBrowserActionCompletionCallback, WorkBrowserActionCompletionOwner,
+    WorkBrowserActionDeliveryCompletion, WorkBrowserActionDeliveryTicket,
+    WorkBrowserActionDispatch, WorkBrowserActionEvent, WorkBrowserActionRefusal,
+    WorkBrowserActionRequest, WorkBrowserExecutionLease, WorkBrowserHistoryBackCompletionCallback,
+    WorkBrowserHistoryBackDispatch, WorkBrowserHistoryBackRequest, WorkBrowserHumanProgress,
+    WorkBrowserHumanRegion, WorkBrowserLeaseDeliveryCompletion,
     WorkBrowserLeaseDeliveryNotification, WorkBrowserLeaseDeliveryPollError,
     WorkBrowserLeaseDeliveryProof, WorkBrowserLeaseDeliveryReceipt,
     WorkBrowserLeaseDeliveryRefusal, WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded,
-    WorkBrowserLeaseNativeDebt, WorkBrowserObservationCompletion,
+    WorkBrowserLeaseNativeDebt, WorkBrowserNavigationCompletion,
+    WorkBrowserNavigationCompletionCallback, WorkBrowserNavigationDispatch,
+    WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation, WorkBrowserNavigationRequest,
+    WorkBrowserObservationCapability, WorkBrowserObservationCompletion,
     WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
     WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserReadBinding,
     WorkBrowserResourceCompletion, WorkBrowserResourceCompletionCallback,
@@ -62,7 +81,9 @@ pub use work_browser_resource::{
     WorkBrowserResourceHealthState, WorkBrowserResourceId, WorkBrowserResourceIdentity,
     WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome, WorkBrowserResourceOperation,
     WorkBrowserResourcePhase, WorkBrowserResourceRequest, WorkBrowserResources, WorkId,
+    MAX_WORK_HUMAN_WAIT_MILLIS,
 };
+pub use work_browser_session::{WeakWorkBrowserSession, WorkBrowserSession};
 #[cfg(feature = "probe-harness")]
 mod contract;
 #[cfg(feature = "probe-harness")]
@@ -90,6 +111,10 @@ mod profile_lease;
 mod protocol;
 #[cfg(feature = "provider-transport")]
 mod provider_transport;
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::lead;
+#[cfg(feature = "provider-transport")]
+pub mod public_asset;
 mod semantic;
 mod semantic_action;
 mod semantic_action_batch_result;
@@ -103,6 +128,7 @@ mod semantic_extract_model;
 mod semantic_locate;
 mod semantic_locate_model;
 mod semantic_model;
+mod semantic_money;
 mod semantic_observation;
 #[cfg(feature = "probe-harness")]
 mod semantic_probe_evidence;
@@ -113,6 +139,7 @@ mod semantic_screenshot;
 mod semantic_settle;
 mod semantic_settle_coordinator;
 mod semantic_verify;
+mod semantic_wait;
 mod semantic_wire;
 mod sign_in_handoff;
 
@@ -139,10 +166,12 @@ pub use agent_lifecycle::{
 };
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
-    AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentNavigationRoute,
-    AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
-    AgentPolicyInstant, AgentRunBudget, AgentRunManifest, AgentRunManifestId, AgentRunScope,
-    MAX_AGENT_DATA_FLOW_RULES, MAX_AGENT_NAVIGATION_ROUTE_HOPS, MAX_AGENT_PLAN_NODES,
+    AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentNavigationDiscovery,
+    AgentNavigationOriginRule, AgentNavigationRoute, AgentPlanLeaseId, AgentPlanNodeAuthority,
+    AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant, AgentRunBudget, AgentRunManifest,
+    AgentRunManifestId, AgentRunScope, MAX_AGENT_DATA_FLOW_RULES,
+    MAX_AGENT_NAVIGATION_DESTINATION_VISITS, MAX_AGENT_NAVIGATION_DISCOVERY_HOPS,
+    MAX_AGENT_NAVIGATION_DISCOVERY_RULES, MAX_AGENT_NAVIGATION_ROUTE_HOPS, MAX_AGENT_PLAN_NODES,
     MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS, MAX_AGENT_RUN_COST_MICRO_USD,
     MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS, MAX_AGENT_RUN_OPERATIONS,
     MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
@@ -163,10 +192,11 @@ pub use agent_native_shutdown::{
     MAX_AGENT_NATIVE_SHUTDOWN_PROOF_BYTES,
 };
 pub use agent_native_shutdown_driver::{
-    drive_agent_native_shutdown_until, AgentNativeShutdownDriveError,
-    AgentNativeShutdownEventSource, AgentNativeShutdownWait,
+    agent_native_shutdown_retry_delay, drive_agent_native_shutdown_until,
+    AgentNativeShutdownDriveError, AgentNativeShutdownEventSource, AgentNativeShutdownWait,
     AGENT_NATIVE_SHUTDOWN_RETRY_BASE_MILLIS, AGENT_NATIVE_SHUTDOWN_RETRY_MAX_MILLIS,
 };
+pub use agent_policy::AgentNavigationLedgerRefusal;
 pub use agent_policy::{
     AgentActiveEffect, AgentActiveModelCall, AgentActiveNavigation, AgentEffectAssessment,
     AgentEffectAuthorization, AgentEffectCancellation, AgentEffectDispatchRequest, AgentEffectId,
@@ -174,10 +204,10 @@ pub use agent_policy::{
     AgentFailedSemanticEffect, AgentModelCallAdmission, AgentModelCallBudget, AgentModelCallId,
     AgentModelCallReceipt, AgentModelCallRequest, AgentModelCallSettlement,
     AgentModelCallUnaccountedSettlement, AgentModelInputCancellation, AgentModelUsageAccounting,
-    AgentNavigationAuthorizationRequest, AgentNavigationPermit, AgentNavigationProgressId,
-    AgentNavigationReceipt, AgentNavigationSettlement, AgentNeedsHumanReason,
-    AgentNeedsHumanTransition, AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError,
-    AgentRunPolicy, AgentRunPolicySettlement, AgentRunPolicySettlementBinding,
+    AgentNavigationAuthorizationRequest, AgentNavigationKind, AgentNavigationPermit,
+    AgentNavigationProgressId, AgentNavigationReceipt, AgentNavigationSettlement,
+    AgentNeedsHumanReason, AgentNeedsHumanTransition, AgentPlanLeaseBinding, AgentPolicyAccounting,
+    AgentPolicyError, AgentRunPolicy, AgentRunPolicySettlement, AgentRunPolicySettlementBinding,
     AgentRunPolicySettlementError, AgentRunPolicySettlementRefusal, AgentTaintCohort,
     AgentVerifiedSemanticEffect, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS,
     MAX_AGENT_PENDING_EFFECTS, MAX_AGENT_PENDING_MODEL_CALLS,
@@ -189,6 +219,7 @@ pub use agent_progress_metrics::{
 };
 #[cfg(test)]
 pub(crate) use agent_provider::AgentBrowserToolCall;
+pub use agent_provider::AgentProviderNavigationRefusalReason;
 pub(crate) use agent_provider::AgentProviderPricedUsage;
 pub use agent_provider::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
@@ -197,23 +228,28 @@ pub use agent_provider::{
     AgentCommittedProviderInput, AgentPreparedDiffRequest, AgentPreparedExtractionRequest,
     AgentPreparedLocateRequest, AgentPreparedObservationRequest,
     AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
-    AgentProviderBillingClass, AgentProviderBoundDiffContinuation,
-    AgentProviderBoundExtractionContinuation, AgentProviderBoundLocateContinuation,
-    AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,
-    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderCompletion,
-    AgentProviderContinuation, AgentProviderContinuationError, AgentProviderContractError,
-    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExactInputCount,
-    AgentProviderExtractionOutputBinding, AgentProviderExtractionOutputCollector,
-    AgentProviderExtractionOutputError, AgentProviderExtractionRequestDraft, AgentProviderFailure,
-    AgentProviderFailureClass, AgentProviderInputAccountingMode, AgentProviderInputEvidence,
-    AgentProviderInputMetricReceipt, AgentProviderInputMetrics, AgentProviderInputOutcome,
-    AgentProviderInputTokenBinding, AgentProviderInputTokenCount, AgentProviderInputTokenRequest,
-    AgentProviderKind, AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
-    AgentProviderModelRevision, AgentProviderNavigationCheckpoint, AgentProviderObjective,
-    AgentProviderObjectiveError, AgentProviderPricingAttribution,
-    AgentProviderPricingContractError, AgentProviderPricingError, AgentProviderPricingProfile,
-    AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderPricingSettlement,
-    AgentProviderPricingSettlementError, AgentProviderProtocolError, AgentProviderProtocolEvent,
+    AgentProviderActionAuthority, AgentProviderActionRefusal, AgentProviderActionRefusalContext,
+    AgentProviderActionRefusalKey, AgentProviderActionResolution,
+    AgentProviderActionResolutionError, AgentProviderBillingClass,
+    AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
+    AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
+    AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
+    AgentProviderCompletion, AgentProviderContinuation, AgentProviderContinuationError,
+    AgentProviderContractError, AgentProviderDecisionInputStats, AgentProviderDiffRequestDraft,
+    AgentProviderEndpoint, AgentProviderExactInputCount, AgentProviderExtractionOutputBinding,
+    AgentProviderExtractionOutputCollector, AgentProviderExtractionOutputError,
+    AgentProviderExtractionRequestDraft, AgentProviderFailure, AgentProviderFailureClass,
+    AgentProviderInputAccountingMode, AgentProviderInputEvidence, AgentProviderInputMetricReceipt,
+    AgentProviderInputMetrics, AgentProviderInputOutcome, AgentProviderInputTokenBinding,
+    AgentProviderInputTokenCount, AgentProviderInputTokenRequest, AgentProviderKind,
+    AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+    AgentProviderModelRevision, AgentProviderNavigationCheckpoint, AgentProviderNavigationRefusal,
+    AgentProviderObjective, AgentProviderObjectiveError, AgentProviderObservationCheckpoint,
+    AgentProviderObservationRefusal, AgentProviderObservationResolution,
+    AgentProviderPricingAttribution, AgentProviderPricingContractError, AgentProviderPricingError,
+    AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
+    AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
+    AgentProviderProtocolError, AgentProviderProtocolEvent,
     AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort, AgentProviderRequest,
     AgentProviderRequestDigest, AgentProviderRequestError, AgentProviderRequestSettlement,
     AgentProviderResponseIdentity, AgentProviderResponseRoute, AgentProviderRetryAfter,
@@ -222,8 +258,9 @@ pub use agent_provider::{
     AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamBudget,
     AgentProviderStreamConclusion, AgentProviderStreamStats, AgentProviderTerminalFailure,
     AgentProviderTextDelta, AgentProviderTokenRates, AgentProviderTransportInput,
-    AgentProviderUsage, MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES,
-    MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES, MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS,
+    AgentProviderUsage, AGENT_BROWSER_SNAPSHOT_ACTION_KINDS,
+    MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
+    MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS,
     MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
     MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS, MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES,
@@ -254,13 +291,18 @@ pub use agent_supervisor::{
     AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt, AgentSupervisorFailure,
     AgentSupervisorId, AgentSupervisorNodeCancellation, AgentSupervisorNodeSnapshot,
     AgentSupervisorNodeStatus, AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus,
-    AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
-    MAX_AGENT_LIVE_SUPERVISOR_NODES,
+    AgentSupervisorWait, AgentWorkChildOutput, AgentWorkExecution, AgentWorkExecutionRefusal,
+    AgentWorkNodeCheckpoint, AgentWorkOrchestration, AgentWorkOrchestrationCheckpoint,
+    AgentWorkOrchestrationError, AgentWorkOutputReference, MAX_AGENT_DELEGATION_DEPTH,
+    MAX_AGENT_EXECUTING_SUPERVISOR_NODES, MAX_AGENT_LIVE_SUPERVISOR_NODES,
+    MAX_AGENT_WORK_NODE_OUTPUTS, MAX_AGENT_WORK_ORCHESTRATION_OUTPUTS,
+    MAX_AGENT_WORK_ORCHESTRATION_TURNS,
 };
 pub use agent_work_journal::{
-    AgentWorkDebt, AgentWorkDisposition, AgentWorkIncarnation, AgentWorkJournalCompletion,
-    AgentWorkJournalError, AgentWorkJournalMutation, AgentWorkJournalPort, AgentWorkJournalReply,
-    AgentWorkJournalRequest, AgentWorkRecord, AGENT_WORK_RECORD_BYTES, MAX_DURABLE_AGENT_WORK_RUNS,
+    AgentWorkDebt, AgentWorkDisposition, AgentWorkHumanHandoff, AgentWorkIncarnation,
+    AgentWorkJournalCompletion, AgentWorkJournalError, AgentWorkJournalMutation,
+    AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest, AgentWorkRecord,
+    AGENT_WORK_RECORD_BYTES, MAX_DURABLE_AGENT_WORK_RUNS,
 };
 #[cfg(all(
     feature = "provider-transport",
@@ -272,25 +314,33 @@ pub use provider_transport::load_macos_probe_openai_credential;
 pub use provider_transport::{exact_loopback_url, ProviderEndpoints};
 #[cfg(all(feature = "provider-transport", target_os = "macos"))]
 pub use provider_transport::{
-    load_macos_development_openai_credential, MacosAgentProviderCredentialError,
-    MACOS_OPENAI_KEYCHAIN_ACCOUNT, MACOS_OPENAI_KEYCHAIN_SERVICE,
+    load_macos_development_openai_credential, load_macos_development_typesafe_credential,
+    MacosAgentProviderCredentialError, MACOS_OPENAI_KEYCHAIN_ACCOUNT,
+    MACOS_OPENAI_KEYCHAIN_SERVICE, MACOS_TYPESAFE_KEYCHAIN_ACCOUNT,
+    MACOS_TYPESAFE_KEYCHAIN_SERVICE,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::{
-    AgentProviderAbortReason, AgentProviderAdmissionError, AgentProviderAttempt,
-    AgentProviderAttemptStateError, AgentProviderBatchDisposition, AgentProviderCancellation,
-    AgentProviderCountedAttempt, AgentProviderCredential, AgentProviderCredentialError,
-    AgentProviderDisclosureStage, AgentProviderExactCountOutcome, AgentProviderImmediateSettlement,
-    AgentProviderImmediateSettlementError, AgentProviderPolicySettlement, AgentProviderTransport,
-    AgentProviderTransportConfig, AgentProviderTransportConfigError, AgentProviderTransportOutcome,
-    AgentProviderTransportResult, AgentProviderTransportShutdownError,
-    AgentProviderTransportShutdownProof, AgentProviderTransportSnapshot,
-    AgentProviderTransportStateError, AgentProviderUsageKnowledge,
-    AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES, MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS,
-    MAX_AGENT_PROVIDER_CREDENTIAL_BYTES, MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES,
-    MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS,
-    MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES, MAX_AGENT_PROVIDER_TRANSPORT_CALLS,
-    MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES, MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
+    AgentCredentialBinding, AgentProviderAbortReason, AgentProviderAdmissionError,
+    AgentProviderAttempt, AgentProviderAttemptStateError, AgentProviderBatchDisposition,
+    AgentProviderCancellation, AgentProviderCountedAttempt, AgentProviderCredential,
+    AgentProviderCredentialError, AgentProviderDisclosureStage, AgentProviderExactCountOutcome,
+    AgentProviderImmediateSettlement, AgentProviderImmediateSettlementError,
+    AgentProviderPolicySettlement, AgentProviderTransport, AgentProviderTransportConfig,
+    AgentProviderTransportConfigError, AgentProviderTransportOutcome, AgentProviderTransportResult,
+    AgentProviderTransportShutdownError, AgentProviderTransportShutdownProof,
+    AgentProviderTransportSnapshot, AgentProviderTransportStateError, AgentProviderUsageKnowledge,
+    DecisionCredentialProvider, AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES,
+    MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_CREDENTIAL_BYTES,
+    MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES, MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS,
+    MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES,
+    MAX_AGENT_PROVIDER_TRANSPORT_CALLS, MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES,
+    MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
+};
+pub use semantic_wait::{
+    SemanticStandaloneWait, SemanticStandaloneWaitBackoff, SemanticStandaloneWaitError,
+    SemanticStandaloneWaitOutcome, SemanticStandaloneWaitResult, SemanticStandaloneWaitStep,
+    SEMANTIC_STANDALONE_WAIT_INITIAL_POLL_MILLIS, SEMANTIC_STANDALONE_WAIT_MAX_POLL_MILLIS,
 };
 
 pub use semantic_locate::{
@@ -321,7 +371,7 @@ pub use context_port::{
     ContextOwnedViewport, ContextPortContractError, ContextPortFailure, ContextRendererLoss,
     ContextResourceAuditId, ContextResourceAuditSettlement, ContextShutdownAuditSettlement,
     ContextShutdownDispatch, ContextTransitionRequest, ContextTransitionSettlement,
-    SemanticActionNativeCompletion, SemanticScreenshotNativeCompletion,
+    SemanticActionNativeCompletion, SemanticScreenshotNativeCompletion, WorkBrowserFrame,
     MAX_CONTEXT_NAVIGATION_REDIRECTS, MAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS,
     MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
@@ -388,15 +438,16 @@ pub use protocol::{
     PROBE_PROTOCOL_VERSION,
 };
 pub use semantic::{
-    SemanticCompleteness, SemanticContractError, SemanticFrameJoin, SemanticFrameTrust,
-    SemanticHeadingLevel, SemanticInvocationId, SemanticNode, SemanticOperationClass,
-    SemanticOperations, SemanticOrigin, SemanticRect, SemanticReference, SemanticReferenceError,
-    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
-    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText, SemanticTruncation,
-    SemanticTrust, SemanticValuePreview, SemanticValueSummary, SemanticValueText,
-    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
-    MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
-    MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
+    SemanticActivation, SemanticCompleteness, SemanticContractError, SemanticEditableStructure,
+    SemanticFillSupport, SemanticFormFacts, SemanticFormMethod, SemanticFrameJoin,
+    SemanticFrameTrust, SemanticHeadingLevel, SemanticInvocationId, SemanticLandmarkKind,
+    SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin, SemanticRect,
+    SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
+    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+    SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValuePreview,
+    SemanticValueSummary, SemanticValueText, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
+    MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
+    MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES, MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
 };
 pub(crate) use semantic_action::SemanticActionRuntimeDescriptor;
 pub use semantic_action::{
@@ -438,7 +489,7 @@ pub use semantic_execute::{
     begin_semantic_action_settlement, SemanticActionExecutionApplied,
     SemanticActionExecutionBackend, SemanticActionExecutionContractError,
     SemanticActionExecutionDisposition, SemanticActionExecutionInstant,
-    SemanticActionExecutionOutcome, SemanticActionExecutionPreparationError,
+    SemanticActionExecutionOutcome, SemanticActionExecutionPreparationError, SemanticActionFollow,
     SemanticActionNativeFailure, SemanticActionNativeReadiness, SemanticActionNativeRequest,
     SemanticActionNativeSettlement, SemanticActionNativeTargetId, SemanticActionNativeViewport,
     SemanticActionNativeViewportError, SemanticActionSettlementRefusal,
@@ -463,19 +514,19 @@ pub use semantic_execute_coordinator::{
 };
 pub use semantic_extract::{
     extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,
-    SemanticExtractedField, SemanticExtractedText, SemanticExtractedTextList,
-    SemanticExtractedUnsigned, SemanticExtractedValue, SemanticExtractionError,
-    SemanticExtractionFieldSchema, SemanticExtractionResult, SemanticExtractionSchema,
-    SemanticExtractionSchemaError, SemanticExtractionSchemaId, SemanticExtractionSource,
-    SemanticExtractionSourceSpan, SemanticExtractionStats, SemanticExtractionTrust,
-    SemanticExtractionValueKind, SemanticOwnedExtractionResult, SemanticOwnedExtractionSource,
-    SemanticOwnedReadContent, MAX_SEMANTIC_EXTRACTION_FIELDS,
-    MAX_SEMANTIC_EXTRACTION_FIELD_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_INPUT_BYTES,
-    MAX_SEMANTIC_EXTRACTION_LIST_ITEMS, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES,
-    MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE,
-    MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES,
-    MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES, MAX_SEMANTIC_EXTRACTION_VALUES,
-    SEMANTIC_EXTRACTION_SCHEMA_VERSION,
+    SemanticExtractedField, SemanticExtractedMoney, SemanticExtractedRow, SemanticExtractedRows,
+    SemanticExtractedText, SemanticExtractedTextList, SemanticExtractedUnsigned,
+    SemanticExtractedValue, SemanticExtractionError, SemanticExtractionFieldSchema,
+    SemanticExtractionResult, SemanticExtractionSchema, SemanticExtractionSchemaError,
+    SemanticExtractionSchemaId, SemanticExtractionSource, SemanticExtractionSourceSpan,
+    SemanticExtractionStats, SemanticExtractionTrust, SemanticExtractionValueKind,
+    SemanticOwnedExtractionResult, SemanticOwnedExtractionSource, SemanticOwnedReadContent,
+    MAX_SEMANTIC_EXTRACTION_FIELDS, MAX_SEMANTIC_EXTRACTION_FIELD_NAME_BYTES,
+    MAX_SEMANTIC_EXTRACTION_INPUT_BYTES, MAX_SEMANTIC_EXTRACTION_LIST_ITEMS,
+    MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES, MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES,
+    MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE, MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES,
+    MAX_SEMANTIC_EXTRACTION_TEXT_BYTES, MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES,
+    MAX_SEMANTIC_EXTRACTION_VALUES, SEMANTIC_EXTRACTION_SCHEMA_VERSION,
 };
 pub use semantic_extract_model::{
     encode_semantic_extraction_request, SemanticEncodedExtractionRequest,
@@ -483,24 +534,27 @@ pub use semantic_extract_model::{
     SemanticExtractionModelPayload, SEMANTIC_EXTRACTION_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_model::{
-    encode_semantic_observation, SemanticEncodedObservation, SemanticEncodingStats,
-    SemanticModelDeliveryError, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
-    SemanticModelEncodingError, SemanticModelPayload, SemanticTokenCountQuality,
-    SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
-    SemanticTokenMeasurement, SemanticTokenMeasurementError, SemanticTokenizerRevision,
-    SemanticTokenizerRevisionError, ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING,
-    ACTION_SEMANTIC_DIFF_TOKEN_TARGET, INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
-    MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS, MAX_SEMANTIC_TOKENIZER_REVISION_BYTES,
-    SEMANTIC_LOCATE_RESULT_TOKEN_CEILING, SEMANTIC_MODEL_SCHEMA_VERSION,
+    encode_semantic_observation, fit_semantic_observation_for_model, SemanticEncodedObservation,
+    SemanticEncodingStats, SemanticModelDeliveryError, SemanticModelDeliverySettlement,
+    SemanticModelEncodingBudget, SemanticModelEncodingError, SemanticModelPayload,
+    SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+    SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenMeasurementError,
+    SemanticTokenizerRevision, SemanticTokenizerRevisionError,
+    ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING, ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
+    INITIAL_SEMANTIC_MODEL_TOKEN_TARGET, MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS,
+    MAX_SEMANTIC_TOKENIZER_REVISION_BYTES, SEMANTIC_LOCATE_RESULT_TOKEN_CEILING,
+    SEMANTIC_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_observation::{
     SemanticExpansionKind, SemanticFrameBoundary, SemanticFrameBoundaryStatus,
     SemanticFrameDeferral, SemanticFrameUnsupported, SemanticObservation,
     SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationError,
     SemanticObservationGeneration, SemanticObservationId, SemanticObservationParent,
-    SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextWindow,
-    MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
+    SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextSearch,
+    SemanticTextWindow, MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
     MAX_SEMANTIC_OBSERVATION_TEXT_BYTES, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
+    MAX_SEMANTIC_TEXT_SEARCH_BYTES, MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,
+    MAX_SEMANTIC_TEXT_SEARCH_RESULTS,
 };
 #[cfg(feature = "probe-harness")]
 pub use semantic_probe_evidence::{
@@ -515,12 +569,13 @@ pub use semantic_probe_evidence::{
     WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
 };
 pub use semantic_read::{
-    read_selected_semantic_observation, read_semantic_observation, SemanticCaptureInstant,
-    SemanticReadAuthority, SemanticReadBudget, SemanticReadBudgetError, SemanticReadContent,
-    SemanticReadError, SemanticReadField, SemanticReadFragment, SemanticReadFragmentId,
-    SemanticReadOmission, SemanticReadOmissions, SemanticReadProvenance, SemanticReadResult,
-    SemanticReadRoleSelection, SemanticReadRoleSelectionError, SemanticReadSensitivityLimit,
-    SemanticReadStats, MAX_SEMANTIC_READ_BYTES, MAX_SEMANTIC_READ_ITEMS,
+    read_selected_semantic_observation, read_semantic_observation,
+    read_semantic_observation_for_schema, SemanticCaptureInstant, SemanticReadAuthority,
+    SemanticReadBudget, SemanticReadBudgetError, SemanticReadContent, SemanticReadError,
+    SemanticReadField, SemanticReadFragment, SemanticReadFragmentId, SemanticReadOmission,
+    SemanticReadOmissions, SemanticReadProvenance, SemanticReadResult, SemanticReadRoleSelection,
+    SemanticReadRoleSelectionError, SemanticReadSensitivityLimit, SemanticReadStats,
+    SemanticRetainedReadEvidence, MAX_SEMANTIC_READ_BYTES, MAX_SEMANTIC_READ_ITEMS,
 };
 pub use semantic_read_model::{
     encode_semantic_read, SemanticEncodedRead, SemanticReadDeliveryReceipt,
@@ -540,9 +595,9 @@ pub use semantic_runtime::{
     MAX_SEMANTIC_RUNTIME_SOURCE_BYTES, MAX_SEMANTIC_RUNTIME_VISITED_NODES,
     MIN_SEMANTIC_RUNTIME_WIRE_BYTES, SEMANTIC_RUNTIME_CHANNEL_ACK,
     SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED, SEMANTIC_RUNTIME_CHANNEL_NAME,
-    SEMANTIC_RUNTIME_CHANNEL_PULL, SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX,
-    SEMANTIC_RUNTIME_CHANNEL_STOP, SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM,
-    SEMANTIC_RUNTIME_PROTOCOL_VERSION,
+    SEMANTIC_RUNTIME_CHANNEL_PARK, SEMANTIC_RUNTIME_CHANNEL_PARKED, SEMANTIC_RUNTIME_CHANNEL_PULL,
+    SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX, SEMANTIC_RUNTIME_CHANNEL_STOP,
+    SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM, SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
 pub use semantic_screenshot::{
     prepare_semantic_screenshot, SemanticScreenshot, SemanticScreenshotBudget,
@@ -587,4 +642,32 @@ pub use sign_in_handoff::{
     ContextSignInHandoff, ContextSignInHandoffBlocker, ContextSignInHandoffCleanup,
     ContextSignInHandoffError, ContextSignInHandoffId, ContextSignInHandoffPlatform,
     ContextSignInHandoffState,
+};
+
+#[cfg(all(feature = "probe-harness", feature = "provider-transport"))]
+pub use provider_transport::agent::agent_turn_wire_faults;
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
+#[cfg(all(feature = "probe-harness", feature = "provider-transport"))]
+pub use provider_transport::decision::capture_app_views;
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::decision::{
+    app_view_control, app_view_wire, app_views, captured_app_view, read_app_view,
+    search_enough_projection, search_reuse_projection, untracked_document_address,
+    AdmittedDecisionOutput, AppView, AppViewSink, DailyApp, DecisionActionSelection,
+    DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic, DecisionCallFailure,
+    DecisionCallOutput, DecisionEnvelopeFacts, DecisionEnvelopeFailure, DecisionLocatedRead,
+    DecisionObservation, DecisionObservationAnswers, DecisionObservationFallback,
+    DecisionOperation, DecisionProjectionError, DecisionReadSelection, DecisionRowDiscovery,
+    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient, SearchQueryTerms,
+};
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::synthesis::OpenAiWorkSynthesizer;
+
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::search::{
+    OpenAiPublicSearch, OpenAiPublicSearchCitation, OpenAiPublicSearchConfig,
+    OpenAiPublicSearchResult,
 };

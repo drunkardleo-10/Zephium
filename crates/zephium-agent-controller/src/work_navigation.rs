@@ -1,6 +1,15 @@
-//! Frozen task-authored document checkpoints through the original Work owners.
+//! Task-scoped document checkpoints through the original Work owners.
 
 use super::*;
+#[cfg(feature = "probe-harness")]
+use std::io::Write as _;
+
+/// Where a document checkpoint comes from: the model's Navigate or Back, or
+/// a same-site load the page started after an admitted action.
+pub(super) enum NavigationStart {
+    Model(Box<AgentBrowserProviderTurn>),
+    Follow(Box<(AgentProviderContinuation, ContextNavigationTarget)>),
+}
 
 pub(super) struct NavigationTerminal {
     receipt: AgentNavigationReceipt,
@@ -24,12 +33,113 @@ impl AgentWorkController {
         Ok(())
     }
 
+    /// Why a model Navigate goes back to the model instead of to policy: a
+    /// miscopied or unobserved link, an address a site task cannot open
+    /// (another site, an in-page `#` route), the open document, a destination
+    /// visited its limit, or no visits left. Each is correctable by the model;
+    /// broken authority still fails closed in policy.
+    pub(super) fn navigation_refusal(
+        state: &WorkState,
+        target: &ContextNavigationTarget,
+        observation: &SemanticObservation,
+    ) -> Option<AgentProviderNavigationRefusalReason> {
+        use AgentProviderNavigationRefusalReason as Reason;
+        let scope = state.navigation_discovery.as_ref()?;
+        if !scope.admits(target) {
+            return scope.is_site_session().then_some(Reason::OutsideScope);
+        }
+        // An in-page anchor ("Skip to content") or any address the session's
+        // own document policy would refuse at dispatch is refused here, where
+        // the model can choose again, instead of ending the page natively.
+        if scope.is_site_session()
+            && !zephium_agentic::WorkBrowserDocumentPolicy::SiteSession.admits_request(target)
+        {
+            return Some(Reason::OutsideScope);
+        }
+        let observed = observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .any(|node| {
+                node.role() == SemanticRole::Link
+                    && node.sensitivity() == SemanticSensitivity::Public
+                    && node.link_destination() == Some(target)
+            });
+        if !observed {
+            return Some(Reason::Unobserved);
+        }
+        let session = state.session.as_ref()?;
+        session
+            .policy
+            .navigation_ledger_refusal(session.lease.lease(), target)
+            .map(|refusal| match refusal {
+                AgentNavigationLedgerRefusal::HopsSpent => Reason::HopsSpent,
+                AgentNavigationLedgerRefusal::AlreadyHere => Reason::AlreadyHere,
+                AgentNavigationLedgerRefusal::Revisited => Reason::Revisited,
+            })
+    }
+
+    /// Counts a refusal of a control that ran or reached the page (not
+    /// observed, rejected at dispatch, covered) by the control's role and
+    /// name digest: the second marks the refusal repeated, the third ends
+    /// the page's loop. Other refusals pass through.
+    pub(super) fn count_refused_control(
+        refused: &mut Vec<(u64, u8)>,
+        refusal: AgentProviderActionRefusal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+    ) -> Result<AgentProviderActionRefusal, AgentWorkFailure> {
+        use std::hash::{Hash, Hasher};
+        if !matches!(
+            refusal.reason(),
+            SemanticActionBindingError::Unverified
+                | SemanticActionBindingError::DispatchRejected
+                | SemanticActionBindingError::TargetCovered
+        ) {
+            return Ok(refusal);
+        }
+        let Some(node) = refusal.target().and_then(|target| {
+            let expected = observation.reference_frame(target).ok()?;
+            let current = frames
+                .iter()
+                .find(|frame| frame.frame() == expected.frame())?;
+            observation.resolve_node(target, current).ok()
+        }) else {
+            return Ok(refusal);
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", node.role()).hash(&mut hasher);
+        node.name().map(SemanticText::as_str).hash(&mut hasher);
+        let control = hasher.finish();
+        let count = match refused.iter_mut().find(|(known, _)| *known == control) {
+            Some((_, count)) => {
+                *count = count.saturating_add(1);
+                *count
+            }
+            None => {
+                refused
+                    .try_reserve(1)
+                    .map_err(|_| AgentWorkFailure::Contract)?;
+                refused.push((control, 1));
+                1
+            }
+        };
+        match count {
+            1 => Ok(refusal),
+            2 => Ok(refusal.repeated()),
+            _ => Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::ActionProposalLoop,
+            )),
+        }
+    }
+
     pub(super) async fn navigate_current(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
-        turn: AgentBrowserProviderTurn,
+        start: NavigationStart,
         observation: &SemanticObservation,
+        captured_at: SemanticCaptureInstant,
         progress: AgentWorkTaskProgress,
     ) -> Result<
         (
@@ -41,72 +151,226 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         state.check_task_contract()?;
-        if state.navigation_complete() || progress != AgentWorkTaskProgress::ReadyForNavigation {
+        let (turn, follow) = match start {
+            NavigationStart::Model(turn) => (Some(*turn), None),
+            NavigationStart::Follow(follow) => (None, Some(*follow)),
+        };
+        let kind = turn
+            .as_ref()
+            .map_or(AgentBrowserToolKind::Navigate, |turn| {
+                turn.turn.proposal().kind()
+            });
+        let is_back = kind == AgentBrowserToolKind::Back;
+        if !matches!(
+            kind,
+            AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
+        ) || (is_back
+            && (state.navigation_discovery.is_none()
+                || !state.history_back
+                || state.native.retained.is_none()))
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        let discovery = state.navigation_discovery.as_ref();
+        let expected = if discovery.is_some() {
+            AgentWorkTaskProgress::Continue
+        } else {
+            AgentWorkTaskProgress::ReadyForNavigation
+        };
+        if state.navigation_complete() || progress != expected {
             return Err(AgentWorkFailure::TaskPhase {
                 expected: progress,
-                proposed: AgentBrowserToolKind::Navigate,
+                proposed: kind,
             });
         }
-        let target = state
-            .current_navigation_target()
-            .cloned()
-            .ok_or(AgentWorkFailure::Contract)?;
-        if !matches!(turn.turn.proposal(), AgentBrowserToolProposal::Navigate(proposed) if proposed == &target)
+        let proposed_target = if is_back {
+            None
+        } else if let Some((_, target)) = &follow {
+            if !discovery.is_some_and(|scope| scope.is_site_session() && scope.admits(target)) {
+                return Err(AgentWorkFailure::Contract);
+            }
+            Some(target.clone())
+        } else if let (Some(scope), Some(turn)) = (discovery, turn.as_ref()) {
+            let AgentBrowserToolProposal::Navigate(target) = turn.turn.proposal() else {
+                return Err(AgentWorkFailure::Contract);
+            };
+            if !scope.admits(target) {
+                return Err(AgentWorkFailure::Contract);
+            }
+            Some(target.clone())
+        } else {
+            Some(
+                state
+                    .current_navigation_target()
+                    .cloned()
+                    .ok_or(AgentWorkFailure::Contract)?,
+            )
+        };
+        if !is_back
+            && follow.is_none()
+            && !matches!(
+                (turn.as_ref().map(|turn| turn.turn.proposal()), proposed_target.as_ref()),
+                (Some(AgentBrowserToolProposal::Navigate(proposed)), Some(target)) if proposed == target
+            )
         {
             return Err(AgentWorkFailure::Contract);
         }
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         // Keep the original total ceiling and reserve the remaining exact route
         // proposals plus final extraction/mapping; no hop receives a new budget.
-        let remaining_hops = state
-            .navigation_length()
-            .checked_sub(state.navigation_hops)
-            .ok_or(AgentWorkFailure::Contract)?;
-        if usize::from(session.turns) + remaining_hops + 1
-            > usize::from(super::super::MAX_BROWSER_MODEL_TURNS)
+        let remaining_hops = if discovery.is_some() {
+            1
+        } else {
+            state
+                .navigation_length()
+                .checked_sub(state.navigation_hops)
+                .ok_or(AgentWorkFailure::Contract)?
+        };
+        if usize::from(session.turns) + remaining_hops + 1 > usize::from(session.max_model_calls)
+            || usize::try_from(
+                session
+                    .policy
+                    .remaining_operations(session.lease.lease())
+                    .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?,
+            )
+            .map_err(|_| AgentWorkFailure::Contract)?
+                < 2 * remaining_hops + 1
         {
             return Err(AgentWorkFailure::Browser(
                 AgentBrowserProviderError::TurnLimit,
             ));
         }
+        #[cfg(feature = "probe-harness")]
+        let navigation_diagnostics = (
+            proposed_target
+                .as_ref()
+                .is_some_and(|target| discovery.is_some_and(|scope| scope.admits(target))),
+            proposed_target
+                .as_ref()
+                .is_some_and(|target| discovery.is_some_and(|scope| scope.departure() == target)),
+        );
         state.refresh_account(worker, browser)?;
-        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
-            AgentBrowserToolKind::Navigate,
-        ))?;
+        if follow.is_none() {
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ToolProposed(kind))?;
+        }
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let id = state.native.identity.id();
-        let automation = state
-            .native
-            .contexts()?
-            .automation_state(id)
-            .map_err(|_| AgentWorkFailure::Context)?;
-        let op = ContextOperationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?;
+        let automation = if let Some(retained) = &state.native.retained {
+            let now = state
+                .session
+                .as_mut()
+                .ok_or(AgentWorkFailure::Contract)?
+                .policy_now()
+                .map_err(AgentWorkFailure::Browser)?;
+            retained.automation_state(now)?
+        } else {
+            state
+                .native
+                .contexts()?
+                .automation_state(id)
+                .map_err(|_| AgentWorkFailure::Context)?
+        };
+        let legacy_operation = if state.native.retained.is_none() {
+            Some(ContextOperationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?)
+        } else {
+            None
+        };
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let checkpoint = turn
-            .into_tool_turn()
-            .into_parts()
-            .1
-            .retire_for_navigation(observation, &target, &session.config)
-            .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
-        let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let permit = session
-            .policy
-            .authorize_navigation(
-                AgentNavigationAuthorizationRequest::new(
-                    session.lease.lease(),
-                    session.account,
-                    automation,
-                    now,
-                ),
+        let (continuation, following) = match (turn, follow) {
+            (Some(turn), None) => (turn.into_tool_turn().into_parts().1, false),
+            (None, Some((continuation, _))) => (continuation, true),
+            _ => return Err(AgentWorkFailure::Contract),
+        };
+        if state.navigation_discovery.is_some() {
+            let schema = state
+                .extraction_schema
+                .as_ref()
+                .ok_or(AgentWorkFailure::Contract)?;
+            let read = read_semantic_observation_for_schema(
                 observation,
-                checkpoint.baseline(),
-                &target,
+                SemanticReadAuthority::Acknowledged(continuation.baseline()),
+                captured_at,
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+                schema,
             )
-            .map_err(|error| {
-                AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
-            })?;
-        let operation = match state.native.contexts()?.begin_navigation(id, op) {
+            .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error)))?;
+            state
+                .retained_read_evidence
+                .retain(&read, continuation.baseline())
+                .map_err(|error| {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                })?;
+        }
+        let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+        let authorization = AgentNavigationAuthorizationRequest::new(
+            session.lease.lease(),
+            session.account,
+            automation,
+            now,
+        );
+        let permit = if is_back {
+            session.policy.authorize_history_back(
+                authorization,
+                observation,
+                continuation.baseline(),
+            )
+        } else if following {
+            session.policy.authorize_follow(
+                authorization,
+                observation,
+                continuation.baseline(),
+                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+            )
+        } else {
+            session.policy.authorize_navigation(
+                authorization,
+                observation,
+                continuation.baseline(),
+                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+            )
+        }
+        .map_err(|error| {
+            #[cfg(feature = "probe-harness")]
+            let _ = writeln!(std::io::stderr(), "work-navigation: stage=authorize error={error:?} scope_admitted={} observed_link={} same_document={}",
+                navigation_diagnostics.0,
+                proposed_target.as_ref().is_some_and(|target| observation.frames().iter().flat_map(|frame| frame.nodes()).any(|node| node.role() == SemanticRole::Link && node.sensitivity() == SemanticSensitivity::Public && node.link_destination() == Some(target))),
+                navigation_diagnostics.1);
+            AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
+        })?;
+        let target = permit.target().clone();
+        let checkpoint = if is_back {
+            continuation.retire_for_history_back(observation, &target, &session.config)
+        } else if following {
+            continuation.retire_for_follow(observation, &target, &session.config)
+        } else {
+            continuation.retire_for_navigation(observation, &target, &session.config)
+        }
+        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation));
+        let checkpoint = match checkpoint {
+            Ok(checkpoint) => checkpoint,
+            Err(failure) => {
+                session
+                    .policy
+                    .cancel_navigation(permit)
+                    .map_err(|_| AgentWorkFailure::Contract)?;
+                return Err(failure);
+            }
+        };
+        let prepared = if let Some(retained) = &mut state.native.retained {
+            retained.prepare_navigation(automation.context(), now)
+        } else {
+            let op = legacy_operation.ok_or(AgentWorkFailure::Contract)?;
+            state
+                .native
+                .contexts()?
+                .begin_navigation(id, op)
+                .map_err(|_| AgentWorkFailure::Context)
+        };
+        let operation = match prepared {
             Ok(operation) => operation,
             Err(_) => {
                 state
@@ -128,18 +392,40 @@ impl AgentWorkController {
             .policy
             .dispatch_navigation(permit, operation, now)
             .map_err(|error| {
+                #[cfg(feature = "probe-harness")]
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "work-navigation: stage=dispatch error={error:?}"
+                );
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
-            })?;
+            });
+        let active = match active {
+            Ok(active) => active,
+            Err(error) => {
+                if let Some(retained) = &mut state.native.retained {
+                    let _ = retained.cancel_navigation_preparation();
+                }
+                return Err(error);
+            }
+        };
         session.navigation = Some(active);
         let active = session
             .navigation
             .as_ref()
             .ok_or(AgentWorkFailure::Contract)?;
-        let request = active
-            .native_request()
-            .map_err(|_| AgentWorkFailure::Contract)?;
         state.native.operation = Some(operation);
-        let dispatch = browser.dispatch(ContextNativeRequest::Navigate(request));
+        let dispatch = if let Some(retained) = &mut state.native.retained {
+            if is_back {
+                retained.dispatch_history_back(active)
+            } else {
+                retained.dispatch_navigation(active)
+            }
+        } else {
+            let request = active
+                .native_request()
+                .map_err(|_| AgentWorkFailure::Contract)?;
+            browser.dispatch(ContextNativeRequest::Navigate(request))
+        };
         let refusal = match dispatch {
             ContextDispatch::Rejected(failure) => Some(failure),
             ContextDispatch::Unsupported => Some(ContextPortFailure::Unsupported),
@@ -163,11 +449,13 @@ impl AgentWorkController {
             .err();
         if let Some(failure) = refusal {
             state.native.operation = None;
-            state
-                .native
-                .contexts()?
-                .settle_navigation(id, operation, ContextSettlement::Refused)
-                .map_err(|_| AgentWorkFailure::Context)?;
+            if state.native.retained.is_none() {
+                state
+                    .native
+                    .contexts()?
+                    .settle_navigation(id, operation, ContextSettlement::Refused)
+                    .map_err(|_| AgentWorkFailure::Context)?;
+            }
             let terminal = state
                 .session
                 .as_mut()
@@ -184,7 +472,7 @@ impl AgentWorkController {
         if let Some(failure) = journal_failure {
             return Err(failure);
         }
-        let receipt = match state.native.next_event(worker, browser).await? {
+        let receipt = match state.native.next_navigation_event(worker, browser).await? {
             AgentRuntimeEvent::NativeTerminal(ContextNativeEvent::NavigationSettled(terminal))
                 if terminal.operation() == operation =>
             {
@@ -203,19 +491,21 @@ impl AgentWorkController {
                     }
                 };
                 state.native.operation = None;
-                state
-                    .native
-                    .contexts()?
-                    .settle_navigation(
-                        id,
-                        operation,
-                        if terminal.outcome().is_ok() {
-                            ContextSettlement::Applied
-                        } else {
-                            ContextSettlement::Refused
-                        },
-                    )
-                    .map_err(|_| AgentWorkFailure::Context)?;
+                if state.native.retained.is_none() {
+                    state
+                        .native
+                        .contexts()?
+                        .settle_navigation(
+                            id,
+                            operation,
+                            if terminal.outcome().is_ok() {
+                                ContextSettlement::Applied
+                            } else {
+                                ContextSettlement::Refused
+                            },
+                        )
+                        .map_err(|_| AgentWorkFailure::Context)?;
+                }
                 if let Some(failure) = terminal_record.journal_failure {
                     return Err(failure);
                 }
@@ -235,8 +525,16 @@ impl AgentWorkController {
         if receipt.hop() != state.navigation_hops {
             return Err(AgentWorkFailure::Contract);
         }
+        if state.navigation_discovery.is_some() {
+            state
+                .retained_read_evidence
+                .advance_after_navigation(receipt)
+                .map_err(|error| {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                })?;
+        }
         state.navigation_hops += 1;
-        let fresh = Self::observe(state, worker, browser).await?;
+        let fresh = Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
         let captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -246,6 +544,15 @@ impl AgentWorkController {
                 .millis(),
         );
         let progress = state.task_progress(&fresh)?;
+        let navigation_available = !state.navigation_complete();
+        let action_authority = state
+            .session
+            .as_ref()
+            .ok_or(AgentWorkFailure::Contract)?
+            .config
+            .permits_tool(AgentBrowserToolKind::Act)
+            .then(|| state.action_authority(&fresh))
+            .transpose()?;
         let now = state
             .session
             .as_mut()
@@ -262,7 +569,14 @@ impl AgentWorkController {
             worker,
             browser,
             session.cancellation.clone(),
-            session.continue_after_navigation(checkpoint, receipt, &fresh, account),
+            session.continue_after_navigation(
+                checkpoint,
+                receipt,
+                &fresh,
+                account,
+                action_authority.as_ref(),
+                navigation_available,
+            ),
         )
         .await?;
         Ok((fresh, captured_at, progress, turn))
@@ -283,6 +597,11 @@ impl AgentBrowserSession {
             .policy
             .settle_navigation(active, terminal, now)
             .map_err(|error| {
+                #[cfg(feature = "probe-harness")]
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "work-navigation: stage=settle error={error:?}"
+                );
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Navigation(error))
             })?;
         Ok(self.record_navigation_terminal(receipt))
@@ -339,9 +658,11 @@ impl AgentBrowserSession {
         receipt: AgentNavigationReceipt,
         observation: &SemanticObservation,
         account: AgentContextAccountBinding,
+        action_authority: Option<&AgentProviderActionAuthority>,
+        navigation_available: bool,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
-        if self.turns >= super::super::MAX_BROWSER_MODEL_TURNS {
+        if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         if receipt.source() != self.account.context()
@@ -362,8 +683,29 @@ impl AgentBrowserSession {
             provisional.now(),
         );
         checkpoint
-            .validate_successor(receipt, observation, request, &self.config)
+            .validate_successor_with_action_authority(
+                receipt,
+                observation,
+                request,
+                &self.config,
+                action_authority,
+            )
             .map_err(|_| AgentBrowserProviderError::Continuation)?;
+        self.history_depth = match receipt.kind() {
+            AgentNavigationKind::Load => self
+                .history_depth
+                .checked_add(1)
+                .ok_or(AgentBrowserProviderError::Continuation)?,
+            AgentNavigationKind::HistoryBack => self
+                .history_depth
+                .checked_sub(1)
+                .ok_or(AgentBrowserProviderError::Continuation)?,
+        };
+        self.config = self
+            .config
+            .clone()
+            .with_navigation_available(navigation_available)
+            .with_history_back_available(self.history_depth > 0);
         let payload = encode_semantic_observation(
             observation,
             SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
@@ -374,15 +716,26 @@ impl AgentBrowserSession {
             .objective
             .as_ref()
             .ok_or(AgentBrowserProviderError::Continuation)?;
-        let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
-            &mut self.policy,
-            request,
-            observation,
-            payload,
-            objective,
-            self.config.clone(),
-        )
-        .map_err(|_| AgentBrowserProviderError::Authority)?;
+        let prepared = match action_authority {
+            Some(authority) => AgentPreparedObservationRequest::try_openai_for_provider_exact_count_with_action_authority(
+                &mut self.policy,
+                request,
+                observation,
+                payload,
+                objective,
+                self.config.clone(),
+                authority,
+            ),
+            None => AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+                &mut self.policy,
+                request,
+                observation,
+                payload,
+                objective,
+                self.config.clone(),
+            ),
+        }
+        .map_err(AgentBrowserProviderError::from_request)?;
         self.account_attestations.push(account.attestation());
         self.account = account;
         self.drive(prepared.into_transport_input()).await

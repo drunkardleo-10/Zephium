@@ -9,21 +9,25 @@
     SidebarLeftIcon,
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
+  import { blocker, siteMenuState } from "$domain/blocker";
   import { commands } from "$shared/ipc/bindings";
   import { IS_MAC } from "$shared/platform";
   import IconButton from "$shared/ui/IconButton";
-  import ModePicker from "./ModePicker.svelte";
+  import ModeTabs from "./ModeTabs.svelte";
   import WindowControls from "$shared/ui/WindowControls";
 
   let {
     compact,
     ontoggle,
     navigation = true,
+    pageControls = true,
     launcher = false,
   }: {
     compact: boolean;
     ontoggle: () => void;
     navigation?: boolean;
+    /** Back, forward and reload act on a page; Work shows none. */
+    pageControls?: boolean;
     /** The rail beside a tool panel has no head of its own to carry search. */
     launcher?: boolean;
   } = $props();
@@ -34,7 +38,8 @@
     const target = event.currentTarget;
     if (!(target instanceof HTMLButtonElement)) return;
     const anchor = target.getBoundingClientRect();
-    void commands.sidebarMenuPopup(anchor.left, anchor.bottom);
+    const { siteProtected, canHide } = siteMenuState(blocker.status());
+    void commands.sidebarMenuPopup(anchor.left, anchor.bottom, siteProtected, canHide);
   }
 </script>
 
@@ -54,16 +59,17 @@
     {#if IS_MAC}
       <div style:height="var(--titlebar-height)" aria-hidden="true"></div>
     {/if}
-    <ModePicker />
+    <ModeTabs compact />
     <div class="flex items-center gap-0.5">
-      <IconButton
-        icon={EllipsisIcon}
-        label={m.ui_sidebar_options()}
-        size={15}
-        buttonSize={26}
-        haspopup
-        onclick={openSidebarMenu}
-      />
+      <!-- Its menu acts on the page and the column's shape; Work has neither. -->
+      {#if pageControls}<IconButton
+          icon={EllipsisIcon}
+          label={m.ui_sidebar_options()}
+          size={15}
+          buttonSize={26}
+          haspopup
+          onclick={openSidebarMenu}
+        />{/if}
       <IconButton
         icon={Search01Icon}
         label={m.ui_search_or_enter_an_address()}
@@ -93,7 +99,7 @@
       />
     {/if}<span class="flex-1" aria-hidden="true"></span>
 
-    {#if navigation}<div
+    {#if navigation && pageControls}<div
         class="flex items-center gap-0.5"
         role="group"
         aria-label={m.ui_navigation()}

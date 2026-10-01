@@ -47,8 +47,12 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
         if (item.type !== "chunk" || !item.isDynamicEntry || !item.facadeModuleId) continue;
         const at = item.facadeModuleId.lastIndexOf("/src/");
         if (at < 0) continue;
+        const dependency = item.facadeModuleId.lastIndexOf("/node_modules/");
         roots.push({
-          name: `lazy:${item.facadeModuleId.slice(at + 5)}`,
+          name:
+            dependency >= 0
+              ? `lazy:dependency/${item.facadeModuleId.slice(dependency + 14)}`
+              : `lazy:${item.facadeModuleId.slice(at + 5)}`,
           file: item.fileName,
           surface: false,
         });
@@ -100,7 +104,7 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
           for (const id of Object.keys(item.modules)) {
             if (
               root.surface &&
-              (/\/features\/work\//u.test(id) || /\/(?:@xyflow|layerchart|@tiptap)\//u.test(id))
+              (/\/(?:features|domain)\/work\//u.test(id) || /\/(?:@xyflow|@tiptap)\//u.test(id))
             )
               this.error(`Work code in ${name} startup: ${id}`);
             const at = id.indexOf("/src/");
@@ -152,10 +156,15 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
           modules: [...modules].sort(),
         };
       }
+      const failures: string[] = [];
       for (const [name, report] of Object.entries(reports)) {
         const failure = checkBundleBudget(name, report, budgets);
-        if (failure) this.error(failure);
+        if (failure)
+          failures.push(
+            `${failure} (measured JS ${report.staticJsBytes}, CSS ${report.staticCssBytes})`,
+          );
       }
+      if (failures.length) this.error(failures.join("\n"));
       this.emitFile({
         type: "asset",
         fileName: pages.includes("browser")

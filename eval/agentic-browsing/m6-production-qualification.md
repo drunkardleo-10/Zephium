@@ -8,6 +8,113 @@ reviewed aggregate evidence and points to executable gates. It must not contain
 raw probe JSONL, page content, screenshots, profiles, credentials, provider
 responses, machine-local paths, or native traces.
 
+## 2026-09-15: Work record collection slice
+
+The release-excluded `--live-agent-collection-work` probe now exercises the
+native public LEGO catalog with a three-record schema and durable comparison
+mapping. Its main-agent assignment is fixed (provider search, admitted source
+read, finish); the Luna browser worker chooses the actual inspection steps.
+This qualifies neither autonomous Work planning nor the normal canvas routing.
+
+One run returned three names and displayed prices with separate native item
+citations, resolved again after Store reopen and clean resource shutdown.
+Later runs completed extraction but omitted price evidence; the strengthened
+acceptance check rejects those incomplete results. Earlier attempts exposed
+initial query-finalization failure, two Snapshot/Scope contract refusals and a
+Locate/Query refusal for a currency symbol. Same-load public query finalization
+and literal symbol lookup are fixed; Snapshot/Scope and consistent price
+collection remain unresolved. No reliability or latency target is met. Reported
+usage is conservative reservation accounting, not measured billed token usage.
+No sign-in, cart operation or purchase was exercised.
+
+Affected library, integration and documentation checks: 1,812 passed, two
+pre-existing ignored; workspace
+Clippy passed. Separate architecture checks still stop at unchanged dependency
+and controller-source expectations. B1/B2 and production qualification remain
+open: typed money/URLs/images, the full worker port, action workflows and
+Windows qualification are not delivered by this slice.
+
+## 2026-09-15: Product text, evidence retention and terminal mapping
+
+The native runtime now preserves visible article prose across structural
+wrappers. Retention favors focused captures within the existing limits and
+removes only unchanged same-node duplicates. A later pressure regression also
+proves that a broad duplicate capture cannot erase the focused source before
+being evicted. Repeated subtree and exhausted inspection refusals are distinct;
+the eight-capture limit is checked before native dispatch. The extraction
+mapper is a fresh schema/evidence-only request, with ordinary tool continuation
+replay and Rust correlation/accounting checks unchanged.
+
+Authorized public macOS/Luna runs during this change:
+
+| Workflow / revision | Outcome | Browser model calls | Input / output tokens | Sum of model elapsed time |
+| --- | --- | ---: | ---: | ---: |
+| Catalog, initial text fix | Three names/prices, cited and reopened | Not separately recorded | Conservative Work accounting only | Not recorded |
+| Catalog, compact mapper | Same three-record acceptance passed | 3 | 18,533 / 875 | 15,096 ms |
+| Documentation, before inspection-limit precheck | Browser authority failure, then retry/deadline/resource failure | Not qualified | Mixed conservative accounting | Not qualified |
+| Documentation, recoverable inspection limit | Browser execution and persistence completed; incomplete prose and incorrect final-summary citation | 14 | 89,938 / 2,593 | 64,597 ms |
+| Catalog, same-source deduplication | Three-record acceptance passed, native citations reopened and resource closed | 2 | 9,976 / 696 | 11,388 ms |
+| Documentation, per-finding output | 16 browser findings with 17 native evidence fragments, reopened and resource closed | 16 | 79,154 / 2,691 | 63,310 ms |
+
+Recorded per-call `PricedCeiling` rows contain actual provider tokens and
+catalog-ceiling cost. Work aggregate usage remains conservative. The last
+catalog mapper used 2,510 input tokens, versus 9,934 in the supplied earlier
+failed trace; this is an individual workflow comparison, not a controlled
+latency/reliability distribution. Model elapsed sums exclude host, search and
+counting overhead; no end-to-end, CPU, RSS or wakeup target is claimed.
+The final native build additionally includes the deterministic duplicate-under-
+pressure fix; that last adjustment was not separately live-qualified.
+
+The documentation workflow is **not end-to-end qualified**. Its final Work
+summary still used one search citation. Inspection found that
+`WorkAgentTurnDisclosure` copies artifact data without mapping artifact-local
+evidence indexes to the disclosed source keys; the application also loads only
+the first eight browser evidence previews. The Work owner needs to preserve that
+mapping, disclose the relevant cited previews under its existing budget, and
+represent omitted previews explicitly. The browser's 16-call run also leaves
+long-page coverage and efficiency unresolved. The authority failure's specific
+cause was not proven by its collapsed diagnostic; no guard or ceiling was relaxed.
+
+Affected tests: 1,817 passed, two pre-existing ignored. Workspace and
+`durable-runtime` composition Clippy, runtime JavaScript smoke, native build,
+formatting and diff checks passed. A sandbox-only test attempt could not bind
+loopback sockets; the authorized rerun passed. No signed-in form, cart, purchase,
+parallel page, image/typed-money record or Windows workflow was qualified.
+B1/B2 and the remaining release blockers stay open.
+
+## 2026-09-15: Source-backed product URLs
+
+Typed URL fields now reach terminal mapping, version 4 storage and Work subject
+links. Only declared URL schemas add native destination fragments; default reads
+retain their previous projection. Source selection, exact public URL screening,
+matching destination citations and archive reload are independently checked.
+The collection adapter selects the subject URL by a trusted field name.
+
+One authorized public macOS/Luna catalog run returned three product names,
+displayed prices and product URLs. The reopened comparison linked each URL to
+native destination evidence and product identity; all three corresponded to the
+observed product routes. Resource failure and persistence failure were absent,
+with clean closure and Store reopen. The main assignment remains fixed; only
+the browser worker is model-directed. No follow-up navigation or action is
+qualified by a historical URL.
+
+There were three browser model calls: 19,229 input / 830 output tokens,
+4,367 micro-USD catalog-ceiling accounting and 12,310 ms summed model elapsed
+time. The terminal mapper used 4,030 input / 520 output tokens, 16,337 request
+bytes and 9,792 semantic bytes. These include the new URL evidence; no broader
+speed or reliability claim follows. Work's aggregate accounting is still
+conservative reservation. No provider bodies or page quotes are recorded here.
+
+Affected tests: 1,820 passed, two pre-existing ignored; workspace Clippy,
+durable-runtime composition Clippy, native build, formatting and diff checks
+passed. Cases include guessed URLs, prose-only URL citations, sensitive links,
+source-selection substitution, downgraded archives, destination substitution,
+and host-selected subject mapping. Typed currency, images, full worker-port
+integration, the Work citation-mapping fix and the remaining release blockers
+remain open.
+
+## Earlier qualification evidence
+
 The physical-Windows procedure now has a checked-in, source-gated two-phase
 PowerShell orchestrator. It requires a clean exact checkout, create-new source
 and debugger-binary hash stamps, an exact result inventory, the x86-64 MSVC
@@ -2339,3 +2446,72 @@ scheduling policy and does not retrospectively prove this public-site cause.
   migration, and stable Work-port audits beyond the dormant Shell seam.
 
 None of these pending items is represented as zero, passing, or non-blocking.
+
+### Image sources and focused evidence retention (2026-09-15)
+
+The live macOS collection qualifier returned three LEGO Architecture products
+with displayed prices, exact product links and matching native image sources.
+Each image cell retained identity and image citations. The stored comparison
+reopened successfully; native failure and persistence error were absent.
+
+Two browser model calls consumed 12,102 input / 976 output tokens, with 2,572
+micro-USD catalog-ceiling accounting and 19,022 ms summed model elapsed time.
+The terminal mapper used 4,636 input / 888 output tokens, an 18,449-byte request
+and 11,340 bytes of semantic evidence. Work aggregate accounting remained
+conservative (21,717 tokens, 14,852 micro-USD, eight operations).
+
+Affected checks: 1,824 tests passed, two pre-existing ignored; workspace and
+durable composition Clippy, native probe build and JS smoke passed. Source
+getter substitution, image-only field selection, exact citations, archive
+tampering and focused/current evidence retention are covered. This is a fixed
+main assignment with a real browser model, not autonomous Work routing, image
+rendering qualification or a whole-system production claim. CPU/RSS and total
+workflow wall time were not measured.
+
+## 2026-09-15: Typed money and durable collection tasks
+
+Money extraction now preserves a nonnegative decimal string and a host-approved
+currency code. Admission and version 6 reload require matching adjacent
+amount/currency text and native proof that the source fields were complete.
+The completeness bit is bound to read guards and retained evidence; a clipped
+numeric prefix cannot become a complete amount. A shared default encodes wholly
+unproven field cohorts without repeating the marker on every row. Prior archive
+versions remain readable. No UTC observed time is inferred from monotonic ticks.
+
+`execute_collection_node_owned` exposes schema-driven output for a single-output
+durable public browse/discovery task, retaining the original attempt, approved
+scope, limits, cancellation and publication receipt. Normal Work routing still
+has to select the schema; this is not the complete streaming worker/page port.
+
+Public macOS/Luna evidence on the official Vercel Commerce product page:
+
+| Route | Outcome | Browser model calls | Input / output tokens | Catalog ceiling micro-USD | Sum model elapsed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Fixed main assignment, before completeness guard | Typed price and cited image reopened | 2 | 7,621 / 313 | 1,569 | 10,683 ms |
+| Model-planned durable task, final completeness guard | Same product, typed price and image reopened | 2 | 7,456 / 350 | 1,573 | 14,080 ms |
+
+The final mapper used 2,194 input / 280 output tokens, a 9,472-byte request and
+3,690 bytes of semantic evidence. Native failure and persistence failure were
+absent, closure was acknowledged, and the stored output remained NeedsReview.
+These are browser-call metrics, not total planning/search overhead or workflow
+wall time. Work aggregate accounting remains conservative. Image candidates
+were not downloaded or rendered.
+
+Earlier qualification setup used the wrong demo hostname: provider search
+returned no results, and browser discovery later failed with Browser(Authority).
+That failure's precise native cause is not established. The target was corrected
+from the official repository. A durable preview also refused a non-directory
+path prefix; the qualifier now uses the existing /product/ contract and one
+hop. One model plan added an extra responsibility and was rejected before native
+execution. No capability, shape check or ceiling was relaxed; none of those runs
+is positive money evidence. The fixed main probe can attempt browser discovery
+after search provides no matching source; autonomous fallback is not qualified.
+
+Final affected checks: 1,830 tests passed, two pre-existing ignored; workspace
+Clippy, durable composition Clippy, native build, formatting and diff checks
+passed. Cases cover wrong amounts/currencies, decimal ambiguity, clipped source
+prefixes, archive downgrade and missing completeness proof, schema substitution
+and identity/price citations in Work cells. Remaining Work integration includes
+collection routing and artifact-local evidence-index mapping to disclosed source
+keys with relevant previews (the application still takes only eight). Signed-in
+actions, full worker/page streaming and remaining release blockers stay open.

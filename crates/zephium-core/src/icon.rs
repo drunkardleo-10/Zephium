@@ -4,7 +4,9 @@
 //! The site renderer owns all network fetching and image decoding. Rust and
 //! the chrome renderer accept only a 32x32 RGBA raster, so malformed PNG,
 //! ICO, SVG, font and animation parsers are never exposed in the privileged
-//! process for a page-controlled favicon.
+//! process for a page-controlled favicon. The one exception is the Work
+//! origin probe, which fetches an icon anonymously (no page, no session) and
+//! decodes it with a bounded, memory-safe decoder into this same raster.
 
 use base64::Engine as _;
 

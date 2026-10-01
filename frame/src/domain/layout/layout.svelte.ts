@@ -1,11 +1,39 @@
 import { createLifecycle } from "$shared/lib/lifecycle";
-import type { DividerView } from "$shared/ipc/bindings";
+import type { DividerView, WorkPaneLayout } from "$shared/ipc/bindings";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 
+/** The pane's applied native hole with finite geometry; the wire type admits null for NaN. */
+export type WorkPaneHole = {
+  tab: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  presented: boolean;
+  generation: number;
+};
+
+function hole(pane: WorkPaneLayout | null): WorkPaneHole | null {
+  if (!pane || pane.x === null || pane.y === null || pane.width === null || pane.height === null)
+    return null;
+  return {
+    tab: pane.tab,
+    x: pane.x,
+    y: pane.y,
+    width: pane.width,
+    height: pane.height,
+    presented: pane.presented,
+    generation: pane.generation,
+  };
+}
+
 let dividerState = $state.raw<DividerView[]>([]);
+let workPaneState = $state.raw<WorkPaneHole | null>(null);
 
 export const dividers = () => dividerState;
+/** The applied native hole of the Work browser pane, or null while no pane is shown. */
+export const workPane = () => workPaneState;
 
 const lifecycle = createLifecycle();
 let initialized = false;
@@ -14,7 +42,9 @@ let unlisten: (() => void) | null = null;
 
 async function initialize(generation: number) {
   const stop = await events.layoutChanged.listen((event) => {
-    if (lifecycle.isCurrent(generation)) dividerState = event.payload.dividers;
+    if (!lifecycle.isCurrent(generation)) return;
+    dividerState = event.payload.dividers;
+    workPaneState = hole(event.payload.work_pane);
   });
 
   if (!lifecycle.isCurrent(generation)) {
@@ -52,6 +82,7 @@ export function dispose() {
   initializing = null;
   unlisten?.();
   unlisten = null;
+  workPaneState = null;
 }
 
 export const grab = (x: number, y: number) => void commands.dividerGrab(x, y);

@@ -61,12 +61,16 @@ impl AgentWorkApplicationPorts {
 }
 
 /// Existing runtime and provider settings, with no parallel model semantics.
+#[derive(Clone)]
 pub struct AgentWorkApplicationConfig {
     runtime: AgentRuntimeConfig,
     provider: AgentProviderTransportConfig,
 }
 
 impl AgentWorkApplicationConfig {
+    pub(crate) fn into_parts(self) -> (AgentRuntimeConfig, AgentProviderTransportConfig) {
+        (self.runtime, self.provider)
+    }
     /// Uses the same bounded runtime and transport configuration as the actor.
     pub fn new(runtime: AgentRuntimeConfig, provider: AgentProviderTransportConfig) -> Self {
         Self { runtime, provider }
@@ -85,9 +89,24 @@ pub struct PreparedAgentWork {
     deadline: Instant,
     run: ContextRunId,
     result_profile: Option<zephium_core::ids::ProfileId>,
+    browser_profile: Option<crate::AgentWorkProfileBinding>,
 }
 
 impl PreparedAgentWork {
+    /// Pins an actor-selected session and verifies that trusted input did not
+    /// substitute its profile or storage class. Shell rechecks admission later.
+    pub fn with_browser_profile(
+        mut self,
+        binding: crate::AgentWorkProfileBinding,
+    ) -> Result<Self, AgentWorkFailure> {
+        if self.controller.profile_storage_binding()?
+            != (binding.profile(), binding.storage_class())
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.browser_profile = Some(binding);
+        Ok(self)
+    }
     /// Builds the shipping stateless actor from trusted product inputs.
     pub fn try_new(
         input: AgentWorkRunInput,
@@ -128,6 +147,7 @@ impl PreparedAgentWork {
             deadline,
             run,
             result_profile,
+            browser_profile: None,
         })
     }
 }
@@ -157,6 +177,9 @@ pub enum AgentWorkApplicationPhase {
     Failed,
     /// Task was cancelled with all original execution/lifecycle owners drained.
     Cancelled,
+    /// The run closed cleanly after requesting a person. No old execution
+    /// authority remains; continuation requires a fresh admission.
+    WaitingForHuman,
 }
 
 /// Human review never resumes an old proposal or clears execution debt.
@@ -349,6 +372,7 @@ impl CallbackHandle {
             AgentWorkApplicationPhase::Succeeded
                 | AgentWorkApplicationPhase::Failed
                 | AgentWorkApplicationPhase::Cancelled
+                | AgentWorkApplicationPhase::WaitingForHuman
                 | AgentWorkApplicationPhase::Reviewed
         ) {
             return None;
@@ -592,6 +616,16 @@ impl ApplicationWork {
                 | AgentWorkDisposition::Rejected
                 | AgentWorkDisposition::FailedClosed,
             ) if closed.human_review().is_some() => AgentWorkApplicationPhase::Reviewed,
+            (
+                Some(AgentWorkOutcome::WaitingForHuman(waiting)),
+                AgentWorkDisposition::WaitingForHuman,
+            ) if matches!(
+                waiting.policy_settlement().closure().outcome(),
+                AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+            ) =>
+            {
+                AgentWorkApplicationPhase::WaitingForHuman
+            }
             _ => return false,
         };
         let projection = lock(&previous.projection);
@@ -655,7 +689,11 @@ impl ApplicationWork {
         self.fail(AgentWorkFailure::Contract);
     }
 
-    pub(crate) fn admit(&mut self, submission: WorkSubmission) {
+    pub(crate) fn admit(
+        &mut self,
+        submission: WorkSubmission,
+        profile: Option<crate::AgentWorkProfileReadiness>,
+    ) {
         if !Arc::ptr_eq(&self.projection, &submission.1) {
             return;
         }
@@ -673,8 +711,16 @@ impl ApplicationWork {
         }
         self.used = true;
         self.audit = Some(run.audit.clone());
+        let profile_valid = run.browser_profile.is_none_or(|binding| {
+            profile == Some(crate::AgentWorkProfileReadiness::Ready(binding))
+        });
         lock(&self.projection).snapshot.run = Some(run.run);
         self.staged = Some(run);
+        if !profile_valid {
+            self.stopping = true;
+            self.fail(AgentWorkFailure::Contract);
+            self.abort_staged();
+        }
         self.poll();
     }
 
@@ -822,6 +868,7 @@ impl ApplicationWork {
             AgentWorkDisposition::Succeeded => AgentWorkApplicationPhase::Succeeded,
             AgentWorkDisposition::Failed => AgentWorkApplicationPhase::Failed,
             AgentWorkDisposition::Cancelled => AgentWorkApplicationPhase::Cancelled,
+            AgentWorkDisposition::WaitingForHuman => AgentWorkApplicationPhase::WaitingForHuman,
             AgentWorkDisposition::NeedsApproval => AgentWorkApplicationPhase::NeedsReview,
             AgentWorkDisposition::FreshAdmissionRequired
             | AgentWorkDisposition::Rejected
@@ -1180,6 +1227,20 @@ impl ApplicationWork {
                         native,
                     ),
                 },
+                (Some(AgentWorkOutcome::WaitingForHuman(waiting)), Some(native), Some(true)) => {
+                    AgentWorkHumanHandoff::try_new(
+                        waiting.request().reason(),
+                        waiting.request().observation(),
+                    )
+                    .and_then(|handoff| {
+                        AgentWorkJournalMutation::waiting_for_human(
+                            record,
+                            waiting.policy_settlement(),
+                            native,
+                            handoff,
+                        )
+                    })
+                }
                 _ => AgentWorkJournalMutation::transition(
                     record,
                     if active.needs_review && !self.stopping {
@@ -1314,6 +1375,7 @@ impl ApplicationWork {
                         | AgentWorkApplicationPhase::Succeeded
                         | AgentWorkApplicationPhase::Failed
                         | AgentWorkApplicationPhase::Cancelled
+                        | AgentWorkApplicationPhase::WaitingForHuman
                 ) || record.disposition() != AgentWorkDisposition::Succeeded
                     || !lock(&self.projection).records.contains(&record)
                 {

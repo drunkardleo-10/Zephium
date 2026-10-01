@@ -6,6 +6,8 @@ impl Shell {
     pub(super) fn handle_operation(&mut self, command: Command) -> OperationDisposition {
         match command {
             Command::ShowBrowserPage(page) => self.operation_show_browser_page(page),
+            Command::WorkPaneShow { target, rect } => self.operation_work_pane_show(target, rect),
+            Command::WorkPaneHide => self.operation_work_pane_hide(),
             Command::Open => self.operation_open(),
             Command::Activate(id) => self.operation_activate(id),
             Command::Close(id) => self.operation_close(id),
@@ -135,7 +137,7 @@ impl Shell {
     }
 
     pub(super) fn operation_open(&mut self) -> OperationDisposition {
-        if self.active_browser_page().is_some() {
+        if self.active_browser_page().is_some() && !self.browser_return_ready {
             self.browser_after_return = Some(Box::new(Command::Open));
             return self.operation_show_browser_page(None);
         }
@@ -167,6 +169,14 @@ impl Shell {
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
+        // Work hands an address back to Browse rather than opening it behind itself.
+        if (self.active_browser_page() == Some(crate::BrowserPage::Work)
+            || (new_tab && self.active_browser_page().is_some()))
+            && !self.browser_return_ready
+        {
+            self.browser_after_return = Some(Box::new(Command::OpenUrl { input, new_tab }));
+            return self.operation_show_browser_page(None);
+        }
         let Some(active) = self.windows.focused().map(|window| window.active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
@@ -225,15 +235,33 @@ impl Shell {
     }
 
     pub(super) fn operation_activate(&mut self, id: ItemId) -> OperationDisposition {
-        if self.active_browser_page().is_some() {
-            self.browser_after_return = Some(Box::new(Command::Activate(id)));
-            return self.operation_show_browser_page(None);
-        }
-
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         let active = self.windows.focused().and_then(|window| window.active);
+        if active == Some(id)
+            && self
+                .items
+                .tab(id)
+                .is_some_and(|tab| tab.content != zephium_core::item::TabContent::Web)
+        {
+            self.touch(id);
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
+        if self.active_browser_page().is_some()
+            && !self.browser_return_ready
+            && self.items.tab(id).is_some_and(|tab| {
+                !matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
+            })
+        {
+            self.browser_after_return = Some(Box::new(Command::Activate(id)));
+            return self.operation_show_browser_page(None);
+        }
+        if self.items.tab(id).is_some_and(|tab| {
+            matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
+        }) {
+            self.browser_page = None;
+        }
         let has_view = self.items.tab(id).is_some_and(TabState::has_view);
         let discard_closing = matches!(
             self.residency.discard_probes.get(&id),
@@ -259,6 +287,19 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        if !self.browser_return_ready
+            && self
+                .windows
+                .focused()
+                .is_some_and(|window| window.active == Some(id))
+            && self
+                .items
+                .tab(id)
+                .is_some_and(|tab| tab.content != zephium_core::item::TabContent::Web)
+        {
+            self.browser_after_return = Some(Box::new(Command::Close(id)));
+            return self.request_browser_return();
+        }
         let discard_closing = matches!(
             self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Closing { .. })
@@ -275,13 +316,36 @@ impl Shell {
     }
 
     pub(super) fn operation_navigate(&mut self, id: ItemId, input: String) -> OperationDisposition {
-        if self.active_browser_page().is_some() {
-            self.browser_after_return = Some(Box::new(Command::Navigate { id, input }));
+        if self.active_browser_page().is_some()
+            && !self.browser_return_ready
+            && !self.work_pane_shows(id)
+        {
+            self.browser_after_return = Some(Box::new(
+                if self.items.tab(id).is_some_and(|tab| {
+                    matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
+                }) {
+                    Command::OpenUrl {
+                        input,
+                        new_tab: true,
+                    }
+                } else {
+                    Command::Navigate { id, input }
+                },
+            ));
             return self.operation_show_browser_page(None);
         }
 
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if self
+            .items
+            .tab(id)
+            .is_some_and(|tab| tab.content != zephium_core::item::TabContent::Web)
+        {
+            // The address field never turns a browser-owned or extension-owned
+            // principal into an ordinary site. Navigate in a fresh web tab.
+            return self.operation_open_url(input, true);
         }
         let Some(input) = self
             .search
@@ -392,6 +456,16 @@ impl Shell {
         if !self.item_in_scope(active, profile, space) || !self.item_in_scope(other, profile, space)
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if [active, other].into_iter().any(|id| {
+            self.items.tab(id).is_some_and(|tab| {
+                matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
+            })
+        }) {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
         }
         if active == other {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
@@ -528,12 +602,24 @@ impl Shell {
     }
 
     pub(super) fn operation_run_command(&mut self, id: &str) -> OperationDisposition {
-        let active = self.windows.focused().and_then(|window| window.active);
+        // Inside Work the pane's tab is the only page a shortcut can mean.
+        let in_work = self.active_browser_page().is_some();
+        let active = if in_work {
+            self.work_pane_tab()
+        } else {
+            self.windows.focused().and_then(|window| window.active)
+        };
         match id {
             "tab.new" => self.operation_open(),
+            "tab.close" if in_work => self.operation_work_pane_hide(),
             "tab.close" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| self.operation_close(id),
+            ),
+            "work.pane.close" => self.operation_work_pane_hide(),
+            "work.pane.openInBrowse" => active.filter(|_| in_work).map_or_else(
+                || operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged),
+                |id| self.operation_activate(id),
             ),
             "tab.reopen" => self.operation_reopen_closed_tab(),
             "tab.next" => self.operation_cycle_tab(1),

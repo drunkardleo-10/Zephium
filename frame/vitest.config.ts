@@ -25,8 +25,8 @@ export default defineConfig({
         plugins: [svelte(), tailwindcss()],
         optimizeDeps: {
           include: [
-            "layerchart/svg",
             "@xyflow/svelte",
+            "elkjs/lib/elk-worker.min.js",
             "@tiptap/core",
             "@tiptap/extension-document",
             "@tiptap/extension-paragraph",
@@ -48,11 +48,16 @@ export default defineConfig({
             "@tiptap/pm/state",
             "@tiptap/pm/view",
             "marked",
+            "@hugeicons/core-free-icons/*",
           ],
         },
         test: {
           name: "component",
           provide: {
+            contentStyleSource: readFileSync(
+              new URL("../crates/zephium-engine/src/host/content_style.js", import.meta.url),
+              "utf8",
+            ),
             packagedStylePolicy: {
               styleSource: JSON.parse(
                 readFileSync(new URL("../desktop/tauri.conf.json", import.meta.url), "utf8"),
@@ -68,6 +73,10 @@ export default defineConfig({
             },
           },
           include: ["src/**/*.component.test.ts"],
+          // Playwright retires the oldest of 10,000 live requests. Parallel
+          // files flood that window while a slow manual mock is still being
+          // resolved, and its route is collected before it can be fulfilled.
+          fileParallelism: false,
           browser: {
             enabled: true,
             headless: true,
@@ -75,7 +84,17 @@ export default defineConfig({
             // Retina is the display this chrome is drawn for, and the one
             // where a radius or a hairline can actually be judged.
             provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),
-            instances: [{ browser: process.platform === "darwin" ? "webkit" : "chromium" }],
+            instances: [
+              {
+                browser:
+                  process.env.ZEPHIUM_COMPONENT_BROWSER === "chromium" ||
+                  process.env.ZEPHIUM_COMPONENT_BROWSER === "webkit"
+                    ? process.env.ZEPHIUM_COMPONENT_BROWSER
+                    : process.platform === "darwin"
+                      ? "webkit"
+                      : "chromium",
+              },
+            ],
           },
         },
       },

@@ -3,6 +3,9 @@
 
 //! Release-excluded macOS native-input/isTrusted risk probe.
 
+#[path = "agentic_owned_input_probe.rs"]
+mod owned;
+
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -55,6 +58,7 @@ const TEARDOWN_WINDOW: Duration = Duration::from_millis(250);
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const MAX_RUNTIME_MESSAGE_UTF16: usize = 32 * 1_024;
 const MAX_RUNTIME_MESSAGE_UTF8: usize = 32 * 1_024;
+const PROBE_VIEWPORT: (u32, u32) = (760, 640);
 
 struct ProbeHostView {
     view: Retained<NSView>,
@@ -119,6 +123,7 @@ enum AdapterError {
     Timeout,
     NativeConstruction,
     Navigation,
+    FocusPolicy,
     InvalidEvidence,
     NativeTeardown,
     ProfileTeardown,
@@ -135,6 +140,7 @@ impl AdapterError {
             Self::ProfileTeardown => ProbeFailureCode::ProfileTeardownIncomplete,
             Self::FixtureTeardown => ProbeFailureCode::FixtureTeardownIncomplete,
             Self::InvalidEvidence => ProbeFailureCode::VerificationFailed,
+            Self::FocusPolicy => ProbeFailureCode::FocusPolicyViolation,
         }
     }
 
@@ -650,9 +656,14 @@ pub(crate) fn run(
     request_id: u64,
     matrix: &RunMatrixRequest,
     permit: &ProbeRunPermit,
+    owned_view: bool,
     mut poll_control: impl FnMut(),
 ) -> Result<RunEvidence, ProbeFailure> {
-    if request_id == 0 || request_id != permit.request_id() || matrix.validate().is_err() {
+    if request_id == 0
+        || request_id != permit.request_id()
+        || matrix.validate().is_err()
+        || (owned_view && matrix.presentation != PresentationState::VisibleFocused)
+    {
         return Err(failure(
             ProbeFailureCode::InvalidRequest,
             ProbeStage::Admit,
@@ -662,7 +673,7 @@ pub(crate) fn run(
         ));
     }
     let pending = objc2::rc::autoreleasepool(|_| {
-        begin_in_autorelease_pool(request_id, matrix, permit, &mut poll_control)
+        begin_in_autorelease_pool(request_id, matrix, permit, owned_view, &mut poll_control)
     })?;
     finish_teardown(pending, &mut poll_control)
 }
@@ -671,6 +682,7 @@ fn begin_in_autorelease_pool(
     request_id: u64,
     matrix: &RunMatrixRequest,
     permit: &ProbeRunPermit,
+    owned_view: bool,
     poll_control: &mut impl FnMut(),
 ) -> Result<PendingTeardown, ProbeFailure> {
     let started = Instant::now();
@@ -700,6 +712,10 @@ fn begin_in_autorelease_pool(
             false,
         )
     })?;
+    let app = NSApplication::sharedApplication(mtm);
+    initialize_application(&app, matrix.presentation)
+        .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
+    let app_active_before_presentation = app.isActive();
     let profile = EphemeralProbeProfile::new()
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
     let configuration = profile
@@ -729,12 +745,7 @@ fn begin_in_autorelease_pool(
         )
     })?;
 
-    let app = NSApplication::sharedApplication(mtm);
-    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    app.finishLaunching();
-    let app_active_before_presentation = app.isActive();
-
-    let window = new_window(mtm)
+    let window = new_window(mtm, matrix.presentation)
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
     let host = ProbeHostView {
         view: window.contentView().ok_or_else(|| {
@@ -753,6 +764,10 @@ fn begin_in_autorelease_pool(
     let popup_requested = Rc::new(Cell::new(false));
     let popup_request_callback = Rc::clone(&popup_requested);
     let webview = wry::WebViewBuilder::new()
+        .with_bounds(wry::Rect {
+            position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+            size: wry::dpi::LogicalSize::new(PROBE_VIEWPORT.0, PROBE_VIEWPORT.1).into(),
+        })
         .with_incognito(true)
         .with_visible(false)
         .with_webview_configuration(configuration)
@@ -779,6 +794,8 @@ fn begin_in_autorelease_pool(
             )
         })?;
     let page = webview.webview();
+    let viewport_valid =
+        page.frame().size == NSSize::new(f64::from(PROBE_VIEWPORT.0), f64::from(PROBE_VIEWPORT.1));
     runtime_mailbox
         .bind_page(&page)
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
@@ -794,7 +811,7 @@ fn begin_in_autorelease_pool(
     };
     let run_loop = NSRunLoop::mainRunLoop();
     let execution = (|| -> Result<_, ProbeFailure> {
-        if !page_configuration_valid {
+        if !page_configuration_valid || !viewport_valid {
             return Err(adapter_failure(
                 AdapterError::NativeConstruction,
                 ProbeStage::Construct,
@@ -802,6 +819,14 @@ fn begin_in_autorelease_pool(
                 None,
             ));
         }
+        let owned_surface = if owned_view {
+            Some(
+                owned::OwnedInputSurface::new(mtm, &host.view, &window, &page)
+                    .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?,
+            )
+        } else {
+            None
+        };
         let mut presentation_control = NativeDispatchControl {
             permit,
             poll_control,
@@ -813,11 +838,12 @@ fn begin_in_autorelease_pool(
             &page,
             &webview,
             matrix.presentation,
+            owned_surface.as_ref(),
             &mut presentation_control,
         )
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
 
-        let runtime = runtime_fingerprint()
+        let runtime = runtime_fingerprint(owned_view)
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         let capabilities = macos_capabilities();
         let mut cases = Vec::with_capacity(matrix.cases.len() * matrix.backends.len());
@@ -855,6 +881,20 @@ fn begin_in_autorelease_pool(
                 .map_err(|error| {
                     adapter_failure(error, ProbeStage::Navigate, Some(case), Some(backend))
                 })?;
+                if !presentation_matches(
+                    matrix.presentation,
+                    window.isVisible(),
+                    window.isKeyWindow(),
+                    app.isActive(),
+                    app_active_before_presentation,
+                ) {
+                    return Err(adapter_failure(
+                        AdapterError::FocusPolicy,
+                        ProbeStage::Execute,
+                        Some(case),
+                        Some(backend),
+                    ));
+                }
                 let evidence = run_case(
                     &app,
                     &window,
@@ -866,6 +906,7 @@ fn begin_in_autorelease_pool(
                     backend,
                     matrix.presentation,
                     geometry,
+                    owned_surface.as_ref(),
                     permit,
                     poll_control,
                     run_deadline,
@@ -988,14 +1029,59 @@ fn finish_teardown(
     Ok(evidence)
 }
 
-fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, AdapterError> {
+fn initialize_application(
+    app: &NSApplication,
+    presentation: PresentationState,
+) -> Result<(), AdapterError> {
+    if presentation == PresentationState::VisibleFocused {
+        if app.activationPolicy() != NSApplicationActivationPolicy::Accessory
+            && !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
+        {
+            return Err(AdapterError::NativeConstruction);
+        }
+        app.finishLaunching();
+        return Ok(());
+    }
+    // Launch without activation before any native window exists.
+    let valid =
+        |policy| app.activationPolicy() == policy && !app.isActive() && app.windows().is_empty();
+    if app.isActive()
+        || !app.windows().is_empty()
+        || (app.activationPolicy() != NSApplicationActivationPolicy::Prohibited
+            && !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited))
+        || !valid(NSApplicationActivationPolicy::Prohibited)
+    {
+        return Err(AdapterError::FocusPolicy);
+    }
+    app.finishLaunching();
+    if !valid(NSApplicationActivationPolicy::Prohibited)
+        || (app.activationPolicy() != NSApplicationActivationPolicy::Accessory
+            && !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory))
+        || !valid(NSApplicationActivationPolicy::Accessory)
+    {
+        return Err(AdapterError::FocusPolicy);
+    }
+    Ok(())
+}
+
+fn new_window(
+    mtm: MainThreadMarker,
+    presentation: PresentationState,
+) -> Result<Retained<NSWindow>, AdapterError> {
     // SAFETY: the marker proves AppKit main-thread affinity. The window is
     // retained through child teardown and configured not to consume itself on close.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(80.0, 80.0), NSSize::new(760.0, 640.0)),
-            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+            NSRect::new(
+                NSPoint::new(80.0, 80.0),
+                NSSize::new(f64::from(PROBE_VIEWPORT.0), f64::from(PROBE_VIEWPORT.1)),
+            ),
+            if presentation == PresentationState::VisibleFocused {
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable
+            } else {
+                NSWindowStyleMask::Borderless
+            },
             NSBackingStoreType::Buffered,
             false,
         )
@@ -1009,12 +1095,27 @@ fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, AdapterError>
     Ok(window)
 }
 
+fn presentation_matches(
+    presentation: PresentationState,
+    visible: bool,
+    key: bool,
+    active: bool,
+    previously_active: bool,
+) -> bool {
+    match presentation {
+        PresentationState::VisibleFocused => visible && key && active,
+        PresentationState::VisibleBackground => visible && !key && (!active || previously_active),
+        PresentationState::Hidden => !visible && !key && (!active || previously_active),
+    }
+}
+
 fn apply_presentation(
     app: &NSApplication,
     window: &NSWindow,
     page: &WryWebView,
     webview: &wry::WebView,
     presentation: PresentationState,
+    owned_surface: Option<&owned::OwnedInputSurface>,
     control: &mut NativeDispatchControl<'_>,
 ) -> Result<(), AdapterError> {
     match presentation {
@@ -1047,7 +1148,10 @@ fn apply_presentation(
                 app.activateIgnoringOtherApps(true);
             }
             control.check()?;
-            if !window.makeFirstResponder(Some(page)) {
+            if !match owned_surface {
+                Some(surface) => surface.focus_chrome(),
+                None => window.makeFirstResponder(Some(page)),
+            } {
                 return Err(AdapterError::NativeConstruction);
             }
             control.check()?;
@@ -1119,6 +1223,7 @@ fn run_case(
     backend: InputBackend,
     presentation: PresentationState,
     geometry: Geometry,
+    owned_surface: Option<&owned::OwnedInputSurface>,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
     run_deadline: Instant,
@@ -1128,6 +1233,20 @@ fn run_case(
     let app_active_before = app.isActive();
     let key_before = window.isKeyWindow();
     let focus_before = native_focus_owner(window, false);
+    if backend == InputBackend::MacosAppKitEvent {
+        if let Some(surface) = owned_surface {
+            let mut control = NativeDispatchControl {
+                permit,
+                poll_control,
+                deadline: run_deadline,
+            };
+            surface
+                .verify_refusals(case, geometry, &mut control)
+                .map_err(|error| {
+                    adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend))
+                })?;
+        }
+    }
     let outcome_hint = execute_backend(
         window,
         page,
@@ -1135,6 +1254,7 @@ fn run_case(
         backend,
         presentation,
         geometry,
+        owned_surface,
         permit,
         poll_control,
         run_deadline,
@@ -1156,6 +1276,29 @@ fn run_case(
             ));
         }
     };
+    if owned_surface.is_some_and(|surface| !surface.current()) {
+        return Err(adapter_failure(
+            AdapterError::FocusPolicy,
+            ProbeStage::Settle,
+            Some(case),
+            Some(backend),
+        ));
+    }
+    if owned_surface.is_some()
+        && state
+            .events
+            .iter()
+            .filter(|event| event.kind == InputEventKind::Click)
+            .count()
+            > 1
+    {
+        return Err(adapter_failure(
+            AdapterError::InvalidEvidence,
+            ProbeStage::Verify,
+            Some(case),
+            Some(backend),
+        ));
+    }
     let target = case.target();
     let target_received_focus = state
         .events
@@ -1212,6 +1355,7 @@ fn execute_backend(
     backend: InputBackend,
     presentation: PresentationState,
     geometry: Geometry,
+    owned_surface: Option<&owned::OwnedInputSurface>,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
     deadline: Instant,
@@ -1230,7 +1374,13 @@ fn execute_backend(
             Ok(None)
         }
         InputBackend::MacosAppKitEvent => {
-            dispatch_appkit(window, page, case, geometry, &mut control)?;
+            if let Some(surface) = owned_surface {
+                if !surface.dispatch_click(case, geometry, &mut control)? {
+                    return Ok(Some(CaseOutcome::Unsupported));
+                }
+            } else {
+                dispatch_appkit(window, page, case, geometry, &mut control)?;
+            }
             Ok(None)
         }
         InputBackend::MacosAccessibility => {
@@ -1519,7 +1669,7 @@ fn native_focus_owner(window: &NSWindow, target_focused: bool) -> FocusOwner {
     }
 }
 
-fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
+fn runtime_fingerprint(owned_view: bool) -> Result<RuntimeFingerprint, AdapterError> {
     let version = NSProcessInfo::processInfo().operatingSystemVersion();
     let os_version = format!(
         "{}.{}.{}",
@@ -1532,8 +1682,12 @@ fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
         engine: EvidenceLabel::new("WebKit").map_err(|_| AdapterError::InvalidEvidence)?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| AdapterError::InvalidEvidence)?,
-        adapter_revision: EvidenceLabel::new("native-input-m1")
-            .map_err(|_| AdapterError::InvalidEvidence)?,
+        adapter_revision: EvidenceLabel::new(if owned_view {
+            "native-input-owned-v1"
+        } else {
+            "native-input-m2"
+        })
+        .map_err(|_| AdapterError::InvalidEvidence)?,
     })
 }
 
@@ -1590,6 +1744,17 @@ fn accessibility_supported_case(case: FixtureCase) -> bool {
 
 fn pump_once(run_loop: &NSRunLoop) {
     objc2::rc::autoreleasepool(|_| {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let app = NSApplication::sharedApplication(mtm);
+            if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                objc2_app_kit::NSEventMask::AppKitDefined,
+                None,
+                objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
+                true,
+            ) {
+                app.sendEvent(&event);
+            }
+        }
         run_loop.runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(
             RUN_LOOP_SLICE.as_secs_f64(),
         ));
@@ -1649,6 +1814,72 @@ fn failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_input_requires_the_dedicated_focused_fixture() {
+        for presentation in [
+            PresentationState::Hidden,
+            PresentationState::VisibleBackground,
+        ] {
+            let gate = zephium_agentic::ProbeGate::new();
+            let permit = gate.try_start(1).expect("permit");
+            let matrix = RunMatrixRequest {
+                cases: vec![FixtureCase::Button],
+                backends: vec![InputBackend::MacosAppKitEvent],
+                presentation,
+            };
+            let result = run(1, &matrix, &permit, true, || {});
+            assert_eq!(
+                result
+                    .expect_err("refuse before creating AppKit objects")
+                    .code,
+                ProbeFailureCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
+    fn requested_presentation_requires_observed_native_state() {
+        use PresentationState::*;
+        assert!(presentation_matches(
+            VisibleFocused,
+            true,
+            true,
+            true,
+            false
+        ));
+        assert!(!presentation_matches(
+            VisibleFocused,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(presentation_matches(
+            VisibleBackground,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(!presentation_matches(
+            VisibleBackground,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(!presentation_matches(
+            VisibleBackground,
+            true,
+            false,
+            true,
+            false
+        ));
+        assert!(presentation_matches(Hidden, false, false, false, false));
+        assert!(!presentation_matches(Hidden, true, false, false, false));
+        assert!(!presentation_matches(Hidden, false, false, true, false));
+    }
 
     fn state(case: FixtureCase) -> FixtureState {
         FixtureState {

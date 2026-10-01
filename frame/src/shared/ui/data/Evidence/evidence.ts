@@ -10,4 +10,6 @@ export type EvidenceView =
       text: string;
       truncated: boolean;
       sourceBytes: string;
+      /** Provider attribution only, never a native browser resource. */
+      citation?: { provider: string; model: string; url: string; title: string };
     };

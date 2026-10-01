@@ -32,7 +32,7 @@ pub const MAX_SEMANTIC_RUNTIME_REQUEST_BYTES: usize = 2 * 1024;
 // page-derived strings. A core-legal Spinbutton Fill with the maximum safe
 // numeric fields reaches this bound exactly; platform execution may still
 // refuse an unsupported concrete number control.
-const SEMANTIC_ACTION_RUNTIME_FIXED_WIRE_UPPER_BOUND_BYTES: usize = 293;
+const SEMANTIC_ACTION_RUNTIME_FIXED_WIRE_UPPER_BOUND_BYTES: usize = 299;
 // Every legal character either remains one UTF-8 byte or JSON-expands to at
 // most two bytes (`\"`, `\\`, `\t`, or `\n`). Control and bidi characters
 // with longer JSON escapes are rejected before encoding.
@@ -55,10 +55,12 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 88 KiB ceiling covers the digest-pinned semantic runtime including
-/// production Fill and native-select protocols while preserving a small,
-/// explicit installation and validation bound on every platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 88 * 1024;
+/// The fixed 144 KiB ceiling covers the digest-pinned semantic runtime including
+/// production Fill, native-select, public links and bounded source-coalesced
+/// windows, keyword discovery, independent page-dialog samples, bounded fill
+/// diagnostics, covered-target centring and the page's structured-data facts,
+/// with an explicit installation bound per platform.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 160 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -71,6 +73,11 @@ pub const SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX: &str = "R1:";
 pub const SEMANTIC_RUNTIME_CHANNEL_ACK: &str = "A1";
 /// Exact native settlement that stops a document's dormant pull loop.
 pub const SEMANTIC_RUNTIME_CHANNEL_STOP: &str = "S1";
+/// Exact native settlement asking an idle document to clear all retained
+/// semantic state before a possible history restoration.
+pub const SEMANTIC_RUNTIME_CHANNEL_PARK: &str = "K1";
+/// Exact runtime acknowledgement after semantic state has been cleared.
+pub const SEMANTIC_RUNTIME_CHANNEL_PARKED: &str = "K1:A";
 /// Exact runtime notice after exhausting its per-document invocation budget.
 pub const SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED: &str = "X1";
 /// Maximum closed invocations accepted by one document before a fresh document is required.
@@ -81,8 +88,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x34, 0x1b, 0x1f, 0x70, 0xd7, 0xe0, 0xdb, 0x2c, 0x76, 0x87, 0x43, 0x8c, 0x64, 0xb1, 0xef, 0x07,
-    0x78, 0xdf, 0xef, 0xf1, 0x91, 0x6c, 0x65, 0x6f, 0x4e, 0x9d, 0x72, 0x85, 0xfb, 0x19, 0x97, 0xea,
+    0x32, 0xb9, 0xab, 0x28, 0x65, 0x86, 0x78, 0xb9, 0x9d, 0xa1, 0x5b, 0xd6, 0x0d, 0x8d, 0x7b, 0x6c,
+    0x17, 0x4e, 0xbe, 0x2e, 0x04, 0xb6, 0x09, 0x9f, 0xa5, 0x06, 0xe3, 0x37, 0xab, 0x50, 0xdd, 0x4d,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -98,6 +105,12 @@ impl SemanticRuntimeProgram {
     /// the separately encoded closed request grammar.
     pub const fn source(self) -> &'static str {
         SEMANTIC_RUNTIME_SOURCE
+    }
+
+    /// Precompacted identical program for the fixed Windows CDP wire ceiling.
+    /// Regenerate with scripts/compact-semantic-runtime.mjs; no runtime rewriting.
+    pub const fn cdp_source(self) -> &'static str {
+        include_str!("../assets/semantic-runtime-cdp-v1.js")
     }
 
     /// Pinned SHA-256 digest of the exact reviewed source bytes.
@@ -140,6 +153,8 @@ pub enum SemanticRuntimeScopeClass {
     Frame,
     /// Bounded readable context surrounding one anchor.
     SurroundingText,
+    /// Bounded keyword-directed visible text below one acknowledged region.
+    TextSearch,
 }
 
 /// Per-frame isolated-runtime ceilings under an aggregate observation budget.
@@ -150,6 +165,7 @@ pub struct SemanticRuntimeBudget {
     max_wire_bytes: u32,
     max_visited_nodes: u32,
     include_geometry: bool,
+    include_link_url_state: bool,
 }
 
 impl SemanticRuntimeBudget {
@@ -160,6 +176,17 @@ impl SemanticRuntimeBudget {
         max_wire_bytes: 64 * 1024,
         max_visited_nodes: 16 * 1024,
         include_geometry: true,
+        include_link_url_state: false,
+    };
+
+    /// A whole-page findings read: most of a long document in one look.
+    pub const WHOLE_PAGE: Self = Self {
+        max_nodes: 320,
+        max_text_bytes: 32 * 1024,
+        max_wire_bytes: 128 * 1024,
+        max_visited_nodes: 16 * 1024,
+        include_geometry: true,
+        include_link_url_state: false,
     };
 
     /// Validates hard per-frame resource ceilings.
@@ -187,6 +214,7 @@ impl SemanticRuntimeBudget {
             max_wire_bytes,
             max_visited_nodes,
             include_geometry,
+            include_link_url_state: false,
         })
     }
 
@@ -213,6 +241,19 @@ impl SemanticRuntimeBudget {
     /// Whether quantized geometry may be returned for action planning.
     pub const fn include_geometry(self) -> bool {
         self.include_geometry
+    }
+
+    /// Enables exact query/fragment bytes for public links in this invocation.
+    /// The default remains off; only a frozen production navigation profile may
+    /// select this immutable host-side capability.
+    pub const fn with_link_url_state(mut self) -> Self {
+        self.include_link_url_state = true;
+        self
+    }
+
+    /// Whether the host explicitly authorized public-link URL state projection.
+    pub const fn includes_link_url_state(self) -> bool {
+        self.include_link_url_state
     }
 }
 
@@ -292,10 +333,13 @@ impl SemanticActionRuntimeInvocation {
         let value = std::str::from_utf8(bytes)
             .map_err(|_| SemanticActionRuntimeResultError::InvalidEncoding)?;
         if let Some(code) = value.strip_prefix("E2:") {
-            return Err(SemanticActionRuntimeResultError::Runtime(
-                SemanticActionRuntimeFault::parse(code)
-                    .ok_or(SemanticActionRuntimeResultError::InvalidFault)?,
+            let fault = SemanticActionRuntimeFault::parse(code)
+                .ok_or(SemanticActionRuntimeResultError::InvalidFault)?;
+            #[cfg(feature = "probe-harness")]
+            crate::probe_evidence_path::trace(format_args!(
+                "native-action-runtime: fault={fault:?}"
             ));
+            return Err(SemanticActionRuntimeResultError::Runtime(fault));
         }
         let wire: SemanticActionRuntimeEvidenceWire = serde_json::from_str(value)
             .map_err(|_| SemanticActionRuntimeResultError::InvalidEncoding)?;
@@ -519,6 +563,13 @@ pub fn encode_semantic_runtime_invocation(
     }
 
     let (scope, scope_class) = match request.scope() {
+        SemanticScope::TextSearch { anchor, query } => (
+            RuntimeScope::TextSearch {
+                anchor: validate_anchor(frame.clone(), anchor, snapshot_generation)?,
+                query: query.as_str().to_owned(),
+            },
+            SemanticRuntimeScopeClass::TextSearch,
+        ),
         SemanticScope::Initial => (RuntimeScope::Initial, SemanticRuntimeScopeClass::Initial),
         SemanticScope::Region(anchor) => {
             let anchor = validate_anchor(frame.clone(), anchor, snapshot_generation)?;
@@ -572,6 +623,7 @@ pub fn encode_semantic_runtime_invocation(
             max_wire_bytes: budget.max_wire_bytes,
             max_visited_nodes: budget.max_visited_nodes,
             include_geometry: budget.include_geometry,
+            include_link_url_state: budget.include_link_url_state,
         },
     };
     let encoded =
@@ -634,6 +686,12 @@ pub fn encode_semantic_action_runtime_invocation(
         (_, None) => None,
         (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
     };
+    #[cfg(feature = "probe-harness")]
+    crate::probe_evidence_path::trace(format_args!(
+        "native-action-runtime: dispatch={:?}; scroll={:?}",
+        request.kind(),
+        request.scroll_recipe()
+    ));
     let wire = SemanticActionRuntimeInvocationWire {
         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
         operation: "action_execute",
@@ -653,6 +711,27 @@ pub fn encode_semantic_action_runtime_invocation(
         fill_text,
         target_descriptor: request.target_runtime_descriptor(),
         option_descriptor,
+        page_dialog_opened: request.page_dialog_opened(),
+        press: request.press_key().map(press_key_wire),
+        scroll: request
+            .scroll_recipe()
+            .map(|(direction, amount)| {
+                use crate::{SemanticScrollAmount as A, SemanticScrollDirection as D};
+                let direction = match direction {
+                    D::Up => "up",
+                    D::Down => "down",
+                    D::Left => "left",
+                    D::Right => "right",
+                };
+                let amount = match amount {
+                    A::Line => "line",
+                    A::HalfPage => "half_page",
+                    A::Page => "page",
+                    A::IntoView => "into_view",
+                };
+                Ok([direction, amount])
+            })
+            .transpose()?,
     };
     let encoded =
         serde_json::to_string(&wire).map_err(|_| SemanticActionRuntimeInvocationError::Encoding)?;
@@ -668,7 +747,7 @@ pub fn encode_semantic_action_runtime_invocation(
     })
 }
 
-const fn semantic_role_wire(role: SemanticRole) -> &'static str {
+pub(crate) const fn semantic_role_wire(role: SemanticRole) -> &'static str {
     match role {
         SemanticRole::Group => "group",
         SemanticRole::Document => "document",
@@ -700,6 +779,26 @@ const fn semantic_role_wire(role: SemanticRole) -> &'static str {
         SemanticRole::Progress => "progress",
         SemanticRole::Status => "status",
         SemanticRole::FrameBoundary => "frame_boundary",
+    }
+}
+
+const fn press_key_wire(key: crate::SemanticPressKey) -> &'static str {
+    use crate::SemanticPressKey as K;
+    match key {
+        K::Enter => "enter",
+        K::Escape => "escape",
+        K::Space => "space",
+        K::Tab => "tab",
+        K::ArrowUp => "arrow_up",
+        K::ArrowDown => "arrow_down",
+        K::ArrowLeft => "arrow_left",
+        K::ArrowRight => "arrow_right",
+        K::Home => "home",
+        K::End => "end",
+        K::PageUp => "page_up",
+        K::PageDown => "page_down",
+        K::Backspace => "backspace",
+        K::Delete => "delete",
     }
 }
 
@@ -745,6 +844,10 @@ pub enum SemanticActionRuntimeFault {
     StaleReference,
     /// Target role or supported operation changed.
     TargetChanged,
+    /// Captured semantic role, name, state or operation no longer matches.
+    TargetDescriptorChanged,
+    /// Target layout moved beyond the admitted geometry tolerance.
+    TargetGeometryChanged,
     /// Target became disabled or read-only for this operation.
     TargetDisabled,
     /// Target is or became a credential field.
@@ -753,8 +856,52 @@ pub enum SemanticActionRuntimeFault {
     TargetOccluded,
     /// The exact action cannot use the fixed native route.
     UnsupportedInteraction,
+    /// The pre-dispatch dialog census exceeded its node or dialog ceiling.
+    PageDialogSampleLimit,
+    /// A complete pre-dispatch dialog census had no live document or viewport.
+    PageDialogSampleUnavailable,
     /// The page may have observed or applied the action, but exact proof failed.
     AppliedUnverified,
+    /// The page cancelled the compatibility beforeinput event.
+    AppliedUnverifiedBeforeInputCancelled,
+    /// The target changed or failed revalidation after beforeinput.
+    AppliedUnverifiedBeforeInputRevalidation,
+    /// The compatibility mutation or its input notification threw.
+    AppliedUnverifiedMutation,
+    /// No correlated terminal was available from the compatibility relay.
+    AppliedUnverifiedRelay,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayDeadline,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayCommandGone,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayCommandChanged,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayDetached,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayRoot,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayTerminalMalformed,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayTerminalForeign,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayTerminalUnknown,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayRead,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelaySetup,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayPublication,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayCleanup,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayOverflow,
+    /// Closed relay diagnostic; never proof of a safely retryable action.
+    AppliedUnverifiedRelayPageException,
+    /// The adjacent isolated projection did not prove the exact postcondition.
+    AppliedUnverifiedPostcondition,
+    /// A gated command matched a fresh logical value, without exact-ref proof.
+    AppliedUnverifiedLogicalEditor,
     /// Runtime hit a closed internal invariant.
     Internal,
 }
@@ -768,11 +915,55 @@ impl SemanticActionRuntimeFault {
             "busy" => Some(Self::Busy),
             "stale_reference" => Some(Self::StaleReference),
             "target_changed" => Some(Self::TargetChanged),
+            "target_descriptor_changed"
+            | "target_descriptor_incomplete"
+            | "target_name_changed"
+            | "target_state_changed"
+            | "target_operations_changed" => Some(Self::TargetDescriptorChanged),
+            "target_geometry_changed" => Some(Self::TargetGeometryChanged),
             "target_disabled" => Some(Self::TargetDisabled),
             "credential_boundary" => Some(Self::CredentialBoundary),
             "target_occluded" => Some(Self::TargetOccluded),
             "unsupported_interaction" => Some(Self::UnsupportedInteraction),
+            "page_dialog_sample_limit" => Some(Self::PageDialogSampleLimit),
+            "page_dialog_sample_unavailable" => Some(Self::PageDialogSampleUnavailable),
             "applied_unverified" => Some(Self::AppliedUnverified),
+            "applied_unverified_beforeinput_cancelled" => {
+                Some(Self::AppliedUnverifiedBeforeInputCancelled)
+            }
+            "applied_unverified_beforeinput_revalidation" => {
+                Some(Self::AppliedUnverifiedBeforeInputRevalidation)
+            }
+            "applied_unverified_mutation" => Some(Self::AppliedUnverifiedMutation),
+            "applied_unverified_relay" => Some(Self::AppliedUnverifiedRelay),
+            "applied_unverified_relay_deadline" => Some(Self::AppliedUnverifiedRelayDeadline),
+            "applied_unverified_relay_command_gone" => {
+                Some(Self::AppliedUnverifiedRelayCommandGone)
+            }
+            "applied_unverified_relay_command_changed" => {
+                Some(Self::AppliedUnverifiedRelayCommandChanged)
+            }
+            "applied_unverified_relay_detached" => Some(Self::AppliedUnverifiedRelayDetached),
+            "applied_unverified_relay_root" => Some(Self::AppliedUnverifiedRelayRoot),
+            "applied_unverified_relay_terminal_malformed" => {
+                Some(Self::AppliedUnverifiedRelayTerminalMalformed)
+            }
+            "applied_unverified_relay_terminal_foreign" => {
+                Some(Self::AppliedUnverifiedRelayTerminalForeign)
+            }
+            "applied_unverified_relay_terminal_unknown" => {
+                Some(Self::AppliedUnverifiedRelayTerminalUnknown)
+            }
+            "applied_unverified_relay_read" => Some(Self::AppliedUnverifiedRelayRead),
+            "applied_unverified_relay_setup" => Some(Self::AppliedUnverifiedRelaySetup),
+            "applied_unverified_relay_publication" => Some(Self::AppliedUnverifiedRelayPublication),
+            "applied_unverified_relay_cleanup" => Some(Self::AppliedUnverifiedRelayCleanup),
+            "applied_unverified_relay_overflow" => Some(Self::AppliedUnverifiedRelayOverflow),
+            "applied_unverified_relay_page_exception" => {
+                Some(Self::AppliedUnverifiedRelayPageException)
+            }
+            "applied_unverified_postcondition" => Some(Self::AppliedUnverifiedPostcondition),
+            "applied_unverified_logical_editor" => Some(Self::AppliedUnverifiedLogicalEditor),
             "internal" => Some(Self::Internal),
             _ => None,
         }
@@ -1045,6 +1236,12 @@ struct RuntimeInvocationWire {
 #[derive(Serialize)]
 #[serde(tag = "k", rename_all = "snake_case")]
 enum RuntimeScope {
+    TextSearch {
+        #[serde(rename = "a")]
+        anchor: u64,
+        #[serde(rename = "q")]
+        query: String,
+    },
     Initial,
     Region {
         #[serde(rename = "a")]
@@ -1084,10 +1281,18 @@ struct RuntimeBudgetWire {
     max_visited_nodes: u32,
     #[serde(rename = "geo")]
     include_geometry: bool,
+    #[serde(rename = "lu", skip_serializing_if = "std::ops::Not::not")]
+    include_link_url_state: bool,
 }
 
 #[derive(Serialize)]
 struct SemanticActionRuntimeInvocationWire<'a> {
+    #[serde(rename = "sc", skip_serializing_if = "Option::is_none")]
+    scroll: Option<[&'static str; 2]>,
+    #[serde(rename = "pk", skip_serializing_if = "Option::is_none")]
+    press: Option<&'static str>,
+    #[serde(rename = "u", skip_serializing_if = "std::ops::Not::not")]
+    page_dialog_opened: bool,
     #[serde(rename = "v")]
     version: u16,
     #[serde(rename = "o")]
@@ -1300,6 +1505,118 @@ mod tests {
     }
 
     #[test]
+    fn fill_fault_diagnostics_accept_only_closed_content_free_phases() {
+        for (code, expected) in [
+            (
+                "applied_unverified_beforeinput_cancelled",
+                SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputCancelled,
+            ),
+            (
+                "applied_unverified_beforeinput_revalidation",
+                SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputRevalidation,
+            ),
+            (
+                "applied_unverified_mutation",
+                SemanticActionRuntimeFault::AppliedUnverifiedMutation,
+            ),
+            (
+                "applied_unverified_relay",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelay,
+            ),
+            (
+                "applied_unverified_relay_deadline",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayDeadline,
+            ),
+            (
+                "applied_unverified_relay_command_gone",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandGone,
+            ),
+            (
+                "applied_unverified_relay_command_changed",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayCommandChanged,
+            ),
+            (
+                "applied_unverified_relay_detached",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayDetached,
+            ),
+            (
+                "applied_unverified_relay_root",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayRoot,
+            ),
+            (
+                "applied_unverified_relay_terminal_malformed",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalMalformed,
+            ),
+            (
+                "applied_unverified_relay_terminal_foreign",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalForeign,
+            ),
+            (
+                "applied_unverified_relay_terminal_unknown",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayTerminalUnknown,
+            ),
+            (
+                "applied_unverified_relay_read",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayRead,
+            ),
+            (
+                "applied_unverified_relay_setup",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelaySetup,
+            ),
+            (
+                "applied_unverified_relay_publication",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayPublication,
+            ),
+            (
+                "applied_unverified_relay_cleanup",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayCleanup,
+            ),
+            (
+                "applied_unverified_relay_overflow",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayOverflow,
+            ),
+            (
+                "applied_unverified_relay_page_exception",
+                SemanticActionRuntimeFault::AppliedUnverifiedRelayPageException,
+            ),
+            (
+                "applied_unverified_postcondition",
+                SemanticActionRuntimeFault::AppliedUnverifiedPostcondition,
+            ),
+            (
+                "applied_unverified_logical_editor",
+                SemanticActionRuntimeFault::AppliedUnverifiedLogicalEditor,
+            ),
+        ] {
+            assert_eq!(SemanticActionRuntimeFault::parse(code), Some(expected));
+            assert_eq!(
+                SemanticActionRuntimeFault::parse(&format!("{code}:page-detail")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn dialog_sample_faults_are_closed_and_content_free() {
+        for (code, expected) in [
+            (
+                "page_dialog_sample_limit",
+                SemanticActionRuntimeFault::PageDialogSampleLimit,
+            ),
+            (
+                "page_dialog_sample_unavailable",
+                SemanticActionRuntimeFault::PageDialogSampleUnavailable,
+            ),
+        ] {
+            assert_eq!(SemanticActionRuntimeFault::parse(code), Some(expected));
+            assert_eq!(
+                SemanticActionRuntimeFault::parse(&format!("{code}:page-detail")),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn immutable_program_is_size_bounded_digest_pinned_and_bridge_free() {
         let source = SEMANTIC_RUNTIME_PROGRAM.source();
         assert!(source.len() <= MAX_SEMANTIC_RUNTIME_SOURCE_BYTES);
@@ -1332,11 +1649,7 @@ mod tests {
             "XMLHttpRequest",
             "WebSocket",
             "EventSource",
-            "MutationObserver",
-            "setTimeout",
             "setInterval",
-            "requestAnimationFrame",
-            "addEventListener",
             ".dispatchEvent(",
             ".click(",
             ".focus(",
@@ -1363,15 +1676,22 @@ mod tests {
                 "forbidden runtime surface: {forbidden}"
             );
         }
+        // Fill has no page-originated transport or idle observer.
+        for forbidden in ["MutationObserver", "CustomEvent", "PAGE_RELAY"] {
+            assert!(
+                !source.contains(forbidden),
+                "forbidden fill transport: {forbidden}"
+            );
+        }
         assert_eq!(
             source
                 .matches("EventTarget.prototype.dispatchEvent")
                 .count(),
-            0
+            1
         );
         assert_eq!(source.matches("Element.prototype.setAttribute").count(), 1);
         assert!(!source.contains(".setAttribute("));
-        assert!(source.contains("const nodeKeys = new WeakMap()"));
+        assert!(source.contains("let nodeKeys = new WeakMap()"));
         assert!(source.contains("keyNodes.set(key, { node, generation })"));
         assert!(source.contains("sweepIdentities(request.g);"));
         assert_eq!(
@@ -1381,7 +1701,14 @@ mod tests {
             1
         );
         assert_eq!(source.matches("channel.postMessage").count(), 1);
-        assert_eq!(source.matches("await apply(post, channel").count(), 3);
+        assert_eq!(source.matches("await apply(post, channel").count(), 4);
+        assert_eq!(
+            source
+                .matches("EventTarget.prototype.addEventListener")
+                .count(),
+            1
+        );
+        assert!(!source.contains(".addEventListener("));
         assert!(source.contains("completed < MAX_DOCUMENT_INVOCATIONS"));
         assert!(!source.contains("evaluateJavaScript"));
         assert!(!source.contains("callAsyncJavaScript"));
@@ -1391,6 +1718,23 @@ mod tests {
         let debug = format!("{SEMANTIC_RUNTIME_PROGRAM:?}");
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("WeakMap"));
+    }
+
+    #[test]
+    fn compact_program_is_bound_to_the_reviewed_source_and_exact_output() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/semantic-runtime-cdp-v1.json"))
+                .expect("manifest");
+        for (key, source) in [
+            ("source", SEMANTIC_RUNTIME_PROGRAM.source()),
+            ("compact", SEMANTIC_RUNTIME_PROGRAM.cdp_source()),
+        ] {
+            assert!(source.is_ascii());
+            assert_eq!(
+                manifest[key],
+                format!("{:x}", Sha256::digest(source.as_bytes()))
+            );
+        }
     }
 
     #[test]
@@ -1420,6 +1764,20 @@ mod tests {
         assert!(!debug.contains("runtime-private"));
         assert!(!debug.contains(r#""i":7"#));
         assert!(debug.contains("[redacted]"));
+
+        let url_state = encode_semantic_runtime_invocation(
+            &request,
+            frame(context),
+            SemanticInvocationId::new(8).expect("invocation"),
+            SemanticSnapshotGeneration::new(10).expect("generation"),
+            SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state(),
+        )
+        .expect("authorized link URL state");
+        assert!(url_state.budget().includes_link_url_state());
+        assert_eq!(
+            url_state.as_str(),
+            r#"{"v":1,"i":8,"g":10,"s":{"k":"initial"},"b":{"n":128,"t":16384,"w":65536,"x":16384,"geo":true,"lu":true}}"#
+        );
     }
 
     #[test]
@@ -1427,6 +1785,35 @@ mod tests {
         let joined_context = context(2);
         let prior = observation(joined_context);
         let prior_frame = prior.frames()[0].frame().clone();
+        let search_request = prior
+            .begin_expansion(
+                SemanticObservationId::new(2).unwrap(),
+                SemanticReferenceId::new(2).unwrap(),
+                &prior_frame,
+                SemanticExpansionKind::TextSearch(
+                    crate::SemanticTextSearch::try_new("width \"quoted\" 尺寸".into()).unwrap(),
+                ),
+                SemanticObservationBudget::try_new(64, 8192, 1).unwrap(),
+            )
+            .unwrap();
+        let search_invocation = encode_semantic_runtime_invocation(
+            &search_request,
+            prior_frame.clone(),
+            SemanticInvocationId::new(12).unwrap(),
+            SemanticSnapshotGeneration::new(22).unwrap(),
+            SemanticRuntimeBudget::try_new(64, 8192, 32 * 1024, 4096, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            search_invocation.scope(),
+            SemanticRuntimeScopeClass::TextSearch
+        );
+        let wire: serde_json::Value = serde_json::from_str(search_invocation.as_str()).unwrap();
+        assert_eq!(
+            wire["s"],
+            json!({"k":"text_search","a":9002,"q":"width \"quoted\" 尺寸"})
+        );
+        assert!(!format!("{search_invocation:?}").contains("quoted"));
         let request = prior
             .begin_expansion(
                 SemanticObservationId::new(2).expect("observation id"),
@@ -1705,6 +2092,7 @@ mod tests {
         let descriptor =
             crate::SemanticActionRuntimeDescriptor::maximum_text_wire_witness(name, prior_value);
         let wire = SemanticActionRuntimeInvocationWire {
+            press: None,
             version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
             operation: "action_execute",
             attempt: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
@@ -1723,9 +2111,11 @@ mod tests {
             fill_text: Some(&replacement),
             target_descriptor: &descriptor,
             option_descriptor: None,
+            page_dialog_opened: false,
+            scroll: None,
         };
         let encoded = serde_json::to_string(&wire).expect("maximum legal fill wire");
-        assert_eq!(encoded.len(), 17_701);
+        assert_eq!(encoded.len(), 17_707);
         assert_eq!(encoded.len(), MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);
 
         for value in [
@@ -1751,6 +2141,7 @@ mod tests {
                             name, prior,
                         );
                     let wire = SemanticActionRuntimeInvocationWire {
+                        press: None,
                         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
                         operation: "action_execute",
                         attempt: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
@@ -1769,6 +2160,8 @@ mod tests {
                         fill_text: Some(&replacement),
                         target_descriptor: &descriptor,
                         option_descriptor: None,
+                        page_dialog_opened: false,
+                        scroll: None,
                     };
                     let encoded = serde_json::to_string(&wire).expect("legal fill variant");
                     assert!(encoded.len() <= MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);

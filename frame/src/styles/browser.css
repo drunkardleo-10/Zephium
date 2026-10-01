@@ -20,7 +20,10 @@
 .stage-page {
   height: 100%;
   transform-origin: 50% 40%;
-  animation: stage-in var(--motion-page) var(--ease-emphasized) both;
+  /* Backwards, not both: a transform held after the entrance would make this
+     page the containing block of everything fixed inside it, and Work's panes
+     and lifts, placed in window coordinates, would land offset by the column. */
+  animation: stage-in var(--motion-page) var(--ease-emphasized) backwards;
 }
 @keyframes stage-in {
   from {

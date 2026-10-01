@@ -1,0 +1,663 @@
+{
+  "schema": 1,
+  "measuredDate": "2026-09-09",
+  "platform": {
+    "productVersion": "27.0",
+    "buildVersion": "26A5425a"
+  },
+  "sourceSHA256": "f39cf82997d59c4b6a8f959ecf78caeff39843f353078d7a8d1c6496dced8a72",
+  "binarySHA256": "5489ded320d47942770850f3d28de07f43d0ac35c2dc5e9a5890dd28f0052739",
+  "productionAdmission": false,
+  "results": [
+    {
+      "appActive": false,
+      "case": "main",
+      "entered": true,
+      "events": [
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "focusin",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "textInput",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "insertText",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "beforeinput",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "insertText",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "input",
+            "value": "bounded insertion"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "activeElement": "main",
+            "mainValue": "bounded insertion",
+            "origin": "https://fixed.invalid",
+            "scriptAttempt": "",
+            "type": "settled",
+            "value": ""
+          }
+        }
+      ],
+      "markedAfterInsert": false,
+      "markedBeforeInsert": false,
+      "nativeResponderExact": true,
+      "nativeURL": "https://fixed.invalid/",
+      "navigations": [
+        {
+          "allowed": true,
+          "mainFrame": true,
+          "url": "https://fixed.invalid/"
+        }
+      ],
+      "windowKey": false,
+      "windowMain": false,
+      "windowVisible": false
+    },
+    {
+      "appActive": false,
+      "case": "dynamic-blank-denied",
+      "entered": true,
+      "events": [
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "focusin",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": false,
+          "nativeFrameURL": "about:blank",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "editor",
+            "trusted": true,
+            "type": "focusin",
+            "value": "child original"
+          }
+        },
+        {
+          "mainFrame": false,
+          "nativeFrameURL": "about:blank",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "editor",
+            "trusted": true,
+            "type": "textInput",
+            "value": "child original"
+          }
+        },
+        {
+          "mainFrame": false,
+          "nativeFrameURL": "about:blank",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "insertText",
+            "sticky": false,
+            "target": "editor",
+            "trusted": true,
+            "type": "beforeinput",
+            "value": "child original"
+          }
+        },
+        {
+          "mainFrame": false,
+          "nativeFrameURL": "about:blank",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "insertText",
+            "sticky": false,
+            "target": "editor",
+            "trusted": true,
+            "type": "input",
+            "value": "bounded insertion"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "activeElement": "IFRAME",
+            "mainValue": "main original",
+            "origin": "https://fixed.invalid",
+            "scriptAttempt": "",
+            "type": "settled",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": false,
+          "nativeFrameURL": "about:blank",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "activeElement": "editor",
+            "mainValue": "",
+            "origin": "https://fixed.invalid",
+            "scriptAttempt": "",
+            "type": "settled",
+            "value": "bounded insertion"
+          }
+        }
+      ],
+      "markedAfterInsert": false,
+      "markedBeforeInsert": false,
+      "nativeResponderExact": true,
+      "nativeURL": "https://fixed.invalid/",
+      "navigations": [
+        {
+          "allowed": true,
+          "mainFrame": true,
+          "url": "https://fixed.invalid/"
+        },
+        {
+          "allowed": false,
+          "mainFrame": false,
+          "url": "about:blank"
+        }
+      ],
+      "windowKey": false,
+      "windowMain": false,
+      "windowVisible": false
+    },
+    {
+      "appActive": false,
+      "case": "sandbox-srcdoc",
+      "entered": true,
+      "events": [
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "focusin",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "IFRAME",
+            "trusted": true,
+            "type": "focusin",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": false,
+          "nativeFrameURL": "about:srcdoc",
+          "nativeOrigin": "://:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "BODY",
+            "trusted": true,
+            "type": "textInput",
+            "value": "setTimeout(()=>{document.body.setAttribute('data-attempt','ran');const e=document.getElementById('editor');e.focus();e.select();document.body.setAttribute('data-attempt','done');},600)"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "activeElement": "IFRAME",
+            "mainValue": "main original",
+            "origin": "https://fixed.invalid",
+            "scriptAttempt": "",
+            "type": "settled",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": false,
+          "nativeFrameURL": "about:srcdoc",
+          "nativeOrigin": "://:0",
+          "phase": "after-insert",
+          "witness": {
+            "activeElement": "BODY",
+            "mainValue": "",
+            "origin": "null",
+            "scriptAttempt": "done",
+            "type": "settled",
+            "value": "child original"
+          }
+        }
+      ],
+      "markedAfterInsert": false,
+      "markedBeforeInsert": false,
+      "nativeResponderExact": true,
+      "nativeURL": "https://fixed.invalid/",
+      "navigations": [
+        {
+          "allowed": true,
+          "mainFrame": true,
+          "url": "https://fixed.invalid/"
+        },
+        {
+          "allowed": true,
+          "mainFrame": false,
+          "url": "about:srcdoc"
+        }
+      ],
+      "windowKey": false,
+      "windowMain": false,
+      "windowVisible": false
+    },
+    {
+      "appActive": false,
+      "case": "sandbox-srcdoc-denied",
+      "entered": true,
+      "events": [
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "focusin",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "IFRAME",
+            "trusted": true,
+            "type": "focusin",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "activeElement": "IFRAME",
+            "mainValue": "main original",
+            "origin": "https://fixed.invalid",
+            "scriptAttempt": "",
+            "type": "settled",
+            "value": ""
+          }
+        }
+      ],
+      "markedAfterInsert": false,
+      "markedBeforeInsert": false,
+      "nativeResponderExact": true,
+      "nativeURL": "https://fixed.invalid/",
+      "navigations": [
+        {
+          "allowed": true,
+          "mainFrame": true,
+          "url": "https://fixed.invalid/"
+        },
+        {
+          "allowed": false,
+          "mainFrame": false,
+          "url": "about:srcdoc"
+        }
+      ],
+      "windowKey": false,
+      "windowMain": false,
+      "windowVisible": false
+    },
+    {
+      "appActive": false,
+      "case": "composition",
+      "entered": true,
+      "events": [
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "focusin",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "deleteByComposition",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "beforeinput",
+            "value": "main original"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "deleteByComposition",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "input",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "compositionstart",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "compositionupdate",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "insertCompositionText",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "beforeinput",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "before-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "insertCompositionText",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "input",
+            "value": "marked seed"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "deleteCompositionText",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "beforeinput",
+            "value": "marked seed"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "deleteCompositionText",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "input",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "textInput",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "insertFromComposition",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "beforeinput",
+            "value": ""
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": true,
+            "inputType": "insertFromComposition",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "input",
+            "value": "bounded insertion"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "active": false,
+            "composing": false,
+            "inputType": "",
+            "sticky": false,
+            "target": "main",
+            "trusted": true,
+            "type": "compositionend",
+            "value": "bounded insertion"
+          }
+        },
+        {
+          "mainFrame": true,
+          "nativeFrameURL": "https://fixed.invalid/",
+          "nativeOrigin": "https://fixed.invalid:0",
+          "phase": "after-insert",
+          "witness": {
+            "activeElement": "main",
+            "mainValue": "bounded insertion",
+            "origin": "https://fixed.invalid",
+            "scriptAttempt": "",
+            "type": "settled",
+            "value": ""
+          }
+        }
+      ],
+      "markedAfterInsert": false,
+      "markedBeforeInsert": false,
+      "nativeResponderExact": true,
+      "nativeURL": "https://fixed.invalid/",
+      "navigations": [
+        {
+          "allowed": true,
+          "mainFrame": true,
+          "url": "https://fixed.invalid/"
+        }
+      ],
+      "windowKey": false,
+      "windowMain": false,
+      "windowVisible": false
+    }
+  ]
+}

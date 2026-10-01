@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zephium Work Integration",
+  "identifier": "app.zephium.work-integration",
+  "build": { "devUrl": null },
+  "bundle": {
+    "targets": ["app"],
+    "macOS": { "signingIdentity": "Developer ID Application: Edgar Injighulyan (4FLB46KK27)" }
+  },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "create": false,
+      "title": "Zephium Work Integration",
+      "width": 1200,
+      "height": 800,
+      "minWidth": 680,
+      "minHeight": 480,
+      "hiddenTitle": true,
+      "titleBarStyle": "Overlay",
+      "transparent": true,
+      "trafficLightPosition": { "x": 7, "y": 25 },
+      "url": "browser.html"
+    }]
+  }
+}

@@ -102,6 +102,7 @@ enum Phase {
     Acquire(u8),
     WaitingSample,
     Read(u8, SemanticRuntimeCorrelation),
+    DeliveryDelay(u8, Instant),
     Stamp(u8, RenderRequest),
     Revoke(u8),
     Retire(RenderRequest),
@@ -474,6 +475,11 @@ impl Driver {
                 self.observe(0)?;
             }
         }
+        if let Phase::DeliveryDelay(index, until) = self.phase {
+            if Instant::now() >= until {
+                self.render(RenderOp::Inspect, Some(index))?;
+            }
+        }
         Ok(())
     }
     fn reply(&mut self, reply: Reply) -> Result<(), &'static str> {
@@ -515,7 +521,8 @@ impl Driver {
                         if Some(&resource) == self.resource.as_ref() =>
                     {
                         self.rendering_started = Some(Instant::now());
-                        self.render(RenderOp::Acquire, None)
+                        EXPECTED.with(|slot| *slot.borrow_mut() = Some(resource));
+                        self.acquire(0)
                     }
                     (Phase::Acquire(index), WorkBrowserResourceEvent::Acquired(lease))
                         if Some(&lease) == self.lease.as_ref() =>
@@ -601,7 +608,16 @@ impl Driver {
                     animation_frame: sample.animation_frame,
                 });
                 if controls && sample.animation_frame {
-                    self.render(RenderOp::Inspect, Some(index))
+                    // Model/provider latency is outside the rendering episode.
+                    // Deliberately wait before an independent native inspection
+                    // confirms the page stayed hidden with no live holder.
+                    self.phase = Phase::DeliveryDelay(
+                        index,
+                        Instant::now()
+                            .checked_add(Duration::from_millis(400))
+                            .ok_or("delay")?,
+                    );
+                    Ok(())
                 } else if index == 0 {
                     self.phase = Phase::WaitingSample;
                     Ok(())
@@ -620,6 +636,9 @@ impl Driver {
                     if request == expected && evidence.state == ForegroundRenderingState::Ready =>
                 {
                     let stamp = evidence.stamp.ok_or("native_stamp")?;
+                    if stamp.presented_observations() != stamp.completed() {
+                        return Err("presentation_retirement_counter");
+                    }
                     self.native_counts[usize::from(index)] = stamp.completed();
                     if index == 0 {
                         if stamp.completed() == 0 {
@@ -728,6 +747,7 @@ impl Driver {
             .is_some_and(|fixture| fixture.shutdown().is_ok());
         self.human_preserved &= self.human.is_current();
         crate::diagnostic!("work-resource-retention: distinct_leases={} ended_leases={} unchanged_native_page_document_world={} stale_core_rejected={} stale_native_rejected={} native_completed_before={} native_completed_after={} resource_core_clean={}", self.distinct_leases, self.ended, self.retained, self.stale_core, self.stale_native, self.native_counts[0], self.native_counts[1], self.rows.is_quiescent());
+        crate::diagnostic!("work-observation-rendering: production_read_path=true presentation_retired_before_delivery={} delayed_native_inspection_ms=400", self.retained);
         let report = ForegroundRenderingWitnessReport {
             outcome: self.outcome,
             cleanup_failure: self.cleanup_failure,

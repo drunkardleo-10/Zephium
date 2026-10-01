@@ -34,6 +34,10 @@ const WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
 const MAX_WORLD_NAME_BYTES: usize = 96;
 const MAX_BROWSER_IDENTIFIER_BYTES: usize = 256;
 const MAX_CONTROL_PARAMETERS_BYTES: usize = 128 * 1_024;
+// Only the immutable, hash-pinned runtime installer needs this allowance:
+// its current JSON payload exceeds 128 KiB after Work's native editing support.
+// Other control messages and all page-supplied invocations keep their limits.
+const MAX_RUNTIME_INSTALL_PARAMETERS_BYTES: usize = 192 * 1_024;
 pub(crate) const MAX_CONTROL_RESPONSE_BYTES: usize = 512 * 1_024;
 pub(crate) const MAX_CONTEXT_EVENT_BYTES: usize = 32 * 1_024;
 pub(crate) const MAX_CONTEXT_EVENTS_PER_INVOCATION: u16 = 512;
@@ -351,7 +355,7 @@ pub(crate) enum SemanticCdpInvocationError {
 pub(crate) fn install_runtime_in_context_command(
     context: &SemanticExecutionContext,
 ) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
-    let source = SEMANTIC_RUNTIME_PROGRAM.source();
+    let source = SEMANTIC_RUNTIME_PROGRAM.cdp_source();
     if source.len() > MAX_SEMANTIC_RUNTIME_SOURCE_BYTES || !source.is_ascii() {
         return Err(SemanticCdpProtocolError::Limit);
     }
@@ -381,7 +385,7 @@ pub(crate) fn install_runtime_in_context_command(
             "awaitPromise": false,
             "uniqueContextId": context.unique_id(),
         }),
-        MAX_CONTROL_PARAMETERS_BYTES,
+        MAX_RUNTIME_INSTALL_PARAMETERS_BYTES,
         MAX_CONTROL_RESPONSE_BYTES,
     )
 }
@@ -653,7 +657,7 @@ mod tests {
         assert!(declaration.ends_with(INSTALL_FUNCTION_SUFFIX));
         assert_eq!(
             declaration
-                .matches(SEMANTIC_RUNTIME_PROGRAM.source())
+                .matches(SEMANTIC_RUNTIME_PROGRAM.cdp_source())
                 .count(),
             1
         );

@@ -63,6 +63,7 @@ pub(super) struct FaviconState {
     pub(super) store_generation: u64,
     pub(super) pending_batch: Option<PendingFaviconBatch>,
     pub(super) batch_generation: u64,
+    pub(super) probe: super::favicon_probe::FaviconProbeState,
 }
 
 impl Shell {
@@ -478,6 +479,51 @@ impl Shell {
             );
         }
         self.project_items();
+    }
+
+    /// A Work page the agent read discovered its icon: cache it by origin
+    /// exactly as a tab's would be, and hand it to chrome.
+    pub(super) fn work_page_favicon(&mut self, profile: ProfileId, page_url: &str, rgba: Vec<u8>) {
+        let Some(origin) = url::Url::parse(page_url)
+            .ok()
+            .and_then(|url| origin_of(&url))
+        else {
+            return;
+        };
+        if self.profiles.get(profile).is_none() {
+            return;
+        }
+        self.admit_origin_icon(profile, &origin, &rgba);
+    }
+
+    /// Caches, stores and delivers one fresh raster for an origin no item
+    /// names. The same capacity and age rules apply as for a tab's icon.
+    pub(super) fn admit_origin_icon(
+        &mut self,
+        profile: ProfileId,
+        origin: &str,
+        rgba: &[u8],
+    ) -> bool {
+        let key = (profile, origin.to_owned());
+        if zephium_core::icon::validated_rgba32(rgba).is_none()
+            || (self.favicons.icons_checked.len() >= TRACKED_ICON_ORIGIN_CAPACITY
+                && !self.favicons.icons_checked.contains(&key))
+            || !self.cache_icon(key.clone(), rgba)
+        {
+            return false;
+        }
+        self.favicons.icons_checked.insert(key);
+        if !self.incognito_profile(profile) {
+            self.store.save_favicon(
+                profile,
+                origin.to_owned(),
+                Some(zephium_core::icon::RGBA32_MIME.to_owned()),
+                rgba.to_vec(),
+            );
+        }
+        let _ = self.icon_ref_for(IconSurface::Chrome, profile, origin);
+        self.project_items();
+        true
     }
 
     pub(super) fn cache_icon(&mut self, key: (ProfileId, String), rgba: &[u8]) -> bool {

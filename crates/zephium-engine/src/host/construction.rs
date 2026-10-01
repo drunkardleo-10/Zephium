@@ -1,11 +1,8 @@
 #[cfg(target_os = "windows")]
 use super::dispatch::with_profile_exit;
 use super::dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
-#[cfg(target_os = "macos")]
-use super::permits::queue_extension_background_wake;
 use super::permits::{
-    queue_navigation_authority_invalidation, queue_navigation_commit, queue_navigation_completion,
-    queue_navigation_failure, EventPermit,
+    queue_navigation_commit, queue_navigation_completion, queue_navigation_failure, EventPermit,
 };
 use super::profiles::bind_profile_persistence_class;
 #[cfg(target_os = "windows")]
@@ -32,13 +29,12 @@ use wry::{DownloadPolicy, WebViewBuilder};
 use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
-use zephium_core::navigation as navigation_policy;
 use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "windows")]
-use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Environment};
+use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
 pub(super) enum NativeViewPurpose {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -137,11 +133,20 @@ impl EngineHost {
             return;
         }
         if self.views.contains_key(&id) {
+            eprintln!("view-create: duplicate live tab identity");
             self.sink
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
-        if !navigation_policy::is_allowed_str(url) {
+        let event_permit = EventPermit::bound(&event_token);
+        #[cfg(target_os = "windows")]
+        let event_permit = event_permit.with_extensions(
+            self.windows_extensions
+                .navigation_grants(partition.profile()),
+        );
+        // Restored and explicitly opened tabs need the same live profile grant
+        // as native child adoption, before either fresh or spare construction.
+        if !event_permit.allows_navigation(url) {
             eprintln!("security: rejected invalid native view target");
             self.sink
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
@@ -233,7 +238,7 @@ impl EngineHost {
             partition,
             url,
             bounds,
-            EventPermit::bound(&event_token),
+            event_permit,
             NativeViewPurpose::Tab,
         ) {
             if !event_token.load(Ordering::Acquire)
@@ -244,6 +249,8 @@ impl EngineHost {
             self.partitions.insert(id, partition);
             self.views.insert(id, view);
             self.finish_new_view_insertion(id, &event_token);
+        } else {
+            eprintln!("view-create: native build returned no view");
         }
     }
 
@@ -313,6 +320,11 @@ impl EngineHost {
         purpose: NativeViewPurpose,
     ) -> Option<ObservedView> {
         let report_failure = purpose.reports_failure();
+        #[cfg(target_os = "windows")]
+        let event_permit = event_permit.with_extensions(
+            self.windows_extensions
+                .navigation_grants(partition.profile()),
+        );
         let target_resource_class = purpose.resource_class();
         let logical_id = id.get();
         let reservation_failure_permit = event_permit.clone();
@@ -338,6 +350,7 @@ impl EngineHost {
         {
             Ok(resource) => resource,
             Err(NativeResourceAdmissionError::AccountingInvariant) => {
+                eprintln!("view-create: native reservation accounting invariant");
                 self.native_resource_accounting_failed = true;
                 if report_failure {
                     event_permit.emit(
@@ -348,9 +361,10 @@ impl EngineHost {
                 return None;
             }
             Err(
-                NativeResourceAdmissionError::ClassExhausted(_)
-                | NativeResourceAdmissionError::GlobalExhausted,
+                error @ (NativeResourceAdmissionError::ClassExhausted(_)
+                | NativeResourceAdmissionError::GlobalExhausted),
             ) => {
+                eprintln!("view-create: native reservation refused: {error:?}");
                 if report_failure {
                     event_permit.emit(
                         &self.sink,
@@ -361,6 +375,7 @@ impl EngineHost {
             }
         };
         if self.native_resource_accounting_failed {
+            eprintln!("view-create: prior resource accounting failure");
             if report_failure {
                 event_permit.emit(
                     &self.sink,
@@ -501,7 +516,6 @@ impl EngineHost {
             || self.construction_unproven.contains(&profile)
             || self.windows_cleanup_debts.contains_key(&profile)
             || self.windows_cleanup_invariant_failed
-            || crate::platform::imp::native_extension_cleanup_invariant_failed()
             || self.native_resource_accounting_failed
             || !self.native_resources.is_healthy()
     }
@@ -584,6 +598,18 @@ impl EngineHost {
             return None;
         }
         let title_permit = event_permit.clone();
+        let site_preferences = self
+            .blocker_sites
+            .entry(partition.profile())
+            .or_default()
+            .clone();
+        let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        if let Some(counter) = self.blocker_statistics.get(&partition.profile()) {
+            site_scope.pause.set_statistics(counter.clone());
+        }
+        let load_site_scope = site_scope.clone();
+        #[cfg(target_os = "windows")]
+        let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
         let title_navigation = navigation.clone();
         let on_load = self.sink.clone();
@@ -593,8 +619,6 @@ impl EngineHost {
         let page_permission_pending = self.page_permissions.pending_presence();
         #[cfg(target_os = "macos")]
         let load_page_permission_pending = page_permission_pending.clone();
-        let extension_document_permits_pending =
-            self.extension_document_authority.pending_presence();
         let presentation_permit = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "macos")]
         let file_uploads = super::file_uploads::FileUploadBroker::new(
@@ -615,63 +639,7 @@ impl EngineHost {
         let (title_id, load_id) = (id.clone(), id.clone());
         let scripts = self.scripts_for(partition);
         #[cfg(target_os = "windows")]
-        let cached_environment = self.environments.get(&partition.profile()).cloned();
-        #[cfg(target_os = "windows")]
-        let extension_startup_gate = match self.windows_extension_environments.content_admission(
-            partition.profile(),
-            cached_environment.is_some(),
-            self.windows_extension_profiles
-                .contains_key(&partition.profile()),
-        ) {
-            super::WindowsExtensionContentAdmission::CreateDisabled
-            | super::WindowsExtensionContentAdmission::ReuseDisabled => None,
-            super::WindowsExtensionContentAdmission::Enabled => {
-                let Some(profile) = self
-                    .windows_extension_profiles
-                    .get(&partition.profile())
-                    .cloned()
-                else {
-                    self.native_resource_accounting_failed = true;
-                    return None;
-                };
-                let owners = match self
-                    .extension_runtime_registry
-                    .published_windows_native_owner_ids(partition.profile())
-                {
-                    Ok(owners) => owners,
-                    Err(error) => {
-                        eprintln!(
-                            "security: cannot project authenticated WebView2 extension inventory: {error:?}"
-                        );
-                        if report_failure {
-                            event_permit
-                                .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-                        }
-                        return None;
-                    }
-                };
-                Some((profile, owners))
-            }
-            super::WindowsExtensionContentAdmission::RestartRequired => {
-                eprintln!(
-                    "security: refused content construction after failed WebView2 extension bootstrap"
-                );
-                if report_failure {
-                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-                }
-                return None;
-            }
-            super::WindowsExtensionContentAdmission::InvariantFailed => {
-                self.native_resource_accounting_failed = true;
-                eprintln!("security: WebView2 extension environment/profile state diverged");
-                if report_failure {
-                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-                }
-                return None;
-            }
-        };
-        #[cfg(target_os = "windows")]
-        let extension_environment_enabled = extension_startup_gate.is_some();
+        let mut cached_environment = self.environments.get(&partition.profile()).cloned();
         #[cfg(target_os = "windows")]
         let construction_environment: Rc<RefCell<Option<ICoreWebView2Environment>>> =
             Rc::new(RefCell::new(None));
@@ -746,6 +714,8 @@ impl EngineHost {
             (builder, expected_directory, context_is_new)
         };
         #[cfg(target_os = "windows")]
+        let mut extension_startup = None;
+        #[cfg(target_os = "windows")]
         let (builder, expected_user_data_folder) = {
             let profile = partition.profile();
             let root = match partition {
@@ -763,6 +733,24 @@ impl EngineHost {
                     return None;
                 }
             };
+            if !matches!(partition, Partition::Ephemeral(_)) {
+                if let Err(error) = self.ensure_windows_profile_environment_at_path(
+                    profile,
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    path.clone(),
+                    true,
+                ) {
+                    eprintln!("extensions: profile startup refused: {error:?}");
+                    if report_failure {
+                        event_permit
+                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    }
+                    return None;
+                }
+                extension_startup = self.windows_extension_startup(profile, &path).ok();
+                extension_startup.as_ref()?;
+                cached_environment = self.environments.get(&profile).cloned();
+            }
             let builder = WebViewBuilder::new_with_web_context(
                 self.web_contexts
                     .entry(profile)
@@ -771,7 +759,7 @@ impl EngineHost {
             (builder, path)
         };
         #[cfg(target_os = "macos")]
-        let (builder, expected_ephemeral_data_store, prepared_extension_controller) = {
+        let (builder, expected_ephemeral_data_store) = {
             let builder = WebViewBuilder::new();
             match partition {
                 Partition::Ephemeral(profile) => {
@@ -844,37 +832,12 @@ impl EngineHost {
                     (
                         builder.with_webview_configuration(configuration),
                         Some(store),
-                        None,
                     )
                 }
                 Partition::Default(profile) | Partition::Persistent(profile) => {
-                    match self
-                        .macos_extension_controllers
-                        .configuration_for_durable_profile(profile)
-                    {
-                        Ok(Some(prepared)) => {
-                            use wry::WebViewBuilderExtMacos;
-                            let (configuration, proof) = prepared.into_parts();
-                            (
-                                builder.with_webview_configuration(configuration),
-                                None,
-                                Some(proof),
-                            )
-                        }
-                        Ok(None) => (builder, None, None),
-                        Err(error) => {
-                            eprintln!(
-                                "security: cannot attach macOS extension controller: {error}"
-                            );
-                            if report_failure {
-                                event_permit.emit(
-                                    &self.sink,
-                                    EngineEvent::ViewCreationFailed { id: id.get() },
-                                );
-                            }
-                            return None;
-                        }
-                    }
+                    use wry::WebViewBuilderExtMacos;
+                    let configuration = self.webext.configuration(profile, &self.sink);
+                    (builder.with_webview_configuration(configuration), None)
                 }
             }
         };
@@ -931,8 +894,17 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
-                navigation_permit.allows_navigation(&target)
-                    && policy_navigation.admits_target(&target)
+                #[cfg(target_os = "macos")]
+                if super::webext::intercept_auth_redirect(&target) {
+                    return false;
+                }
+                let admitted = navigation_permit.allows_navigation(&target)
+                    && policy_navigation.admits_target(&target);
+                #[cfg(target_os = "windows")]
+                if admitted {
+                    navigation_site_scope.navigating(&target);
+                }
+                admitted
             })
             // Raw content starts with no device or ambient capabilities. The
             // pinned Wry revision carries this callback consistently across
@@ -1044,11 +1016,22 @@ impl EngineHost {
         // `scripts_for` prepends the protected host-owned registrations. Keep
         // that exact ordering so their captured intrinsics and observers are
         // installed before any caller-owned page content.
+        #[cfg(target_os = "macos")]
+        {
+            let scope = site_scope.clone();
+            builder = builder.with_main_frame_navigation_attempt_handler(move |target| {
+                scope.navigating(&target)
+            });
+        }
         for script in wry_document_start_scripts(&scripts) {
             builder = builder.with_initialization_script_for_main_only(
                 script.source.as_ref(),
                 !script.all_frames,
             );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.with_user_agent(crate::platform::imp::safari_user_agent());
         }
 
         #[cfg(target_os = "windows")]
@@ -1135,20 +1118,9 @@ impl EngineHost {
             if let Some(environment) = cached_environment {
                 builder = builder.with_environment(environment);
             }
-            if let Some((profile, owners)) = extension_startup_gate {
-                builder = with_windows_extension_startup_gate(builder, move |environment, core| {
-                    let now = std::time::Instant::now();
-                    let deadline = now
-                        .checked_add(std::time::Duration::from_secs(5))
-                        .unwrap_or(now);
-                    profile
-                        .attest_controller(environment, core, deadline, &owners)
-                        .map_err(|_| {
-                            windows_core::Error::new(
-                                windows::Win32::Foundation::E_ACCESSDENIED,
-                                "authenticated WebView2 extension inventory gate failed",
-                            )
-                        })
+            if let Some(startup) = extension_startup {
+                builder = builder.with_browser_extension_startup_gate(move |environment, core| {
+                    startup.authenticate(environment, core)
                 });
             }
         }
@@ -1167,8 +1139,6 @@ impl EngineHost {
             let page_permission_permit = event_permit.clone();
             let page_permission_navigation = navigation.clone();
             let page_permission_presence = page_permission_pending.clone();
-            let context_menu_item = id.clone();
-            let context_menu_permit = event_permit.clone();
             let profile = partition.profile();
             builder = builder
                 // Link preview is a native WebKit UI/network surface outside
@@ -1269,32 +1239,14 @@ impl EngineHost {
                         }
                     });
             }
-            if prepared_extension_controller.is_some() {
-                builder = builder.with_context_menu_handler(move |_event, default_menu| {
-                    super::dispatch::try_macos_extension_context_menu(
-                        context_menu_item.get(),
-                        &context_menu_permit,
-                        default_menu,
-                    )
-                });
-            }
         }
 
         builder = match partition {
             Partition::Default(profile) | Partition::Persistent(profile) => {
                 #[cfg(target_os = "macos")]
                 {
-                    if prepared_extension_controller.is_some() {
-                        // Wry deliberately ignores `data_store_identifier`
-                        // when a custom configuration is supplied. The
-                        // registry already installed and pre-attested the
-                        // exact named store in that configuration.
-                        let _ = profile;
-                        builder
-                    } else {
-                        use wry::WebViewBuilderExtDarwin;
-                        builder.with_data_store_identifier(profile.bytes())
-                    }
+                    use wry::WebViewBuilderExtDarwin;
+                    builder.with_data_store_identifier(profile.bytes())
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -1327,44 +1279,22 @@ impl EngineHost {
                         broker.cancel();
                     }
                     #[cfg(target_os = "macos")]
-                    queue_extension_background_wake(
-                        id,
-                        &load_permit,
-                        &load_navigation,
-                        epoch,
-                        event.url.clone(),
-                    );
-                    #[cfg(target_os = "macos")]
                     super::page_permissions::queue_navigation_revocation(
                         id,
                         &load_permit,
                         &load_navigation,
                         &load_page_permission_pending,
                     );
-                    if extension_document_permits_pending.load(Ordering::Acquire) {
-                        queue_navigation_authority_invalidation(id, &load_permit, &load_navigation);
-                    }
                     if load_navigation.is_current(epoch) {
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: true });
                     }
                 }
-                NavigationTransition::Redirected(epoch) => {
-                    #[cfg(not(target_os = "macos"))]
-                    let _ = epoch;
-                    #[cfg(target_os = "macos")]
-                    queue_extension_background_wake(
-                        id,
-                        &load_permit,
-                        &load_navigation,
-                        epoch,
-                        event.url.clone(),
-                    );
-                    if extension_document_permits_pending.load(Ordering::Acquire) {
-                        queue_navigation_authority_invalidation(id, &load_permit, &load_navigation);
-                    }
+                NavigationTransition::Redirected(_) => {
+                    load_site_scope.navigating(&event.url);
                 }
                 NavigationTransition::Committed(epoch) => {
+                    load_site_scope.navigating(&event.url);
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
                     // attribution to the final redirect destination.
@@ -1387,6 +1317,9 @@ impl EngineHost {
                     restored,
                     request,
                 } => {
+                    if let Some((_, url)) = load_navigation.committed_snapshot() {
+                        load_site_scope.navigating(&url);
+                    }
                     // The transition was current when accepted. End its
                     // loading state even when a provisional failure restored
                     // the still-visible previous committed document.
@@ -1476,23 +1409,7 @@ impl EngineHost {
             // is no longer needed in either case.
             self.construction_unproven.remove(&profile);
             match captured {
-                Ok(captured) => {
-                    if !extension_environment_enabled
-                        && !self.windows_extension_environments.record_disabled(profile)
-                    {
-                        self.native_resource_accounting_failed = true;
-                        self.quarantine_unverifiable_windows_profile(profile);
-                        eprintln!(
-                            "security: WebView2 disabled environment mode contradicted its registry"
-                        );
-                        if report_failure {
-                            event_permit
-                                .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-                        }
-                        return None;
-                    }
-                    captured
-                }
+                Ok(captured) => captured,
                 Err(error) => {
                     self.quarantine_unverifiable_windows_profile(profile);
                     eprintln!("engine: cannot retain early WebView2 process obligation: {error}");
@@ -1524,16 +1441,11 @@ impl EngineHost {
                 return None;
             }
         };
+        // Lets Safari's Web Inspector reach tab pages and the content scripts
+        // running in them while diagnosing extensions.
         #[cfg(target_os = "macos")]
-        if let Err(error) = self
-            .macos_extension_controllers
-            .attest_built_view(&view, prepared_extension_controller)
-        {
-            eprintln!("security: macOS extension-controller readback failed: {error}");
-            if report_failure {
-                event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-            }
-            return None;
+        if zephium_webext_macos::tracing() {
+            unsafe { crate::platform::imp::native_webview(&view).setInspectable(true) };
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -1685,7 +1597,11 @@ impl EngineHost {
         // observer and the first network-producing load. This ordering is the
         // first-navigation protection boundary.
         let content_policy_registration =
-            match crate::platform::imp::install_content_policy_on_view(&view, &content_policy) {
+            match crate::platform::imp::install_scoped_content_policy_on_view(
+                &view,
+                &content_policy,
+                &site_scope.pause,
+            ) {
                 Ok(registration) => registration,
                 Err(error) => {
                     eprintln!("content blocker: native view policy installation failed: {error:?}");
@@ -1788,7 +1704,7 @@ impl EngineHost {
         let observation_id = id.clone();
         let observation_permit = event_permit.clone();
         let observation_navigation = navigation.clone();
-        let observer = match crate::platform::imp::install_navigation_observer(&view, move || {
+        let observer = match crate::platform::imp::install_navigation_observer(&view, move |_| {
             if observation_permit.active_token().is_none() {
                 return;
             }
@@ -1847,6 +1763,8 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            site_scope,
+            content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]
             file_uploads,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1879,107 +1797,56 @@ impl EngineHost {
     }
 }
 
+/// Why a profile's WebView2 environment could not be established.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WindowsProfileEnvironmentFailure {
+    /// Admission is closed or another construction holds the profile.
+    Busy,
+    /// The retained environment belongs to a different storage root.
+    Mismatch,
+    /// The page-inert bootstrap controller failed to build or close.
+    Construction,
+}
+
 #[cfg(target_os = "windows")]
 impl EngineHost {
-    /// Side-effect-free admission for the first extension-enabled environment
-    /// of a profile. A profile whose browser process was already created in
-    /// the ordinary closed mode must be restarted or explicitly reconstructed;
-    /// WebView2 rejects mixing option values for one running UDF.
-    pub(super) fn preflight_windows_extension_profile(
-        &mut self,
-        profile: zephium_core::ids::ProfileId,
-        deadline: std::time::Instant,
-    ) -> Result<(), crate::platform::imp::WindowsNativeExtensionFailure> {
-        self.collect_pending_windows_cleanup_debts();
-        if std::time::Instant::now() >= deadline {
-            return Err(
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
-            );
-        }
-        match self.windows_extension_environments.preflight(
-            profile,
-            self.environments.contains_key(&profile),
-            self.windows_extension_profiles.contains_key(&profile),
-        ) {
-            super::WindowsExtensionEnvironmentPreflight::Create
-            | super::WindowsExtensionEnvironmentPreflight::Ready => {}
-            super::WindowsExtensionEnvironmentPreflight::RestartRequired => {
-                return Err(
-                    crate::platform::imp::WindowsNativeExtensionFailure::ExistingEnvironmentModeConflict,
-                )
-            }
-            super::WindowsExtensionEnvironmentPreflight::InvariantFailed => {
-                self.native_resource_accounting_failed = true;
-                return Err(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant);
-            }
-        }
-        if self.windows_view_admission_blocked(profile)
-            || !self.windows_profile_process_group_capacity_allows(profile)
-        {
-            return Err(
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
-            );
-        }
-        if self
-            .windows_extension_environments
-            .is_extension_ready(profile)
-        {
-            return Ok(());
-        }
-        if self.has_live_profile_view(profile)
-            || self
-                .spare
-                .as_ref()
-                .is_some_and(|spare| spare.partition.profile() == profile)
-        {
-            return Err(
-                crate::platform::imp::WindowsNativeExtensionFailure::ExistingEnvironmentModeConflict,
-            );
-        }
-        Ok(())
-    }
-
-    /// Creates one short-lived, page-inert controller solely to obtain and
-    /// attest the extension-enabled environment/profile pair. The controller
-    /// is closed before this function returns; only the exact environment and
-    /// profile objects remain for native inventory/install operations and
-    /// later content-controller startup gates.
-    pub(super) fn ensure_windows_extension_profile(
-        &mut self,
-        profile: zephium_core::ids::ProfileId,
-        deadline: std::time::Instant,
-    ) -> Result<(), crate::platform::imp::WindowsNativeExtensionFailure> {
-        let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
-            .map_err(|_| {
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable
-            })?;
-        self.ensure_windows_extension_profile_at_path(profile, deadline, path)
-    }
-
-    /// Establishes or rejoins the extension-enabled environment at one exact
-    /// already-authorized storage root. Agent-owned ephemeral contexts use
-    /// the private runtime root; normal extension activation retains the
-    /// durable profile root through the wrapper above.
-    pub(super) fn ensure_windows_extension_profile_at_path(
+    /// Establishes or rejoins a profile's environment at one exact
+    /// already-authorized storage root. Without a live environment, one
+    /// short-lived, page-inert controller is created solely to obtain it and
+    /// is closed before this function returns.
+    pub(super) fn ensure_windows_profile_environment_at_path(
         &mut self,
         profile: zephium_core::ids::ProfileId,
         deadline: std::time::Instant,
         path: std::path::PathBuf,
-    ) -> Result<(), crate::platform::imp::WindowsNativeExtensionFailure> {
-        self.preflight_windows_extension_profile(profile, deadline)?;
-        if self
-            .windows_extension_environments
-            .is_extension_ready(profile)
+        extensions_enabled: bool,
+    ) -> Result<(), WindowsProfileEnvironmentFailure> {
+        self.collect_pending_windows_cleanup_debts();
+        if std::time::Instant::now() >= deadline
+            || self.windows_view_admission_blocked(profile)
+            || !self.windows_profile_process_group_capacity_allows(profile)
         {
-            return self
-                .environments
-                .get(&profile)
-                .ok_or(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant)
-                .and_then(|environment| {
-                    crate::platform::imp::attest_environment(environment, &path).map_err(|_| {
-                        crate::platform::imp::WindowsNativeExtensionFailure::EnvironmentAttestation
-                    })
-                });
+            return Err(WindowsProfileEnvironmentFailure::Busy);
+        }
+        let startup = if extensions_enabled {
+            Some(
+                self.windows_extension_startup(profile, &path)
+                    .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch)?,
+            )
+        } else {
+            None
+        };
+        if let Some(environment) = self.environments.get(&profile) {
+            if extensions_enabled
+                && startup
+                    .as_ref()
+                    .is_none_or(|startup| !startup.initialized.get())
+            {
+                return Err(WindowsProfileEnvironmentFailure::Mismatch);
+            }
+            return crate::platform::imp::attest_environment(environment, &path)
+                .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch);
         }
         let mut construction_resource = Some(
             self.native_resources
@@ -1988,39 +1855,20 @@ impl EngineHost {
                     if error == NativeResourceAdmissionError::AccountingInvariant {
                         self.native_resource_accounting_failed = true;
                     }
-                    crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable
+                    WindowsProfileEnvironmentFailure::Busy
                 })?,
         );
         let observed_environment: Rc<RefCell<Option<ICoreWebView2Environment>>> =
             Rc::new(RefCell::new(None));
         let capture_failed = Rc::new(Cell::new(false));
-        let admitted_profile: Rc<
-            RefCell<
-                Option<
-                    Result<
-                        crate::platform::imp::WindowsNativeExtensionProfile,
-                        crate::platform::imp::WindowsNativeExtensionFailure,
-                    >,
-                >,
-            >,
-        > = Rc::new(RefCell::new(None));
         let parent = super::ParentHandle(self.parent.0);
 
         if !self.construction_unproven.insert(profile) {
-            return Err(
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
-            );
-        }
-        if !self.windows_extension_environments.begin(profile) {
-            self.construction_unproven.remove(&profile);
-            self.native_resource_accounting_failed = true;
-            return Err(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant);
+            return Err(WindowsProfileEnvironmentFailure::Busy);
         }
         let builder = {
             let observed = observed_environment.clone();
             let capture_failed = capture_failed.clone();
-            let admitted = admitted_profile.clone();
-            let expected_path = path.clone();
             let context = self
                 .web_contexts
                 .entry(profile)
@@ -2038,6 +1886,7 @@ impl EngineHost {
                 .with_picture_in_picture_enabled(false)
                 .with_general_autofill_enabled(false)
                 .with_navigation_handler(|target| target == "about:blank")
+                .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
                 .with_permission_handler(|_| wry::PermissionResponse::Deny)
                 .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
                 .with_page_close_policy(wry::PageClosePolicy::Ignore);
@@ -2056,39 +1905,19 @@ impl EngineHost {
                     }
                     *slot = Some(environment.clone());
                 });
-            with_windows_extension_startup_gate(builder, move |environment, core| {
-                let result = crate::platform::imp::WindowsNativeExtensionProfile::from_startup_gate(
-                    environment,
-                    core,
-                    profile,
-                    &expected_path,
-                );
-                let accepted = result.is_ok();
-                let Ok(mut slot) = admitted.try_borrow_mut() else {
-                    return Err(windows_core::Error::new(
-                        windows::Win32::Foundation::E_UNEXPECTED,
-                        "WebView2 extension profile gate was reentrant",
-                    ));
-                };
-                if slot.is_some() {
-                    return Err(windows_core::Error::new(
-                        windows::Win32::Foundation::E_UNEXPECTED,
-                        "WebView2 extension profile gate ran more than once",
-                    ));
-                }
-                *slot = Some(result);
-                if accepted {
-                    Ok(())
-                } else {
-                    Err(windows_core::Error::new(
-                        windows::Win32::Foundation::E_ACCESSDENIED,
-                        "WebView2 extension profile gate rejected the controller",
-                    ))
-                }
-            })
+            if let Some(startup) = startup {
+                builder.with_browser_extension_startup_gate(move |environment, core| {
+                    startup.authenticate(environment, core)
+                })
+            } else {
+                builder
+            }
         };
 
         let mut built = builder.build_as_child(&parent);
+        if let Err(error) = &built {
+            eprintln!("extensions: native bootstrap build failed: {error}");
+        }
         let environment = observed_environment
             .try_borrow_mut()
             .map(|mut environment| environment.take())
@@ -2100,15 +1929,16 @@ impl EngineHost {
         if capture_failed.get() {
             self.quarantine_unverifiable_windows_profile(profile);
         }
-        let capture = environment
-            .ok_or(crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostConstructionFailed)
+        let mut failure = environment
+            .ok_or(WindowsProfileEnvironmentFailure::Construction)
             .and_then(|environment| {
+                crate::platform::imp::attest_environment(&environment, &path)
+                    .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch)?;
                 self.capture_windows_environment(profile, environment)
                     .map(|_| ())
-                    .map_err(|_| {
-                        crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostConstructionFailed
-                    })
-            });
+                    .map_err(|_| WindowsProfileEnvironmentFailure::Construction)
+            })
+            .err();
         self.construction_unproven.remove(&profile);
 
         let construction_debts = wry::pending_webview2_cleanup_debts();
@@ -2134,24 +1964,12 @@ impl EngineHost {
         }
         self.collect_pending_windows_cleanup_debts();
 
-        let native_profile = admitted_profile
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut profile| profile.take())
-            .ok_or(
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostConstructionFailed,
-            )
-            .and_then(|profile| profile);
-        let mut failure = capture
-            .err()
-            .or_else(|| native_profile.as_ref().err().copied());
         if let Ok(view) = built.as_mut() {
-            if failure.is_none()
-                && crate::platform::imp::configure(view, 0.0, false, &path).is_err()
-            {
-                failure = Some(
-                    crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostConstructionFailed,
-                );
+            if failure.is_none() {
+                if let Err(error) = crate::platform::imp::configure(view, 0.0, false, &path) {
+                    eprintln!("extensions: native bootstrap hardening failed: {error:?}");
+                    failure = Some(WindowsProfileEnvironmentFailure::Construction);
+                }
             }
             if let Err(debt) = wry::WebViewExtWindows::close(view) {
                 let debt = super::OwnedWindowsCleanupDebt::new(debt, construction_resource.take());
@@ -2159,43 +1977,18 @@ impl EngineHost {
                     self.native_resource_accounting_failed = true;
                 }
                 self.retain_windows_cleanup_debt(profile, debt);
-                failure = Some(
-                    crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostCleanupFailed,
-                );
+                failure = Some(WindowsProfileEnvironmentFailure::Construction);
             }
         } else {
-            failure.get_or_insert(
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostConstructionFailed,
-            );
+            failure.get_or_insert(WindowsProfileEnvironmentFailure::Construction);
         }
         drop(built);
         drop(construction_resource.take());
         if let Some(failure) = failure {
-            self.windows_extension_profiles.remove(&profile);
-            self.windows_extension_environments.fail(profile);
             return Err(failure);
         }
         if std::time::Instant::now() >= deadline {
-            self.windows_extension_profiles.remove(&profile);
-            self.windows_extension_environments.fail(profile);
-            return Err(
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
-            );
-        }
-        let native_profile = match native_profile {
-            Ok(native_profile) => native_profile,
-            Err(failure) => {
-                self.windows_extension_environments.fail(profile);
-                return Err(failure);
-            }
-        };
-        self.windows_extension_profiles
-            .insert(profile, native_profile);
-        if !self.windows_extension_environments.publish(profile) {
-            self.windows_extension_profiles.remove(&profile);
-            self.windows_extension_environments.fail(profile);
-            self.native_resource_accounting_failed = true;
-            return Err(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant);
+            return Err(WindowsProfileEnvironmentFailure::Busy);
         }
         Ok(())
     }
@@ -2212,15 +2005,6 @@ fn to_wry(r: Rect) -> wry::Rect {
         position: Position::Logical(LogicalPosition::new(r.x, r.y)),
         size: Size::Logical(LogicalSize::new(r.width, r.height)),
     }
-}
-
-#[cfg(target_os = "windows")]
-fn with_windows_extension_startup_gate<'a>(
-    builder: WebViewBuilder<'a>,
-    gate: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
-) -> WebViewBuilder<'a> {
-    use wry::WebViewBuilderExtWindows;
-    builder.with_browser_extension_startup_gate(gate)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 use std::fmt;
 
 use thiserror::Error;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 /// Maximum UTF-8 bytes in one portable private payload entry name.
 pub const MAX_PRIVATE_ENTRY_NAME_BYTES: usize = 128;
@@ -12,8 +13,11 @@ pub const MAX_PRIVATE_ENTRY_NAME_BYTES: usize = 128;
 /// This type is deliberately distinct from [`crate::PrivateComponent`].
 /// `PrivateComponent` is the normalized, lowercase namespace-control grammar;
 /// `PrivateEntryName` preserves authenticated package spelling while admitting
-/// only the single-component subset portable across macOS, Linux, and Windows.
+/// a conservative single-component subset for macOS, Linux, and Windows.
 /// It performs no Unicode, case, whitespace, or punctuation normalization.
+/// Non-ASCII payload characters are limited to letters and numbers excluding
+/// combining marks; internal namespace-control components retain their
+/// separate ASCII grammar.
 ///
 /// Constructing a name does not authorize filesystem access or mutation.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -58,9 +62,9 @@ pub enum PrivateEntryNameError {
     /// The entry name exceeds the fixed byte ceiling.
     #[error("private payload entry name exceeds the portable byte bound")]
     TooLong,
-    /// The entry name contains non-ASCII text.
-    #[error("private payload entry name is not ASCII")]
-    NonAscii,
+    /// The entry name contains an unsupported non-ASCII scalar.
+    #[error("private payload entry name contains unsupported Unicode")]
+    UnsupportedUnicode,
     /// The entry name is `.` or `..`.
     #[error("private payload entry name is a traversal component")]
     DotComponent,
@@ -83,8 +87,13 @@ fn validate(value: &str) -> Result<(), PrivateEntryNameError> {
     if value.len() > MAX_PRIVATE_ENTRY_NAME_BYTES {
         return Err(PrivateEntryNameError::TooLong);
     }
-    if !value.is_ascii() {
-        return Err(PrivateEntryNameError::NonAscii);
+    if value.chars().any(|scalar| {
+        !scalar.is_ascii()
+            && (!scalar.is_alphanumeric()
+                || is_combining_mark(scalar)
+                || is_invisible_hangul_filler(scalar))
+    }) {
+        return Err(PrivateEntryNameError::UnsupportedUnicode);
     }
     if matches!(value, "." | "..") {
         return Err(PrivateEntryNameError::DotComponent);
@@ -108,7 +117,48 @@ fn validate(value: &str) -> Result<(), PrivateEntryNameError> {
     if is_reserved_windows_device(value) {
         return Err(PrivateEntryNameError::ReservedDeviceName);
     }
+    if !value.is_ascii() {
+        // A compatibility spelling is used only to reject names that could
+        // bypass the ASCII device/ending rules. The stored name stays exact.
+        let mut compatible = String::with_capacity(value.len());
+        for scalar in value.nfkc() {
+            if compatible
+                .len()
+                .checked_add(scalar.len_utf8())
+                .is_none_or(|length| length > MAX_PRIVATE_ENTRY_NAME_BYTES)
+            {
+                return Err(PrivateEntryNameError::TooLong);
+            }
+            compatible.push(scalar);
+        }
+        if matches!(compatible.as_str(), "." | "..") {
+            return Err(PrivateEntryNameError::DotComponent);
+        }
+        if compatible.bytes().any(|byte| {
+            byte.is_ascii_control()
+                || matches!(
+                    byte,
+                    b'/' | b'\\' | b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*' | b'%' | b'#'
+                )
+        }) {
+            return Err(PrivateEntryNameError::UnsupportedUnicode);
+        }
+        if compatible.starts_with(' ') {
+            return Err(PrivateEntryNameError::UnsupportedUnicode);
+        }
+        if compatible.ends_with([' ', '.']) {
+            return Err(PrivateEntryNameError::AmbiguousEnding);
+        }
+        if is_reserved_windows_device(&compatible) {
+            return Err(PrivateEntryNameError::ReservedDeviceName);
+        }
+    }
     Ok(())
+}
+
+fn is_invisible_hangul_filler(scalar: char) -> bool {
+    // These default-ignorable Hangul fillers are alphanumeric in Unicode.
+    matches!(scalar, '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}')
 }
 
 fn is_reserved_windows_device(value: &str) -> bool {
@@ -157,9 +207,35 @@ mod tests {
             Err(PrivateEntryNameError::TooLong)
         );
         assert_eq!(
-            PrivateEntryName::new("café.js"),
-            Err(PrivateEntryNameError::NonAscii)
+            PrivateEntryName::new("café.js").unwrap().as_str(),
+            "café.js"
         );
+        assert_eq!(
+            PrivateEntryName::new("сlickableCard.common.chunk.js")
+                .unwrap()
+                .as_str(),
+            "сlickableCard.common.chunk.js"
+        );
+        assert_eq!(
+            PrivateEntryName::new("説明.txt").unwrap().as_str(),
+            "説明.txt"
+        );
+        for value in [
+            "cafe\u{301}.js",
+            "emoji-😀.js",
+            "a\u{200d}b.js",
+            "name\u{0345}.js",
+            "name\u{05b0}.js",
+            "name\u{115f}.js",
+            "name\u{1160}.js",
+            "name\u{3164}.js",
+            "name\u{ffa0}.js",
+        ] {
+            assert_eq!(
+                PrivateEntryName::new(value),
+                Err(PrivateEntryNameError::UnsupportedUnicode)
+            );
+        }
     }
 
     #[test]
@@ -212,6 +288,16 @@ mod tests {
                 }
             }
         }
+        for value in ["ＣＯＮ.txt", "COM¹.txt", "ＬＰＴ９.js"] {
+            assert_eq!(
+                PrivateEntryName::new(value),
+                Err(PrivateEntryNameError::ReservedDeviceName)
+            );
+        }
+        assert_eq!(
+            PrivateEntryName::new("\u{037a}name.js"),
+            Err(PrivateEntryNameError::UnsupportedUnicode)
+        );
     }
 
     #[test]

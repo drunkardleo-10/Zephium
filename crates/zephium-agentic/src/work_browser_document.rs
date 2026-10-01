@@ -1,7 +1,7 @@
-//! Trusted initial-document policy, not model or successor navigation authority.
+//! Trusted document-finalization policy, never model destination authority.
 use crate::ContextNavigationTarget;
 
-/// Closed construction policy supplied before native allocation or dispatch.
+/// Closed trusted policy supplied before native allocation or dispatch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WorkBrowserDocumentPolicy {
     /// The native current URL must remain exactly the requested URL.
@@ -11,12 +11,43 @@ pub enum WorkBrowserDocumentPolicy {
     /// location sample. A query-free request may acquire an opaque nonempty
     /// query, but no other URL bytes may change. No second load is authorized.
     InitialQueryFinalization,
+    /// Freeze a query-free HTTPS request after bounded native document
+    /// finalization. May also be frozen into an explicitly authorized successor
+    /// operation. Each operation owns its own finalization and exact receipt.
+    DocumentQueryFinalization,
+    /// Public browsing may rewrite its query during initial page setup. Freeze
+    /// one safe native URL on the exact same origin/path and committed load;
+    /// this grants neither a redirect nor any subsequent location change.
+    PublicQueryFinalization,
+    /// Public interactions may update a safe query within the committed document.
+    /// The native gate still refuses every unapproved load, origin/path change,
+    /// fragment and credential-bearing location. The admitted URL remains the
+    /// resource's stable citation address; query state grants no new destination.
+    PublicSameDocumentQuery,
+    /// Work in the person's session on one site: redirects, committed loads
+    /// and same-document location changes may move anywhere on the requested
+    /// site (registrable domain, same scheme and port). Page-initiated loads
+    /// are cancelled, never followed; cross-site locations are refused.
+    SiteSession,
 }
 
 impl WorkBrowserDocumentPolicy {
     /// Checks trusted admission, before any request is sent to the native port.
     pub fn admits_request(self, requested: &ContextNavigationTarget) -> bool {
         let url = requested.as_url();
+        if matches!(
+            self,
+            Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
+        ) {
+            return url.scheme() == "https"
+                && url.fragment().is_none()
+                && crate::semantic_wire::model_safe_public_url(requested);
+        }
+        if self == Self::SiteSession {
+            return site_scheme(requested)
+                && url.fragment().is_none()
+                && crate::semantic_wire::model_safe_public_url(requested);
+        }
         self == Self::Exact
             || (url.scheme() == "https"
                 && url.query().is_none()
@@ -25,7 +56,7 @@ impl WorkBrowserDocumentPolicy {
                 && url.password().is_none())
     }
 
-    /// Rechecks a native construction receipt. This relation alone is not a
+    /// Rechecks a native document receipt. This relation alone is not a
     /// native identity/commit proof; only the original request may supply one.
     pub fn admits_final_document(
         self,
@@ -38,11 +69,24 @@ impl WorkBrowserDocumentPolicy {
         if requested == effective {
             return true;
         }
-        self == Self::InitialQueryFinalization
-            && effective
-                .as_url()
-                .query()
-                .is_some_and(|query| !query.is_empty())
+        if self == Self::SiteSession {
+            return same_site(requested, effective);
+        }
+        if matches!(
+            self,
+            Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
+        ) {
+            return self.admits_request(effective)
+                && requested.as_url().as_str().split('?').next()
+                    == effective.as_url().as_str().split('?').next();
+        }
+        matches!(
+            self,
+            Self::InitialQueryFinalization | Self::DocumentQueryFinalization
+        ) && effective
+            .as_url()
+            .query()
+            .is_some_and(|query| !query.is_empty())
             && effective.as_url().fragment().is_none()
             && effective
                 .as_url()
@@ -53,45 +97,184 @@ impl WorkBrowserDocumentPolicy {
     }
 }
 
+/// HTTPS, or plain HTTP on a loopback host (local qualification sites only).
+fn site_scheme(target: &ContextNavigationTarget) -> bool {
+    let url = target.as_url();
+    url.username().is_empty()
+        && url.password().is_none()
+        && match url.scheme() {
+            "https" => true,
+            "http" => {
+                matches!(
+                    url.host(),
+                    Some(url::Host::Ipv4(ip)) if ip.is_loopback()
+                ) || url.host_str() == Some("localhost")
+            }
+            _ => false,
+        }
+}
+
+/// The site a location belongs to: its registrable domain under a known
+/// public suffix, or the exact host for an IP address or an unknown suffix.
+pub fn registrable_site(target: &ContextNavigationTarget) -> Option<String> {
+    let host = target
+        .as_url()
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if matches!(target.as_url().host(), Some(url::Host::Domain(_))) {
+        if let Some(domain) =
+            psl::domain(host.as_bytes()).filter(|domain| domain.suffix().is_known())
+        {
+            return std::str::from_utf8(domain.as_bytes())
+                .ok()
+                .map(str::to_owned);
+        }
+    }
+    Some(host)
+}
+
+/// Both locations are on one site: same scheme and port, same registrable
+/// domain (private suffixes keep hosted tenants apart; IPs stay exact).
+pub fn same_site(source: &ContextNavigationTarget, target: &ContextNavigationTarget) -> bool {
+    site_scheme(source) && site_scheme(target) && crate::same_work_human_site(source, target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn startup_relation_is_opaque_but_never_a_url_or_navigation_substitution() {
-        let source = ContextNavigationTarget::parse("https://example.test/product").unwrap();
-        let policy = WorkBrowserDocumentPolicy::InitialQueryFinalization;
-        for query in ["a=one", "arbitrary=two&another=three"] {
-            let target =
-                ContextNavigationTarget::parse(&format!("https://example.test/product?{query}"))
-                    .unwrap();
-            assert!(policy.admits_final_document(&source, &target));
-            assert!(!WorkBrowserDocumentPolicy::Exact.admits_final_document(&source, &target));
-            assert!(!policy.admits_request(&target));
+    fn public_finalization_preserves_the_exact_base_and_refuses_secret_locations() {
+        let policy = WorkBrowserDocumentPolicy::PublicQueryFinalization;
+        let requested =
+            ContextNavigationTarget::parse("https://example.test/catalog?sort=price").unwrap();
+        for changed in [
+            "https://example.test/catalog",
+            "https://example.test/catalog?sort=price&page=1",
+            "https://example.test/catalog?sort=name",
+        ] {
+            let effective = ContextNavigationTarget::parse(changed).unwrap();
+            assert!(policy.admits_final_document(&requested, &effective));
+            assert!(!WorkBrowserDocumentPolicy::Exact.admits_final_document(&requested, &effective));
         }
         for changed in [
-            "https://example.test/product?",
-            "https://example.test/product?x=1#f",
-            "https://example.test/other?x=1",
-            "https://else.test/product?x=1",
-            "http://example.test/product?x=1",
-            "https://example.test:444/product?x=1",
+            "https://example.test/other?sort=price",
+            "https://other.test/catalog?sort=price",
+            "http://example.test/catalog?sort=price",
+            "https://example.test:444/catalog?sort=price",
+            "https://example.test/catalog?sort=price#fragment",
+            "https://example.test/catalog?access_token=private-value",
         ] {
-            let target = ContextNavigationTarget::parse(changed).unwrap();
-            assert!(!policy.admits_final_document(&source, &target));
+            let effective = ContextNavigationTarget::parse(changed).unwrap();
+            assert!(!policy.admits_final_document(&requested, &effective));
         }
-        assert!(policy.admits_final_document(&source, &source));
-        let prefix = "https://example.test/product?";
-        let at_bound = ContextNavigationTarget::parse(&format!(
-            "{prefix}{}",
-            "x".repeat(8_192 - prefix.len())
-        ))
-        .unwrap();
-        assert!(policy.admits_final_document(&source, &at_bound));
-        // The existing target type enforces the same byte ceiling before a
-        // native receipt can carry a page-derived URL into this relation.
-        assert!(ContextNavigationTarget::parse(&format!("{}x", at_bound.as_url())).is_err());
-        assert!(
-            ContextNavigationTarget::parse("https://user:secret@example.test/product?x=1").is_err()
-        );
+    }
+    #[test]
+    fn startup_relation_is_opaque_but_never_a_url_or_navigation_substitution() {
+        let source = ContextNavigationTarget::parse("https://example.test/product").unwrap();
+        for policy in [
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+        ] {
+            for query in ["a=one", "arbitrary=two&another=three"] {
+                let target = ContextNavigationTarget::parse(&format!(
+                    "https://example.test/product?{query}"
+                ))
+                .unwrap();
+                assert!(policy.admits_final_document(&source, &target));
+                assert!(!WorkBrowserDocumentPolicy::Exact.admits_final_document(&source, &target));
+                assert!(!policy.admits_request(&target));
+            }
+            for changed in [
+                "https://example.test/product?",
+                "https://example.test/product?x=1#f",
+                "https://example.test/other?x=1",
+                "https://else.test/product?x=1",
+                "http://example.test/product?x=1",
+                "https://example.test:444/product?x=1",
+            ] {
+                let target = ContextNavigationTarget::parse(changed).unwrap();
+                assert!(!policy.admits_final_document(&source, &target));
+            }
+            assert!(policy.admits_final_document(&source, &source));
+            let prefix = "https://example.test/product?";
+            let at_bound = ContextNavigationTarget::parse(&format!(
+                "{prefix}{}",
+                "x".repeat(8_192 - prefix.len())
+            ))
+            .unwrap();
+            assert!(policy.admits_final_document(&source, &at_bound));
+            // The existing target type enforces the same byte ceiling before a
+            // native receipt can carry a page-derived URL into this relation.
+            assert!(ContextNavigationTarget::parse(&format!("{}x", at_bound.as_url())).is_err());
+            assert!(
+                ContextNavigationTarget::parse("https://user:secret@example.test/product?x=1")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_site_is_its_registrable_domain() {
+        for (url, site) in [
+            ("https://app.slack.com/client", "slack.com"),
+            ("https://www.bbc.co.uk/news", "bbc.co.uk"),
+            ("https://alice.github.io/x", "alice.github.io"),
+            ("http://127.0.0.1:4100/", "127.0.0.1"),
+            ("https://intranet.invalid/", "intranet.invalid"),
+        ] {
+            let target = ContextNavigationTarget::parse(url).unwrap();
+            assert_eq!(registrable_site(&target).as_deref(), Some(site), "{url}");
+        }
+    }
+    #[test]
+    fn site_session_moves_within_the_registrable_domain_only() {
+        let policy = WorkBrowserDocumentPolicy::SiteSession;
+        let start = ContextNavigationTarget::parse("https://app.slack.com/client").unwrap();
+        assert!(policy.admits_request(&start));
+        for moved in [
+            "https://app.slack.com/client/T1/C2",
+            "https://files.slack.com/files/x?y=1",
+            "https://slack.com/signin#done",
+        ] {
+            let moved = ContextNavigationTarget::parse(moved).unwrap();
+            assert!(policy.admits_final_document(&start, &moved), "{moved:?}");
+        }
+        for foreign in [
+            "https://slack.com.evil.test/",
+            "https://accounts.google.com/",
+            "http://app.slack.com/client",
+            "https://app.slack.com:8443/client",
+        ] {
+            let foreign = ContextNavigationTarget::parse(foreign).unwrap();
+            assert!(
+                !policy.admits_final_document(&start, &foreign),
+                "{foreign:?}"
+            );
+        }
+        let tenant = ContextNavigationTarget::parse("https://one.github.io/a").unwrap();
+        let other = ContextNavigationTarget::parse("https://two.github.io/a").unwrap();
+        assert!(!policy.admits_final_document(&tenant, &other));
+        let loopback = ContextNavigationTarget::parse("http://127.0.0.1:4100/inbox").unwrap();
+        assert!(policy.admits_request(&loopback));
+        assert!(policy.admits_final_document(
+            &loopback,
+            &ContextNavigationTarget::parse("http://127.0.0.1:4100/next").unwrap()
+        ));
+        assert!(!policy.admits_final_document(
+            &loopback,
+            &ContextNavigationTarget::parse("http://127.0.0.1:4101/next").unwrap()
+        ));
+        assert!(!policy
+            .admits_request(&ContextNavigationTarget::parse("http://example.test/").unwrap()));
+        // An in-page anchor is never a navigation request of a session.
+        assert!(!policy.admits_request(
+            &ContextNavigationTarget::parse("https://linear.app/acme/agent#skip-nav").unwrap()
+        ));
+        // Notion's workspace moved from notion.so to app.notion.com.
+        assert!(policy.admits_final_document(
+            &ContextNavigationTarget::parse("https://www.notion.so/").unwrap(),
+            &ContextNavigationTarget::parse("https://app.notion.com/acme").unwrap()
+        ));
     }
 }

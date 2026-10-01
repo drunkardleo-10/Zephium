@@ -6,13 +6,32 @@ license.workspace = true
 
 [features]
 default = []
-macos-work = ["dep:zephium-app", "dep:zephium-engine", "dep:zephium-store", "dep:zephium-agent-controller", "dep:zephium-agent-provider-transport"]
-public-qualification = ["macos-work", "zephium-app/work-execution-probe"]
+durable-runtime = ["macos-work", "dep:serde_json", "dep:sha2", "dep:zephium-core", "dep:zephium-ipc", "zephium-app/work-runtime", "dep:tokio"]
+macos-work = ["dep:zephium-app", "dep:zephium-engine", "dep:zephium-store", "dep:zephium-agent-controller", "dep:zephium-agent-provider-transport", "dep:zephium-agentic"]
+public-qualification = [
+    "macos-work",
+    "zephium-app/work-execution-probe",
+    "zephium-agent-provider-transport/probe-harness",
+]
 navigation-qualification = ["macos-work", "dep:zephium-agentic", "dep:zephium-core", "dep:zephium-agent-runtime"]
+discovery-qualification = ["navigation-qualification", "public-qualification"]
+# Content-free original-resource failure evidence; never selects a task.
+retained-lifetime-diagnostic = ["public-qualification", "zephium-engine/native-agentic-work-lifetime-diagnostic"]
+retained-product-qualification = ["navigation-qualification", "retained-lifetime-diagnostic"]
+# A compile-time-only objective selection on the same retained product entry.
+retained-commerce-qualification = ["retained-product-qualification"]
+retained-action-qualification = ["retained-product-qualification", "zephium-agentic/probe-harness"]
+retained-back-qualification = ["retained-product-qualification", "zephium-agentic/probe-harness"]
+retained-notion-qualification = ["retained-product-qualification"]
+retained-notion-write-qualification = ["retained-product-qualification"]
 retained-qualification = ["public-qualification", "zephium-engine/native-agentic-work-resource-probe", "dep:zephium-agentic", "dep:zephium-core", "dep:zephium-agent-runtime"]
 retained-public-qualification = ["retained-qualification", "zephium-engine/native-agentic-public-resource-probe"]
 
 [dependencies]
+serde_json = { workspace = true, optional = true }
+sha2 = { version = "=0.10.9", optional = true }
+zephium-ipc = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
 zephium-app = { workspace = true, optional = true, features = ["work-execution"] }
 zephium-engine = { workspace = true, optional = true, features = ["agentic-browser"] }
 zephium-store = { workspace = true, optional = true, features = ["work-execution"] }
@@ -21,3 +40,6 @@ zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-agentic = { workspace = true, optional = true }
 zephium-agent-runtime = { workspace = true, optional = true }
 zephium-core = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

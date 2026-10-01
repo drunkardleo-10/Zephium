@@ -16,7 +16,7 @@ use zephium_agent_runtime::{AgentRuntimeConfig, AgentRuntimeStopReason};
 use zephium_app::{AgentWorkApplicationConfig, AgentWorkApplicationPhase, ShutdownOutcome};
 use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 
-struct NoChrome;
+pub(super) struct NoChrome;
 impl zephium_core::ports::chrome::Chrome for NoChrome {
     fn position(&self, _: zephium_core::ports::chrome::ChromeFrame) -> bool {
         false
@@ -145,24 +145,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
     if durable {
         register_public_profile(&store, profile)?;
     }
-    let blocker = zephium_blocker_service::ManagedBlocker::unconfigured(
-        zephium_blocker::CompiledArtifactCacheConfig::new(data.path().join("compiled"))
-            .map_err(|_| Error::Authority)?,
-    )
-    .map_err(|_| Error::Runtime)?;
-    let extension = zephium_extension_service::prepare_extension_service_boot(
-        store
-            .claim_extension_service_store_authority()
-            .map_err(|_| Error::Authority)?,
-        zephium_extension_service::ExtensionRepositoryRoot::from_app_data_directory(
-            data.path().to_owned(),
-        )
-        .map_err(|_| Error::Authority)?,
-    )
-    .map_err(|_| Error::Authority)?;
-    let zephium_extension_service::ExtensionServiceBootPlan::Inert(extension) = extension else {
-        return Err(Error::Authority);
-    };
+    let blocker = seeded_blocker(data.path())?;
     let request = TrustedWorkRequest::new(
         input,
         AgentWorkApplicationConfig::new(
@@ -179,7 +162,6 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
             engine.clone(),
             store.clone(),
             blocker,
-            extension,
             Box::new(move |_| {
                 fail_sink.store(true, Ordering::Release);
             }),
@@ -240,6 +222,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         cost_micro_usd,
                         accounting,
                         elapsed_millis,
+                        ..
                     } => {
                         turns += 1;
                         tokens_in += input_tokens;
@@ -716,4 +699,43 @@ fn verify_prepared_result(result: &zephium_agentic::SemanticOwnedExtractionResul
         && matches!(source.role, SemanticRole::Searchbox | SemanticRole::Textbox)
         && source.snapshot != SemanticSnapshotGeneration::INITIAL
         && sources.next().is_none()
+}
+
+// The merged product enables protection by default. Give isolated probes the
+// same authenticated bundled rules so Work policy readiness can settle.
+pub(super) fn seeded_blocker(
+    data: &std::path::Path,
+) -> Result<Arc<zephium_blocker_service::ManagedBlocker>, super::ProbeFailure> {
+    use zephium_blocker_service::{
+        EmbeddedReleaseAsset, LicensePolicy, ReleaseCatalogSeed, UpdateLimits,
+    };
+    let seed = ReleaseCatalogSeed::from_embedded_gzip(
+        include_bytes!("../../../assets/blocker-seed/v1/catalog.json"),
+        include_bytes!("../../../assets/blocker-seed/v1/release-seed.json"),
+        vec![
+            EmbeddedReleaseAsset::new(
+                "easylist.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/easylist.txt.gz"),
+            ),
+            EmbeddedReleaseAsset::new(
+                "easyprivacy.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/easyprivacy.txt.gz"),
+            ),
+        ],
+        UpdateLimits {
+            max_manifest_bytes: 16 * 1024,
+            max_sources: 2,
+            max_source_bytes: 4 * 1024 * 1024,
+            max_total_source_bytes: 4 * 1024 * 1024,
+            ..UpdateLimits::default()
+        },
+        LicensePolicy::new(["CC-BY-SA-3.0"]).map_err(|_| super::ProbeFailure::Authority)?,
+    )
+    .map_err(|_| super::ProbeFailure::Authority)?;
+    zephium_blocker_service::ManagedBlocker::with_release_seed(
+        seed,
+        zephium_blocker::CompiledArtifactCacheConfig::new(data.join("compiled"))
+            .map_err(|_| super::ProbeFailure::Authority)?,
+    )
+    .map_err(|_| super::ProbeFailure::Runtime)
 }

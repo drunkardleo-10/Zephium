@@ -24,8 +24,7 @@ mod content_filter;
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
-#[allow(dead_code)]
-mod extensions;
+pub(crate) mod extensions;
 #[cfg(feature = "agentic-browser")]
 // Compiled and lifecycle-bound while invocation remains closed until the
 // physical Windows isolated-world qualifier promotes the support claim.
@@ -40,11 +39,13 @@ mod stage;
 #[cfg(feature = "agentic-browser")]
 mod timeout;
 
+#[cfg(feature = "agentic-browser")]
+pub(crate) use content_filter::install_on_view as install_content_policy_on_view;
 pub(crate) use content_filter::{
-    install_on_view as install_content_policy_on_view, prepare as prepare_content_policy,
-    same_policy as same_content_policy, ContentPolicyRegistration, NativeContentPolicy,
+    install_scoped_on_view as install_scoped_content_policy_on_view,
+    prepare as prepare_content_policy, same_policy as same_content_policy,
+    ContentPolicyRegistration, NativeContentPolicy,
 };
-pub(crate) use extensions::*;
 pub use stage::Stage;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use timeout::{schedule_content_policy_timeout, ContentPolicyTimeout};

@@ -14,6 +14,8 @@ pub const KEYS: &[&str] = &[
     "ui.newtab-tasks",
     "ui.tab-layout",
     "onboarding",
+    "ai.enabled",
+    "work.enabled",
 ];
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
@@ -29,7 +31,9 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
         "search.suggestions" | "ui.reduce-motion" | "ui.newtab-greeting" | "ui.newtab-name"
-        | "ui.newtab-clock" | "ui.newtab-tasks" => matches!(value, "true" | "false"),
+        | "ui.newtab-clock" | "ui.newtab-tasks" | "ai.enabled" | "work.enabled" => {
+            matches!(value, "true" | "false")
+        }
         _ => false,
     }
 }
@@ -45,6 +49,14 @@ mod tests {
         assert!(value_allowed("ui.newtab-tasks", "false"));
         assert!(value_allowed("ui.tab-layout", "horizontal"));
         assert!(value_allowed("onboarding", "done"));
+        for key in ["ai.enabled", "work.enabled"] {
+            assert!(KEYS.contains(&key));
+            assert!(value_allowed(key, "true"));
+            assert!(value_allowed(key, "false"));
+            for value in ["", "0", "1", "TRUE", " false", "false "] {
+                assert!(!value_allowed(key, value));
+            }
+        }
         for (key, value) in [
             ("ui.custom-css", "body{}"),
             ("ui.accent", "url(evil)"),

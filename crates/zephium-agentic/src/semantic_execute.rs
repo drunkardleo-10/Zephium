@@ -167,6 +167,23 @@ struct NativeCorrelation {
     guard: [u8; 32],
 }
 
+/// Resource owners retain exact native correlation without retaining an action
+/// recipe, fill text, or a second dispatch capability.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct SemanticActionNativeCorrelation(NativeCorrelation);
+
+impl SemanticActionNativeCorrelation {
+    pub(crate) fn matches(&self, terminal: &SemanticActionNativeSettlement) -> bool {
+        self.0 == terminal.correlation
+    }
+}
+
+impl fmt::Debug for SemanticActionNativeCorrelation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SemanticActionNativeCorrelation([redacted])")
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct SemanticActionCoordinatorKey {
     effect: AgentEffectId,
@@ -304,9 +321,35 @@ impl fmt::Debug for SemanticActionExecutionPending {
     }
 }
 
+/// A same-site GET a page started during one action. The native adapter
+/// cancels it and records the target; the controller may then load it as
+/// its own navigation.
+#[derive(Clone, Debug, Default)]
+pub struct SemanticActionFollow(
+    std::sync::Arc<std::sync::Mutex<Option<crate::ContextNavigationTarget>>>,
+);
+
+impl SemanticActionFollow {
+    /// Records the latest diverted load; a later one replaces it.
+    pub fn record(&self, target: crate::ContextNavigationTarget) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(target);
+        }
+    }
+
+    /// Takes the diverted load, leaving the slot empty.
+    pub fn take(&self) -> Option<crate::ContextNavigationTarget> {
+        self.0.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
 /// Non-cloneable closed recipe for one trusted native adapter.
 #[must_use]
 pub struct SemanticActionNativeRequest {
+    page_dialog_opened: bool,
+    effect: crate::SemanticEffectClass,
+    follow: Option<SemanticActionFollow>,
+    consent: bool,
     correlation: NativeCorrelation,
     role: SemanticRole,
     expected_geometry: SemanticRect,
@@ -316,6 +359,47 @@ pub struct SemanticActionNativeRequest {
 }
 
 impl SemanticActionNativeRequest {
+    pub(crate) const fn page_dialog_opened(&self) -> bool {
+        self.page_dialog_opened
+    }
+    pub(crate) fn correlation(&self) -> SemanticActionNativeCorrelation {
+        SemanticActionNativeCorrelation(self.correlation.clone())
+    }
+
+    /// Lets the native adapter report one same-site load the page started
+    /// during this action, which the adapter cancels rather than follows.
+    pub fn with_follow(mut self, follow: SemanticActionFollow) -> Self {
+        self.follow = Some(follow);
+        self
+    }
+
+    /// The follow slot the controller attached, if any.
+    pub const fn follow(&self) -> Option<&SemanticActionFollow> {
+        self.follow.as_ref()
+    }
+
+    /// Marks Rust's own press of a cookie banner's refusal: the page may save
+    /// that choice with one same-site POST and hand back with its own loads,
+    /// which the native adapter follows instead of diverting.
+    pub fn with_consent(mut self) -> Self {
+        self.consent = true;
+        self
+    }
+
+    /// Rust's own press of a cookie banner's refusal.
+    pub const fn consent(&self) -> bool {
+        self.consent
+    }
+
+    /// Policy-admitted effect class. A durable commit may carry a same-site
+    /// form POST; lower classes only ever follow GET loads.
+    pub const fn commits(&self) -> bool {
+        !matches!(
+            self.effect,
+            crate::SemanticEffectClass::Read | crate::SemanticEffectClass::LocalWrite
+        )
+    }
+
     /// Exact policy-dispatched action attempt.
     pub const fn attempt(&self) -> SemanticActionAttemptId {
         self.correlation.attempt
@@ -577,6 +661,19 @@ impl fmt::Debug for SemanticActionNativeSettlement {
 }
 
 impl SemanticActionNativeSettlement {
+    /// Whether this original native terminal reports an effect whose application
+    /// could not be independently verified. This is neither success nor replay
+    /// permission; the terminal must still rejoin its exact execution owner.
+    pub const fn is_applied_unverified(&self) -> bool {
+        matches!(
+            self.outcome,
+            NativeOutcome::Failed {
+                failure: SemanticActionNativeFailure::AppliedUnverified,
+                ..
+            }
+        )
+    }
+
     pub(crate) const fn coordinator_key(&self) -> SemanticActionCoordinatorKey {
         self.correlation.coordinator_key()
     }
@@ -1050,6 +1147,7 @@ pub(crate) fn prepare_semantic_action_execution(
         requested_at,
         deadline,
     );
+    let effect = active.effect();
     let correlation = NativeCorrelation {
         effect: active.id(),
         attempt: active.attempt(),
@@ -1069,6 +1167,14 @@ pub(crate) fn prepare_semantic_action_execution(
             active,
         },
         SemanticActionNativeRequest {
+            page_dialog_opened: matches!(
+                action.verification(),
+                crate::SemanticVerification::PageDialogOpened
+                    | crate::SemanticVerification::PageDialogClosed
+            ),
+            effect,
+            follow: None,
+            consent: false,
             correlation,
             role: action.bound_action().target_role(),
             expected_geometry,
@@ -1151,7 +1257,8 @@ fn admit_native_outcome(
                 ) => rect_intersects_viewport(applied.actual_geometry, applied.viewport),
                 (
                     SemanticActionKind::Fill,
-                    SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+                    SemanticActionExecutionBackend::FixedSemanticRecipe
+                    | SemanticActionExecutionBackend::PageWorldCompatibilityFill,
                     SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
                 ) => true,
                 (
@@ -1876,7 +1983,10 @@ mod tests {
                  "b": {"x": 10, "y": 90, "w": 200, "h": 30}},
                 {"k": 5, "p": 3, "r": "option", "n": "Private high",
                  "v": {"k": "ordinal", "value": 1}, "o": 9,
-                 "b": {"x": 10, "y": 120, "w": 200, "h": 30}}
+                 "b": {"x": 10, "y": 120, "w": 200, "h": 30}},
+                {"k": 6, "p": 0, "r": "dialog", "n": "Private dialog"},
+                {"k": 7, "p": 5, "r": "button", "n": "Private dialog result", "o": 9,
+                 "b": {"x": 10, "y": 160, "w": 200, "h": 30}}
             ]),
         );
 
@@ -1942,6 +2052,64 @@ mod tests {
         )
         .expect("click");
         assert_eq!(click_native.kind(), SemanticActionKind::Click);
+        let ordinary_wire: serde_json::Value = serde_json::from_str(
+            crate::encode_semantic_action_runtime_invocation(&click_native)
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+        assert!(
+            ordinary_wire.get("u").is_none(),
+            "ordinary actions must not request global samples"
+        );
+        let dialog = prepared(
+            &observation,
+            86,
+            proposal(
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(2).unwrap(),
+                },
+                SemanticEffectClass::Read,
+                SemanticVerification::PageDialogOpened,
+            ),
+        );
+        let (_, native) = prepare_semantic_action_execution(
+            active(&dialog, 66),
+            &dialog,
+            SemanticActionExecutionInstant::from_millis(1),
+        )
+        .unwrap();
+        let wire: serde_json::Value = serde_json::from_str(
+            crate::encode_semantic_action_runtime_invocation(&native)
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(wire["u"], true);
+        let dialog_close = prepared(
+            &observation,
+            87,
+            proposal(
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(7).unwrap(),
+                },
+                SemanticEffectClass::Read,
+                SemanticVerification::PageDialogClosed,
+            ),
+        );
+        let (_, native) = prepare_semantic_action_execution(
+            active(&dialog_close, 67),
+            &dialog_close,
+            SemanticActionExecutionInstant::from_millis(1),
+        )
+        .unwrap();
+        let wire: serde_json::Value = serde_json::from_str(
+            crate::encode_semantic_action_runtime_invocation(&native)
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(wire["u"], true);
 
         let (fill_pending, fill_native) = prepare_semantic_action_execution(
             active(&fill, 62),
@@ -1974,7 +2142,7 @@ mod tests {
         assert!(!invocation_debug.contains("private replacement"));
         assert!(!invocation_debug.contains("Private title"));
         let fill_settlement = fill_native.complete(
-            SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+            SemanticActionExecutionBackend::FixedSemanticRecipe,
             SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
             viewport(),
             rect(10, 50, 200, 30),
@@ -1984,7 +2152,7 @@ mod tests {
         assert!(matches!(
             fill_pending.settle(fill.frame(), fill_settlement).disposition(),
             SemanticActionExecutionDisposition::Applied(applied)
-                if applied.backend() == SemanticActionExecutionBackend::PageWorldCompatibilityFill
+                if applied.backend() == SemanticActionExecutionBackend::FixedSemanticRecipe
                     && applied.readiness()
                         == SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
         ));

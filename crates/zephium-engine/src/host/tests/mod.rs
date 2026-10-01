@@ -3,93 +3,9 @@ fn raw_view_construction_policy() -> &'static str {
         .split_once("let mut builder = builder")
         .expect("raw view policy builder")
         .1
-        .split_once("/// Side-effect-free admission for the first extension-enabled environment")
-        .expect("extension profile constructor boundary")
+        .split_once("/// Why a profile's WebView2 environment could not be established.")
+        .expect("agent environment bootstrap boundary")
         .0
-}
-
-#[test]
-fn windows_extension_configure_failure_is_sticky_for_preflight_and_content() {
-    let profile = zephium_core::ids::ProfileId::from(1);
-    let mut registry = super::WindowsExtensionEnvironmentRegistry::default();
-    assert_eq!(
-        registry.preflight(profile, false, false),
-        super::WindowsExtensionEnvironmentPreflight::Create,
-    );
-    assert!(registry.begin(profile));
-    // The environment callback may already have published the COM environment
-    // when later controller hardening fails.
-    registry.fail(profile);
-    assert_eq!(
-        registry.preflight(profile, true, false),
-        super::WindowsExtensionEnvironmentPreflight::RestartRequired,
-    );
-    assert_eq!(
-        registry.content_admission(profile, true, false),
-        super::WindowsExtensionContentAdmission::RestartRequired,
-    );
-    assert!(!registry.publish(profile));
-    assert!(!registry.record_disabled(profile));
-}
-
-#[test]
-fn windows_extension_close_debt_cannot_publish_the_attested_profile() {
-    let profile = zephium_core::ids::ProfileId::from(2);
-    let mut registry = super::WindowsExtensionEnvironmentRegistry::default();
-    assert!(registry.begin(profile));
-    // Profile attestation can succeed before explicit controller close. A
-    // close/cleanup failure must still dominate that provisional object.
-    registry.fail(profile);
-    assert_eq!(
-        registry.content_admission(profile, true, true),
-        super::WindowsExtensionContentAdmission::RestartRequired,
-    );
-    assert_eq!(
-        registry.preflight(profile, true, true),
-        super::WindowsExtensionEnvironmentPreflight::RestartRequired,
-    );
-    assert!(!registry.publish(profile));
-}
-
-#[test]
-fn windows_extension_environment_and_profile_map_divergence_is_never_reused() {
-    let profile = zephium_core::ids::ProfileId::from(3);
-    let mut registry = super::WindowsExtensionEnvironmentRegistry::default();
-    assert_eq!(
-        registry.content_admission(profile, true, false),
-        super::WindowsExtensionContentAdmission::InvariantFailed,
-        "an unclassified captured environment is not implicitly disabled",
-    );
-    assert_eq!(
-        registry.content_admission(profile, false, true),
-        super::WindowsExtensionContentAdmission::InvariantFailed,
-    );
-
-    assert!(registry.begin(profile));
-    assert!(registry.publish(profile));
-    assert_eq!(
-        registry.content_admission(profile, true, true),
-        super::WindowsExtensionContentAdmission::Enabled,
-    );
-    for (environment_present, profile_authority_present) in
-        [(true, false), (false, true), (false, false)]
-    {
-        assert_eq!(
-            registry.content_admission(profile, environment_present, profile_authority_present,),
-            super::WindowsExtensionContentAdmission::InvariantFailed,
-        );
-    }
-
-    registry.remove(profile);
-    assert!(registry.record_disabled(profile));
-    assert_eq!(
-        registry.content_admission(profile, true, false),
-        super::WindowsExtensionContentAdmission::ReuseDisabled,
-    );
-    assert_eq!(
-        registry.preflight(profile, true, false),
-        super::WindowsExtensionEnvironmentPreflight::RestartRequired,
-    );
 }
 
 #[test]
@@ -509,6 +425,83 @@ fn raw_native_views_never_request_focus_during_construction() {
     assert_eq!(raw_policy.matches(".with_focused(false)").count(), 1);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn hidden_wkwebview_construction_preserves_responder_and_cannot_activate() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vendor/wry/src/wkwebview/mod.rs"
+    ));
+    let constructor = source
+        .split("fn new_ns_view(")
+        .nth(1)
+        .and_then(|source| source.split("  pub fn id(&self)").next())
+        .expect("bounded WKWebView constructor");
+    let policy = constructor
+        .find("let focuses_during_initial_construction =")
+        .expect("initial focus policy capture");
+    let responder_capture = constructor
+        .find("let unfocused_child_focus =")
+        .expect("unfocused child responder capture");
+    let parenting = constructor
+        .find("ns_view.addSubview(&webview)")
+        .expect("child WebView parenting");
+    let responder_settlement = constructor
+        .find("preserve_unfocused_child_focus(snapshot")
+        .expect("same-stack responder settlement");
+    let responder_rollback = constructor
+        .find("rollback_unfocused_child_attachment(snapshot")
+        .expect("failed focus settlement rollback");
+    let error_return = constructor
+        .find("return Err(error)")
+        .expect("constructor failure after rollback");
+    let gate = constructor
+        .find("if focuses_during_initial_construction {")
+        .expect("application activation focus gate");
+    let activation = constructor
+        .find("NSApplication::activate(&app)")
+        .expect("application activation");
+
+    assert!(policy < responder_capture);
+    assert!(responder_capture < parenting);
+    assert!(parenting < responder_settlement);
+    assert!(responder_settlement < responder_rollback);
+    assert!(responder_rollback < error_return);
+    assert!(error_return < gate);
+    assert!(gate < activation);
+    assert_eq!(
+        constructor.matches("NSApplication::activate(&app)").count(),
+        1
+    );
+    assert_eq!(
+        constructor
+            .matches("NSApplication::activateIgnoringOtherApps(&app, true)")
+            .count(),
+        1
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hidden_wkwebviews_cannot_become_first_responder_after_construction() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vendor/wry/src/wkwebview/class/wry_web_view.rs"
+    ));
+    for method in ["fn accepts_first_responder", "fn become_first_responder"] {
+        let body = source
+            .split(method)
+            .nth(1)
+            .and_then(|source| source.split("    #[").next())
+            .expect("bounded responder override");
+        let hidden = body.find("if self.isHidden()").expect("hidden-state gate");
+        let refusal = body.find("Bool::NO").expect("hidden focus refusal");
+        let native = body.find("super(self)").expect("visible native behavior");
+        assert!(hidden < refusal);
+        assert!(refusal < native);
+    }
+}
+
 #[test]
 fn native_completion_waits_for_shell_ordered_presentation_acknowledgement() {
     let navigation = include_str!(concat!(
@@ -628,53 +621,6 @@ fn every_identity_bearing_commit_rearms_presentation_but_history_observation_doe
     assert!(
         guarded_wk.find("guard();").unwrap() < guarded_wk.find("webview.setHidden(true)").unwrap()
     );
-}
-
-#[test]
-fn document_background_wake_is_navigation_exact_and_precedes_shell_loading_projection() {
-    let construction = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/host/construction.rs"
-    ));
-    let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
-    let handler = construction
-        .split("builder = builder.with_navigation_event_handler")
-        .nth(1)
-        .expect("raw navigation event handler")
-        .split("#[cfg(target_os = \"windows\")]")
-        .next()
-        .expect("bounded raw navigation event handler");
-    let started = handler
-        .split("NavigationTransition::Started(epoch)")
-        .nth(1)
-        .expect("navigation-start branch")
-        .split("NavigationTransition::Redirected(epoch)")
-        .next()
-        .expect("bounded navigation-start branch");
-    assert!(started.contains("queue_extension_background_wake"));
-    assert!(
-        started.find("queue_extension_background_wake")
-            < started.find("EngineEvent::LoadingChanged")
-    );
-    let redirected = handler
-        .split("NavigationTransition::Redirected(epoch)")
-        .nth(1)
-        .expect("redirect branch")
-        .split("NavigationTransition::Committed(epoch)")
-        .next()
-        .expect("bounded redirect branch");
-    assert!(redirected.contains("queue_extension_background_wake"));
-
-    let wake = permits
-        .split("fn queue_extension_background_wake(")
-        .nth(1)
-        .expect("bounded extension background wake queue")
-        .split("fn queue_navigation_authority_invalidation(")
-        .next()
-        .expect("isolated extension background wake queue");
-    assert!(wake.contains("matches_current_target"));
-    assert!(wake.contains("wake_matching_document_backgrounds"));
-    assert!(!wake.contains("permit.revoke()"));
 }
 
 #[test]

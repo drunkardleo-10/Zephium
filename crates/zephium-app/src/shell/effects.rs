@@ -72,6 +72,7 @@ impl Shell {
         native.record(self.relayout());
         self.maintain_views();
         self.project_items();
+        self.project_browser_page_if_changed();
         native
     }
 
@@ -92,9 +93,7 @@ impl Shell {
                     self.zoom.pending.remove(&id);
                     self.items.view_creation_failed(id);
                     native.rejected = true;
-                    crate::diagnostic!(
-                        "profile deletion: refused native view creation for quarantined profile"
-                    );
+                    crate::diagnostic!("view-create: profile deletion quarantine");
                 }
                 Effect::Navigate { id, request, .. }
                     if self.profile_deletion_quarantines_item(id) =>
@@ -144,6 +143,7 @@ impl Shell {
                 Effect::CreateView { id, url } => {
                     let profile = self.profile_of_item(id);
                     if profile.is_some_and(|profile| extension_surfaces.failed(profile)) {
+                        crate::diagnostic!("view-create: extension surface publication unsettled");
                         self.zoom.pending.remove(&id);
                         self.items.view_creation_failed(id);
                         rejected_creates.insert(id);
@@ -151,6 +151,9 @@ impl Shell {
                         continue;
                     }
                     if logical_residents >= LIVE_VIEW_ABSOLUTE_LIMIT {
+                        crate::diagnostic!(
+                            "view-create: resident ceiling live={logical_residents} limit={LIVE_VIEW_ABSOLUTE_LIMIT}"
+                        );
                         self.zoom.pending.remove(&id);
                         self.items.view_creation_failed(id);
                         rejected_creates.insert(id);
@@ -161,6 +164,7 @@ impl Shell {
                         .engine
                         .create_view(id, self.partition_of(id), &url, bounds)
                     {
+                        crate::diagnostic!("view-create: native dispatch refused");
                         // Dispatch rejection is synchronous and must not rely
                         // on a callback entering an already-overloaded queue.
                         self.zoom.pending.remove(&id);

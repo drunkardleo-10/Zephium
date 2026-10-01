@@ -226,6 +226,7 @@ fn settled_unsuccessful_terminals_survive_crash_without_reopening_or_result_bodi
     for disposition in [
         AgentWorkDisposition::Failed,
         AgentWorkDisposition::Cancelled,
+        AgentWorkDisposition::WaitingForHuman,
     ] {
         for injected in [Fault::BeforeWrite, Fault::AfterWrite, Fault::AfterCommit] {
             let (directory, mut hub, owner) = open();
@@ -237,6 +238,10 @@ fn settled_unsuccessful_terminals_survive_crash_without_reopening_or_result_bodi
             let mut bytes = *running.as_bytes();
             bytes[1] = disposition as u8;
             bytes[2] = AgentWorkDebt::NONE.bits();
+            if disposition == AgentWorkDisposition::WaitingForHuman {
+                bytes[3] = 1;
+                bytes[7] = 1;
+            }
             bytes[8..16].copy_from_slice(&(running.revision() + 1).to_be_bytes());
             let terminal = AgentWorkRecord::decode(bytes).unwrap();
             FAULT.with(|fault| fault.set(Some(injected)));

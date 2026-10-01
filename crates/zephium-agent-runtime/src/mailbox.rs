@@ -11,7 +11,8 @@ use tokio::sync::Notify;
 use zephium_agentic::{
     AgentAuditCompletion, AgentAuditDeliverySettlement, ContextNativeEvent,
     ContextNavigationReplacement, ContextRendererLoss, SemanticActionNativeCompletion,
-    SemanticActionNativeSettlement,
+    SemanticActionNativeSettlement, SemanticScreenshotNativeCapture,
+    SemanticScreenshotNativeCompletion, SemanticScreenshotNativeFailure,
 };
 
 const FAULT_NONE: u8 = 0;
@@ -117,6 +118,10 @@ pub(crate) enum AgentRuntimeMailboxItem {
     NativeTerminal(ContextNativeEvent),
     /// A native semantic-action callback settlement.
     SemanticActionTerminal(SemanticActionNativeSettlement),
+    /// A native semantic-screenshot callback settlement.
+    SemanticScreenshotTerminal(
+        Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ),
     /// A durable audit-delivery callback settlement.
     AuditTerminal(AgentAuditDeliverySettlement),
     #[cfg(test)]
@@ -136,6 +141,7 @@ impl fmt::Debug for AgentRuntimeMailboxItem {
         let label = match self {
             Self::NativeTerminal(_) => "NativeTerminal",
             Self::SemanticActionTerminal(_) => "SemanticActionTerminal",
+            Self::SemanticScreenshotTerminal(_) => "SemanticScreenshotTerminal",
             Self::AuditTerminal(_) => "AuditTerminal",
             #[cfg(test)]
             Self::TestTerminal => "TestTerminal",
@@ -173,6 +179,7 @@ pub(crate) enum AgentRuntimeMailboxCleanClaimRefusal {
 enum TerminalItem {
     Native(ContextNativeEvent),
     SemanticAction(SemanticActionNativeSettlement),
+    SemanticScreenshot(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>),
     Audit(AgentAuditDeliverySettlement),
     #[cfg(test)]
     Test,
@@ -229,6 +236,14 @@ impl AgentRuntimeMailbox {
     #[allow(dead_code)]
     pub(crate) fn semantic_action_sink(&self) -> SemanticActionSink {
         SemanticActionSink {
+            mailbox: self.clone(),
+        }
+    }
+
+    /// Returns a cloneable native semantic-screenshot callback sink.
+    #[allow(dead_code)]
+    pub(crate) fn semantic_screenshot_sink(&self) -> SemanticScreenshotSink {
+        SemanticScreenshotSink {
             mailbox: self.clone(),
         }
     }
@@ -329,6 +344,9 @@ impl AgentRuntimeMailbox {
                 TerminalItem::Native(event) => AgentRuntimeMailboxItem::NativeTerminal(event),
                 TerminalItem::SemanticAction(settlement) => {
                     AgentRuntimeMailboxItem::SemanticActionTerminal(settlement)
+                }
+                TerminalItem::SemanticScreenshot(settlement) => {
+                    AgentRuntimeMailboxItem::SemanticScreenshotTerminal(settlement)
                 }
                 TerminalItem::Audit(settlement) => {
                     AgentRuntimeMailboxItem::AuditTerminal(settlement)
@@ -542,6 +560,7 @@ fn discard_staged_item(item: AgentRuntimeMailboxItem) {
     match item {
         AgentRuntimeMailboxItem::NativeTerminal(event) => drop(event),
         AgentRuntimeMailboxItem::SemanticActionTerminal(settlement) => drop(settlement),
+        AgentRuntimeMailboxItem::SemanticScreenshotTerminal(settlement) => drop(settlement),
         AgentRuntimeMailboxItem::AuditTerminal(settlement) => {
             let _ = settlement;
         }
@@ -551,6 +570,36 @@ fn discard_staged_item(item: AgentRuntimeMailboxItem) {
         }
         #[cfg(test)]
         AgentRuntimeMailboxItem::TestTerminal | AgentRuntimeMailboxItem::TestSignal => {}
+    }
+}
+
+/// Screenshot callback sink safe to retain and invoke from native code.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct SemanticScreenshotSink {
+    mailbox: AgentRuntimeMailbox,
+}
+
+impl SemanticScreenshotSink {
+    /// Retains one screenshot terminal without unwinding across native code.
+    #[allow(dead_code)]
+    pub(crate) fn publish(
+        &self,
+        settlement: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ) -> Result<(), AgentRuntimeMailboxFault> {
+        panic_safe(&self.mailbox, || {
+            self.mailbox
+                .publish_terminal(TerminalItem::SemanticScreenshot(settlement))
+        })
+    }
+
+    /// Creates the move-only callback required by the native screenshot port.
+    #[allow(dead_code)]
+    pub(crate) fn completion(&self) -> SemanticScreenshotNativeCompletion {
+        let sink = self.clone();
+        Box::new(move |settlement| {
+            let _ = sink.publish(settlement);
+        })
     }
 }
 

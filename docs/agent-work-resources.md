@@ -1,24 +1,87 @@
 # Persistent Work browser resources and execution leases
 
-Status: functional core, typed ports and opt-in macOS native integration;
-**one native two-lease retention witness is qualified** under the separately
-qualified, release-excluded foreground holder. Other adapters remain explicitly
-Unsupported. This proves one fixed native document survived two actor leases,
-not product rendering authority or general task execution. The existing
-run-owned qualification path remains available, and its all-zero proof now also
-excludes retained Work resources and their outstanding delivery owners.
+Status: functional core, typed ports and opt-in macOS native integration.
+The shipping retained product entry has mechanically qualified one bounded,
+model-selected two-hop public objective, retaining the same healthy resource
+through durable completion and clean original shutdown. Answer usefulness was
+partial because relevant subsection content was absent from model-visible
+evidence; this is not general task or product readiness. Other native adapters
+remain explicitly Unsupported. The existing run-owned qualification path remains
+available, and its all-zero proof also excludes retained Work resources and their
+outstanding delivery owners.
 
 The actual-app retained WKWebView/common-controller join additionally qualified
 one [frozen public product brief](../eval/agentic-browsing/macos-retained-public-product-brief.md)
 on 2026-09-07, with two stateless Luna calls and clean independent closure.
 That one-page read-only result is not general task or shipping-product readiness.
 
+The shared controller/application now joins observed-link public discovery to
+execution-lease-bound document transitions on that same retained resource. Its
+deterministic provider/controller regressions cover two selected hops, transcript
+retirement and exact cancellation accounting. The corrected
+[retained public workflow](../eval/agentic-browsing/macos-retained-open-objective.md)
+completed two Luna-selected Svelte documentation hops and source-mapped output
+in 28.934 seconds on 2026-09-07. Mechanical completion and partial semantic
+usefulness are recorded separately. Observation-owned native rendering is also
+independently [RAF-qualified](../eval/agentic-browsing/macos-retained-observation-rendering.md).
+
+## Production selected-profile attachment
+
+The shipping `macos-work` Rust entry is now
+`zephium_desktop::admit_retained_trusted_work(app, request)`, delegating through
+the installed `MacosWorkComposition::launch_retained` and the original Shell.
+The trusted request must include the existing actor-selected Ready profile
+binding, approved manifest/context/objective/model/deadline, credential and
+task/account contract. There is no UI/IPC authority parser or default task.
+Preparation opens no resource or provider request. Shell rechecks its original
+Engine and Store/audit allocations, selected profile/storage/readiness, deadline
+and exclusive lifecycle slot before invoking the original deferred native factory.
+Legacy and retained compositions share its single acquisition site; no port
+reopens or is manufactured from an ordinary Browse tab.
+
+The installed application owner retains construction through callback loss,
+stop and expiry; successful construction enters the existing original Store
+Claim, native acquisition, exact Admitted/Running ACK and scoped controller
+sequence. Original notifications drive the existing Shell queue/timer. A sealed
+queue has an already-owned shutdown barrier, not a lost resource wake: that
+barrier waits on the original notification epoch under one caller deadline.
+No new executor, timer thread or model/controller implementation is added.
+
+`RetainedWorkHandle` exposes bounded content-free snapshots/events, explicit
+stop and exact uncertain-CAS reconciliation, and one source-bound ModelMapped
+extraction only after original scoped drain and durable Succeeded ACK. Result
+artifacts are not persisted by this slice. The resource remains retained after
+result retrieval; normal Shell shutdown alone destroys it and joins the same
+global native seal/audit proof. Unresolved construction, Store, worker or native
+owners cannot become a clean local-zero substitute. Factory/admission ambiguity
+remains fail-closed and retains any original owner available to the application.
+
+The production provider path remains `store:false`. An explicit public-only,
+release-excluded diagnostic can select inspectable retention through this same
+entry; its separately compiled adapters do not exist in production. One-page
+read-only objectives and bounded Public/Anonymous/Read observed-link discovery
+are supported by the existing trusted task/controller contract. Arbitrary URL
+navigation, actions, human takeover/input, fresh successor-run admission and
+general cross-origin multi-page objectives are **not** exposed. Shared application
+contracts are macOS/Windows-neutral; existing unsupported native platforms remain
+unsupported. Default Browse does not enable this optional graph.
+
+Deterministic actual-Shell/SQLite/loopback tests cover durable result before
+destruction, original global shutdown, foreign Engine/Store and changed profile,
+duplicate/legacy attachment, pre-attachment stop, and stop/expiry during original
+construction with no acquisition/provider work. Separate actual-app evidence
+now exercises this production entry for a
+[one-page result](../eval/agentic-browsing/macos-retained-product-workflow.md) and
+the bounded two-hop public workflow above, retaining the page after terminal
+result and verifying normal original Shell/native shutdown. Those isolated
+witnesses do not establish broad website coverage or production reliability.
+
 ## Why this boundary exists
 
 The actual-application foreground witness establishes a bounded supported
-rendering opportunity for one exact page. It does not solve ownership: current
-`ContextIdentity` permanently owns a run, normal cancellation stops loading and
-fails the isolated document channel, and current successful runs destroy every
+rendering opportunity for one exact page. It does not solve ownership: legacy
+`ContextIdentity` permanently owns a run, its normal cancellation stops loading
+and fails the isolated document channel, and successful legacy runs destroy every
 native context. Reusing those mechanisms as persistent Work resource lifetimes
 would either lose the useful page or silently change the meaning of Clean.
 
@@ -37,8 +100,229 @@ monotonic generation and original absolute deadline without relabeling the
 resource or page. It is neither an account/effect/navigation capability nor a
 model-facing tool. Future page operations must also join the approved policy,
 account, current document, observation and operation-specific native permit.
-This checkpoint enables only an explicit trusted construction source and the
-existing bounded initial all-role observation, not general navigation or effects.
+The application enables an explicit trusted construction source, bounded
+all-role observation and the existing approved observed-link discovery contract.
+The native successor primitive below adds no navigation or effect authority by
+itself; the original controller policy remains the only navigation authorizer.
+
+## Retained discovery controller join
+
+The existing `navigate_current` algorithm is shared by legacy and retained
+backings. Only current automation state, preparation, dispatch and terminal
+polling differ. Retained execution never opens a shadow `ContextRegistry`, tab,
+run-owned native page, provider loop or deadline. A private application slot owns
+the move-only preparation, original callback and terminal independently of the
+worker. One original policy `AgentActiveNavigation` binds that preparation.
+
+The checkpoint retires the previous page transcript; preparation invalidates old
+observations before dispatch. Exact successful native settlement commits the
+successor document, refreshes the retained binding, then requires a new bounded
+observation/rendering episode and account attestation before any next model call.
+Resource/profile/incarnation/lease stay unchanged. Existing observed-link,
+same-origin subtree, hop, repeat, redirect, cumulative budget and deadline rules
+apply without exceptions. Final extraction cites only its current document;
+cross-page evidence synthesis is not claimed.
+
+Cancellation drains two independent original owners: the application settles
+the retained resource terminal, and the controller settles its original policy
+navigation receipt/audit obligation. Lease delivery waits on outstanding
+navigation slots and cannot silently consume and discard that policy terminal.
+Abandoned slots remain application-owned for physical cleanup; lost or uncertain
+callback admission cannot become a false zero. A journal failure retains explicit
+Recovery even when native terminal debt is known drained. An undispatched or
+synchronously refused successor never restores the old document's authority.
+
+## Progressive same-document inspection
+
+Discovery can request the existing closed `snapshot` operation on an acknowledged
+region, subtree or bounded surrounding-text anchor, or refresh the initial
+viewport. This is a separate nonterminal observation checkpoint, not a widening
+of ordinary `read`. The exact settled tool/configuration and predecessor
+acknowledgement are consumed before native dispatch; old provider replay is
+retired. A new capture still uses the original `PendingRead`, rendering episode,
+lease, committed document, callback/notification debt and absolute deadlines.
+The registry and native adapter independently require the current invocation /
+snapshot generation. A refused or uncertain invocation cannot reuse an old anchor.
+
+Fresh provider delivery requires the requested scope/context/frame, the exact
+next snapshot generation and private anchor key, a connected region/subtree or
+an anchor-first forest of independent surrounding-text sources, original manifest
+revision, refreshed account and original cumulative admission. It never
+manufactures an acknowledgement for undisclosed data. Once delivered, `read(initial)` may format
+that exact scoped baseline, and subsequent navigation still uses the original
+observed-link policy. No native ref or previous body survives the new baseline.
+Cancellation and missing callbacks remain owned by the original retained read;
+failure cannot convert unresolved native debt to clean lease delivery.
+
+Every surrounding-window node is a root with no operations, navigation
+destination or frame boundary. The anchor retains its ordinary bounded metadata;
+additional roots contain only semantic role/heading level and optional visible
+text, without names, values, state or geometry. Decoder-redacted secrets remain
+withheld, and truncated windows may retain empty source anchors. Disclosed public
+source text must fit the requested combined before/after window as well as the
+original observation limits. New source keys need not have appeared in the prior
+snapshot; their fresh native capture supplies the references. Directional byte
+placement and DOM/source fidelity remain obligations of the pinned runtime.
+
+Region traversal stops at nested landmark/document roots and leaves them as
+current, separately expandable anchors with scope-boundary completeness. This
+prevents a long nested navigation tree from exhausting a parent's prose budget.
+The policy-bound discovery checkpoint retains bounded content-free inspection
+progress across scope/initial refreshes, without old body text or ref authority.
+Any target hint is resolved again against the exact current native observation;
+this includes independent source roots and never reuses a prior reference ordinal.
+Navigation retires this document-local metadata. Metadata is encoded before the
+original model-input reservation and shares its existing ceilings.
+
+See [discovery semantics](agent-work-discovery.md) and
+[deterministic evidence](../eval/agentic-browsing/progressive-inspection.md).
+The reused rendering owner was previously RAF-qualified; the new scoped live
+workflow itself still requires qualification. Windows native composition is not
+claimed by macOS or loopback tests.
+
+## Retained document transitions: deterministic native primitive
+
+An execution lease may prepare one successor only after a successful observation
+of its exact current document. Preparation reserves a successor operation and
+navigation/frame epochs privately, immediately makes old read bindings and
+automation state unusable, and holds registry navigation debt. It does **not**
+advance the row's committed URL/epochs or dispatch anything. The preparation
+becomes a move-only native request only when bound to the existing policy's exact
+`AgentActiveNavigation`. Scope, account, budget and audit authorization therefore
+remain in that policy; the lease is not a new source of navigation authority.
+This first primitive accepts exact-target navigation with no redirects.
+
+The native ingress independently joins the original private resource guard,
+lease/deadline, successfully core-accounted source observation and document epoch.
+It reserves the actual task/navigation slot before dispatch. The host rechecks
+the selected profile erasure state, current native URL/gate, semantic callback
+drain and original lease immediately before loading. A 30-second navigation
+ceiling is intersected with the original lease deadline. No temporary tab, legacy
+context registry, replacement view, profile or run-owned page is constructed.
+
+The original resource-owned document gate admits an explicit successor from its
+Ready state. It never reopens bootstrap, constructor authority or unsolicited
+location handling. The load must independently pass the exact native
+Started/Committed/Finished sequence, native navigation identity and target;
+redirects, old-document callbacks, target substitution and post-ready location
+drift still refuse. Only the exact successful terminal publishes the successor
+URL and epochs. The resource identity, native view, profile and execution lease
+stay unchanged; the next document requires a fresh observation before automation.
+
+`DocumentQueryFinalization` is a separate trusted operation policy for real
+documents which add one opaque query without loading another path. The model
+still selects an exact observed, query-free HTTPS destination; the immutable
+manifest and authorized native request carry the policy. After the same exact
+native event lineage and semantic load drain, macOS requires a 500 ms native URL
+quiet period. A policy-valid KVO update invalidates that content-free revision
+ticket and requires another bounded quiet period without consuming a URL sample.
+Missing, invalid, noncanonical, fragment/credential-bearing, origin/path-changing
+or otherwise forbidden KVO values fail immediately even if the page later moves
+back. Once the revision stays quiet, one current-URL sample is fenced against a
+racing callback and becomes the exact effective document. The timer does not
+reset the navigation or lease deadline. Exact-policy documents pay no delay.
+
+The requested destination and effective document remain separate facts through
+native completion, policy settlement, observation binding and provider context.
+The query cannot become a future model-authored destination. The legacy context
+adapters reject this policy as Unsupported; Windows must implement equivalent
+native proof before claiming support.
+
+Core navigation debt and the native request/task/callback-return debt remain
+separate and both join lease revocation, destruction and global shutdown. A
+successful terminal arriving after revocation records physical document facts
+but cannot resume the old actor. Synchronous non-admission returns the original
+request for explicit accounting. Failure or uncertain admission never restores
+old authority and requires cleanup in this slice. Destruction settles the
+host-owned navigation task before waiting for its original native drains.
+
+Deterministic tests cover the actual policy-to-request/budget-receipt join,
+pre-dispatch invalidation versus committed epoch publication, fresh successor
+observation, foreign/stale terminals, refusal, expiry, revocation/destruction,
+physical callback-return barriers and exact native gate event ordering. The
+shared port defaults to lossless Unsupported outside the concrete macOS adapter.
+Controller transcript retirement, fresh account evidence and production rendering
+opportunities are now integrated through the shared controller join above. Its
+separate bounded macOS live evidence qualifies two unfamiliar model-selected
+documentation hops; these primitive tests alone make no such live claim.
+
+## Rendering as part of retained observation
+
+The macOS retained-read adapter now owns one bounded presentation episode inside
+the original observation task. It prepares a hidden auxiliary public AppKit
+window, publishes the owner and watchdog before presentation, briefly reparents
+the same WKWebView, performs one semantic invocation, and restores/hides/releases
+the presentation before delivering a snapshot. It creates no second browser,
+profile, model tool or foreground-control capability. Other native adapters remain
+Unsupported at the existing retained-resource port.
+
+Hidden, unfocused macOS child construction is itself a fail-closed focus
+transaction. Wry retains the pre-construction key window, main window and first
+responder across callback-capable AppKit parenting, suppresses application
+activation, and accepts only unchanged responder ownership or focus captured by
+the new child subtree. It restores only that owned focus. If preservation fails,
+the child is detached before constructor teardown; rollback retries restoration
+only while the same retained window authority and child-owned responder remain,
+and never overwrites a foreign responder selected by the user or a callback.
+The native Wry subclass also rejects both first-responder eligibility and
+`becomeFirstResponder` while hidden, closing delayed AppKit/WebKit focus attempts
+after the constructor stack returns. Making the view visible restores WebKit's
+ordinary native responder behavior, so explicit human takeover remains possible.
+Non-child Wry construction retains its upstream content-view focus behavior and
+is not used for this Work resource path.
+
+WKWebView URL observations are bounded evidence rather than document authority.
+Started, committed and finished navigation events plus an independent current-URL
+sample still establish the exact native document. Once that document is sealed,
+a delayed or duplicate URL observation is idempotent only when its newly sampled
+native value is byte-for-byte equal to the sealed effective URL. A missing,
+oversized or unequal value refuses the resource; parsing or canonical equivalence
+cannot weaken that comparison. Equal notifications during query finalization
+still advance its revision fence, and redirects, substitutions, reloads and
+foreign native navigation identities remain fail-closed.
+
+The exact resource guard/incarnation, execution lease, observation correlation,
+committed document epoch/native navigation stamp and current native URL are
+rechecked through completion. Only one such presentation is admitted at a time.
+The fixed 1280×800 viewport must fit on-screen without scaling or clipping. The
+window cannot become key/main and ignores mouse input. The application's current
+key/main windows must remain the captured human owners. The original responder
+is required at admission; later responder churn does not transfer the retained
+page. Execution still requires its exact noninteractive surface attachment and
+excludes routing the human window's responder into the retained page subtree.
+Zephium never activates the application, injects input, selects a responder or
+restores focus after a human changes it. Missing foreground/geometry yields an
+explicit read refusal, not a fabricated observation.
+
+The episode has one five-second absolute deadline intersected with the original
+execution lease. Once visibly presented, a 100 ms normal-event-loop opportunity
+precedes the single invocation; this is a bounded rendering opportunity, not a
+claim that any arbitrary site has settled. A coalesced 50 ms watchdog revalidates
+ownership. Expiry/control/profile/document changes revoke presentation and discard
+the result. Callback servicing is subject to the real application event loop,
+not a realtime scheduling guarantee. Cleanup can outlive revoked authority but
+gets at most 104 total watchdog opportunities, without renewing execution or
+presentation authority. An undrained failure remains owned and blocks Clean.
+
+The snapshot remains with the original task until the semantic callback has
+returned through the next-main-queue barrier, the exact auxiliary window's weak
+reference has cleared, parent/frame restoration is verified, and the cancelled
+or entered watchdog owner has physically drained. Cancellation of an executing
+semantic invocation invalidates that channel and quarantines the resource;
+it is not represented as a healthy reusable page. Destruction retries exact
+presentation retirement before retiring the page. Native audits include the
+production surface and the original pending resource/task owners. No live timer
+authority or presentation remains when the observation finishes; a cancelled
+dispatch block may still run later, but holds no callback, lease or permit.
+
+The historical diagnostic holder stays release-excluded. The provider-free
+two-lease RAF qualifier now instead calls the shipping retained-read operation,
+then waits 400 ms after delivery before independently checking the hidden page
+and completed presentation count. Its native view/document/world stamps and
+normal application/profile/native weak cleanup remain required. See
+[retained observation rendering qualification](../eval/agentic-browsing/macos-retained-observation-rendering.md)
+for the actual measured status; deterministic tests alone do not qualify a live
+RAF workflow, background execution or heterogeneous multi-page tasks.
 
 ## Exact lifetime protocol
 
@@ -120,8 +404,9 @@ retained but cannot issue an observation.
 synthetic retained fixture policy). This opt-in accepts only an initially
 query-free, fragment-free, credential-free HTTPS request. After the same exact
 native start/commit/finish lineage, a separate non-dispatching finalization state
-freezes one bounded native current-URL sample: either the exact request or one
-opaque nonempty query addition with all other URL bytes unchanged. There is no
+uses the same bounded native quiet-period/revision fence described above and
+then freezes one current-URL sample: either the exact request or one opaque
+nonempty query addition with all other URL bytes unchanged. There is no
 query-name/value whitelist, interpretation, second load, redirect allowance,
 general same-document continuation, or origin-only fallback. Noncanonical raw
 URLs, missing/oversized samples and changed components fail closed.
@@ -429,7 +714,7 @@ with the Work owner. Dropping that owner immediately closes new actor authority
 without pretending to perform cleanup.
 
 Each resource retains at most three exact operation slots: lifecycle, bounded
-read, and an overtaking destruction. Every slot owns its one terminal receiver,
+read or navigation (mutually exclusive), and an overtaking destruction. Every slot owns its one terminal receiver,
 original refusal request, and any revocation ticket/terminal; actor handles only
 poll that original slot. Native callbacks publish into their immutable one-slot
 destination before waking. Dropping an actor handle cannot discard a late A
@@ -447,7 +732,7 @@ Finished-slot inspection does not wait for an operation mutex while holding the
 slots collection. An operation poll may independently inspect that collection's
 poison state without creating the inverse lock-order dependency.
 
-Read terminals are accounted before the core's zero-read revocation settlement.
+Read and navigation terminals are accounted before the core's revocation settlement.
 After an exact terminal and delivery receipt are consumed, failed health/delivery
 proof marks uncertainty but does not retain fictitious callback debt. Actual
 missing terminals stay owed. The private primitive acquisition gate requires

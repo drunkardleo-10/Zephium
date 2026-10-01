@@ -10,7 +10,14 @@ const ROOT: &str = "crates/zephium-agent-controller/src/lib.rs";
 const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
+const DECISION: &str = "crates/zephium-agent-controller/src/decision.rs";
+const ACTION_REFUSAL: &str = "crates/zephium-agentic/src/agent_provider/action_refusal.rs";
+const REINSPECTION: &str = "crates/zephium-agent-controller/src/work_reinspection.rs";
 const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
+const WORK_DECISION: &str = "crates/zephium-agent-controller/src/work_decision.rs";
+const INSPECTION: &str = "crates/zephium-agent-controller/src/work_inspection.rs";
+const OBSERVATION_CHECKPOINT: &str =
+    "crates/zephium-agentic/src/agent_provider/observation_checkpoint.rs";
 const FORM: &str = "crates/zephium-agent-controller/src/work_form.rs";
 const NAVIGATION: &str = "crates/zephium-agent-controller/src/work_navigation.rs";
 const NAVIGATION_POLICY: &str = "crates/zephium-agentic/src/agent_policy/navigation.rs";
@@ -21,13 +28,14 @@ const PROVIDER_REQUEST: &str = "crates/zephium-agentic/src/agent_provider/reques
 const POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/main.rs";
 const WORK_QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/work_actor.rs";
-const ALLOWED_DEPENDENCIES: [&str; 6] = [
+const ALLOWED_DEPENDENCIES: [&str; 7] = [
     "thiserror",
     "tokio",
     "zephium-agentic",
     "zephium-agent-model-catalog",
     "zephium-agent-provider-transport",
     "zephium-agent-runtime",
+    "zephium-decision",
 ];
 const FORBIDDEN_TERRA_TOKENS: [&str; 14] = [
     "reqwest",
@@ -57,11 +65,21 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_root(&root)?;
     validate_probe(&probe)?;
     validate_terra(&terra)?;
-    validate_action(&action)?;
-    validate_work(&read(repository.join(WORK))?)?;
+    validate_decision_routing(&read(repository.join(DECISION))?)?;
+    validate_action(&action, &read(repository.join(ACTION_REFUSAL))?)?;
+    validate_reinspection(&read(repository.join(REINSPECTION))?)?;
+    validate_work(
+        &read(repository.join(WORK))?,
+        &read(repository.join(WORK_DECISION))?,
+    )?;
+    validate_progressive_observation(
+        &read(repository.join(INSPECTION))?,
+        &read(repository.join(OBSERVATION_CHECKPOINT))?,
+    )?;
     validate_account_refresh(
         &terra,
         &read(repository.join(WORK))?,
+        &read(repository.join(WORK_DECISION))?,
         &read(repository.join(POLICY))?,
     )?;
     validate_form(&read(repository.join(FORM))?)?;
@@ -93,6 +111,48 @@ fn read(path: impl AsRef<Path>) -> Result<String, String> {
         .map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
+fn validate_reinspection(source: &str) -> Result<(), String> {
+    for required in [
+        "current.identity().profile() != source.identity().profile()",
+        "current.identity().owner() != source.identity().owner()",
+        "current.identity().id() == source.identity().id()",
+        "binding.frame().origin() != action.frame().origin()",
+        "binding.document() != &target.document",
+        "current.current_requested_document() != &self.target.document",
+        "account.account() != self.source_account.account()",
+        "account.attestation() == self.source_account.attestation()",
+        "account.observed_at() < self.issued_at",
+        "snapshot.completeness() != SemanticCompleteness::Complete",
+        "matches.next().is_some()",
+        "node.sensitivity() == SemanticSensitivity::Secret",
+        "value.truncated()",
+        "completion.matches(self.binding.lease(), &self.correlation)",
+        "unmatched: Some((Box::new(self), Box::new(completion)))",
+        ".observe_initial(lease, now)",
+        ".settle_observation(completion, now)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!("effect reinspection lost boundary: {required}"));
+        }
+    }
+    for forbidden in [
+        "dispatch_semantic_effect",
+        "authorize_semantic_effect",
+        "AgentVerifiedSemanticEffect",
+        "continue_after_verified_action",
+        "tokio::",
+        "std::thread",
+        "evaluateJavaScript",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "effect reinspection acquired execution authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_form(source: &str) -> Result<(), String> {
     for required in [
         "impl AgentWorkTask for AgentWorkFormTask",
@@ -104,7 +164,7 @@ fn validate_form(source: &str) -> Result<(), String> {
         "snapshot.generation() <= last.snapshot",
         "matches.next().is_some()",
         "descendant(snapshot, option_index, target_index)",
-        "preview.source_bytes() == goal.value.len()",
+        "preview.source_bytes() == expected.len()",
         "action.source_observation() != baseline.observation",
         "action.source_observation_generation() != baseline.generation",
         "action.frame() != &baseline.frame",
@@ -115,6 +175,7 @@ fn validate_form(source: &str) -> Result<(), String> {
         "self.refused = true;",
         "self.account_sample.get()",
         "sample.context() == context",
+        "impl AgentWorkTask for AgentWorkFormExtractionTask",
     ] {
         if !source.contains(required) {
             return Err(format!("trusted form contract lost boundary: {required}"));
@@ -134,8 +195,6 @@ fn validate_form(source: &str) -> Result<(), String> {
         "AgentProviderTransport",
         "tokio::",
         "std::thread",
-        "fn accept_extraction",
-        "fn allows_actions_before_extraction",
         "fn allows_subtree_extraction",
     ] {
         if source.contains(forbidden) {
@@ -147,7 +206,12 @@ fn validate_form(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(), String> {
+fn validate_account_refresh(
+    terra: &str,
+    work: &str,
+    decision: &str,
+    policy: &str,
+) -> Result<(), String> {
     let refresh = terra
         .split("pub fn refresh_account(")
         .nth(1)
@@ -166,7 +230,7 @@ fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(),
         "account != self.account",
         "account.attestation() == self.account.attestation()",
         "self.account_attestations.contains(&account.attestation())",
-        "self.account_attestations.len() >= MAX_BROWSER_ACCOUNT_ATTESTATIONS",
+        "self.account_attestations.len() >= self.max_account_attestations",
     ] {
         if !refresh.contains(required) {
             return Err(format!("account refresh lost authority fence: {required}"));
@@ -184,10 +248,15 @@ fn validate_account_refresh(terra: &str, work: &str, policy: &str) -> Result<(),
         || !sample.contains("self.task.attest_account(context, now);")
         || !sample.contains(".refresh_account(account)")
         || !work.contains("session.continue_inspection(")
-        || work
+        // Pinned across the actor's two files; new admission paths (discovery,
+        // waits, screenshots, decisions, a site's whole first look, the whole
+        // look a consent press is made on, an app view's look and each
+        // landmark it opens, and each view an app read switches to) each sample
+        // once more.
+        || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 5
+            != 28
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -258,7 +327,9 @@ fn validate_navigation_route_contract(source: &str) -> Result<(), String> {
         "target.as_url().fragment().is_some()",
         "SemanticOrigin::parse(target.as_url().as_str()).as_ref() != Ok(&origin)",
         "target == &departure || destinations[..index - 1].contains(target)",
-        "self.navigation_route.is_some() || self.origins.binary_search(route.origin()).is_err()",
+        "self.navigation_route.is_some()",
+        "|| self.navigation_discovery.is_some()",
+        "|| self.origins.binary_search(route.origin()).is_err()",
         "if routed != 0",
         "ZEPHIUM-AGENT-NAVIGATION-ROUTES-1",
         "hasher.update(node.id().bytes())",
@@ -295,7 +366,9 @@ fn validate_navigation_progress(
         ][..]),
         (request, &[
             "struct AgentProviderNavigationContext", "ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1",
-            "target.is_some_and(looks_like_secret_value)",
+            // acc7cc16: every checkpoint URL passes the model-safe public URL gate.
+            "crate::semantic_wire::model_safe_public_url(target)",
+            ".map(provider_navigation_url)",
             "checkpoint.binding()", "openai_text_message(\"developer\", checkpoint)",
         ][..]),
     ] {
@@ -309,7 +382,7 @@ fn validate_navigation_progress(
     if request
         .matches(".validate_navigation_checkpoint(policy, call_request)?;")
         .count()
-        != 8
+        != 9
         || request
             .matches("policy.reject_unstructured_navigation_input(call_request)?;")
             .count()
@@ -329,69 +402,145 @@ fn validate_navigation_progress(
         .find(".provider_navigation_checkpoint(call_request, observation)?")
         .ok_or("missing policy projection")?;
     let encoding = initial
-        .find("encode_openai_observation_body(")
+        .find("encode_openai_observation_body_with_action_targets(")
         .ok_or("missing checkpoint encoding")?;
+    let inspection = initial
+        .find("let text = progress.encode(observation)?;")
+        .ok_or("missing bounded inspection projection")?;
+    let bound = initial
+        .find("text.len() > MAX_AGENT_PROVIDER_INSPECTION_CHECKPOINT_BYTES")
+        .ok_or("missing inspection checkpoint size bound")?;
+    let measurement = initial
+        .find("conservative_request_measurement(&config, &body)?")
+        .ok_or("missing whole-input measurement")?;
     let admission = initial
         .find("policy.prepare_provider_observation_input(")
         .ok_or("missing whole-input admission")?;
-    if !(projection < encoding && encoding < admission) {
+    if !(projection < inspection
+        && inspection < bound
+        && bound < encoding
+        && encoding < measurement
+        && measurement < admission)
+    {
         return Err("navigation progress serialized after policy reservation".into());
     }
     Ok(())
 }
 
+const NAVIGATION_VOCABULARY: &str = "self.config = self
+            .config
+            .clone()
+            .with_navigation_available(navigation_available)
+            .with_history_back_available(self.history_depth > 0);";
+
 fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<(), String> {
     for (source, boundaries) in [
-        (actor, &[
-            "state.navigation_complete() || progress != AgentWorkTaskProgress::ReadyForNavigation",
-            ".current_navigation_target()", "receipt.hop() != state.navigation_hops",
-            "state.navigation_hops += 1;", "remaining_hops + 1",
-            "if proposed == &target",
-            "state.refresh_account(worker, browser)?",
-            "retire_for_navigation(observation, &target, &session.config)",
-            ".authorize_navigation(", ".dispatch_navigation(permit, operation, now)",
-            ".begin_navigation(id, op)", "state.native.snapshot_generation = None;",
-            "session.navigation = Some(active);", "ContextNativeRequest::Navigate(request)",
-            "terminal.operation() == operation", ".settle_navigation_terminal(&terminal)",
-            "AgentBrowserNavigationDispatchRefusal", "self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?",
-            "!= Some(refusal.operation)", ".refuse_navigation_dispatch(active, refusal.failure, now)",
-            "Self::observe(state, worker, browser).await?", "state.task_progress(&fresh)?",
-            "state.task.attest_account(operation.context(), now)",
-            "account.observed_at() < receipt.settled_at()", "account.attestation() == self.account.attestation()",
-            "self.validate_account_update(account, receipt.operation().context())?",
-            "SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE",
-            ".validate_successor(receipt, observation, request, &self.config)",
-            "self.drive(prepared.into_transport_input()).await",
-        ][..]),
-        (policy, &[
-            "self.navigation.is_some()", "!self.calls.is_empty()", "!self.effects.is_empty()",
-            "let route = node.navigation_route();", "route.map_or(1, |route| route.destinations().len())",
-            "hop != self.navigation_receipts.iter().flatten().count()",
-            "route.destinations().get(hop) != Some(target)",
-            "prior.settlement() == AgentNavigationSettlement::Committed",
-            "prior.lease() == request.lease", "prior.node() == node_id",
-            "prior.operation().context() == observation.request().context()",
-            "request.account.observed_at() >= prior.settled_at()",
-            "!baseline.matches(observation)", "!request.automation.can_automate()",
-            "observation.frames()[0].frame().origin() != &origin",
-            "operation.kind() != ContextOperationKind::Navigate", "!is_document_successor(",
-            "terminal.operation() != active.operation", "target != &active.row.target",
-            "self.navigation_attempts += 1;", ".get_mut(active.row.hop)", "*slot = Some(receipt)",
-            "hash.update(node.bytes())", "hash.update(lease.bytes())", "hash.update((hop as u64).to_be_bytes())",
-            "AgentNavigationProgressId(hash.finalize().into())",
-        ][..]),
-        (continuation, &[
-            "pub struct AgentProviderNavigationCheckpoint", "pub fn retire_for_navigation(",
-            "self.correlation.navigation_target.as_ref() != Some(target)",
-            "pub fn validate_successor(", "request.id() <= self.prior_call.call()",
-            "receipt.matches_source(&self.baseline, &self.target)",
-            "observation.request().context() != successor", "request.account().account() != receipt.account()",
-        ][..]),
+        (
+            actor,
+            &[
+                "state.navigation_complete() || progress != expected",
+                "AgentWorkTaskProgress::ReadyForNavigation",
+                "if !scope.admits(target)",
+                ".current_navigation_target()",
+                "receipt.hop() != state.navigation_hops",
+                "state.navigation_hops += 1;",
+                "remaining_hops + 1",
+                // 64d6c7b9: Back is exempt; any other proposal must equal the target.
+                // A site-session follow carries no proposal; its target is
+                // the engine's own record, admitted by scope and policy.
+                "(Some(AgentBrowserToolProposal::Navigate(proposed)), Some(target)) if proposed == target",
+                "scope.is_site_session() && scope.admits(target)",
+                "state.refresh_account(worker, browser)?",
+                "retire_for_navigation(observation, &target, &session.config)",
+                ".authorize_navigation(",
+                ".dispatch_navigation(permit, operation, now)",
+                ".begin_navigation(id, op)",
+                "state.native.snapshot_generation = None;",
+                "session.navigation = Some(active);",
+                "ContextNativeRequest::Navigate(request)",
+                "terminal.operation() == operation",
+                ".settle_navigation_terminal(&terminal)",
+                "AgentBrowserNavigationDispatchRefusal",
+                "self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?",
+                "!= Some(refusal.operation)",
+                ".refuse_navigation_dispatch(active, refusal.failure, now)",
+                "Self::observe(state, worker, browser).await?",
+                "state.task_progress(&fresh)?",
+                "state.task.attest_account(operation.context(), now)",
+                "account.observed_at() < receipt.settled_at()",
+                "account.attestation() == self.account.attestation()",
+                "self.validate_account_update(account, receipt.operation().context())?",
+                "SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE",
+                ".validate_successor_with_action_authority(",
+                "self.drive(prepared.into_transport_input()).await",
+            ][..],
+        ),
+        (
+            policy,
+            &[
+                "self.navigation.is_some()",
+                "!self.calls.is_empty()",
+                "!self.effects.is_empty()",
+                "let route = node.navigation_route();",
+                "route.map_or(1, |route| route.destinations().len())",
+                "hop != self.navigation_receipts.iter().flatten().count()",
+                "route.destinations().get(hop) != Some(target)",
+                "node.navigation_discovery()",
+                "!scope.admits(target)",
+                "node.link_destination() == Some(target)",
+                "node.sensitivity() == SemanticSensitivity::Public",
+                // 506c0c96: discovery caps visits per destination instead of one.
+                ".filter(|destination| *destination == target)",
+                ">= scope.max_visits_per_destination()",
+                "prior.settlement() == AgentNavigationSettlement::Committed",
+                "prior.lease() == request.lease",
+                "prior.node() == node_id",
+                "prior.operation().context() == observation.request().context()",
+                "request.account.observed_at() >= prior.settled_at()",
+                "!baseline.matches(observation)",
+                "!request.automation.can_automate()",
+                // 506c0c96: discovery binds both origins to its scope, else same-origin.
+                "!scope.admits_origin(source_origin) || !scope.admits_origin(&target_origin)",
+                "discovery.is_none() && source_origin != &target_origin",
+                "operation.kind() != ContextOperationKind::Navigate",
+                "!is_document_successor(",
+                "terminal.operation() != active.operation",
+                ".admits_final_document(&active.row.target, target)",
+                "self.navigation_attempts += 1;",
+                ".get_mut(active.row.hop)",
+                "*slot = Some(receipt)",
+                "hash.update(node.bytes())",
+                "hash.update(lease.bytes())",
+                "hash.update((hop as u64).to_be_bytes())",
+                "AgentNavigationProgressId(hash.finalize().into())",
+            ][..],
+        ),
+        (
+            continuation,
+            &[
+                "pub struct AgentProviderNavigationCheckpoint",
+                "pub fn retire_for_navigation(",
+                "self.correlation.navigation_target.as_ref() != Some(target)",
+                "pub fn validate_successor(",
+                "request.id() <= self.prior_call.call()",
+                "receipt.matches_source(&self.baseline, &self.target)",
+                "observation.request().context() != successor",
+                "request.account().account() != receipt.account()",
+            ][..],
+        ),
     ] {
         for boundary in boundaries {
-            if !source.contains(boundary) { return Err(format!("navigation lost boundary: {boundary}")); }
+            if !source.contains(boundary) {
+                return Err(format!("navigation lost boundary: {boundary}"));
+            }
         }
     }
+    // Admits one config rewrite (64d6c7b9): it only narrows the tool vocabulary
+    // (with_history_back_available ANDs the configured grant) after a hop.
+    if actor.matches(NAVIGATION_VOCABULARY).count() > 1 {
+        return Err("navigation rewrote its config more than once".into());
+    }
+    let scanned_actor = actor.replacen(NAVIGATION_VOCABULARY, "", 1);
     for forbidden in [
         "self.policy =",
         "self.deadline =",
@@ -402,7 +551,7 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
         "try_new_with_redirect_policy",
         "AgentProviderTranscript::",
     ] {
-        if actor.contains(forbidden) || policy.contains(forbidden) {
+        if scanned_actor.contains(forbidden) || policy.contains(forbidden) {
             return Err(format!(
                 "navigation widened or replaced authority: {forbidden}"
             ));
@@ -463,10 +612,24 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     {
         return Err("controller package identity or build policy drifted".to_owned());
     }
-    for forbidden in ["dev-dependencies", "build-dependencies", "target"] {
+    for forbidden in ["build-dependencies", "target"] {
         if manifest.get(forbidden).is_some() {
             return Err(format!("controller may not declare {forbidden}"));
         }
+    }
+    let development = manifest
+        .get("dev-dependencies")
+        .and_then(Value::as_table)
+        .ok_or("controller test dependency inventory missing")?;
+    let json = development
+        .get("serde_json")
+        .and_then(Value::as_table)
+        .ok_or("controller tests require only workspace serde_json")?;
+    if development.len() != 1
+        || json.len() != 1
+        || json.get("workspace").and_then(Value::as_bool) != Some(true)
+    {
+        return Err("controller test dependencies must remain serde_json workspace-only".into());
     }
     let dependencies = manifest
         .get("dependencies")
@@ -490,6 +653,17 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     {
         return Err("controller provider façade must remain optional workspace-only".to_owned());
     }
+    // The typed-decision layer rides the provider façade: optional, workspace-only.
+    let decision = dependencies
+        .get("zephium-decision")
+        .and_then(Value::as_table)
+        .ok_or_else(|| "controller decision dependency is malformed".to_owned())?;
+    if decision.get("workspace").and_then(Value::as_bool) != Some(true)
+        || decision.get("optional").and_then(Value::as_bool) != Some(true)
+        || decision.len() != 2
+    {
+        return Err("controller decision layer must remain optional workspace-only".to_owned());
+    }
     let features = manifest
         .get("features")
         .and_then(Value::as_table)
@@ -500,6 +674,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "provider-transport",
         &[
             "dep:zephium-agent-provider-transport",
+            "dep:zephium-decision",
             "zephium-agent-provider-transport/provider-transport",
         ],
     )?;
@@ -581,11 +756,11 @@ fn validate_terra(source: &str) -> Result<(), String> {
         .ok_or("controller lost bounded read driver")?;
     for required in [
         "self.check_live()?",
-        "self.turns >= MAX_BROWSER_MODEL_TURNS",
+        "self.turns >= self.max_model_calls",
         "!self.config.permits_baseline_read()",
         "AgentBrowserScopeProposal::Initial",
         "read_semantic_observation",
-        "SemanticReadAuthority::Initial",
+        "SemanticReadAuthority::Acknowledged(continuation.baseline())",
         "SemanticReadSensitivityLimit::PublicOnly",
         "SemanticReadBudget::STANDARD",
         ".bind_read_request(request, &self.config, &read, payload)",
@@ -658,8 +833,8 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "self.drive_terminal(input, Some(output)).await?",
         "SemanticReadSensitivityLimit::PublicOnly",
         "self.extraction_output.take()",
-        ".bind_diff_request(request, &self.config, &diff, payload)",
-        ".try_prepare_for_provider_exact_count(&mut self.policy, request, &diff)",
+        ".bind_diff_request_with_action_authority(",
+        ".try_prepare_for_provider_exact_count(&mut self.policy, request, diff)",
         ".try_prove_shutdown()",
     ] {
         if !source.contains(required) {
@@ -672,6 +847,18 @@ fn validate_terra(source: &str) -> Result<(), String> {
         if source.contains(forbidden) {
             return Err(format!(
                 "controller Terra path contains forbidden authority token: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Terra's typed-decision routing is a child of the Terra path and inherits its fence.
+fn validate_decision_routing(source: &str) -> Result<(), String> {
+    for forbidden in FORBIDDEN_TERRA_TOKENS {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "controller decision routing contains forbidden authority token: {forbidden}"
             ));
         }
     }
@@ -728,16 +915,26 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "terra.rs".to_owned(),
             "work.rs".to_owned(),
             "work_retained.rs".to_owned(),
+            "work_reinspection.rs".to_owned(),
+            "work_reinspection_tests.rs".to_owned(),
             "work_tests.rs".to_owned(),
             "work_combined_tests.rs".to_owned(),
             "work_scoped_tests.rs".to_owned(),
             "work_read_tests.rs".to_owned(),
             "work_account_tests.rs".to_owned(),
             "work_navigation.rs".to_owned(),
+            "work_inspection.rs".to_owned(),
             "work_navigation_tests.rs".to_owned(),
             "work_route_tests.rs".to_owned(),
             "work_form.rs".to_owned(),
             "work_form_tests.rs".to_owned(),
+            "work_discovery.rs".to_owned(),
+            // Reviewed decision layer (2af19810, d7c2496e): Terra's typed-decision
+            // routing, the Work actor's decision child and their test modules.
+            "decision.rs".to_owned(),
+            "terra_decision_tests.rs".to_owned(),
+            "work_decision.rs".to_owned(),
+            "work_decision_tests.rs".to_owned(),
         ])
     {
         return Err("controller source inventory drifted".to_owned());
@@ -785,7 +982,7 @@ fn validate_workflow_qualifier(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_action(source: &str) -> Result<(), String> {
+fn validate_action(source: &str, refusal: &str) -> Result<(), String> {
     let refusal_branch = source
         .split("AgentEffectAuthorization::NeedsHuman(transition) =>")
         .nth(1)
@@ -798,7 +995,7 @@ fn validate_action(source: &str) -> Result<(), String> {
         return Err("controller review classification escaped exact unissued policy branch".into());
     }
     for required in [
-        "SemanticActionBatch::bind",
+        "turn.resolve_action",
         "authorize_semantic_effect",
         "dispatch_semantic_effect",
         "execution: &mut SemanticActionExecutionCoordinator",
@@ -824,6 +1021,20 @@ fn validate_action(source: &str) -> Result<(), String> {
             return Err(format!("controller action lost boundary: {required}"));
         }
     }
+    for required in [
+        "config != &continuation.config",
+        "!continuation.baseline.matches(observation)",
+        "actions.actions().iter().find_map",
+        "targets.permitted_operations(context.target)",
+        "SemanticReferenceError::OperationDenied",
+        "SemanticActionBatch::bind",
+    ] {
+        if !refusal.contains(required) {
+            return Err(format!(
+                "provider action resolution lost grounding boundary: {required}"
+            ));
+        }
+    }
     for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
         "SemanticModelActionQualificationExecution",
         "for_execution_qualification",
@@ -837,7 +1048,62 @@ fn validate_action(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_work(source: &str) -> Result<(), String> {
+fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Result<(), String> {
+    for required in [
+        "state.check_task_contract()?",
+        "session.continue_after_observation(",
+        "checkpoint.baseline()",
+        // 7cf84437 threads the observation capability into the retained scope.
+        "let capability = state.observation_capability();",
+        ".observe_retained_scope(worker, expansion, capability)",
+        "state.refresh_account(worker, browser)?",
+        "Self::provider(",
+        ".prepare_successor_with_action_authority(",
+        "self.drive(prepared.into_transport_input())",
+    ] {
+        if !inspection.contains(required) {
+            return Err(format!(
+                "progressive observation lost original owner join: {required}"
+            ));
+        }
+    }
+    for required in [
+        "config != &self.config",
+        "!self.baseline.matches(observation)",
+        ".matches_manifest_revision(policy.manifest().id(), policy.manifest().guard())",
+        "request.lease() != self.prior_call.lease()",
+        "self.validate_successor(previous, current, request, &config)",
+        "AgentPreparedObservationRequest::try_for_config_with_inspections_and_action_authority(",
+        "successor_generation(previous, current, self.anchor_lost)",
+        "!anchor_lost && matches!(current.request().scope(), crate::SemanticScope::Initial)",
+        "== Some(current_generation)",
+        "node.parent().is_some()",
+        "self.context == observation.request().context()",
+        "capture.snapshot == observation.frames()[0].generation().get()",
+        "progress.captures.len() >= MAX_AGENT_INSPECTION_CAPTURES",
+        ".find(|node| node.key() == key)",
+        "node.reference().model_token()",
+    ] {
+        if !checkpoint.contains(required) {
+            return Err(format!(
+                "progressive observation lost delivery authority: {required}"
+            ));
+        }
+    }
+    for forbidden in FORBIDDEN_TERRA_TOKENS {
+        if inspection.contains(forbidden) {
+            return Err(format!(
+                "progressive observation owns forbidden integration: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_work(work: &str, decision: &str) -> Result<(), String> {
+    // The Work actor spans work.rs and its work_decision.rs child since d7c2496e.
+    let actor = format!("{work}\n{decision}");
+    let source = actor.as_str();
     let human = source
         .split("pub(crate) fn needs_human(")
         .nth(1)
@@ -870,6 +1136,8 @@ fn validate_work(source: &str) -> Result<(), String> {
         "navigation_target.is_some() && navigation_route.is_some()",
         "route.departure() != &input.context.target",
         "self.task.navigation_route() != self.navigation_route.as_ref()",
+        "self.task.navigation_discovery() != self.navigation_discovery.as_ref()",
+        "navigation_discovery.as_ref() != approved_discovery",
         "route.destinations().get(self.navigation_hops)",
         "self.navigation_hops == self.navigation_length()",
         "self.task.allows_actions_before_extraction() != self.actions_before_extraction",
@@ -887,9 +1155,9 @@ fn validate_work(source: &str) -> Result<(), String> {
         "progress != AgentWorkTaskProgress::ReadyForExtraction",
         "progress == AgentWorkTaskProgress::ReadyForExtraction",
         "session.config.restrict_to_actions_and_extraction()",
-        "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
-        "session.extract_from(",
-        "if session.turns >= super::MAX_BROWSER_MODEL_TURNS",
+        "captured_at = current_at;",
+        "session.extract_from_with_evidence(",
+        "if session.turns >= session.max_model_calls",
         "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         "state.native.revoke(browser)",
         ".begin_action_settlement(",
@@ -903,8 +1171,14 @@ fn validate_work(source: &str) -> Result<(), String> {
         "session.try_finish_unsuccessful()",
         "state.native.deferred.is_empty()",
         "state.drained.is_some()",
-        "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
-        "self.publish_terminal(worker, cleanup.is_some()).await",
+        // Since 8755115b the terminal intent is frozen once and the closure must
+        // match it, replacing the unsuccessful flag threaded into publication.
+        "if state.terminal_intent.replace(terminal_intent).is_some() {",
+        "let terminal_intent = state.terminal_intent.ok_or(AgentWorkFailure::Contract)?;",
+        "let closure_matches_intent = match terminal_intent {",
+        "closure.outcome() != AgentRunProgressOutcome::Succeeded",
+        "if !closure_matches_intent {",
+        "self.publish_terminal(worker).await",
         ".record_human_refusal(",
         "proposal_refusal: action_proposal_failure",
         "AgentBrowserActionProposalRefusal::discard_after_closure",
@@ -914,14 +1188,108 @@ fn validate_work(source: &str) -> Result<(), String> {
             return Err(format!("Work actor lost boundary: {required}"));
         }
     }
+    let scanned = without_loading_classifier(&without_challenge_detector(source)?)?;
     for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
         "SemanticModelActionQualificationExecution",
         "for_execution_qualification",
         "TerraProbeActionBridge",
     ]) {
-        if source.contains(forbidden) {
+        if scanned.contains(forbidden) {
             return Err(format!(
                 "Work actor acquired forbidden authority: {forbidden}"
+            ));
+        }
+    }
+    validate_work_decision(decision)
+}
+
+// This exact 16-node boolean classifier is the only additional content read.
+// Keep its whole body pinned so a changed bound, phrase or data flow is rejected.
+const LOADING_CLASSIFIER: &str = r#"fn says_loading(observation: &SemanticObservation) -> bool {
+    let nodes = || {
+        observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+    };
+    nodes().count() <= 16
+        && nodes().any(|node| {
+            [node.name(), node.text()]
+                .into_iter()
+                .flatten()
+                .map(|words| {
+                    words
+                        .as_str()
+                        .trim()
+                        .trim_end_matches(['…', '.'])
+                        .to_ascii_lowercase()
+                })
+                .any(|words| words == "loading" || words == "loading your workspace")
+        })
+}"#;
+
+fn without_loading_classifier(source: &str) -> Result<String, String> {
+    if source.matches(LOADING_CLASSIFIER).count() != 1 {
+        return Err("Work loading classifier changed its exact bounded content read".to_owned());
+    }
+    Ok(source.replacen(
+        LOADING_CLASSIFIER,
+        &LOADING_CLASSIFIER.replace(".as_str()", ""),
+        1,
+    ))
+}
+
+const CHALLENGE_DETECTOR: &str =
+    "fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {";
+
+// Admits one content read (352048d5): the bot-check detector matches short node
+// text against fixed phrases over a capped node count and yields only a bool.
+fn without_challenge_detector(source: &str) -> Result<String, String> {
+    let Some((head, tail)) = source.split_once(CHALLENGE_DETECTOR) else {
+        return Ok(source.to_owned());
+    };
+    let (detector, rest) = tail
+        .split_once("\n}\n")
+        .ok_or("Work challenge detector is malformed")?;
+    for required in [
+        "if nodes > MAX_HUMAN_CHALLENGE_NODES {",
+        ".filter(|text| text.len() <= 96)",
+        ".any(|phrase| lower.starts_with(phrase))",
+    ] {
+        if !detector.contains(required) {
+            return Err(format!("Work challenge detector lost bound: {required}"));
+        }
+    }
+    if detector.matches(".as_str()").count() != 1
+        || source.matches(CHALLENGE_DETECTOR).count() != 1
+        || !source.contains("const MAX_HUMAN_CHALLENGE_NODES: usize = 48;")
+    {
+        return Err("Work challenge detector widened its content read".to_owned());
+    }
+    let detector = detector.replacen(".map(|text| text.as_str().trim())", "", 1);
+    Ok(format!("{head}{detector}\n}}\n{rest}"))
+}
+
+// Decision-selected actions settle in work_decision.rs; the post-action capture
+// time is still the settlement instant, and that actor has no wider authority.
+fn validate_work_decision(source: &str) -> Result<(), String> {
+    let settled = source
+        .split("pub(super) async fn execute_prepared_action(")
+        .nth(1)
+        .ok_or("Work decision actor lost verified action settlement")?;
+    for required in [
+        ".verify_action_settlement(",
+        "SemanticSettleInstant::from_millis(now.millis()),",
+        "SemanticCaptureInstant::from_millis(now.millis()),",
+    ] {
+        if !settled.contains(required) {
+            return Err(format!("Work decision actor lost boundary: {required}"));
+        }
+    }
+    for forbidden in FORBIDDEN_TERRA_TOKENS {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Work decision actor acquired forbidden authority: {forbidden}"
             ));
         }
     }
@@ -981,11 +1349,12 @@ fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
 mod tests {
     use super::{
         validate_account_refresh, validate_navigation, validate_navigation_progress,
-        validate_navigation_route_contract, validate_scoped_extraction,
+        validate_navigation_route_contract, validate_reinspection, validate_scoped_extraction,
     };
     use super::{
-        validate_action, validate_form, validate_manifest, validate_probe, validate_root,
-        validate_terra, validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
+        validate_action, validate_decision_routing, validate_form, validate_manifest,
+        validate_probe, validate_root, validate_terra, validate_work,
+        validate_work_actor_qualifier, validate_workflow_qualifier, LOADING_CLASSIFIER,
     };
 
     const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
@@ -993,7 +1362,11 @@ mod tests {
     const PROBE: &str = include_str!("../../crates/zephium-agent-controller/src/probe.rs");
     const TERRA: &str = include_str!("../../crates/zephium-agent-controller/src/terra.rs");
     const ACTION: &str = include_str!("../../crates/zephium-agent-controller/src/action.rs");
+    const ACTION_REFUSAL: &str =
+        include_str!("../../crates/zephium-agentic/src/agent_provider/action_refusal.rs");
     const WORK: &str = include_str!("../../crates/zephium-agent-controller/src/work.rs");
+    const WORK_DECISION: &str =
+        include_str!("../../crates/zephium-agent-controller/src/work_decision.rs");
     const READ: &str = include_str!("../../crates/zephium-agentic/src/semantic_read.rs");
     const CONTINUATION: &str =
         include_str!("../../crates/zephium-agentic/src/agent_provider/continuation.rs");
@@ -1011,6 +1384,45 @@ mod tests {
         include_str!("../../crates/zephium-agentic/src/agent_policy/navigation.rs");
 
     #[test]
+    fn progressive_observation_cannot_bypass_the_original_delivery_or_native_owners() {
+        let inspection =
+            include_str!("../../crates/zephium-agent-controller/src/work_inspection.rs");
+        let checkpoint = include_str!(
+            "../../crates/zephium-agentic/src/agent_provider/observation_checkpoint.rs"
+        );
+        super::validate_progressive_observation(inspection, checkpoint).unwrap();
+        for boundary in [
+            "session.continue_after_observation(",
+            ".prepare_successor_with_action_authority(",
+            "state.refresh_account(worker, browser)?",
+        ] {
+            assert!(super::validate_progressive_observation(
+                &inspection.replace(boundary, "removed"),
+                checkpoint
+            )
+            .is_err());
+        }
+        for boundary in [
+            "request.lease() != self.prior_call.lease()",
+            "successor_generation(previous, current, self.anchor_lost)",
+            "!anchor_lost && matches!(current.request().scope(), crate::SemanticScope::Initial)",
+            "== Some(current_generation)",
+            "node.parent().is_some()",
+            "self.context == observation.request().context()",
+            "capture.snapshot == observation.frames()[0].generation().get()",
+            "progress.captures.len() >= MAX_AGENT_INSPECTION_CAPTURES",
+            ".find(|node| node.key() == key)",
+            "node.reference().model_token()",
+        ] {
+            assert!(super::validate_progressive_observation(
+                inspection,
+                &checkpoint.replace(boundary, "removed")
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn navigation_progress_cannot_lose_trust_replay_or_whole_input_admission() {
         validate_navigation_progress(NAVIGATION_POLICY, CONTINUATION, PROVIDER_REQUEST).unwrap();
         for boundary in ["receipt.hop != hop", "checkpoint.binding == binding"] {
@@ -1025,12 +1437,15 @@ mod tests {
             ".validate_navigation_checkpoint(policy, call_request)?;",
             "policy.reject_unstructured_navigation_input(call_request)?;",
             "openai_text_message(\"developer\", checkpoint)",
-            "target.is_some_and(looks_like_secret_value)",
+            "crate::semantic_wire::model_safe_public_url(target)",
+            "let text = progress.encode(observation)?;",
+            "text.len() > MAX_AGENT_PROVIDER_INSPECTION_CHECKPOINT_BYTES",
+            "conservative_request_measurement(&config, &body)?",
         ] {
             assert!(validate_navigation_progress(
                 NAVIGATION_POLICY,
                 CONTINUATION,
-                &PROVIDER_REQUEST.replacen(boundary, "removed", 1)
+                &PROVIDER_REQUEST.replace(boundary, "removed")
             )
             .is_err());
         }
@@ -1042,9 +1457,10 @@ mod tests {
         validate_root(ROOT).expect("controller root");
         validate_probe(PROBE).expect("controller probe");
         validate_terra(TERRA).expect("controller Terra path");
-        validate_action(ACTION).expect("controller native action path");
-        validate_work(WORK).expect("production Work actor");
-        validate_account_refresh(TERRA, WORK, POLICY).expect("trusted account sampling");
+        validate_action(ACTION, ACTION_REFUSAL).expect("controller native action path");
+        validate_work(WORK, WORK_DECISION).expect("production Work actor");
+        validate_account_refresh(TERRA, WORK, WORK_DECISION, POLICY)
+            .expect("trusted account sampling");
         validate_form(FORM).expect("production trusted form contract");
         validate_navigation(NAVIGATION, NAVIGATION_POLICY, CONTINUATION)
             .expect("exact document continuation");
@@ -1063,7 +1479,7 @@ mod tests {
             "self.task.navigation_route() != self.navigation_route.as_ref()",
             "route.destinations().get(self.navigation_hops)",
         ] {
-            assert!(validate_work(&WORK.replace(removed, "removed")).is_err());
+            assert!(validate_work(&WORK.replace(removed, "removed"), WORK_DECISION).is_err());
         }
         validate_navigation_route_contract(RUN_MANIFEST).unwrap();
         for removed in [
@@ -1094,7 +1510,7 @@ mod tests {
             .is_err());
         }
         for removed in [
-            "target != &active.row.target",
+            ".admits_final_document(&active.row.target, target)",
             "!is_document_successor(",
             "*slot = Some(receipt)",
             "hop != self.navigation_receipts.iter().flatten().count()",
@@ -1124,8 +1540,8 @@ mod tests {
         }
         assert!(validate_navigation(
             &NAVIGATION.replace(
-                "let dispatch = browser.dispatch",
-                "journal.navigation_active(active); let dispatch = browser.dispatch"
+                "let dispatch = if let Some(retained)",
+                "journal.navigation_active(active); let dispatch = if let Some(retained)"
             ),
             NAVIGATION_POLICY,
             CONTINUATION
@@ -1151,23 +1567,31 @@ mod tests {
             "self.account_attestations.contains(&account.attestation())",
             "self.failure = Some(error)",
         ] {
-            assert!(
-                validate_account_refresh(&TERRA.replace(removed, "removed"), WORK, POLICY).is_err()
-            );
+            assert!(validate_account_refresh(
+                &TERRA.replace(removed, "removed"),
+                WORK,
+                WORK_DECISION,
+                POLICY
+            )
+            .is_err());
         }
         for removed in [
             "state.refresh_account(worker, browser)?",
             "self.task.attest_account(context, now);",
             "self.native.check_control(worker, browser)?",
         ] {
-            assert!(
-                validate_account_refresh(TERRA, &WORK.replacen(removed, "removed", 1), POLICY)
-                    .is_err()
-            );
+            assert!(validate_account_refresh(
+                TERRA,
+                &WORK.replacen(removed, "removed", 1),
+                WORK_DECISION,
+                POLICY
+            )
+            .is_err());
         }
         assert!(validate_account_refresh(
             TERRA,
             WORK,
+            WORK_DECISION,
             &POLICY.replace("u64 = 30_000;", "u64 = 600_000;")
         )
         .is_err());
@@ -1177,9 +1601,31 @@ mod tests {
                 "pub fn refresh_account( /* self.deadline = */"
             ),
             WORK,
+            WORK_DECISION,
             POLICY
         )
         .is_err());
+    }
+
+    #[test]
+    fn app_view_admissions_each_retain_their_account_sample() {
+        validate_account_refresh(TERRA, WORK, WORK_DECISION, POLICY)
+            .expect("28 reviewed admission samples");
+        for (start, end) in [
+            ("async fn read_app_rows(", "async fn open_app_view("),
+            ("async fn open_app_view(", "async fn read_app_look("),
+        ] {
+            let begin = WORK.find(start).expect("admission function");
+            let finish = begin + WORK[begin..].find(end).expect("next function");
+            let path = &WORK[begin..finish];
+            // The last sample in each function is the one introduced for
+            // successive view observations by 2f873db4 and kept by 8249cf5c.
+            let sample = "state.refresh_account(worker, browser)?;";
+            let at = begin + path.rfind(sample).expect("new view sample");
+            let mut invalid = WORK.to_owned();
+            invalid.replace_range(at..at + sample.len(), "");
+            assert!(validate_account_refresh(TERRA, &invalid, WORK_DECISION, POLICY).is_err());
+        }
     }
 
     #[test]
@@ -1220,10 +1666,13 @@ mod tests {
             ))
             .is_err());
         }
-        assert!(validate_work(&WORK.replace(
-            "self.task.allows_baseline_read() != self.baseline_read",
-            "false"
-        ))
+        assert!(validate_work(
+            &WORK.replace(
+                "self.task.allows_baseline_read() != self.baseline_read",
+                "false"
+            ),
+            WORK_DECISION
+        )
         .is_err());
     }
 
@@ -1292,12 +1741,63 @@ mod tests {
     }
 
     #[test]
+    fn loading_classifier_admits_only_the_exact_bounded_boolean_read() {
+        validate_work(WORK, WORK_DECISION).expect("reviewed loading classifier");
+        for changed in [
+            LOADING_CLASSIFIER.replace("nodes().count() <= 16", "nodes().count() <= 17"),
+            LOADING_CLASSIFIER.replace("nodes().count() <= 16", "true"),
+            LOADING_CLASSIFIER.replace(".as_str()", ".as_str().as_str()"),
+            LOADING_CLASSIFIER.replace("words == \"loading\"", "words.contains(\"loading\")"),
+            LOADING_CLASSIFIER.replace(
+                "node.name(), node.text()",
+                "node.name(), node.text(), node.text()",
+            ),
+        ] {
+            assert_ne!(changed, LOADING_CLASSIFIER);
+            assert!(validate_work(
+                &WORK.replacen(LOADING_CLASSIFIER, &changed, 1),
+                WORK_DECISION,
+            )
+            .is_err());
+        }
+        assert!(validate_work(&format!("{WORK}\n{LOADING_CLASSIFIER}"), WORK_DECISION).is_err());
+        assert!(validate_work(
+            &format!("{WORK}\nfn other_read() {{ page.as_str(); }}"),
+            WORK_DECISION
+        )
+        .is_err());
+    }
+
+    #[test]
     fn mutation_cannot_reenable_default_transport_or_content_reading() {
         assert!(validate_manifest(
             &MANIFEST.replace("default = []", "default = [\"provider-transport\"]")
         )
         .is_err());
         assert!(validate_terra(&format!("{TERRA}\nlet _ = delta.as_str();")).is_err());
+        // The admitted detector read stays single, bounded and exact.
+        let detector = ".map(|text| text.as_str().trim())";
+        assert!(validate_work(
+            &WORK.replacen(detector, ".map(|text| text.as_str().as_str().trim())", 1),
+            WORK_DECISION
+        )
+        .is_err());
+        assert!(validate_work(
+            &WORK.replacen(".filter(|text| text.len() <= 96)", ".filter(|_| true)", 1),
+            WORK_DECISION
+        )
+        .is_err());
+        assert!(validate_work(&format!("{WORK}\nlet _ = page.as_str();"), WORK_DECISION).is_err());
+        let decision = include_str!("../../crates/zephium-agent-controller/src/decision.rs");
+        validate_decision_routing(decision).expect("decision routing");
+        assert!(validate_decision_routing(&format!("{decision}\nstd::thread::spawn(f);")).is_err());
+        let vocabulary = super::NAVIGATION_VOCABULARY;
+        assert!(validate_navigation(
+            &format!("{NAVIGATION}\n{vocabulary}"),
+            NAVIGATION_POLICY,
+            CONTINUATION
+        )
+        .is_err());
     }
 
     #[test]
@@ -1322,13 +1822,19 @@ mod tests {
             "state.native.deferred.is_empty()",
             "let _ = session.settle_navigation_refusal();",
             "state.drained.is_some()",
-            "(closure.outcome() == AgentRunProgressOutcome::Succeeded) == unsuccessful",
+            "if state.terminal_intent.replace(terminal_intent).is_some() {",
+            "let terminal_intent = state.terminal_intent.ok_or(AgentWorkFailure::Contract)?;",
+            "let closure_matches_intent = match terminal_intent {",
+            "closure.outcome() != AgentRunProgressOutcome::Succeeded",
+            "if !closure_matches_intent {",
             "claim.commit_with_shutdown(proof, settlement, provider)",
             ".record_human_refusal(",
             "proposal_refusal: action_proposal_failure",
             "AgentBrowserActionProposalRefusal::discard_after_closure",
         ] {
-            assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());
+            assert!(
+                validate_work(&WORK.replace(boundary, "removed_boundary"), WORK_DECISION).is_err()
+            );
         }
     }
 
@@ -1349,13 +1855,32 @@ mod tests {
             "progress != AgentWorkTaskProgress::ReadyForExtraction",
             "progress == AgentWorkTaskProgress::ReadyForExtraction",
             "session.config.restrict_to_actions_and_extraction()",
-            "captured_at = SemanticCaptureInstant::from_millis(now.millis());",
-            "session.extract_from(",
-            "if session.turns >= super::MAX_BROWSER_MODEL_TURNS",
+            "captured_at = current_at;",
+            "session.extract_from_with_evidence(",
+            "if session.turns >= session.max_model_calls",
             "state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete",
         ] {
-            assert!(validate_work(&WORK.replace(boundary, "removed_boundary")).is_err());
+            // The actor spans both files, so a boundary is removed from each.
+            assert!(validate_work(
+                &WORK.replace(boundary, "removed_boundary"),
+                &WORK_DECISION.replace(boundary, "removed_boundary"),
+            )
+            .is_err());
         }
+        for boundary in [
+            ".verify_action_settlement(",
+            "SemanticSettleInstant::from_millis(now.millis()),",
+            "SemanticCaptureInstant::from_millis(now.millis()),",
+        ] {
+            assert!(
+                validate_work(WORK, &WORK_DECISION.replace(boundary, "removed_boundary")).is_err()
+            );
+        }
+        assert!(validate_work(
+            WORK,
+            &format!("{WORK_DECISION}\nfn f() {{ std::thread::yield_now() }}")
+        )
+        .is_err());
     }
 
     #[test]
@@ -1369,14 +1894,36 @@ mod tests {
             "self.pending = Some",
         ] {
             assert!(
-                validate_action(&ACTION.replace(boundary, "removed_boundary")).is_err(),
+                validate_action(
+                    &ACTION.replace(boundary, "removed_boundary"),
+                    ACTION_REFUSAL
+                )
+                .is_err(),
                 "{boundary}"
             );
         }
-        assert!(validate_action(&format!(
-            "{ACTION}\nSemanticModelActionQualificationExecution"
-        ))
+        assert!(validate_action(
+            &format!("{ACTION}\nSemanticModelActionQualificationExecution"),
+            ACTION_REFUSAL
+        )
         .is_err());
+        for boundary in [
+            "config != &continuation.config",
+            "!continuation.baseline.matches(observation)",
+            "actions.actions().iter().find_map",
+            "targets.permitted_operations(context.target)",
+            "SemanticReferenceError::OperationDenied",
+            "SemanticActionBatch::bind",
+        ] {
+            assert!(
+                validate_action(
+                    ACTION,
+                    &ACTION_REFUSAL.replace(boundary, "removed_boundary")
+                )
+                .is_err(),
+                "{boundary}"
+            );
+        }
     }
 
     #[test]
@@ -1394,5 +1941,24 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn reinspection_cannot_restore_execution_or_relax_independent_evidence() {
+        let source = include_str!("../../crates/zephium-agent-controller/src/work_reinspection.rs");
+        validate_reinspection(source).unwrap();
+        for guard in [
+            "binding.document() != &target.document",
+            "account.account() != self.source_account.account()",
+            "account.attestation() == self.source_account.attestation()",
+            "matches.next().is_some()",
+            "value.truncated()",
+            "unmatched: Some((Box::new(self), Box::new(completion)))",
+        ] {
+            assert!(validate_reinspection(&source.replace(guard, "removed")).is_err());
+        }
+        assert!(
+            validate_reinspection(&format!("{source}\ncontinue_after_verified_action")).is_err()
+        );
     }
 }

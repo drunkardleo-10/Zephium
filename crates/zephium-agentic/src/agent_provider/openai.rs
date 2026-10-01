@@ -1006,6 +1006,8 @@ impl OpenAiResponsesStreamDecoder {
             return Err(AgentProviderProtocolError::Sequence);
         }
         let guard: [u8; 32] = Sha256::digest(arguments.as_bytes()).into();
+        #[cfg(feature = "probe-harness")]
+        let retained_arguments = self.config.store_response.then(|| arguments.clone());
         let call = AgentBrowserToolCall::decode_openai_with_replay(
             self.call,
             tool.item_id.clone(),
@@ -1014,7 +1016,23 @@ impl OpenAiResponsesStreamDecoder {
             arguments,
             None,
         )
-        .map_err(|_| AgentProviderProtocolError::ToolCall)?;
+        .map_err(|error| {
+            #[cfg(feature = "probe-harness")]
+            if let Some(arguments) = retained_arguments {
+                let body = serde_json::json!({
+                    "tool": tool.name.as_str(),
+                    "arguments": arguments,
+                    "error": format!("{error:?}"),
+                });
+                if let Ok(bytes) = serde_json::to_vec(&body) {
+                    crate::probe_evidence_path::write_runtime_proof(
+                        "refused-browser-tool.json",
+                        &bytes,
+                    );
+                }
+            }
+            AgentProviderProtocolError::ToolContract(tool.name, error)
+        })?;
         tool.argument_guard = Some(guard);
         tool.call = Some(call);
         Ok(())
@@ -2523,6 +2541,242 @@ mod tests {
     }
 
     #[test]
+    fn natural_language_locate_stream_preserves_arguments_usage_and_eof_boundary() {
+        let events = natural_language_locate_events();
+        let wire = encode_test_events(&events);
+        for chunk_size in [1, 7, 127, wire.len()] {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .expect("decoder");
+            for chunk in wire.as_bytes().chunks(chunk_size) {
+                assert!(decoder
+                    .push(chunk)
+                    .expect("valid stream")
+                    .deltas()
+                    .is_empty());
+            }
+            let (conclusion, tool) = decoder.finish().expect("authenticated EOF").into_parts();
+            let tool = tool.expect("private tool at EOF");
+            let crate::AgentBrowserToolProposal::Locate { query, scope } = tool.proposal() else {
+                panic!("locate proposal");
+            };
+            assert_eq!(query.as_str(), LOCATE_REGRESSION_QUERY);
+            assert!(matches!(scope, crate::AgentBrowserScopeProposal::Initial));
+            let AgentProviderStreamConclusion::Completed(completion) = conclusion else {
+                panic!("completed");
+            };
+            assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
+            assert_eq!(completion.usage().input_tokens(), 4_617);
+            assert_eq!(completion.usage().output_tokens(), 82);
+            assert_eq!(completion.usage().total_tokens(), 4_699);
+            assert_eq!(
+                completion.stats().tool_argument_bytes() as usize,
+                locate_regression_arguments().len()
+            );
+        }
+
+        // A decoded proposal remains private without item completion, terminal
+        // authentication and the transport EOF, including a valid arguments.done.
+        for event_count in 1..events.len() {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .expect("decoder");
+            decoder
+                .push(encode_test_events(&events[..event_count]).as_bytes())
+                .expect("prefix");
+            assert!(
+                decoder.finish().is_err(),
+                "prefix {event_count} cannot release a tool"
+            );
+        }
+    }
+
+    const LOCATE_REGRESSION_QUERY: &str = "Find the current product price and product dimensions or measurements, plus any availability or stock status for Tower Bridge.";
+
+    fn locate_regression_arguments() -> String {
+        json!({"scope":{"kind":"initial"},"semantic_query":LOCATE_REGRESSION_QUERY}).to_string()
+    }
+
+    fn natural_language_locate_events() -> Vec<Value> {
+        let arguments = locate_regression_arguments();
+        let item = json!({
+            "type":"function_call", "id":"fc_locate_regression", "call_id":"call_locate_regression",
+            "name":"locate", "arguments":arguments, "status":"completed"
+        });
+        let mut added_item = item.clone();
+        added_item["arguments"] = json!("");
+        added_item["status"] = json!("in_progress");
+        vec![
+            json!({"type":"response.created","response":{
+                "id":"resp_locate_regression","status":"in_progress",
+                "model":"gpt-5.6-luna","service_tier":"default"
+            }}),
+            json!({"type":"response.output_item.added","output_index":0,"item":added_item}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_locate_regression","output_index":0,"delta":&arguments[..31]}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_locate_regression","output_index":0,"delta":&arguments[31..]}),
+            json!({"type":"response.function_call_arguments.done","item_id":"fc_locate_regression","output_index":0,"name":"locate","arguments":arguments}),
+            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+            json!({"type":"response.completed","response":{
+                "id":"resp_locate_regression","status":"completed",
+                "model":"gpt-5.6-luna","service_tier":"default","output":[item],
+                "usage":{"input_tokens":4617,"output_tokens":82,"total_tokens":4699}
+            }}),
+        ]
+    }
+
+    fn encode_test_events(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(|event| sse(event["type"].as_str().expect("kind"), &event.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn literal_symbol_search_stream_preserves_arguments_and_eof_boundary() {
+        // Run 27's stored Luna call was valid Responses JSON. The previous
+        // failure at arguments.done was our semantic query validator rejecting
+        // "$", not an SSE framing or repeated-arguments mismatch.
+        let arguments = r#"{"scope":{"kind":"text_search","query":"$","target":"@a23"}}"#;
+        let mut events = natural_language_locate_events();
+        for index in [1, 5] {
+            events[index]["item"]["name"] = json!("snapshot");
+        }
+        events[2]["delta"] = json!(&arguments[..31]);
+        events[3]["delta"] = json!(&arguments[31..]);
+        events[4]["name"] = json!("snapshot");
+        events[4]["arguments"] = json!(arguments);
+        events[5]["item"]["arguments"] = json!(arguments);
+        events[6]["response"]["output"][0] = events[5]["item"].clone();
+        let wire = encode_test_events(&events);
+        for chunk_size in [1, 7, wire.len()] {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .unwrap();
+            for chunk in wire.as_bytes().chunks(chunk_size) {
+                assert!(decoder.push(chunk).unwrap().deltas().is_empty());
+            }
+            let (_, tool) = decoder.finish().unwrap().into_parts();
+            let tool = tool.unwrap();
+            let crate::AgentBrowserToolProposal::Snapshot(
+                crate::AgentBrowserScopeProposal::TextSearch { target, query },
+            ) = tool.proposal()
+            else {
+                panic!("text search");
+            };
+            assert_eq!(target.get(), 23);
+            assert_eq!(query.as_str(), "$");
+        }
+        for event_count in 1..events.len() {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .unwrap();
+            decoder
+                .push(encode_test_events(&events[..event_count]).as_bytes())
+                .unwrap();
+            assert!(
+                decoder.finish().is_err(),
+                "prefix {event_count} releases no tool"
+            );
+        }
+    }
+
+    #[test]
+    fn natural_language_locate_stream_retains_fail_closed_protocol_checks() {
+        let original = natural_language_locate_events();
+        let mut rejected = Vec::new();
+        // Every authenticated identity and repeated argument boundary must agree.
+        for (index, pointer, value) in [
+            (2, "/item_id", json!("fc_other")),
+            (2, "/output_index", json!(1)),
+            (4, "/item_id", json!("fc_other")),
+            (4, "/output_index", json!(1)),
+            (4, "/name", json!("back")),
+            (4, "/arguments", json!("{}")),
+            (5, "/item/id", json!("fc_other")),
+            (5, "/item/call_id", json!("call_other")),
+            (5, "/item/name", json!("back")),
+            (5, "/item/arguments", json!("{}")),
+            (6, "/response/id", json!("resp_other")),
+            (6, "/response/output/0/id", json!("fc_other")),
+            (6, "/response/output/0/call_id", json!("call_other")),
+            (6, "/response/output/0/arguments", json!("{}")),
+            (6, "/response/usage/total_tokens", json!(4698)),
+            (6, "/response/usage", Value::Null),
+            (6, "/response/model", json!("gpt-other")),
+        ] {
+            let mut events = original.clone();
+            *events[index].pointer_mut(pointer).expect("field") = value;
+            rejected.push(events);
+        }
+        for index in [1, 4, 5, 6] {
+            let mut events = original.clone();
+            events.insert(index, events[index].clone());
+            rejected.push(events);
+        }
+        for (left, right) in [(1, 2), (3, 4), (4, 5), (5, 6)] {
+            let mut events = original.clone();
+            events.swap(left, right);
+            rejected.push(events);
+        }
+        let mut unknown = original.clone();
+        unknown.insert(4, json!({"type":"response.unknown_event"}));
+        rejected.push(unknown);
+        for (case, events) in rejected.into_iter().enumerate() {
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .expect("decoder");
+            let error = decoder
+                .push(encode_test_events(&events).as_bytes())
+                .expect_err(&format!("case {case}"));
+            assert_eq!(decoder.push(b""), Err(error), "case {case} stays failed");
+            assert!(decoder.finish().is_err(), "case {case} releases no tool");
+        }
+    }
+
+    #[test]
+    fn natural_language_locate_still_rejects_invalid_closed_arguments() {
+        for arguments in [
+            r#"{"scope":{"kind":"initial"},"semantic_query":""}"#.to_owned(),
+            r#"{"scope":{"kind":"initial"},"semantic_query":"in the"}"#.to_owned(),
+            r#"{"scope":{"kind":"initial"},"semantic_query":"price","selector":"secret"}"#
+                .to_owned(),
+            r#"{"scope":{"kind":"region","target":"untrusted"},"semantic_query":"price"}"#
+                .to_owned(),
+            r#"{"scope":{"kind":"initial"},"semantic_query":"price","semantic_query":"stock"}"#
+                .to_owned(),
+            json!({"scope":{"kind":"initial"},"semantic_query":"unsafe\u{202e}query"}).to_string(),
+        ] {
+            let mut events = natural_language_locate_events();
+            events[2]["delta"] = json!(arguments);
+            events[3]["delta"] = json!("");
+            events[4]["arguments"] = json!(arguments);
+            let mut decoder = OpenAiResponsesStreamDecoder::try_new(
+                call(),
+                &config_with_effective_models(64, &["gpt-5.6-terra", "gpt-5.6-luna"]),
+            )
+            .expect("decoder");
+            assert!(matches!(
+                decoder.push(encode_test_events(&events[..5]).as_bytes()),
+                Err(AgentProviderProtocolError::ToolContract(
+                    AgentBrowserToolKind::Locate,
+                    _
+                ))
+            ));
+            assert!(decoder.finish().is_err());
+        }
+    }
+
+    #[test]
     fn malformed_tool_arguments_fail_stop_before_raw_json_escapes() {
         let mut decoder =
             OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
@@ -2577,9 +2831,18 @@ mod tests {
         );
         assert_eq!(
             decoder.push(done.as_bytes()),
-            Err(AgentProviderProtocolError::ToolCall)
+            Err(AgentProviderProtocolError::ToolContract(
+                AgentBrowserToolKind::Navigate,
+                super::super::AgentBrowserToolContractError::Arguments
+            ))
         );
-        assert_eq!(decoder.push(b""), Err(AgentProviderProtocolError::ToolCall));
+        assert_eq!(
+            decoder.push(b""),
+            Err(AgentProviderProtocolError::ToolContract(
+                AgentBrowserToolKind::Navigate,
+                super::super::AgentBrowserToolContractError::Arguments
+            ))
+        );
         assert!(!format!("{decoder:?}").contains("#secret"));
     }
 

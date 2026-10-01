@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ZEPHIUM_MIN_WEBKITGTK_VERSION: "2.52.5"
+  ZEPHIUM_MIN_WEBKITGTK_VERSION: "2.52.6"
 
 jobs:
   release_gate:
@@ -273,7 +273,7 @@ jobs:
         run: cargo deny check
 
   # Fedora 43 is the oldest target for the RPM release. Its signed stable
-  # repositories must carry WebKitGTK 2.52.5 before this job can publish; the
+  # repositories must carry WebKitGTK 2.52.6 before this job can publish; the
   # checks below intentionally block while that security update is only in
   # updates-testing. Keep this separate from the portable formats: Ubuntu LTS
   # and Debian stable are still below the floor,

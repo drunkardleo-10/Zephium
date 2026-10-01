@@ -12,31 +12,31 @@ use crate::runtime_security::{
     RuntimeSecurityUpdateTarget,
 };
 
-pub const SECURITY_FLOOR: [u32; 3] = [2, 52, 5];
-pub const SECURITY_FLOOR_TEXT: &str = "2.52.5";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-07-10";
-pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://webkitgtk.org/security/WSA-2026-0004.html";
-/// 2026-07-10T00:00:00Z. A wall clock before the reviewed advisory cannot
+pub const SECURITY_FLOOR: [u32; 3] = [2, 52, 6];
+pub const SECURITY_FLOOR_TEXT: &str = "2.52.6";
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-08-20";
+pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://webkitgtk.org/security/WSA-2026-0005.html";
+/// 2026-08-20T00:00:00Z. A wall clock before the reviewed advisory cannot
 /// establish that the security floor was published and must fail closed.
-pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_783_641_600;
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_787_184_000;
 
 pub const REVIEWED_STABLE_RELEASE_LINE: [u32; 2] = [2, 52];
 pub const REVIEWED_STABLE_RELEASE_LINE_TEXT: &str = "2.52";
 
-pub const LATEST_REVIEWED: [u32; 3] = [2, 52, 5];
-pub const LATEST_REVIEWED_TEXT: &str = "2.52.5";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-07-09";
+pub const LATEST_REVIEWED: [u32; 3] = [2, 52, 6];
+pub const LATEST_REVIEWED_TEXT: &str = "2.52.6";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-08-19";
 pub const LATEST_REVIEWED_SOURCE_URL: &str =
-    "https://webkitgtk.org/2026/07/09/webkitgtk2.52.5-released.html";
+    "https://webkitgtk.org/2026/08/19/webkitgtk2.52.6-released.html";
 
-/// Re-reviewed on 2026-08-10 against the official security-advisory index and
-/// release feed. WSA-2026-0004 and WebKitGTK 2.52.5 remain the newest stable
-/// security boundary; 2.53.90 is an odd-minor development release.
+/// Re-reviewed on 2026-09-10 against the official security-advisory index and
+/// release feed. WSA-2026-0005 and WebKitGTK 2.52.6 establish the newest stable
+/// security boundary; 2.53.92 is an odd-minor development release.
 ///
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-09";
-/// 2026-09-10T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_788_998_400;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-10";
+/// 2026-10-11T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_791_676_800;
 
 /// Environment switches that can disable/replace renderer confinement,
 /// expose a remote inspector, pause a child for a debugger, or turn off
@@ -159,13 +159,13 @@ mod tests {
     #[test]
     fn admission_rejects_obsolete_and_development_release_lines() {
         assert_eq!(
-            admit_runtime(2, 52, 4),
+            admit_runtime(2, 52, 5),
             Err(AdmissionError::BelowSecurityFloor {
-                found: [2, 52, 4],
+                found: [2, 52, 5],
                 required: SECURITY_FLOOR,
             })
         );
-        assert_eq!(admit_runtime(2, 52, 5), Ok(()));
+        assert_eq!(admit_runtime(2, 52, 6), Ok(()));
         assert_eq!(admit_runtime(2, 52, u32::MAX), Ok(()));
         assert_eq!(admit_runtime(2, 54, 0), Ok(()));
 
@@ -188,7 +188,7 @@ mod tests {
             assess_runtime(
                 2,
                 52,
-                5,
+                6,
                 SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
             ),
             Ok(RuntimeSecurityAdvisories::from_advisory(

@@ -119,6 +119,15 @@ fn task(frame: &SemanticFrameJoin, phases: Vec<AgentWorkFormPhase>) -> AgentWork
     )
     .unwrap()
 }
+fn external_task(frame: &SemanticFrameJoin, phases: Vec<AgentWorkFormPhase>) -> AgentWorkFormTask {
+    AgentWorkFormTask::try_new_external_update(
+        frame.context().identity(),
+        frame.origin().clone(),
+        AgentAccountScope::Anonymous,
+        phases,
+    )
+    .unwrap()
+}
 fn action(
     observation: &SemanticObservation,
     intent: SemanticActionIntent,
@@ -160,6 +169,16 @@ fn fill(observation: &SemanticObservation, value: &str) -> SemanticPreparedActio
         SemanticEffectClass::LocalWrite,
     )
 }
+fn external_fill(observation: &SemanticObservation, value: &str) -> SemanticPreparedAction {
+    action(
+        observation,
+        SemanticActionIntent::Fill {
+            target: SemanticReferenceId::new(2).unwrap(),
+            value: SemanticActionText::try_new(value.into()).unwrap(),
+        },
+        SemanticEffectClass::ExternalWrite,
+    )
+}
 fn select(observation: &SemanticObservation, option: u16) -> SemanticPreparedAction {
     action(
         observation,
@@ -172,6 +191,25 @@ fn select(observation: &SemanticObservation, option: u16) -> SemanticPreparedAct
 }
 
 #[test]
+fn form_goal_accepts_editable_combobox_without_granting_role_only_fill() {
+    let frame = frame();
+    for (operations, accepts) in [(3, true), (9, false), (13, false)] {
+        let mut task = task(&frame, vec![phase("query", false)]);
+        let initial = decode(
+            &frame,
+            1,
+            &format!(
+                r#"{{"v":1,"i":1,"g":1,"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"combobox","n":"Query","o":{operations},"v":{{"k":"text","value":""}},"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#
+            ),
+        );
+        assert_eq!(task.evaluate(&initial).is_ok(), accepts);
+        if accepts {
+            assert!(task.assess(&fill(&initial, "query")).is_ok());
+        }
+    }
+}
+
+#[test]
 fn phased_form_is_variable_order_and_exact_not_action_count() {
     for language_first in [true, false] {
         let frame = frame();
@@ -181,6 +219,11 @@ fn phased_form_is_variable_order_and_exact_not_action_count() {
         assert_eq!(
             task.evaluate(&initial).unwrap(),
             AgentWorkTaskProgress::Continue
+        );
+        assert_eq!(
+            task.model_action_operations(&initial.frames()[0].nodes()[1], &initial)
+                .unwrap(),
+            SemanticOperations::try_new(&[SemanticOperationClass::Fill]).unwrap()
         );
         assert!(task.assess(&fill(&initial, "first")).is_ok());
         assert!(task.assess(&select(&initial, 4)).is_ok());
@@ -196,6 +239,15 @@ fn phased_form_is_variable_order_and_exact_not_action_count() {
         assert_eq!(
             task.evaluate(&mid).unwrap(),
             AgentWorkTaskProgress::Continue
+        );
+        assert_eq!(
+            task.model_action_operations(&mid.frames()[0].nodes()[1], &mid)
+                .unwrap(),
+            if language_first {
+                SemanticOperations::try_new(&[SemanticOperationClass::Fill]).unwrap()
+            } else {
+                SemanticOperations::NONE
+            }
         );
         assert!(
             task.assess(&fill(&initial, "first")).is_err(),
@@ -241,6 +293,92 @@ fn phased_form_is_variable_order_and_exact_not_action_count() {
 }
 
 #[test]
+fn exact_external_transition_updates_then_restores_without_widening_authority() {
+    let frame = frame();
+    let transition = |from: &str, to: &str| {
+        AgentWorkFormPhase::try_new(vec![AgentWorkFormGoal::fill_transition(
+            None,
+            from.into(),
+            to.into(),
+        )
+        .unwrap()])
+        .unwrap()
+    };
+    let mut task = external_task(
+        &frame,
+        vec![
+            transition("original", "qualification marker"),
+            transition("qualification marker", "original"),
+        ],
+    );
+
+    let initial = observe(&frame, 1, "original", false, "");
+    assert_eq!(
+        task.evaluate(&initial).unwrap(),
+        AgentWorkTaskProgress::Continue
+    );
+    let update = external_fill(&initial, "qualification marker");
+    let assessment = task.assess(&update).unwrap();
+    assert_eq!(
+        assessment.actual_effect(),
+        SemanticEffectClass::ExternalWrite
+    );
+    assert!(task
+        .assess(&fill(&initial, "qualification marker"))
+        .is_err());
+    assert!(task.assess(&external_fill(&initial, "unapproved")).is_err());
+
+    let changed = observe(&frame, 2, "qualification marker", false, "");
+    assert_eq!(
+        task.evaluate(&changed).unwrap(),
+        AgentWorkTaskProgress::Continue
+    );
+    assert!(task
+        .assess(&external_fill(&initial, "qualification marker"))
+        .is_err());
+    assert!(task.assess(&external_fill(&changed, "original")).is_ok());
+
+    let restored = observe(&frame, 3, "original", false, "");
+    assert_eq!(
+        task.evaluate(&restored).unwrap(),
+        AgentWorkTaskProgress::Complete
+    );
+}
+
+#[test]
+fn external_transition_precondition_and_uniqueness_fail_closed() {
+    let frame = frame();
+    let transition = || {
+        AgentWorkFormPhase::try_new(vec![AgentWorkFormGoal::fill_transition(
+            None,
+            "original".into(),
+            "qualification marker".into(),
+        )
+        .unwrap()])
+        .unwrap()
+    };
+
+    let mut wrong_initial = external_task(&frame, vec![transition()]);
+    assert!(wrong_initial
+        .evaluate(&observe(&frame, 1, "unexpected", false, ""))
+        .is_err());
+
+    let mut ambiguous = external_task(&frame, vec![transition()]);
+    let extra = r#",{"k":6,"p":0,"r":"textbox","n":"Other","s":64,"o":3,"v":{"k":"text","value":"qualification marker"}}"#;
+    assert!(ambiguous
+        .evaluate(&observe(&frame, 1, "original", false, extra))
+        .is_err());
+
+    let mut already_final = external_task(&frame, vec![transition()]);
+    assert_eq!(
+        already_final
+            .evaluate(&observe(&frame, 1, "qualification marker", false, ""))
+            .unwrap(),
+        AgentWorkTaskProgress::Complete
+    );
+}
+
+#[test]
 fn goals_are_bounded_and_overlapping_authority_is_rejected() {
     for (name, value) in [
         (Some("".into()), "ok".into()),
@@ -252,6 +390,7 @@ fn goals_are_bounded_and_overlapping_authority_is_rejected() {
     }
     assert!(AgentWorkFormGoal::select(None, "".into()).is_err());
     assert!(AgentWorkFormGoal::select(None, "x".repeat(513)).is_err());
+    assert!(AgentWorkFormGoal::fill_transition(None, "same".into(), "same".into()).is_err());
     assert!(AgentWorkFormPhase::try_new(vec![]).is_err());
     assert!(AgentWorkFormPhase::try_new(vec![
         AgentWorkFormGoal::fill(None, "a".into()).unwrap(),
@@ -397,7 +536,7 @@ fn unique_unnamed_fields_clear_exactly_but_foreign_named_targets_cannot_write() 
         2,
         "",
         false,
-        r#",{"k":6,"p":0,"r":"textbox","n":"Other","o":2,"b":{"x":10,"y":100,"w":120,"h":30}}"#,
+        r#",{"k":6,"p":0,"r":"textbox","n":"Other","o":2,"v":{"k":"text","value":""},"b":{"x":10,"y":100,"w":120,"h":30}}"#,
     );
     assert!(unnamed.evaluate(&other).is_err());
     let mut named = task(&frame, vec![phase("wanted", false)]);

@@ -56,12 +56,3 @@ export function untilNextMinute(now: number): number {
 export function dayKey(at: Date): string {
   return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
 }
-
-/** A span of focused time, as hours and minutes: "2h 14m", "4h", "45m". */
-export function focusSpan(minutes: number): string {
-  const whole = Math.max(0, Math.round(minutes));
-  const hours = Math.floor(whole / 60);
-  const rest = whole % 60;
-  if (hours === 0) return `${rest}m`;
-  return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
-}

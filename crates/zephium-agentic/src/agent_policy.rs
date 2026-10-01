@@ -26,8 +26,9 @@ pub use effect::{
 pub(crate) use navigation::is_document_successor;
 use navigation::AgentNavigationRow;
 pub use navigation::{
-    AgentActiveNavigation, AgentNavigationAuthorizationRequest, AgentNavigationPermit,
-    AgentNavigationProgressId, AgentNavigationReceipt, AgentNavigationSettlement,
+    AgentActiveNavigation, AgentNavigationAuthorizationRequest, AgentNavigationKind,
+    AgentNavigationLedgerRefusal, AgentNavigationPermit, AgentNavigationProgressId,
+    AgentNavigationReceipt, AgentNavigationSettlement,
 };
 pub(crate) use navigation::{AgentNavigationCheckpoint, AgentNavigationCheckpointBinding};
 
@@ -48,6 +49,7 @@ use crate::{
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
     SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
     SemanticReferenceId, SemanticScreenshotDeliveryReceipt, SemanticSensitivity, SemanticTrust,
+    SemanticValueSummary,
 };
 
 /// Maximum model calls reserved or active in one run policy.
@@ -176,6 +178,7 @@ pub struct AgentModelCallRequest {
     account: AgentContextAccountBinding,
     budget: AgentModelCallBudget,
     now: AgentPolicyInstant,
+    remaining_native_actions: Option<u64>,
 }
 
 impl AgentModelCallRequest {
@@ -193,7 +196,18 @@ impl AgentModelCallRequest {
             account,
             budget,
             now,
+            remaining_native_actions: None,
         }
+    }
+
+    /// Frozen host allowance for this call; it grants no native authority.
+    pub const fn with_remaining_native_actions(mut self, remaining: u64) -> Self {
+        self.remaining_native_actions = Some(remaining);
+        self
+    }
+
+    pub(crate) const fn remaining_native_actions(self) -> Option<u64> {
+        self.remaining_native_actions
     }
 
     /// Monotonic exact call identity.
@@ -395,6 +409,7 @@ impl AgentPolicyAccounting {
 pub struct AgentRunPolicySettlement {
     closure: AgentRunMetricClosure,
     accounting: AgentPolicyAccounting,
+    model_usage_exact: bool,
 }
 
 const _: () = assert!(
@@ -439,6 +454,12 @@ impl AgentRunPolicySettlement {
     /// Exact terminal metric closure joined before consuming the policy.
     pub const fn closure(self) -> AgentRunMetricClosure {
         self.closure
+    }
+
+    /// True only when every closed model receipt carries exact tokens and cost.
+    /// Zero model calls are exact zero; priced or reservation ceilings are not exact.
+    pub const fn model_usage_exact(self) -> bool {
+        self.model_usage_exact
     }
 
     /// Final consumed accounting with every reservation proven zero.
@@ -1075,8 +1096,18 @@ pub struct AgentRunPolicy {
     calls: Vec<ModelCallRow>,
     effects: Vec<AgentEffectRow>,
     navigation: Option<AgentNavigationRow>,
-    navigation_receipts: [Option<AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+    initial_navigation_document: Option<(ContextJoin, crate::ContextNavigationTarget)>,
+    navigation_receipts:
+        [Option<AgentNavigationReceipt>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
+    // Bounded public discovery progress only. Receipt/audit types stay content-free.
+    navigation_destinations:
+        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
+    navigation_effective_destinations:
+        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
     navigation_attempts: usize,
+    navigation_history:
+        [Option<crate::ContextNavigationTarget>; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS + 1],
+    navigation_history_cursor: Option<usize>,
     last_call: Option<AgentModelCallId>,
     last_effect: Option<AgentEffectId>,
     last_action_attempt: Option<SemanticActionAttemptId>,
@@ -1126,8 +1157,13 @@ impl AgentRunPolicy {
             calls: Vec::with_capacity(MAX_AGENT_PENDING_MODEL_CALLS),
             effects: Vec::with_capacity(MAX_AGENT_PENDING_EFFECTS),
             navigation: None,
-            navigation_receipts: [None; crate::MAX_AGENT_NAVIGATION_ROUTE_HOPS],
+            navigation_receipts: [None; crate::MAX_AGENT_NAVIGATION_DISCOVERY_HOPS],
+            navigation_destinations: std::array::from_fn(|_| None),
+            initial_navigation_document: None,
+            navigation_effective_destinations: std::array::from_fn(|_| None),
             navigation_attempts: 0,
+            navigation_history: std::array::from_fn(|_| None),
+            navigation_history_cursor: None,
             last_call: None,
             last_effect: None,
             last_action_attempt: None,
@@ -1183,6 +1219,54 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Unreserved operations still available under both the run and lease node.
+    /// This is advisory accounting, not a reservation or dispatch authority.
+    pub fn remaining_operations(&self, lease: AgentPlanLeaseId) -> Result<u32, AgentPolicyError> {
+        let index = self.lease_index(lease).ok_or(AgentPolicyError::Lease)?;
+        let node = self
+            .manifest
+            .plan_node(self.leases[index].binding.node())
+            .ok_or(AgentPolicyError::Invariant)?;
+        let remaining = |budget: AgentRunBudget, accounting: AgentPolicyAccounting| {
+            budget
+                .operations()
+                .checked_sub(accounting.consumed_operations())
+                .and_then(|value| value.checked_sub(accounting.reserved_operations()))
+                .ok_or(AgentPolicyError::Budget)
+        };
+        Ok(
+            remaining(self.manifest.budget(), self.accounting())?.min(remaining(
+                node.budget(),
+                self.lease_accounting(lease)
+                    .ok_or(AgentPolicyError::Invariant)?,
+            )?),
+        )
+    }
+
+    /// Unreserved model tokens under both the run and the exact lease node.
+    /// Advisory only: every request still requires its original reservation.
+    pub fn remaining_model_tokens(&self, lease: AgentPlanLeaseId) -> Result<u64, AgentPolicyError> {
+        let index = self.lease_index(lease).ok_or(AgentPolicyError::Lease)?;
+        let node = self
+            .manifest
+            .plan_node(self.leases[index].binding.node())
+            .ok_or(AgentPolicyError::Invariant)?;
+        let remaining = |budget: AgentRunBudget, accounting: AgentPolicyAccounting| {
+            budget
+                .model_tokens()
+                .checked_sub(accounting.consumed_model_tokens())
+                .and_then(|value| value.checked_sub(accounting.reserved_model_tokens()))
+                .ok_or(AgentPolicyError::Budget)
+        };
+        Ok(
+            remaining(self.manifest.budget(), self.accounting())?.min(remaining(
+                node.budget(),
+                self.lease_accounting(lease)
+                    .ok_or(AgentPolicyError::Invariant)?,
+            )?),
+        )
+    }
+
     /// Consumed and reserved accounting for one exact plan lease.
     pub fn lease_accounting(&self, lease: AgentPlanLeaseId) -> Option<AgentPolicyAccounting> {
         let state = self
@@ -1216,6 +1300,8 @@ impl AgentRunPolicy {
             Ok(accounting) => Ok(AgentRunPolicySettlement {
                 closure,
                 accounting,
+                model_usage_exact: metrics.snapshot().model().exact()
+                    == metrics.snapshot().model().calls(),
             }),
             Err(error) => Err(Box::new(AgentRunPolicySettlementRefusal {
                 error,
@@ -1240,6 +1326,24 @@ impl AgentRunPolicy {
         };
         self.consumed = consumed;
         self.leases[0].consumed = consumed;
+    }
+
+    /// Rust chose a read step on this observation from a closed list (a
+    /// cookie banner's refusal) with no model call: the observation taints
+    /// the run as a model's reading would, so later data-flow decisions still
+    /// count it. Taint only grows; nothing else is granted.
+    pub fn admit_owned_observation(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentPolicyError> {
+        if self.sealed {
+            return Err(AgentPolicyError::Sealed);
+        }
+        for candidate in observation_taints(observation, account)? {
+            merge_taint(&mut self.taints, candidate);
+        }
+        Ok(())
     }
 
     /// Reserves exact observation input before any model transport receives bytes.
@@ -1300,6 +1404,100 @@ impl AgentRunPolicy {
                 measured: structured_input_tokens,
                 additional: 0,
             },
+        )
+    }
+
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn prepare_decision_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        projection: &crate::DecisionObservation,
+        input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if !projection.matches(observation, request.account()) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let context = observation.request().context();
+        let source_guard = SemanticObservationFingerprint::from_observation(observation).digest();
+        let mut candidates = Vec::new();
+        for frame in observation.frames() {
+            let nodes: Vec<_> = frame
+                .nodes()
+                .iter()
+                .filter(|node| projection.references().contains(&node.reference()))
+                .collect();
+            if nodes.is_empty() {
+                continue;
+            }
+            let sensitivity = nodes
+                .iter()
+                .map(|node| node.sensitivity())
+                .max()
+                .ok_or(AgentPolicyError::PayloadMismatch)?;
+            if sensitivity == SemanticSensitivity::Secret
+                || (sensitivity == SemanticSensitivity::Sensitive
+                    && request.account().account() == AgentAccountScope::Anonymous)
+            {
+                return Err(AgentPolicyError::Sensitivity);
+            }
+            merge_taint(
+                &mut candidates,
+                AgentTaintCohort {
+                    context,
+                    observation: observation.request().id(),
+                    observation_generation: observation.request().generation(),
+                    source_guard,
+                    account: request.account().account(),
+                    origin: frame.frame().origin().clone(),
+                    sensitivity,
+                    trust: SemanticTrust::UntrustedPage,
+                    attested_at: request.account().observed_at(),
+                    references: canonical_references(
+                        nodes.iter().map(|node| node.reference()).collect(),
+                    ),
+                },
+            );
+        }
+        self.prepare_model_input(
+            request,
+            context,
+            ModelInputKind::Observation,
+            source_guard,
+            candidates,
+            ModelInputTokenReservation {
+                measured: input_tokens,
+                additional: 0,
+            },
+        )
+    }
+
+    /// Reserve full observation delivery for an already-bound tool result.
+    /// The predecessor's exact plan node must survive policy rejoining before
+    /// any observation taint or model budget can be admitted.
+    pub(crate) fn prepare_provider_continuation_observation_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        expected: AgentModelCallExpectation,
+        observation: &SemanticObservation,
+        payload: &SemanticModelPayload,
+        structured_input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if request.id() != expected.call
+            || request.lease() != expected.lease
+            || self.manifest.id() != expected.manifest
+            || self
+                .lease_index(expected.lease)
+                .and_then(|index| self.leases.get(index))
+                .is_none_or(|lease| lease.binding.node() != expected.node)
+        {
+            return Err(AgentPolicyError::Authority);
+        }
+        self.prepare_provider_observation_input(
+            request,
+            observation,
+            payload,
+            structured_input_tokens,
         )
     }
 
@@ -1494,9 +1692,12 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::PayloadMismatch);
         }
         let candidates = match input.subtree_target {
-            None => {
-                provider_read_taints(input.read, input.baseline, request.account(), &self.taints)?
-            }
+            None => provider_extraction_read_taints(
+                input.read,
+                input.baseline,
+                request.account(),
+                &self.taints,
+            )?,
             Some(target) => provider_subtree_read_taints(
                 input.read,
                 input.baseline,
@@ -1892,7 +2093,19 @@ impl AgentRunPolicy {
             .plan_node(node_id)
             .ok_or(AgentPolicyError::Invariant)?;
         validate_time(&self.manifest, node.expires_at(), account, request.now())?;
-        validate_context_scope(&self.manifest, node, context, account, &candidates)?;
+        let historical_contexts = if kind == ModelInputKind::Extraction {
+            self.historical_extraction_contexts(request, context)?
+        } else {
+            Vec::new()
+        };
+        validate_context_scope_with_history(
+            &self.manifest,
+            node,
+            context,
+            account,
+            &candidates,
+            &historical_contexts,
+        )?;
 
         let input_token_limit = token_reservation
             .measured
@@ -1908,7 +2121,17 @@ impl AgentRunPolicy {
             run_accounting,
             reserved_tokens,
             budget.cost_micro_usd(),
-        )?;
+        )
+        .map_err(|error| {
+            model_budget_error(
+                error,
+                request,
+                input_token_limit,
+                self.manifest.budget(),
+                run_accounting,
+                false,
+            )
+        })?;
         let lease_accounting = self
             .lease_accounting(lease)
             .ok_or(AgentPolicyError::Invariant)?;
@@ -1917,7 +2140,17 @@ impl AgentRunPolicy {
             lease_accounting,
             reserved_tokens,
             budget.cost_micro_usd(),
-        )?;
+        )
+        .map_err(|error| {
+            model_budget_error(
+                error,
+                request,
+                input_token_limit,
+                node.budget(),
+                lease_accounting,
+                true,
+            )
+        })?;
         let (projected_cohorts, projected_references) =
             projected_taint_usage(&self.taints, &self.calls, &candidates)?;
         if projected_cohorts > MAX_AGENT_TAINT_COHORTS {
@@ -2224,6 +2457,27 @@ pub enum AgentPolicyError {
     /// Run or node operation/token/cost budget could not reserve the call.
     #[error("agent policy budget is exhausted")]
     Budget,
+    /// Development-only numeric facts from the exact model-input reservation refusal.
+    #[cfg(feature = "probe-harness")]
+    #[error("model input reservation exceeds the original budget")]
+    ModelInputBudget {
+        /// Monotonic model-call number, not a provider or user identity.
+        call: u64,
+        /// Complete structured input reservation (conservative before counting).
+        input: u64,
+        /// Maximum reserved model output tokens.
+        output: u32,
+        /// Requested conservative micro-USD reservation.
+        cost: u64,
+        /// Tokens still unconsumed and unreserved in the failing envelope.
+        remaining_tokens: u64,
+        /// Micro-USD still unconsumed and unreserved in the failing envelope.
+        remaining_cost: u64,
+        /// Operations still unconsumed and unreserved in the failing envelope.
+        remaining_operations: u32,
+        /// True for the lease-node envelope; false for the whole run.
+        node_scope: bool,
+    },
     /// Admission/active token, source receipt, or call state mismatched.
     #[error("agent policy model-call admission mismatch")]
     AdmissionMismatch,
@@ -2263,6 +2517,17 @@ fn validate_context_scope(
     account: AgentContextAccountBinding,
     candidates: &[AgentTaintCohort],
 ) -> Result<(), AgentPolicyError> {
+    validate_context_scope_with_history(manifest, node, context, account, candidates, &[])
+}
+
+fn validate_context_scope_with_history(
+    manifest: &AgentRunManifest,
+    node: &crate::AgentPlanNodeScope,
+    context: ContextJoin,
+    account: AgentContextAccountBinding,
+    candidates: &[AgentTaintCohort],
+    historical_contexts: &[ContextJoin],
+) -> Result<(), AgentPolicyError> {
     if account.context() != context || context.identity().owner() != manifest.run() {
         return Err(AgentPolicyError::Authority);
     }
@@ -2287,15 +2552,18 @@ fn validate_context_scope(
         return Err(AgentPolicyError::SourceOutsideScope);
     }
     for candidate in candidates {
-        if candidate.context != context
+        if (candidate.context != context && !historical_contexts.contains(&candidate.context))
             || candidate.profile() != profile
             || candidate.account != account.account()
-            || manifest
+            || (!node.navigation_discovery().is_some_and(|scope| {
+                (scope.is_public_web() || scope.is_site_session())
+                    && scope.admits_origin(&candidate.origin)
+            }) && (manifest
                 .scope()
                 .origins()
                 .binary_search(&candidate.origin)
                 .is_err()
-            || node.origins().binary_search(&candidate.origin).is_err()
+                || node.origins().binary_search(&candidate.origin).is_err()))
         {
             return Err(AgentPolicyError::SourceOutsideScope);
         }
@@ -2320,6 +2588,7 @@ fn observation_taints(
     if account.context() != context {
         return Err(AgentPolicyError::Authority);
     }
+    let anonymous = account.account() == AgentAccountScope::Anonymous;
     let mut cohorts = Vec::with_capacity(observation.frames().len());
     for frame in observation.frames() {
         if frame.frame().context() != context {
@@ -2329,10 +2598,14 @@ fn observation_taints(
             .nodes()
             .iter()
             .map(|node| match node.sensitivity() {
+                SemanticSensitivity::Public => SemanticSensitivity::Public,
+                // Nobody typed into an anonymous page: a labelled control
+                // that holds no text discloses nothing and stays public;
+                // sensitive page text keeps its taint.
+                _ if anonymous && !holds_text(node) => SemanticSensitivity::Public,
                 // Secret values are mechanically absent/redacted. Remaining
                 // page labels/metadata are conservatively private taint.
-                SemanticSensitivity::Secret => SemanticSensitivity::Sensitive,
-                other => other,
+                _ => SemanticSensitivity::Sensitive,
             })
             .max()
             .unwrap_or(SemanticSensitivity::Public);
@@ -2355,6 +2628,11 @@ fn observation_taints(
         );
     }
     Ok(cohorts)
+}
+
+fn holds_text(node: &crate::SemanticNode) -> bool {
+    node.text().is_some_and(|text| !text.is_empty())
+        || matches!(node.value(), Some(SemanticValueSummary::Text(text)) if !text.is_empty())
 }
 
 fn screenshot_taints(
@@ -2569,10 +2847,22 @@ fn provider_read_taints(
     account: AgentContextAccountBinding,
     retained: &[AgentTaintCohort],
 ) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
+    if read.has_retained_evidence() {
+        return Err(AgentPolicyError::Authority);
+    }
+    provider_extraction_read_taints(read, baseline, account, retained)
+}
+
+fn provider_extraction_read_taints(
+    read: &SemanticReadResult<'_>,
+    baseline: &SemanticObservationAcknowledgement,
+    account: AgentContextAccountBinding,
+    retained: &[AgentTaintCohort],
+) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
     if account.context() != read.context() || !read.matches_acknowledgement(baseline) {
         return Err(AgentPolicyError::Authority);
     }
-    let candidates = retained
+    let mut candidates = retained
         .iter()
         .filter(|cohort| {
             cohort.context == baseline.context()
@@ -2588,15 +2878,22 @@ fn provider_read_taints(
     }
     for fragment in read.fragments() {
         let provenance = fragment.provenance();
-        let mut sources = candidates
-            .iter()
-            .filter(|cohort| cohort.contains_reference(provenance.reference()));
+        let source_baseline = read.source_acknowledgement(provenance).unwrap_or(baseline);
+        let mut sources = retained.iter().filter(|cohort| {
+            cohort.context == provenance.context()
+                && cohort.observation == provenance.observation()
+                && cohort.observation_generation == provenance.observation_generation()
+                && cohort.source_guard == source_baseline.guard()
+                && cohort.account == account.account()
+                && cohort.contains_reference(provenance.reference())
+        });
         let Some(source) = sources.next() else {
             return Err(AgentPolicyError::ReadBaselineMissing);
         };
         if sources.next().is_some() || source.origin() != provenance.origin() {
             return Err(AgentPolicyError::ReadBaselineMissing);
         }
+        merge_taint(&mut candidates, source.clone());
     }
     Ok(candidates)
 }
@@ -2750,6 +3047,41 @@ fn projected_taint_usage(
             .ok_or(AgentPolicyError::TaintReferenceLimit)
     })?;
     Ok((projected.len(), references))
+}
+
+fn model_budget_error(
+    error: AgentPolicyError,
+    request: AgentModelCallRequest,
+    input: u64,
+    envelope: AgentRunBudget,
+    accounting: AgentPolicyAccounting,
+    node_scope: bool,
+) -> AgentPolicyError {
+    #[cfg(feature = "probe-harness")]
+    if error == AgentPolicyError::Budget {
+        return AgentPolicyError::ModelInputBudget {
+            call: request.id().get(),
+            input,
+            output: request.budget().output_tokens(),
+            cost: request.budget().cost_micro_usd(),
+            remaining_tokens: envelope
+                .model_tokens()
+                .saturating_sub(accounting.consumed_model_tokens())
+                .saturating_sub(accounting.reserved_model_tokens()),
+            remaining_cost: envelope
+                .cost_micro_usd()
+                .saturating_sub(accounting.consumed_cost_micro_usd())
+                .saturating_sub(accounting.reserved_cost_micro_usd()),
+            remaining_operations: envelope
+                .operations()
+                .saturating_sub(accounting.consumed_operations())
+                .saturating_sub(accounting.reserved_operations()),
+            node_scope,
+        };
+    }
+    #[cfg(not(feature = "probe-harness"))]
+    let _ = (request, input, envelope, accounting, node_scope);
+    error
 }
 
 fn ensure_budget(
@@ -2933,10 +3265,10 @@ mod tests {
         read_semantic_observation, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
         AgentDelegationSpec, AgentDelegationTopology, AgentEffectScope, AgentPlanNodeAuthority,
         AgentPlanNodeScope, AgentPreparedObservationRequest, AgentPreparedReadRequest,
-        AgentProviderCallConfig, AgentProviderContractError, AgentProviderDiffRequestDraft,
-        AgentProviderEndpoint, AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
-        AgentProviderInputKind, AgentProviderInputOutcome, AgentProviderKind,
-        AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+        AgentProviderActionAuthority, AgentProviderCallConfig, AgentProviderContractError,
+        AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExtractionRequestDraft,
+        AgentProviderInputEvidence, AgentProviderInputKind, AgentProviderInputOutcome,
+        AgentProviderKind, AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
         AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort,
         AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
@@ -2953,8 +3285,9 @@ mod tests {
         SemanticLocateBudget, SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest,
         SemanticLocateScope, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
         SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
-        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
-        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
+        SemanticObservationRequest, SemanticOperationClass, SemanticOperations,
+        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
+        SemanticReadSensitivityLimit, SemanticReferenceId, SemanticSettleBudget,
         SemanticSettleInstant, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
         SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
         SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
@@ -3606,6 +3939,26 @@ mod tests {
         effect_values: &[SemanticEffectClass],
         budget: AgentRunBudget,
     ) -> PolicyFixture {
+        policy_fixture_with_node_budget(
+            run,
+            profile_value,
+            source,
+            max_sensitivity,
+            effect_values,
+            budget,
+            budget,
+        )
+    }
+
+    fn policy_fixture_with_node_budget(
+        run: u128,
+        profile_value: u128,
+        source: SemanticOrigin,
+        max_sensitivity: SemanticSensitivity,
+        effect_values: &[SemanticEffectClass],
+        budget: AgentRunBudget,
+        node_budget: AgentRunBudget,
+    ) -> PolicyFixture {
         let effect_scope = effects(effect_values);
         let scope = AgentRunScope::try_new(
             vec![profile(profile_value)],
@@ -3635,7 +3988,7 @@ mod tests {
             vec![AgentPlanNodeScope::new(
                 node_id,
                 authority,
-                budget,
+                node_budget,
                 AgentPolicyInstant::from_millis(EXPIRES_AT - 1),
             )],
         )
@@ -3884,18 +4237,263 @@ mod tests {
     }
 
     #[test]
-    fn observation_delivery_reserves_commits_taint_and_settles_actual_usage() {
+    fn anonymous_empty_controls_stay_public_taint_while_signed_in_pages_keep_it() {
+        let source = origin("form");
+        let context = make_context(7, 8, 9);
+        let page = observation(
+            context,
+            source,
+            1,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 2, "p": 0, "r": "textbox", "n": "Email", "q": "sensitive", "o": 2}),
+                json!({"k": 3, "p": 0, "r": "password", "n": "Password", "q": "secret", "o": 2}),
+            ],
+        );
+        let anonymous = observation_taints(&page, account(context, NOW - 1)).unwrap();
+        assert_eq!(anonymous[0].sensitivity(), SemanticSensitivity::Public);
+        let signed_in = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::from_raw(5),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::from_raw(999)),
+            AgentPolicyInstant::from_millis(NOW - 1),
+        );
+        let authenticated = observation_taints(&page, signed_in).unwrap();
+        assert_eq!(
+            authenticated[0].sensitivity(),
+            SemanticSensitivity::Sensitive
+        );
+        let typed = observation(
+            context,
+            origin("typed"),
+            2,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 2, "p": 0, "r": "textbox", "n": "Email", "q": "sensitive", "o": 2,
+                    "v": {"k": "text", "value": "someone@example.test"}}),
+            ],
+        );
+        let filled = observation_taints(&typed, account(context, NOW - 1)).unwrap();
+        assert_eq!(filled[0].sensitivity(), SemanticSensitivity::Sensitive);
+    }
+
+    #[cfg(feature = "provider-transport")]
+    #[test]
+    fn decision_projection_omits_secret_metadata_and_anonymous_sensitive_nodes() {
         let source = origin("source");
         let context = make_context(7, 8, 9);
         let observation = mixed_observation(context, source.clone(), 1);
-        let payload = observation_payload(&observation, 50);
+        let authority = crate::AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the page".into(),
+            &tokenizer(),
+        )
+        .unwrap();
+        let binding = account(context, NOW - 1);
+        let projection =
+            crate::DecisionObservation::try_new(&observation, &objective, &authority, binding)
+                .unwrap();
+        let encoded = projection.request().encode().unwrap();
+        let encoded = std::str::from_utf8(&encoded).unwrap();
+        assert!(encoded.contains("public marker"));
+        for omitted in [
+            "private marker",
+            "Password",
+            "must-never-escape",
+            "@a3",
+            "@a4",
+        ] {
+            assert!(!encoded.contains(omitted));
+            assert!(!format!("{projection:?}").contains(omitted));
+        }
+        assert!(!projection
+            .request()
+            .questions()
+            .contains_key("click_target"));
+        let mut fixture = policy_fixture(
+            7,
+            8,
+            source,
+            SemanticSensitivity::Public,
+            &[SemanticEffectClass::Read],
+            run_budget(3, 1000, 1000),
+        );
+        let admission = fixture
+            .policy
+            .prepare_decision_input(
+                call_request(1, fixture.lease, binding, 0, 10, 100, NOW),
+                &observation,
+                &projection,
+                500,
+            )
+            .unwrap();
+        let ack = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observation),
+        );
+        let active = fixture
+            .policy
+            .commit_observation_input(admission, &ack)
+            .unwrap();
+        assert!(fixture
+            .policy
+            .taints()
+            .iter()
+            .all(|taint| taint.sensitivity() == SemanticSensitivity::Public));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 100, 5, 5)
+            .unwrap();
+        assert_eq!(
+            fixture.policy.remaining_model_tokens(fixture.lease),
+            Ok(895)
+        );
+    }
+
+    #[cfg(feature = "provider-transport")]
+    #[test]
+    fn decision_sensitive_projection_still_requires_manifest_account_scope() {
+        let source = origin("source");
+        let context = make_context(7, 8, 9);
+        let observation = mixed_observation(context, source.clone(), 1);
+        let authority = crate::AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the page".into(),
+            &tokenizer(),
+        )
+        .unwrap();
+        let signed_in = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::from_raw(17),
+            context,
+            AgentAccountScope::Authenticated(crate::AgentAccountId::from_raw(18)),
+            AgentPolicyInstant::from_millis(NOW - 1),
+        );
+        let projection =
+            crate::DecisionObservation::try_new(&observation, &objective, &authority, signed_in)
+                .unwrap();
+        let encoded = projection.request().encode().unwrap();
+        let encoded = std::str::from_utf8(&encoded).unwrap();
+        assert!(encoded.contains("private marker"));
+        assert!(!encoded.contains("Password"));
+        assert!(!encoded.contains("must-never-escape"));
         let mut fixture = policy_fixture(
             7,
             8,
             source,
             SemanticSensitivity::Sensitive,
             &[SemanticEffectClass::Read],
+            run_budget(3, 1000, 1000),
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_decision_input(
+                    call_request(1, fixture.lease, signed_in, 0, 10, 100, NOW),
+                    &observation,
+                    &projection,
+                    500
+                )
+                .unwrap_err(),
+            AgentPolicyError::SourceOutsideScope
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+    }
+
+    #[cfg(feature = "provider-transport")]
+    #[test]
+    fn decision_projection_cannot_reuse_authority_or_account_after_observation_changes() {
+        let source = origin("source");
+        let context = make_context(7, 8, 9);
+        let first = actionable_observation(context, source.clone(), 1);
+        let next = actionable_observation(context, source.clone(), 2);
+        let target = first.frames()[0].nodes()[1].reference();
+        let allowed = SemanticOperations::try_new(&[SemanticOperationClass::Click]).unwrap();
+        let authority =
+            crate::AgentProviderActionAuthority::try_new(&first, &[(target, allowed)]).unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the page".into(),
+            &tokenizer(),
+        )
+        .unwrap();
+        let binding = account(context, NOW - 1);
+        let projection =
+            crate::DecisionObservation::try_new(&first, &objective, &authority, binding).unwrap();
+        let zephium_decision::Question::Choice { criteria, .. } =
+            &projection.request().questions()["click_target"]
+        else {
+            panic!("choice");
+        };
+        assert_eq!(criteria.len(), 2);
+        assert!(criteria.contains_key(&target.model_token().to_string()));
+        assert!(!projection.request().questions().contains_key("type_target"));
+        assert!(
+            crate::DecisionObservation::try_new(&next, &objective, &authority, binding).is_err()
+        );
+        let mut fixture = policy_fixture(
+            7,
+            8,
+            source,
+            SemanticSensitivity::Public,
+            &[SemanticEffectClass::Read],
+            run_budget(3, 1000, 1000),
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_decision_input(
+                    call_request(1, fixture.lease, binding, 0, 10, 100, NOW),
+                    &next,
+                    &projection,
+                    500
+                )
+                .unwrap_err(),
+            AgentPolicyError::PayloadMismatch
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_decision_input(
+                    call_request(1, fixture.lease, account(context, NOW), 0, 10, 100, NOW),
+                    &first,
+                    &projection,
+                    500
+                )
+                .unwrap_err(),
+            AgentPolicyError::PayloadMismatch
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+    }
+
+    #[test]
+    fn observation_delivery_reserves_commits_taint_and_settles_actual_usage() {
+        let source = origin("source");
+        let context = make_context(7, 8, 9);
+        let observation = mixed_observation(context, source.clone(), 1);
+        let payload = observation_payload(&observation, 50);
+        let mut fixture = policy_fixture_with_node_budget(
+            7,
+            8,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
             run_budget(10, 1_000, 10_000),
+            run_budget(3, 1_000, 10_000),
+        );
+        assert_eq!(fixture.policy.remaining_operations(fixture.lease), Ok(3));
+        assert_eq!(
+            fixture.policy.remaining_model_tokens(fixture.lease),
+            Ok(1_000)
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .remaining_model_tokens(AgentPlanLeaseId::from_raw(999)),
+            Err(AgentPolicyError::Lease)
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .remaining_operations(AgentPlanLeaseId::from_raw(999)),
+            Err(AgentPolicyError::Lease)
         );
         let binding = account(context, NOW - 1);
         let admission = fixture
@@ -3909,9 +4507,14 @@ mod tests {
         assert_eq!(admission.input_token_limit(), 60);
         assert_eq!(admission.output_token_limit(), 20);
         assert_eq!(admission.cost_limit_micro_usd(), 100);
+        assert_eq!(
+            fixture.policy.remaining_model_tokens(fixture.lease),
+            Ok(920)
+        );
         let admission_debug = format!("{admission:?}");
 
         assert_eq!(fixture.policy.pending_model_calls(), 1);
+        assert_eq!(fixture.policy.remaining_operations(fixture.lease), Ok(2));
         assert_eq!(fixture.policy.taints(), &[]);
         assert_eq!(
             fixture.policy.accounting(),
@@ -3962,6 +4565,7 @@ mod tests {
         assert_eq!(receipt.output_tokens(), 10);
         assert_eq!(receipt.cost_micro_usd(), 80);
         assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.remaining_operations(fixture.lease), Ok(2));
         assert_eq!(
             fixture.policy.accounting(),
             AgentPolicyAccounting {
@@ -4365,7 +4969,9 @@ mod tests {
         assert!(wire.get("previous_response_id").is_none());
         assert!(wire.get("metadata").is_none());
         assert_eq!(wire["input"].as_array().expect("input").len(), 2);
-        assert_eq!(wire["tools"].as_array().expect("tools").len(), 13);
+        let tools = wire["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), crate::AgentBrowserToolKind::ALL.len() - 1);
+        assert!(tools.iter().all(|tool| tool["name"] != "back"));
         assert!(wire["tools"]
             .as_array()
             .expect("tools")
@@ -4505,6 +5111,81 @@ mod tests {
     }
 
     #[test]
+    fn full_observation_continuation_rejects_foreign_plan_node_before_reservation() {
+        let source = origin("replacement");
+        let context = make_context(29_007, 29_008, 29_009);
+        let observation = observation(
+            context,
+            source.clone(),
+            2,
+            vec![json!({"k":1,"r":"document","o":16})],
+        );
+        let payload = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&tokenizer())
+        .unwrap();
+        let mut fixture = policy_fixture(
+            29_007,
+            29_008,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 100_000, 100_000),
+        );
+        let request = call_request(
+            2,
+            fixture.lease,
+            account(context, NOW),
+            64_000,
+            128,
+            100_000,
+            NOW,
+        );
+        let expected = AgentModelCallExpectation::new(
+            fixture.policy.manifest.id(),
+            request.id(),
+            fixture.lease,
+            AgentPlanNodeId::from_raw(999),
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_provider_continuation_observation_input(
+                    request,
+                    expected,
+                    &observation,
+                    &payload,
+                    512
+                )
+                .err(),
+            Some(AgentPolicyError::Authority)
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_cost_micro_usd(), 0);
+        let expected = AgentModelCallExpectation::new(
+            fixture.policy.manifest.id(),
+            request.id(),
+            fixture.lease,
+            fixture.policy.leases[0].binding.node(),
+        );
+        assert!(fixture
+            .policy
+            .prepare_provider_continuation_observation_input(
+                request,
+                expected,
+                &observation,
+                &payload,
+                512
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn provider_exact_initial_observation_reserves_whole_body_conservatively() {
         let source = origin("provider-exact");
         let context = make_context(29_007, 29_008, 29_009);
@@ -4514,9 +5195,19 @@ mod tests {
             1,
             vec![
                 json!({"k": 1, "r": "document", "o": 16}),
-                json!({"k": 2, "p": 0, "r": "paragraph", "t": "private provider-exact marker"}),
+                json!({"k": 2, "p": 0, "r": "button", "n": "Approved action", "o": 1}),
+                json!({"k": 3, "p": 0, "r": "paragraph", "t": "private provider-exact marker"}),
             ],
         );
+        let action_authority = AgentProviderActionAuthority::try_new(
+            &observation,
+            &[(
+                SemanticReferenceId::new(2).expect("action reference"),
+                SemanticOperations::try_new(&[SemanticOperationClass::Click])
+                    .expect("click operation"),
+            )],
+        )
+        .expect("action authority");
         let selected = tokenizer();
         let payload = encode_semantic_observation(
             &observation,
@@ -4563,6 +5254,29 @@ mod tests {
             ))
         ));
         assert_eq!(fixture.policy.pending_model_calls(), 0);
+
+        for fixed_envelope in [
+            provider_config(selected.clone(), 10, 128),
+            anthropic_provider_config(selected.clone(), 10, 128),
+        ] {
+            let payload = observation_payload(&observation, 50);
+            assert!(matches!(
+                AgentPreparedObservationRequest::try_for_config_with_action_authority(
+                    &mut fixture.policy,
+                    request,
+                    &observation,
+                    payload,
+                    &objective,
+                    fixed_envelope,
+                    &action_authority,
+                ),
+                Err(crate::AgentProviderRequestError::Encoding)
+            ));
+            assert_eq!(fixture.policy.pending_model_calls(), 0);
+            assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+            assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 0);
+            assert_eq!(fixture.policy.accounting().reserved_cost_micro_usd(), 0);
+        }
 
         for exact_provider in [
             provider_config(selected.clone(), 10, 128),
@@ -4611,17 +5325,38 @@ mod tests {
         .expect("encode again")
         .admit_conservative_utf8(&selected)
         .expect("conservative payload");
-        let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+        let prepared = AgentPreparedObservationRequest::try_for_config_with_action_authority(
             &mut fixture.policy,
             request,
             &observation,
             payload,
             &objective,
             config,
+            &action_authority,
         )
         .expect("provider-exact prepared request");
         let body_bytes = u32::try_from(prepared.request().byte_len()).expect("bounded body");
         assert!(body_bytes > 0);
+        let wire: Value =
+            serde_json::from_slice(prepared.request().body()).expect("projected request JSON");
+        assert!(wire["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "act"));
+        // Only the approved operation and target are advertised, as a host
+        // fact after the observation; the tools stay the page's own.
+        let targets = wire["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .filter_map(|item| item["content"][0]["text"].as_str())
+            .find_map(|text| text.strip_prefix("ZEPHIUM_HOST_ACT_TARGETS_V1\n"))
+            .expect("act targets");
+        assert_eq!(
+            serde_json::from_str::<Value>(targets).expect("targets JSON"),
+            json!({"click": ["@a2"]})
+        );
         assert_eq!(
             fixture.policy.accounting().reserved_model_tokens(),
             u64::from(body_bytes) + 128
@@ -6036,6 +6771,78 @@ mod tests {
     }
 
     #[test]
+    fn retained_extraction_requires_every_original_committed_source_and_current_baseline() {
+        let context = make_context(9_281, 9_282, 9_283);
+        let origin = origin("retained-provider-read");
+        let source = observation(
+            context,
+            origin.clone(),
+            1,
+            vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"paragraph","t":"Observed historical evidence"}),
+            ],
+        );
+        let empty = document_only_observation(context, origin, 2);
+        let acknowledge = |observation: &SemanticObservation| {
+            observation_payload(observation, 10)
+                .settle_delivery(SemanticModelDeliverySettlement::Committed)
+                .unwrap()
+        };
+        let prior_ack = acknowledge(&source);
+        let current_ack = acknowledge(&empty);
+        let binding = account(context, NOW - 1);
+        let mut retained = observation_taints(&source, binding).unwrap();
+        retained.extend(observation_taints(&empty, binding).unwrap());
+        let read = |observation, acknowledgement, at| {
+            read_semantic_observation(
+                observation,
+                SemanticReadAuthority::Acknowledged(acknowledgement),
+                SemanticCaptureInstant::from_millis(at),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap()
+        };
+        let prior = read(&source, &prior_ack, NOW - 3);
+        let mut evidence = crate::SemanticRetainedReadEvidence::default();
+        evidence.retain(&prior, &prior_ack).unwrap();
+        let merged = evidence
+            .merge_for_extraction(read(&empty, &current_ack, NOW - 2))
+            .unwrap();
+        assert!(!merged.fragments().is_empty());
+        assert!(provider_extraction_read_taints(&merged, &current_ack, binding, &retained).is_ok());
+        assert_eq!(
+            provider_read_taints(&merged, &current_ack, binding, &retained),
+            Err(AgentPolicyError::Authority)
+        );
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &prior_ack, binding, &retained),
+            Err(AgentPolicyError::Authority)
+        );
+        let current_only = observation_taints(&empty, binding).unwrap();
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &current_ack, binding, &current_only),
+            Err(AgentPolicyError::ReadBaselineMissing)
+        );
+        let prior_only = observation_taints(&source, binding).unwrap();
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &current_ack, binding, &prior_only),
+            Err(AgentPolicyError::ReadBaselineMissing)
+        );
+        let other_account = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::generate()),
+            AgentPolicyInstant::from_millis(NOW),
+        );
+        assert_eq!(
+            provider_extraction_read_taints(&merged, &current_ack, other_account, &retained),
+            Err(AgentPolicyError::ReadBaselineMissing)
+        );
+    }
+
+    #[test]
     fn screenshot_taint_covers_every_observed_frame_without_reference_authority() {
         let context = make_context(9_257, 9_258, 9_259);
         let observation = multi_origin_observation(context, 1);
@@ -6574,7 +7381,25 @@ mod tests {
                     &observation_payload(&observation, 21),
                 )
                 .expect_err("aggregate token budget"),
-            AgentPolicyError::Budget
+            {
+                #[cfg(feature = "probe-harness")]
+                {
+                    AgentPolicyError::ModelInputBudget {
+                        call: 2,
+                        input: 21,
+                        output: 0,
+                        cost: 1,
+                        remaining_tokens: 20,
+                        remaining_cost: 40,
+                        remaining_operations: 1,
+                        node_scope: false,
+                    }
+                }
+                #[cfg(not(feature = "probe-harness"))]
+                {
+                    AgentPolicyError::Budget
+                }
+            }
         );
         budgeted
             .policy
@@ -6597,7 +7422,25 @@ mod tests {
                     &payload,
                 )
                 .expect_err("aggregate cost budget"),
-            AgentPolicyError::Budget
+            {
+                #[cfg(feature = "probe-harness")]
+                {
+                    AgentPolicyError::ModelInputBudget {
+                        call: 4,
+                        input: 10,
+                        output: 0,
+                        cost: 1,
+                        remaining_tokens: 90,
+                        remaining_cost: 0,
+                        remaining_operations: 1,
+                        node_scope: false,
+                    }
+                }
+                #[cfg(not(feature = "probe-harness"))]
+                {
+                    AgentPolicyError::Budget
+                }
+            }
         );
         budgeted
             .policy

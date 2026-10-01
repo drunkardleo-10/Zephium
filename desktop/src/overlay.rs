@@ -14,6 +14,7 @@ use zephium_ipc::{
 };
 pub const PANEL_LABEL: &str = "panel";
 pub const PANEL_SIZE: (f64, f64) = (geometry::WIDTH, geometry::RESTING_HEIGHT);
+#[cfg(target_os = "macos")]
 pub const PANEL_RADIUS: u16 = model::RADIUS;
 pub const EVENT_STATE: &str = "zephium:panel-state";
 #[derive(Default)]
@@ -29,6 +30,7 @@ struct State {
     content_height: f64,
     layout_revision: u64,
     placement: Option<geometry::Placement>,
+    pending_document: Option<tauri::Url>,
     focus_revision: u64,
     focus_timer: bool,
     closed: bool,
@@ -48,7 +50,7 @@ pub struct Overlay {
     state: Arc<Mutex<State>>,
 }
 impl Overlay {
-    pub fn new(window: WebviewWindow) -> Self {
+    pub fn new(window: WebviewWindow, pending_document: Option<tauri::Url>) -> Self {
         let owner = window
             .app_handle()
             .try_state::<ContextCache>()
@@ -63,6 +65,7 @@ impl Overlay {
                 content_height: geometry::RESTING_HEIGHT,
                 layout_revision: 0,
                 placement: None,
+                pending_document,
                 focus_revision: 0,
                 focus_timer: false,
                 closed: false,
@@ -265,10 +268,32 @@ impl Overlay {
     }
     fn present(&self) {
         let snapshot = self.snapshot();
-        self.publish();
-        if !self.state().model.ready {
+        let (ready, document) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let document = if snapshot.visible && !state.model.ready {
+                state.pending_document.take()
+            } else {
+                None
+            };
+            (state.model.ready, document)
+        };
+        // Windows keeps the hardened native panel at about:blank until the
+        // first real request. Loading an unused second application graph at
+        // startup competes with the main surface and retains renderer state.
+        // The authoritative model keeps the latest route/owner while loading;
+        // panel_ready returns that snapshot before the first native reveal.
+        if let Some(document) = document {
+            if let Err(error) = self.window.navigate(document) {
+                crate::request_startup_failure(
+                    self.window.app_handle(),
+                    format_args!("could not load trusted panel document: {error}"),
+                );
+            }
+        }
+        if !ready {
             return;
         }
+        self.publish();
         if !snapshot.visible {
             if visible(&self.window) {
                 self.tell_browser("launcher.dismissed");

@@ -1,0 +1,752 @@
+//! Frozen authority for bounded discovery through observed non-sensitive links.
+use super::*;
+
+/// One canonical production navigation boundary.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AgentNavigationOriginRule {
+    origin: SemanticOrigin,
+    path_prefix: String,
+    allow_query: bool,
+    allow_fragment: bool,
+}
+
+impl AgentNavigationOriginRule {
+    /// Creates one slash-delimited path boundary under an already-approved origin.
+    pub fn try_new(
+        origin: SemanticOrigin,
+        path_prefix: String,
+        allow_query: bool,
+        allow_fragment: bool,
+    ) -> Result<Self, AgentManifestContractError> {
+        if !valid_path_prefix(&path_prefix) {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        Ok(Self {
+            origin,
+            path_prefix,
+            allow_query,
+            allow_fragment,
+        })
+    }
+    /// Canonical allowed origin.
+    pub const fn origin(&self) -> &SemanticOrigin {
+        &self.origin
+    }
+    /// Slash-delimited allowed path prefix.
+    pub fn path_prefix(&self) -> &str {
+        &self.path_prefix
+    }
+    /// Whether exact public query-bearing links are allowed.
+    pub const fn allows_query(&self) -> bool {
+        self.allow_query
+    }
+    /// Whether exact public fragment-bearing links are allowed.
+    pub const fn allows_fragment(&self) -> bool {
+        self.allow_fragment
+    }
+    fn admits(&self, target: &crate::ContextNavigationTarget) -> bool {
+        let url = target.as_url();
+        SemanticOrigin::parse(url.as_str()).as_ref() == Ok(&self.origin)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path().starts_with(&self.path_prefix)
+            && safe_path(url.path())
+            && (self.allow_query || url.query().is_none())
+            && (self.allow_fragment || url.fragment().is_none())
+    }
+}
+
+impl fmt::Debug for AgentNavigationOriginRule {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentNavigationOriginRule")
+            .field("allow_query", &self.allow_query)
+            .field("allow_fragment", &self.allow_fragment)
+            .field("scope", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DiscoveryProfile {
+    Restrictive,
+    Production,
+    PublicWeb,
+    SiteSession,
+}
+
+/// Read-only navigation scope. Destinations are selected from the current
+/// acknowledged document, never added to authority by model text.
+#[derive(Clone, Eq, PartialEq)]
+pub struct AgentNavigationDiscovery {
+    departure: crate::ContextNavigationTarget,
+    origin: SemanticOrigin,
+    path_prefix: String,
+    max_hops: usize,
+    document_policy: crate::WorkBrowserDocumentPolicy,
+    profile: DiscoveryProfile,
+    rules: Vec<AgentNavigationOriginRule>,
+    max_visits_per_destination: usize,
+}
+
+impl AgentNavigationDiscovery {
+    /// One explicitly scoped account page, with no successor navigation authority.
+    pub fn try_new_account_page(
+        departure: crate::ContextNavigationTarget,
+        document_policy: crate::WorkBrowserDocumentPolicy,
+    ) -> Result<Self, AgentManifestContractError> {
+        if !document_policy.admits_request(&departure) {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        let mut scope = Self::try_new_production(
+            departure,
+            vec![AgentNavigationOriginRule::try_new(
+                origin,
+                "/".into(),
+                true,
+                false,
+            )?],
+            1,
+            1,
+        )?;
+        scope.max_hops = 0;
+        scope.document_policy = document_policy;
+        Ok(scope)
+    }
+    /// Anonymous reading of one page, with no successor navigation authority.
+    pub fn try_new_public_page(
+        departure: crate::ContextNavigationTarget,
+    ) -> Result<Self, AgentManifestContractError> {
+        let mut scope = Self::try_new_public_web(departure, 1, 1)?;
+        scope.max_hops = 0;
+        Ok(scope)
+    }
+
+    /// A separately approved anonymous, read-only public-web capability.
+    /// Every successor must still be a non-sensitive link in the acknowledged
+    /// document. Native admission must use an isolated website data store.
+    pub fn try_new_public_web(
+        departure: crate::ContextNavigationTarget,
+        max_hops: usize,
+        max_visits_per_destination: usize,
+    ) -> Result<Self, AgentManifestContractError> {
+        if !public_destination(&departure) {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        let mut scope = Self::try_new_production(
+            departure,
+            vec![AgentNavigationOriginRule::try_new(
+                origin,
+                "/".into(),
+                true,
+                false,
+            )?],
+            max_hops,
+            max_visits_per_destination,
+        )?;
+        scope.profile = DiscoveryProfile::PublicWeb;
+        scope.document_policy = crate::WorkBrowserDocumentPolicy::PublicQueryFinalization;
+        Ok(scope)
+    }
+    /// Work in the person's session on one site: every destination on the
+    /// departure's registrable domain, reached through observed links.
+    pub fn try_new_site_session(
+        departure: crate::ContextNavigationTarget,
+        max_hops: usize,
+    ) -> Result<Self, AgentManifestContractError> {
+        if !crate::WorkBrowserDocumentPolicy::SiteSession.admits_request(&departure) {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        let mut scope = Self::try_new_production(
+            departure,
+            vec![AgentNavigationOriginRule::try_new(
+                origin,
+                "/".into(),
+                true,
+                false,
+            )?],
+            max_hops,
+            2,
+        )?;
+        scope.profile = DiscoveryProfile::SiteSession;
+        scope.document_policy = crate::WorkBrowserDocumentPolicy::SiteSession;
+        Ok(scope)
+    }
+    /// Whether this scope works in one site's session.
+    pub const fn is_site_session(&self) -> bool {
+        matches!(self.profile, DiscoveryProfile::SiteSession)
+    }
+
+    /// Enables safe same-document query updates for a single-page public task.
+    /// No additional load, path, origin, hop or authenticated scope is granted.
+    pub fn with_same_document_query_updates(mut self) -> Result<Self, AgentManifestContractError> {
+        if !self.is_public_web() || self.max_hops != 0 {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        self.document_policy = crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery;
+        Ok(self)
+    }
+
+    /// This capability never permits authenticated state or effects.
+    pub const fn is_public_web(&self) -> bool {
+        matches!(self.profile, DiscoveryProfile::PublicWeb)
+    }
+    /// Approves the legacy restrictive same-origin subtree.
+    pub fn try_new(
+        departure: crate::ContextNavigationTarget,
+        path_prefix: String,
+        max_hops: usize,
+    ) -> Result<Self, AgentManifestContractError> {
+        Self::try_new_with_document_policy(
+            departure,
+            path_prefix,
+            max_hops,
+            crate::WorkBrowserDocumentPolicy::Exact,
+        )
+    }
+
+    /// Adds trusted query finalization without changing restrictive discovery.
+    pub fn try_new_with_document_policy(
+        departure: crate::ContextNavigationTarget,
+        path_prefix: String,
+        max_hops: usize,
+        document_policy: crate::WorkBrowserDocumentPolicy,
+    ) -> Result<Self, AgentManifestContractError> {
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        if document_policy == crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+            || !document_policy.admits_request(&departure)
+            || max_hops == 0
+            || max_hops > MAX_AGENT_NAVIGATION_ROUTE_HOPS
+            || !valid_restrictive_prefix(&path_prefix)
+            || departure.as_url().query().is_some()
+            || departure.as_url().fragment().is_some()
+            || departure.as_url().as_str().len() > crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+        {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let rules = vec![AgentNavigationOriginRule::try_new(
+            origin.clone(),
+            path_prefix.clone(),
+            false,
+            false,
+        )?];
+        Ok(Self {
+            departure,
+            origin,
+            path_prefix,
+            max_hops,
+            document_policy,
+            profile: DiscoveryProfile::Restrictive,
+            rules,
+            max_visits_per_destination: 1,
+        })
+    }
+
+    /// Freezes bounded production browsing. Every destination must still be an
+    /// exact public link in the current acknowledged document.
+    pub fn try_new_production(
+        departure: crate::ContextNavigationTarget,
+        mut rules: Vec<AgentNavigationOriginRule>,
+        max_hops: usize,
+        max_visits_per_destination: usize,
+    ) -> Result<Self, AgentManifestContractError> {
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        rules.sort();
+        if rules.is_empty()
+            || rules.len() > MAX_AGENT_NAVIGATION_DISCOVERY_RULES
+            || rules.windows(2).any(|pair| pair[0] == pair[1])
+            || max_hops == 0
+            || max_hops > MAX_AGENT_NAVIGATION_DISCOVERY_HOPS
+            || max_visits_per_destination == 0
+            || max_visits_per_destination > MAX_AGENT_NAVIGATION_DESTINATION_VISITS
+            || departure.as_url().as_str().len() > crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+            || !crate::semantic_wire::model_safe_public_url(&departure)
+            || !rules.iter().any(|rule| rule.admits(&departure))
+        {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let path_prefix = rules
+            .iter()
+            .find(|rule| rule.origin() == &origin && rule.admits(&departure))
+            .ok_or(AgentManifestContractError::NavigationRoute)?
+            .path_prefix
+            .clone();
+        Ok(Self {
+            departure,
+            origin,
+            path_prefix,
+            max_hops,
+            document_policy: crate::WorkBrowserDocumentPolicy::Exact,
+            profile: DiscoveryProfile::Production,
+            rules,
+            max_visits_per_destination,
+        })
+    }
+
+    /// Exact starting document.
+    pub const fn departure(&self) -> &crate::ContextNavigationTarget {
+        &self.departure
+    }
+    /// Canonical departure origin.
+    pub const fn origin(&self) -> &SemanticOrigin {
+        &self.origin
+    }
+    /// Canonical origins named by this scope.
+    pub fn origins(&self) -> impl Iterator<Item = &SemanticOrigin> {
+        self.rules.iter().map(AgentNavigationOriginRule::origin)
+    }
+    /// Restrictive prefix, or the production rule covering departure.
+    pub fn path_prefix(&self) -> &str {
+        &self.path_prefix
+    }
+    /// Maximum committed transitions.
+    pub const fn max_hops(&self) -> usize {
+        self.max_hops
+    }
+    /// Native final-document policy.
+    pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
+        self.document_policy
+    }
+    /// Whether this is the separately authorized production profile.
+    pub const fn is_production(&self) -> bool {
+        matches!(
+            self.profile,
+            DiscoveryProfile::Production
+                | DiscoveryProfile::PublicWeb
+                | DiscoveryProfile::SiteSession
+        )
+    }
+    /// Canonical production rules; restrictive profiles contain one equivalent rule.
+    pub fn rules(&self) -> &[AgentNavigationOriginRule] {
+        &self.rules
+    }
+    /// Maximum visits to one exact destination.
+    pub const fn max_visits_per_destination(&self) -> usize {
+        self.max_visits_per_destination
+    }
+    /// Tests whether an origin was explicitly named.
+    pub fn admits_origin(&self, origin: &SemanticOrigin) -> bool {
+        if self.is_public_web() {
+            return crate::ContextNavigationTarget::parse(origin.as_url().as_str())
+                .is_ok_and(|target| public_destination(&target));
+        }
+        if self.is_site_session() {
+            return crate::ContextNavigationTarget::parse(origin.as_url().as_str())
+                .is_ok_and(|target| crate::same_work_site(&self.departure, &target));
+        }
+        self.rules.iter().any(|rule| rule.origin() == origin)
+    }
+    /// Scope-only check; policy also requires a current public link and exact history budgets.
+    pub fn admits(&self, target: &crate::ContextNavigationTarget) -> bool {
+        if self.is_public_web() {
+            return public_destination(target) && safe_path(target.as_url().path());
+        }
+        if self.is_site_session() {
+            return crate::WorkBrowserDocumentPolicy::SiteSession.admits_request(target)
+                && crate::same_work_site(&self.departure, target)
+                && target.as_url().as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+                && safe_path(target.as_url().path());
+        }
+        target.as_url().as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+            && self.rules.iter().any(|rule| rule.admits(target))
+            && (self.is_production() || !target.as_url().path().contains('%'))
+            && (self.is_production() || target != &self.departure)
+    }
+}
+
+fn public_destination(target: &crate::ContextNavigationTarget) -> bool {
+    let url = target.as_url();
+    url.scheme() == "https"
+        && url.port().is_none_or(|port| port == 443)
+        && url.as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+        && url.fragment().is_none()
+        && crate::semantic_wire::model_safe_public_url(target)
+        && matches!(url.host(), Some(url::Host::Domain(host)) if {
+            let host = host.trim_end_matches('.');
+            host.contains('.') && !["localhost", "local", "internal", "lan", "home", "test", "invalid", "example", "onion"].iter()
+                .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+        })
+}
+
+#[cfg(test)]
+mod public_tests {
+    use super::*;
+    #[test]
+    fn public_discovery_requires_safe_https_destinations_without_origin_predeclaration() {
+        let scope = AgentNavigationDiscovery::try_new_public_web(
+            crate::ContextNavigationTarget::parse("https://www.bing.com/search?q=svelte").unwrap(),
+            8,
+            2,
+        )
+        .unwrap();
+        assert!(scope.is_public_web());
+        assert!(scope.admits(
+            &crate::ContextNavigationTarget::parse("https://github.com/sveltejs/svelte/issues")
+                .unwrap()
+        ));
+        for url in [
+            "http://github.com/",
+            "https://127.0.0.1/",
+            "https://[::1]/",
+            "https://10.0.0.1/",
+            "https://intranet/",
+            "https://app.internal/",
+            "https://app.local/",
+            "https://app.local./",
+            "https://github.com:444/",
+            "https://github.com/?access_token=secret",
+            "https://github.com/#access_token=secret",
+        ] {
+            if let Ok(target) = crate::ContextNavigationTarget::parse(url) {
+                assert!(!scope.admits(&target), "{url}");
+            }
+        }
+    }
+    #[test]
+    fn site_session_scope_spans_one_site_and_admits_session_authority() {
+        let scope = AgentNavigationDiscovery::try_new_site_session(
+            crate::ContextNavigationTarget::parse("https://app.slack.com/client").unwrap(),
+            16,
+        )
+        .unwrap();
+        assert!(scope.is_site_session() && scope.is_production() && !scope.is_public_web());
+        assert_eq!(
+            scope.document_policy(),
+            crate::WorkBrowserDocumentPolicy::SiteSession
+        );
+        for url in [
+            "https://app.slack.com/client/T1/C2",
+            "https://files.slack.com/files/x",
+            "https://slack.com/help?q=1",
+        ] {
+            let target = crate::ContextNavigationTarget::parse(url).unwrap();
+            assert!(scope.admits(&target), "{url}");
+            assert!(scope.admits_origin(&SemanticOrigin::parse(url).unwrap()));
+        }
+        for url in [
+            "https://slack.com.evil.com/",
+            "http://app.slack.com/client",
+            "https://accounts.google.com/",
+            "https://app.slack.com/?access_token=secret",
+        ] {
+            let target = crate::ContextNavigationTarget::parse(url).unwrap();
+            assert!(!scope.admits(&target), "{url}");
+        }
+        assert!(AgentNavigationDiscovery::try_new_site_session(
+            crate::ContextNavigationTarget::parse("http://example.com/").unwrap(),
+            4,
+        )
+        .is_err());
+        let authority = || {
+            AgentPlanNodeAuthority::try_new(
+                vec![1.into()],
+                vec![AgentAccountScope::Authenticated(
+                    crate::AgentAccountId::generate(),
+                )],
+                vec![SemanticOrigin::parse("https://app.slack.com").unwrap()],
+                SemanticSensitivity::Sensitive,
+                AgentEffectScope::try_new(&[
+                    SemanticEffectClass::Read,
+                    SemanticEffectClass::LocalWrite,
+                ])
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(authority().with_navigation_discovery(scope).is_ok());
+        let public = AgentNavigationDiscovery::try_new_production(
+            crate::ContextNavigationTarget::parse("https://app.slack.com/client").unwrap(),
+            vec![AgentNavigationOriginRule::try_new(
+                SemanticOrigin::parse("https://app.slack.com").unwrap(),
+                "/".into(),
+                true,
+                false,
+            )
+            .unwrap()],
+            4,
+            1,
+        )
+        .unwrap();
+        assert!(authority().with_navigation_discovery(public).is_err());
+    }
+    #[test]
+    fn public_discovery_cannot_attach_to_authenticated_or_effectful_authority() {
+        let origin = SemanticOrigin::parse("https://www.bing.com").unwrap();
+        let scope = AgentNavigationDiscovery::try_new_public_web(
+            crate::ContextNavigationTarget::parse("https://www.bing.com/search?q=rust").unwrap(),
+            8,
+            2,
+        )
+        .unwrap();
+        for (account, effects, admitted) in [
+            (
+                AgentAccountScope::Anonymous,
+                vec![SemanticEffectClass::Read],
+                true,
+            ),
+            (
+                AgentAccountScope::Anonymous,
+                vec![SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+                false,
+            ),
+            (
+                AgentAccountScope::Authenticated(crate::AgentAccountId::generate()),
+                vec![SemanticEffectClass::Read],
+                false,
+            ),
+        ] {
+            let authority = AgentPlanNodeAuthority::try_new(
+                vec![1.into()],
+                vec![account],
+                vec![origin.clone()],
+                SemanticSensitivity::Public,
+                AgentEffectScope::try_new(&effects).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                authority.with_navigation_discovery(scope.clone()).is_ok(),
+                admitted
+            );
+        }
+    }
+}
+
+impl fmt::Debug for AgentNavigationDiscovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentNavigationDiscovery")
+            .field(
+                "profile",
+                &if self.is_production() {
+                    "production"
+                } else {
+                    "restrictive"
+                },
+            )
+            .field("rules", &self.rules.len())
+            .field("max_hops", &self.max_hops)
+            .field(
+                "max_visits_per_destination",
+                &self.max_visits_per_destination,
+            )
+            .field("scope", &"[redacted]")
+            .finish()
+    }
+}
+
+fn valid_restrictive_prefix(path: &str) -> bool {
+    valid_path_prefix(path) && !path.contains('%')
+}
+fn valid_path_prefix(path: &str) -> bool {
+    path.starts_with('/')
+        && path.ends_with('/')
+        && path.len() <= 1024
+        && !path.contains(['?', '#', '\\'])
+        && !path.split('/').any(|part| matches!(part, "." | ".."))
+        && safe_path(path)
+}
+fn safe_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        let Some(pair) = bytes.get(index + 1..index + 3) else {
+            return false;
+        };
+        let Some(value) = hex(pair[0]).and_then(|high| hex(pair[1]).map(|low| high * 16 + low))
+        else {
+            return false;
+        };
+        if matches!(value, b'%' | b'/' | b'\\' | b'.' | b'?' | b'#' | 0) {
+            return false;
+        }
+        index += 3;
+    }
+    true
+}
+const fn hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn target(value: &str) -> crate::ContextNavigationTarget {
+        crate::ContextNavigationTarget::parse(value).unwrap()
+    }
+    fn rule(origin: &str, path: &str, query: bool, fragment: bool) -> AgentNavigationOriginRule {
+        AgentNavigationOriginRule::try_new(
+            SemanticOrigin::parse(origin).unwrap(),
+            path.into(),
+            query,
+            fragment,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn restrictive_discovery_contract_is_unchanged() {
+        let initial = target("https://example.test/docs");
+        let scope = AgentNavigationDiscovery::try_new(initial.clone(), "/docs/".into(), 2).unwrap();
+        assert!(scope.admits(&target("https://example.test/docs/topic")));
+        for denied in [
+            "https://example.test/docs",
+            "https://example.test/docs-other/topic",
+            "https://other.test/docs/topic",
+            "https://example.test/docs/topic?q=1",
+            "https://example.test/docs/topic#part",
+            "https://example.test/docs/topic%20name",
+            "https://example.test/docs/%61",
+            "https://example.test/docs/%2e%2e/private",
+        ] {
+            assert!(!scope.admits(&target(denied)), "{denied}");
+        }
+        assert!(!scope.is_production());
+    }
+    #[test]
+    fn production_scope_is_explicit_bounded_and_supports_normal_links() {
+        let departure = target("https://search.example.test/app/start?q=one#top");
+        let scope = AgentNavigationDiscovery::try_new_production(
+            departure.clone(),
+            vec![
+                rule("https://search.example.test", "/app/", true, true),
+                rule("https://docs.example.test", "/guide/", true, false),
+            ],
+            12,
+            2,
+        )
+        .unwrap();
+        assert!(scope.admits(&departure));
+        assert!(scope.admits(&target("https://search.example.test/app/results?q=two#row")));
+        assert!(scope.admits(&target("https://docs.example.test/guide/a%20b?q=two")));
+        for denied in [
+            "https://search.example.test/private/x",
+            "https://docs.example.test/guide/a#fragment",
+            "https://docs.example.test/guide/%2e%2e/private",
+            "https://docs.example.test/guide/%252e%252e/private",
+            "https://other.example.test/guide/x",
+        ] {
+            assert!(!scope.admits(&target(denied)), "{denied}");
+        }
+        assert_eq!(scope.max_hops(), 12);
+        assert_eq!(scope.max_visits_per_destination(), 2);
+        assert!(!format!("{scope:?}").contains("example.test"));
+    }
+    #[test]
+    fn production_scope_rejects_unbounded_or_ambiguous_rules() {
+        let departure = target("https://example.test/app/start");
+        let base = rule("https://example.test", "/app/", false, false);
+        assert!(AgentNavigationDiscovery::try_new_production(
+            departure.clone(),
+            vec![base.clone(), base],
+            2,
+            1
+        )
+        .is_err());
+        assert!(AgentNavigationDiscovery::try_new_production(
+            departure.clone(),
+            vec![rule("https://example.test", "/app/", false, false)],
+            MAX_AGENT_NAVIGATION_DISCOVERY_HOPS + 1,
+            1
+        )
+        .is_err());
+        assert!(AgentNavigationDiscovery::try_new_production(
+            departure,
+            vec![rule("https://example.test", "/other/", false, false)],
+            2,
+            1
+        )
+        .is_err());
+        for sensitive in [
+            "https://example.test/app/start?token=shortsecret",
+            "https://example.test/app/start?access%5Ftoken=shortsecret",
+            "https://example.test/app/start?code=Qm9VT3F2cW1ROGxobTVoQ2c",
+            "https://example.test/app/start#q=ghp%5Fabcdefghijklmnop",
+            "https://example.test/app/start#access_token%3Dshortsecret",
+            "https://example.test/app/start?access_token%3Dshortsecret",
+            "https://example.test/app/start#q=token=shortsecret",
+            "https://example.test/app/start#q=a=b=c=token=shortsecret",
+            "https://example.test/app/start?q=a=b=c=d=token=shortsecret",
+            "https://example.test/app/start?return=https%3A%2F%2Fother.test%2F%23token%3Dshortsecret",
+        ] {
+            assert!(
+                AgentNavigationDiscovery::try_new_production(
+                    target(sensitive),
+                    vec![rule("https://example.test", "/app/", true, true)],
+                    2,
+                    1,
+                )
+                .is_err(),
+                "{sensitive}"
+            );
+        }
+    }
+    #[test]
+    fn query_interaction_scope_is_opt_in_and_cannot_add_navigation() {
+        let page =
+            AgentNavigationDiscovery::try_new_public_page(target("https://example.com/catalog"))
+                .unwrap();
+        assert_eq!(
+            page.document_policy(),
+            crate::WorkBrowserDocumentPolicy::PublicQueryFinalization
+        );
+        let page = page.with_same_document_query_updates().unwrap();
+        assert_eq!(page.max_hops(), 0);
+        assert_eq!(
+            page.document_policy(),
+            crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+        );
+        assert!(AgentNavigationDiscovery::try_new_public_web(
+            target("https://example.com/catalog"),
+            2,
+            1
+        )
+        .unwrap()
+        .with_same_document_query_updates()
+        .is_err());
+        assert!(AgentNavigationDiscovery::try_new(
+            target("https://example.com/catalog"),
+            "/".into(),
+            2
+        )
+        .unwrap()
+        .with_same_document_query_updates()
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod account_page_tests {
+    use super::*;
+    #[test]
+    fn approved_account_page_has_no_navigation_or_anonymous_authority() {
+        let target =
+            crate::ContextNavigationTarget::parse("https://accounts.example.com/home").unwrap();
+        let scope = AgentNavigationDiscovery::try_new_account_page(
+            target.clone(),
+            crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery,
+        )
+        .unwrap();
+        assert_eq!(scope.departure(), &target);
+        assert_eq!(scope.max_hops(), 0);
+        assert!(!scope.is_public_web());
+        assert_eq!(scope.origins().count(), 1);
+        assert!(!scope.admits(
+            &crate::ContextNavigationTarget::parse("https://other.example.com/home").unwrap()
+        ));
+    }
+}

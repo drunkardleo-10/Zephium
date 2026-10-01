@@ -84,12 +84,14 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
         Ok(meta) if meta.file_type().is_dir() => Ok(()),
         Ok(_) => Err(not_regular()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             match builder.create(path) {
                 Err(error) if error.kind() != io::ErrorKind::AlreadyExists => Err(error),
                 _ => match fs::symlink_metadata(path) {
@@ -128,12 +130,14 @@ fn sync_file(file: &File) -> io::Result<()> {
 }
 
 fn open_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
+    let options = OpenOptions::new();
     #[cfg(unix)]
-    {
+    let options = {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = options;
         options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
-    }
+        options
+    };
     options
 }
 

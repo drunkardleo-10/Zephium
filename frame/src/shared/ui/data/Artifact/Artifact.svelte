@@ -1,19 +1,46 @@
 <script lang="ts">
   import DataTable from "../DataTable";
   import LazyView from "$shared/ui/LazyView";
-  import Button from "$shared/ui/Button";
-  import { loadChart } from "../Chart";
+  import Matrix from "./Matrix.svelte";
+  import Table from "./Table.svelte";
+  import { tableGrid } from "./table";
+  import DocumentView from "./DocumentView.svelte";
+  import AnswerView from "./AnswerView.svelte";
+  import Findings from "./Findings.svelte";
+  import Sources from "./Sources.svelte";
+  import EvidenceChips from "./EvidenceChips.svelte";
+  import HostGlyph from "./HostGlyph.svelte";
   import {
+    answerCover,
     artifactRenderable,
     displayLocation,
     type ArtifactView,
     type EvidenceReference,
   } from "./artifact";
+  import { CODE_CARD_LINES, loadCodeBlock } from "../Code";
   import * as m from "$shared/i18n/messages";
   let {
     artifact,
     onevidence,
-  }: { artifact: ArtifactView; onevidence?: (reference: EvidenceReference) => void } = $props();
+    onlink,
+    embedded = false,
+    compact = false,
+    card = false,
+  }: {
+    artifact: ArtifactView;
+    onevidence?: (reference: EvidenceReference) => void;
+    /** Prose links open through a native intent (the Work pane or a tab). */
+    onlink?: (href: string) => void;
+    embedded?: boolean;
+    /** The card version of a plot: no readout, no values table. */
+    compact?: boolean;
+    /** The canvas card: no chips, no sections past the first, capped rows, then "+n". */
+    card?: boolean;
+  } = $props();
+  const CAP = { table: 4, findings: 4, sources: 4 } as const;
+  const more = (count: number) => m.work_card_more({ count });
+  const tableRows = (rows: readonly (readonly string[])[]) =>
+    card ? rows.slice(0, CAP.table) : rows;
   let valid = $derived(artifactRenderable(artifact));
   let content = $derived(artifact.content);
   const labels = {
@@ -27,51 +54,118 @@
     range: (first: number, last: number, total: number) =>
       m.work_table_range({ first, last, total }),
   };
+  /** The chart and its Work conversion arrive together, only when a chart is shown. */
+  const loadWorkChart = () => import("./WorkChart.svelte");
+  const matrixLabels = {
+    unknown: m.work_cell_unknown(),
+    generalKnowledge: m.work_general_knowledge(),
+    criterion: m.work_matrix_criterion(),
+    subject: m.work_matrix_subject(),
+    yes: m.work_yes(),
+    no: m.work_no(),
+  };
+  const findingLabels = {
+    confidence: {
+      supported: m.work_confidence_supported(),
+      inferred: m.work_confidence_inferred(),
+      unverified: m.work_confidence_unverified(),
+      contradicted: m.work_confidence_contradicted(),
+    },
+    generalKnowledge: m.work_general_knowledge(),
+  };
 </script>
 
-<article aria-label={artifact.title} class="artifact">
-  <header>
-    <h2>{artifact.title}</h2>
-    <p class="review">{artifact.reviewLabel}</p>
-  </header>
+<article aria-label={artifact.title} class="artifact" class:card>
+  {#if !embedded}<header>
+      <h2>{artifact.title}</h2>
+      <p class="review">{artifact.reviewLabel}</p>
+    </header>{/if}
   {#if !valid}<p role="alert">{m.work_artifact_unavailable()}</p>
+  {:else if content.kind === "document" && card}<DocumentView
+      card
+      document={content.formatted}
+      paragraphs={content.paragraphs}
+    />
   {:else if content.kind === "document"}<div class="document">
-      {#each content.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{:else}<p>
-          {m.work_empty_data()}
-        </p>{/each}
+      {#if content.formatted}<DocumentView document={content.formatted} {onlink} />
+      {:else}{#each content.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{:else}<p>
+            {m.work_empty_data()}
+          </p>{/each}{/if}
     </div>
+  {:else if (content.kind === "table" || content.kind === "comparison") && !card}<Table
+      caption={artifact.title}
+      {...tableGrid(content)}
+    />
   {:else if content.kind === "table"}<DataTable
       caption={artifact.title}
+      showCaption={!embedded}
       columns={content.columns.map((label, i) => ({ key: String(i), label }))}
-      rows={content.rows.map((row, i) => ({
+      rows={tableRows(content.rows).map((row, i) => ({
         key: String(i),
         label: String(i + 1),
         cells: Object.fromEntries(row.map((cell, c) => [String(c), cell])),
       }))}
       {labels}
-    />
+    />{#if card && content.rows.length > CAP.table}<p class="more">
+        {more(content.rows.length - CAP.table)}
+      </p>{/if}
   {:else if content.kind === "comparison"}<DataTable
       caption={artifact.title}
+      showCaption={!embedded}
       columns={content.criteria.map((label, i) => ({ key: String(i), label }))}
-      rows={content.alternatives.map((row, i) => ({
-        key: String(i),
-        label: row.name,
-        cells: Object.fromEntries(row.values.map((cell, c) => [String(c), cell])),
-      }))}
+      rows={(card ? content.alternatives.slice(0, CAP.table) : content.alternatives).map(
+        (row, i) => ({
+          key: String(i),
+          label: row.name,
+          cells: Object.fromEntries(row.values.map((cell, c) => [String(c), cell])),
+        }),
+      )}
       {labels}
+    />{#if card && content.alternatives.length > CAP.table}<p class="more">
+        {more(content.alternatives.length - CAP.table)}
+      </p>{/if}
+  {:else if content.kind === "matrix"}<Matrix
+      subjects={content.subjects}
+      criteria={content.criteria}
+      cells={content.cells}
+      notes={content.notes}
+      labels={matrixLabels}
+      {onevidence}
+      {card}
+      {more}
+    />
+  {:else if content.kind === "findings"}<Findings
+      subjects={content.subjects}
+      items={content.items}
+      labels={findingLabels}
+      {onevidence}
+      limit={card ? CAP.findings : undefined}
+      {more}
     />
   {:else if content.kind === "chart"}<LazyView
-      loader={loadChart}
+      loader={loadWorkChart}
       loadingLabel={m.surface_loading()}
       failureLabel={m.work_artifact_unavailable()}
       retryLabel={m.surface_retry()}
-      >{#snippet children(Chart)}<Chart
+      >{#snippet children(WorkChart)}<WorkChart
           title={artifact.title}
-          xLabel={content.xLabel}
-          yLabel={content.yLabel}
-          series={content.series}
-        />{/snippet}</LazyView
+          chart={content}
+          compact={compact || card}
+          {onevidence}
+        >
+          {#snippet glyph(reference)}<HostGlyph
+              host={reference.origin || reference.label}
+              url={reference.url}
+              file={!!reference.file}
+              size={12}
+            />{/snippet}
+        </WorkChart>{/snippet}</LazyView
     >
+  {:else if content.kind === "checklist" && card}<p class="count">
+      {content.items.length === 1
+        ? m.work_card_step_one()
+        : m.work_card_steps({ count: content.items.length })}
+    </p>
   {:else if content.kind === "checklist"}<ul class="checklist">
       {#each content.items as item, i (i)}<li>
           <span aria-label={item.completed ? m.work_item_complete() : m.work_item_open()}
@@ -79,21 +173,56 @@
           ><span>{item.text}</span>
         </li>{:else}<li>{m.work_empty_data()}</li>{/each}
     </ul>
-  {:else if content.kind === "sources"}<p>{content.summary}</p>
+  {:else if content.kind === "sources"}<Sources
+      summary={content.summary}
+      subjects={content.subjects}
+      entries={content.entries}
+      fallback={artifact.evidence}
+      {onevidence}
+      limit={card ? CAP.sources : undefined}
+      {more}
+    />
   {:else if content.kind === "browser"}<section class="resource">
       <p class="eyebrow">{m.work_browser_resource()}</p>
       <h3>{content.title}</h3>
       <p class="location">{displayLocation(content.location) || m.work_location_unavailable()}</p>
       <p>{content.summary}</p>
-      <small>{m.work_browser_preview_only()}</small>
+      {#if !card}<small>{m.work_browser_preview_only()}</small>{/if}
     </section>
+  {:else if content.kind === "diagram" && card}<p class="count">
+      {content.nodes.length === 1
+        ? m.work_card_diagram_part_one()
+        : m.work_card_diagram_parts({ count: content.nodes.length })}
+    </p>
+  {:else if content.kind === "diagram"}<ul class="checklist">
+      {#each content.nodes as node (node.id)}<li>
+          <span>{node.name}</span>{#if node.note}<small>{node.note}</small>{/if}
+        </li>{/each}
+    </ul>
+  {:else if content.kind === "code"}<LazyView
+      loader={loadCodeBlock}
+      loadingLabel={m.surface_loading()}
+      failureLabel={m.work_artifact_unavailable()}
+      retryLabel={m.surface_retry()}
+      >{#snippet children(CodeBlock)}<CodeBlock
+          language={content.language}
+          text={content.text}
+          notes={content.notes}
+          label={artifact.title}
+          variant={card ? "card" : "lift"}
+          limit={card ? CODE_CARD_LINES : undefined}
+        />{/snippet}</LazyView
+    >
+  {:else if content.kind === "answer"}<AnswerView
+      blocks={card ? answerCover(content.blocks) : content.blocks}
+      label={artifact.title}
+      page={!card}
+    />
   {:else if content.kind === "unavailable"}<p role="status">{content.reason}</p>{/if}
-  {#if valid && artifact.evidence.length}<footer aria-label={m.work_sources()}>
-      {#each artifact.evidence as reference (reference.key)}<Button
-          size="compact"
-          disabled={!onevidence}
-          onclick={() => onevidence?.(reference)}>{reference.label}</Button
-        >{/each}
+  {#if valid && !card && !artifact.knowledge && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
+      aria-label={m.work_sources()}
+    >
+      <EvidenceChips references={artifact.evidence} {onevidence} />
     </footer>{/if}
 </article>
 
@@ -161,12 +290,40 @@
     color: var(--color-muted);
   }
 
+  .count {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 16px;
+  }
+
+  .card .resource {
+    padding: 10px 12px;
+  }
+
+  .card .resource p {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    margin: 0;
+    overflow: hidden;
+    line-height: 16px;
+  }
+
+  .more {
+    margin: 4px 0 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 13px;
+  }
+
   footer {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-block-start: 24px;
-    padding-block-start: 16px;
+    margin-block-start: 16px;
+    padding-block-start: 12px;
     border-block-start: 1px solid var(--color-border);
   }
 </style>

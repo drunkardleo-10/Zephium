@@ -12,6 +12,7 @@ export function setQuery(value: string) {
   target = null;
 }
 export function select(value: SettingsSection, field: string | null = null) {
+  if (value === "account") value = "ai";
   revision++;
   current = value;
   search = "";
@@ -20,6 +21,14 @@ export function select(value: SettingsSection, field: string | null = null) {
 
 export function handleNativeSection(id: string) {
   const section = id.slice("settings.section.".length);
-  if (id.startsWith("settings.section.") && ["profiles", "account", "newtab"].includes(section))
+  if (
+    id.startsWith("settings.section.") &&
+    (section === "connections" || section.startsWith("connections."))
+  ) {
+    const service = section.slice("connections.".length);
+    select("mcp", service ? `connection.${decodeURIComponent(service).toLowerCase()}` : null);
+    return;
+  }
+  if (id.startsWith("settings.section.") && ["profiles", "newtab", "ai"].includes(section))
     select(section as SettingsSection);
 }

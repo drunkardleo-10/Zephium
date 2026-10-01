@@ -21,6 +21,27 @@ credential and `AgentWorkTask`. The trusted task supplies both task-level
 completion and independent effect/account assessment. There is no default task
 and no interpretation of model text as product authority.
 
+Ordinary `prepare` additionally requires `with_browser_profile` carrying an
+opaque `AgentWorkProfileBinding` from the application actor's selector-free
+`Handle::work_profile_binding` query. Unbound requests fail before consuming the
+desktop composition. The query selects the focused live browser profile, refuses
+deletion quarantine and missing/failed/unapplied policy, and reports policy
+compilation/installation as pending. Callers retain one bounded query at a time
+under their original deadline/cancellation owner; they must not silently follow
+a different profile while waiting. No profile name/ID is logged by this surface.
+
+The binding preserves the actual browser session: default/named profiles are
+durable and incognito is ephemeral. Preparation matches it against the frozen
+controller input; Shell rechecks the selected live/ready binding when it consumes
+`AdmitWork`. A stale, deleting, pending or substituted binding cannot start the
+factory, and refusal keeps the original dormant owner for fail-closed accounting.
+Native construction separately checks tombstone/persistence class and acquires
+the current applied policy on its serialized host turn. A readiness snapshot
+does not grant authority to an old policy generation or keep a profile alive;
+ordinary policy replacement and profile erasure remain authoritative. Account
+attestation is still supplied by the trusted task, never inferred from profile
+selection or from the fact that a session is shared.
+
 Trusted local-only form workflows can supply
 [`AgentWorkFormTask`](agent-work-forms.md) with explicit bounded goals. The
 product must independently attest local effect semantics for those fields;

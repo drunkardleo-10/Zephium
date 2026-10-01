@@ -55,6 +55,10 @@ impl Native {
                 self.acquisitions.fetch_add(1, Ordering::SeqCst);
                 WorkBrowserResourceNativeOutcome::Acquired
             }
+            WorkBrowserResourceOperation::PresentHuman
+            | WorkBrowserResourceOperation::ContinueAfterHuman => {
+                WorkBrowserResourceNativeOutcome::Refused
+            }
             WorkBrowserResourceOperation::Revoke => {
                 *self.delivery.lock().unwrap() = request.take_lease_delivery_completion();
                 WorkBrowserResourceNativeOutcome::Revoked {
@@ -985,6 +989,10 @@ fn refused_construction_retires_waking_reporter_before_any_owner_slot_or_rows_lo
                                 slots.iter().all(|slot| match slot {
                                     OwnedSlot::Lifecycle(slot) => slot.try_lock().is_ok(),
                                     OwnedSlot::Read(slot) => slot.try_lock().is_ok(),
+                                    #[cfg(feature = "work-execution")]
+                                    OwnedSlot::Navigation(slot) => slot.try_lock().is_ok(),
+                                    #[cfg(feature = "work-execution")]
+                                    OwnedSlot::Action(slot) => slot.try_lock().is_ok(),
                                 })
                             })
                     })

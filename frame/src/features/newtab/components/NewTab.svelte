@@ -2,12 +2,12 @@
   import { onMount, type Snippet } from "svelte";
   import {
     CheckListIcon,
-    Clock01Icon,
     Settings01Icon,
     Shield01Icon,
     UserCircleIcon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
+  import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
   import { preferences } from "$domain/preferences";
   import { taskCounts } from "$domain/resources";
@@ -15,8 +15,7 @@
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import { greetingFor } from "../lib/greeting";
-  import { clockFace, clockFormat, dayKey, focusSpan, untilNextMinute } from "../lib/clock";
-  import { SAMPLE_DAY } from "../lib/figures";
+  import { clockFace, clockFormat, dayKey, untilNextMinute } from "../lib/clock";
   import { groundPath, notchShape, notchWidth, roundedRect } from "../lib/ground";
   import { layout, type Box } from "../lib/layout";
   import { WORDMARK } from "$shared/lib/wordmark";
@@ -26,9 +25,6 @@
     oncustomize,
     onprofile,
     ontasks,
-    trackersBlocked = SAMPLE_DAY.trackersBlocked,
-    focusMinutes = SAMPLE_DAY.focusMinutes,
-    focusGoalMinutes = SAMPLE_DAY.focusGoalMinutes,
   }: {
     /** The field that hangs in the notch. */
     search: Snippet;
@@ -38,11 +34,6 @@
     onprofile?: () => void;
     /** Opens Tasks. */
     ontasks?: () => void;
-    /** Trackers the blocker stopped today. */
-    trackersBlocked?: number;
-    /** Minutes spent focused today, and the day's aim. */
-    focusMinutes?: number;
-    focusGoalMinutes?: number;
   } = $props();
 
   const id = $props.id();
@@ -51,6 +42,7 @@
   let height = $state(0);
   let now = $state(new Date());
   let due = $state({ today: 0, overdue: 0 });
+  let blocked = $state<number | null>(null);
 
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   let profile = $derived(tabs.profile()?.id ?? null);
@@ -72,15 +64,33 @@
     ),
   );
   const number = new Intl.NumberFormat();
-  let focusShare = $derived(
-    focusGoalMinutes > 0 ? Math.min(1, Math.max(0, focusMinutes / focusGoalMinutes)) : 0,
-  );
 
   // The figures a private window shows none of; what is due only while Tasks
-  // is wanted here.
+  // is wanted here, and the blocked count only once it has been read.
   let figures = $derived(
-    incognito ? [] : showDue ? ["trackers", "focus", "due"] : ["trackers", "focus"],
+    incognito ? [] : [...(blocked === null ? [] : ["trackers"]), ...(showDue ? ["due"] : [])],
   );
+
+  // Read when the page opens and with the minute's redraw while it shows, so
+  // it keeps up with browsing in other tabs without a timer of its own.
+  $effect(() => {
+    const owner = profile;
+    void now;
+    if (!owner || incognito) {
+      blocked = null;
+      return;
+    }
+    let live = true;
+    void commands.blockerStats(owner).then(
+      (result) => {
+        if (live) blocked = result.status === "ok" ? result.data.today : null;
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
   let controls = $derived((onprofile ? 1 : 0) + (oncustomize ? 1 : 0));
   let page = $derived(layout(width, height, { controls, clock: showClock, tiles: figures.length }));
 
@@ -282,26 +292,8 @@
             ></span
           >
           <span class="reading">
-            <span class="value">{number.format(trackersBlocked)}</span>
+            <span class="value">{number.format(blocked ?? 0)}</span>
             <span class="foot">{m.ntp_today()}</span>
-          </span>
-        </div>
-      {:else if figure === "focus"}
-        <div class="tile" style={at(tile)}>
-          <span class="label"
-            ><Icon icon={Clock01Icon} size={13} /><span class="name">{m.ntp_focused()}</span><span
-              class="meter"
-              role="meter"
-              aria-label={m.ntp_focus_goal({ goal: focusSpan(focusGoalMinutes) })}
-              aria-valuemin={0}
-              aria-valuemax={focusGoalMinutes}
-              aria-valuenow={Math.min(focusMinutes, focusGoalMinutes)}
-              ><span class="fill" style:transform={`scaleX(${focusShare})`}></span></span
-            ></span
-          >
-          <span class="reading">
-            <span class="value">{focusSpan(focusMinutes)}</span>
-            <span class="foot">{m.ntp_focus_goal({ goal: focusSpan(focusGoalMinutes) })}</span>
           </span>
         </div>
       {:else}
@@ -587,31 +579,10 @@
     color: var(--color-danger);
   }
 
-  /* The day's progress toward the aim, at the far end of the label. */
-  .meter {
-    position: relative;
-    flex: none;
-    inline-size: 36px;
-    margin-inline-start: auto;
-    block-size: 3px;
-    overflow: hidden;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-  }
-
-  .fill {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background: var(--color-text);
-    transform-origin: left center;
-  }
-
   /* A card too narrow for the figure and its context keeps the figure on
      screen; the context is still read out. */
   @container tile (inline-size < 148px) {
-    .foot,
-    .meter {
+    .foot {
       position: absolute;
       inline-size: 1px;
       block-size: 1px;

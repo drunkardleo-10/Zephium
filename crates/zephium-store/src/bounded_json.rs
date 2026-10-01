@@ -27,6 +27,23 @@ const MAX_JSON_DEPTH: usize = MAX_SPLIT_DEPTH * 2 + 16;
 /// strings. Typed deserialization remains authoritative for syntax; this pass
 /// exists to establish allocation bounds before it runs.
 pub(crate) fn preflight(input: &str) -> Result<PreflightedJson<'_>, &'static str> {
+    preflight_with_string_limit(input, MAX_RAW_STRING_BYTES)
+}
+
+/// Work execution rows are independently capped at 512 KiB before this pass.
+/// Their semantic artifact text permits 32 KiB, with at most 2x JSON escaping
+/// from the canonical writer. Session ingress keeps its existing smaller bound.
+pub(crate) fn preflight_work_execution(input: &str) -> Result<PreflightedJson<'_>, &'static str> {
+    preflight_with_string_limit(
+        input,
+        2 * zephium_core::work::artifact::MAX_ARTIFACT_TEXT_BYTES,
+    )
+}
+
+fn preflight_with_string_limit(
+    input: &str,
+    max_string_bytes: usize,
+) -> Result<PreflightedJson<'_>, &'static str> {
     let bytes = input.as_bytes();
     let mut stack = [0_u8; MAX_JSON_DEPTH];
     let mut depth = 0_usize;
@@ -59,7 +76,7 @@ pub(crate) fn preflight(input: &str) -> Result<PreflightedJson<'_>, &'static str
                         raw_bytes = raw_bytes.saturating_add(1);
                         index += 1;
                     }
-                    if raw_bytes > MAX_RAW_STRING_BYTES {
+                    if raw_bytes > max_string_bytes {
                         return Err("JSON string exceeds allocation limit");
                     }
                 }
@@ -398,6 +415,16 @@ mod tests {
             a: Box::new(pane_with_leaves(first, next)),
             b: Box::new(pane_with_leaves(leaves - first, next)),
         }
+    }
+
+    #[test]
+    fn work_text_ingress_does_not_expand_session_string_admission() {
+        let text = "\t".repeat(zephium_core::work::artifact::MAX_ARTIFACT_TEXT_BYTES);
+        let body = serde_json::to_string(&text).unwrap();
+        assert!(preflight_work_execution(&body).is_ok());
+        assert!(preflight(&body).is_err());
+        let oversized = serde_json::to_string(&(text + "\t")).unwrap();
+        assert!(preflight_work_execution(&oversized).is_err());
     }
 
     #[test]

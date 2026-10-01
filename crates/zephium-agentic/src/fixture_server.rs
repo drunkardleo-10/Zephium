@@ -13,6 +13,12 @@ use crate::probe_recipes::{backend_name, case_name, MAX_NATIVE_INPUT_RUNTIME_ROW
 use crate::{FixtureCase, InputBackend};
 
 const MAX_REQUEST_BYTES: usize = 4 * 1_024;
+// No form, submission controls, scripts, event handlers, frames, remote assets
+// or persistence. The initial value deliberately differs from the trusted goal.
+const RETAINED_LOCAL_FORM_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium local preparation witness</title><body><main><h1>Local draft</h1><label for="draft">Draft</label><input id="draft" type="text" value="Unprepared" autocomplete="off"><p>This field has no submission or persistence.</p></main></body></html>"#;
+const RETAINED_BACK_ORIGIN_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium release card</title><body><main><h1>Zephium Release Card</h1><p>Release code</p><h2>ZEPH-R7-492</h2><p>Verify this candidate against the relevant linked record before reporting from this card.</p><nav aria-label="Release references"><a href="/retained-back/register-v1.html">Compatibility register</a><a href="/retained-back/handbook-v1.html">Release handbook</a></nav></main></body></html>"#;
+const RETAINED_BACK_REGISTER_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium compatibility register</title><body><main><h1>Compatibility Register</h1><h2>ZEPH-R7-492</h2><p>Status: cleared for native history validation.</p><p>The authoritative release code remains on the release card.</p></main></body></html>"#;
+const RETAINED_BACK_HANDBOOK_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'"><title>Zephium release handbook</title><body><main><h1>Release Handbook</h1><p>This handbook describes process only and does not contain compatibility status.</p></main></body></html>"#;
 // A maximum 112-row matrix reloads the top document for activation isolation;
 // each load may fetch the fixed child frame and one favicon.
 const MAX_REQUESTS: usize = 512;
@@ -67,6 +73,16 @@ pub enum FixtureRoute {
     SemanticRuntime,
     /// Provider-free hidden-view rendering readiness diagnostic.
     SemanticRendering,
+    /// Fixed local browser/OS surface qualification after native text entry.
+    OwnedSurfaceProbe,
+    /// Script-free, non-submitting local field for retained action qualification.
+    RetainedLocalForm,
+    /// Original document for the retained native-Back qualification.
+    RetainedBackOrigin,
+    /// Relevant linked record for the retained native-Back qualification.
+    RetainedBackRegister,
+    /// Irrelevant observed-link alternative for open-route qualification.
+    RetainedBackHandbook,
     /// Controlled-input document for the release-excluded page-world relay proof.
     SemanticRuntimeRelay,
     /// Real-WebKit adversarial page-world relay qualification document.
@@ -99,6 +115,11 @@ impl FixtureRoute {
             Self::SameOriginFrame => "/frame-v1.html",
             Self::SemanticRuntime => "/semantic-runtime-v1.html",
             Self::SemanticRendering => "/semantic-rendering-v1.html",
+            Self::OwnedSurfaceProbe => "/owned-surface-probe-v1.html",
+            Self::RetainedLocalForm => "/retained-local-form-v1.html",
+            Self::RetainedBackOrigin => "/retained-back/origin-v1.html",
+            Self::RetainedBackRegister => "/retained-back/register-v1.html",
+            Self::RetainedBackHandbook => "/retained-back/handbook-v1.html",
             Self::SemanticRuntimeRelay => "/semantic-runtime-relay-v1.html",
             Self::SemanticRuntimeRelayHostile => "/semantic-runtime-relay-hostile-v1.html",
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
@@ -506,6 +527,13 @@ fn handle(
         return Ok(());
     }
     let (status, content_type, body, script_policy) = match first_line {
+        b"GET /owned-surface-probe-v1.html HTTP/1.1"
+        | b"GET /owned-surface-probe-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            include_bytes!("../assets/owned-surface-probe-v1.html").as_slice(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
         line if is_native_input_request(line) => (
             200,
             "text/html; charset=utf-8",
@@ -535,6 +563,34 @@ fn handle(
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RENDERING_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /retained-local-form-v1.html HTTP/1.1"
+        | b"GET /retained-local-form-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            RETAINED_LOCAL_FORM_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /retained-back/origin-v1.html HTTP/1.1"
+        | b"GET /retained-back/origin-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            RETAINED_BACK_ORIGIN_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /retained-back/register-v1.html HTTP/1.1"
+        | b"GET /retained-back/register-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            RETAINED_BACK_REGISTER_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /retained-back/handbook-v1.html HTTP/1.1"
+        | b"GET /retained-back/handbook-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            RETAINED_BACK_HANDBOOK_HTML.as_bytes(),
             FixtureScriptPolicy::InlineOnly,
         ),
         b"GET /semantic-runtime-relay-v1.html HTTP/1.1"
@@ -1042,14 +1098,31 @@ const SEMANTIC_RENDERING_HTML: &str = r###"<!doctype html>
 
 const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
 <meta name="referrer" content="no-referrer">
 <title>Semantic runtime fixture v1</title></head>
 <body>
 <main aria-label="First semantic epoch">
   <h1>First semantic epoch</h1>
+  <div id="semantic-fill-editable" contenteditable="true" role="textbox" aria-label="Semantic fill editable">fixture editable</div>
+  <span role="heading" aria-level="3" id="semantic-fill-editable-status">Semantic fill editable pending</span>
+  <aside aria-label="Fixed Fill diagnostic fixtures" style="position:absolute;right:0;top:0;width:220px;font-size:10px;line-height:12px">
+  <div role="textbox" aria-label="Fill support missing attribute">diagnostic</div>
+  <label contenteditable="true" role="textbox" aria-label="Fill support unsupported tag">diagnostic</label>
+  <div id="nested-editor" contenteditable="true" role="group"><div id="nested-leaf" contenteditable="true" role="textbox" aria-label="Fill support editable ancestor">diagnostic</div><span id="nested-sibling" contenteditable="false"><b>retained sibling</b></span></div>
+  <div id="nested-destination" contenteditable="true" role="group"></div>
+  <span role="heading" aria-level="3" id="nested-status">Nested editor pending</span>
+  <div contenteditable="true" role="group"><div contenteditable="true" role="textbox" aria-label="Fill support rich editable ancestor"><span>diagnostic</span></div></div>
+  <div contenteditable="true" role="textbox" aria-label="Fill support element child"><span>diagnostic</span></div>
+  <div contenteditable="true" role="textbox" aria-label="Fill support other child">diagnostic<!-- retained structural marker --></div>
+  <div contenteditable="true" role="textbox" aria-label="Fill support readonly" aria-readonly="true">diagnostic</div>
+  <div contenteditable="true" role="textbox" aria-label="Fill support disabled" aria-disabled="true">diagnostic</div>
+  <input type="email" role="textbox" aria-label="Fill support unsupported control" value="diagnostic">
+  <div id="fill-support-child-limit" contenteditable="true" role="textbox" aria-label="Fill support child limit"></div>
+  <script>for (let i = 0; i < 129; i++) document.getElementById('fill-support-child-limit').appendChild(document.createTextNode('x'));</script>
+  </aside>
   <p id="bridge-status">Page bridge unresolved</p>
-  <button id="primary-semantic-action" type="button" aria-label="Primary semantic action" aria-expanded="false">Run</button>
+  <details><summary id="primary-semantic-action"><span>Primary semantic action</span></summary><p>Native disclosure content</p></details>
   <p id="primary-action-activation" aria-label="Primary action activation pending"></p>
   <p id="primary-action-settled" aria-label="Primary action settle pending"></p>
   <input id="semantic-fill-text" type="text" aria-label="Semantic fill text" value="fixture text">
@@ -1086,7 +1159,6 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
     const stickyDuring = !!userActivation?.hasBeenActive;
     const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
     const popupDenied = popup === null;
-    primaryAction.setAttribute('aria-expanded', 'true');
     primaryAction.setAttribute(
       'aria-label',
       event.isTrusted ? 'Primary semantic action applied trusted' : 'Primary semantic action applied untrusted'
@@ -1111,11 +1183,11 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
   const installFillProbe = (targetId, statusId, expected) => {
     const target = document.getElementById(targetId);
     const status = document.getElementById(statusId);
+    const editable = target.isContentEditable;
     const valueGetter = Object.getOwnPropertyDescriptor(
-      target instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype,
-      'value'
+      editable ? Node.prototype : target instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype,
+      editable ? 'textContent' : 'value'
     ).get;
     const counts = {beforeinput: 0, input: 0, change: 0};
     const countClass = (count) => count === 0 ? '0' : count === 1 ? '1' : 'many';
@@ -1154,6 +1226,7 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
   };
   installFillProbe('semantic-fill-text', 'semantic-fill-text-status', 'Zephium fixed text');
   installFillProbe('semantic-fill-search', 'semantic-fill-search-status', 'Zephium fixed search');
+  installFillProbe('semantic-fill-editable', 'semantic-fill-editable-status', '  Zephium fixed editable\nline two  ');
   installFillProbe(
     'semantic-fill-textarea',
     'semantic-fill-textarea-status',
@@ -1164,7 +1237,320 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
     'semantic-hostile-recovery-status',
     'Zephium hostile recovery'
   );
+  // Local fixture application: delegated editor handler owns a tiny model and
+  // rerenders only the admitted leaf. The recipe must never edit this parent,
+  // its noneditable formatted sibling, or a newly selected editing context.
+  const editor = document.getElementById('nested-editor');
+  const leaf = document.getElementById('nested-leaf');
+  const sibling = document.getElementById('nested-sibling');
+  const siblingChild = sibling.firstChild;
+  const destination = document.getElementById('nested-destination');
+  const nestedStatus = document.getElementById('nested-status');
+  const textAccess = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+  const text = node => Reflect.apply(textAccess.get, node, []);
+  const replace = (node, value) => Reflect.apply(textAccess.set, node, [value]);
+  let nestedModel = 'diagnostic';
+  let nestedInputs = 0;
+  const axProbe = window.location.hash === '#native-ax-fill';
+  // Release-excluded trusted interaction proof. This application owns an
+  // editing unit and may reconstruct its text leaf after native editing. The
+  // native probe never obtains a selector or program from these attributes.
+  const trustedCase = window.location.hash.slice('#native-unit-'.length);
+  if (window.location.hash.startsWith('#native-unit-') &&
+      ['normal', 'retarget', 'retarget-before-native', 'retarget-text-input', 'cancel', 'navigation', 'takeover-before', 'takeover-after'].includes(trustedCase)) {
+    const unit = document.createElement('div');
+    unit.contentEditable = 'true';
+    unit.setAttribute('role', 'textbox');
+    unit.setAttribute('aria-label', 'Trusted editing unit');
+    const original = document.createElement('span');
+    original.contentEditable = 'true';
+    original.setAttribute('aria-label', 'Trusted unit text');
+    original.textContent = 'unit original';
+    const preserved = document.createElement('b');
+    preserved.contentEditable = 'false';
+    preserved.textContent = 'unit sibling';
+    unit.append(original, preserved);
+    const decoy = document.createElement('div');
+    decoy.contentEditable = 'true';
+    decoy.setAttribute('role', 'textbox');
+    decoy.setAttribute('aria-label', 'Trusted unit decoy');
+    decoy.textContent = 'unit decoy';
+    const setup = document.createElement('h3');
+    const report = document.createElement('h3');
+    // Keep both independently verified fields in the viewport even when the
+    // takeover-before row deliberately performs no native autoscroll.
+    primaryAction.before(unit, decoy, setup, report);
+    let inputs = 0, trusted = 0, before = 0, active = false, sticky = false;
+    let model = 'unit original', popup = false, rerendered = false;
+    const select = node => {
+      node.focus({preventScroll: true});
+      const range = document.createRange(); range.selectNodeContents(node);
+      const selection = document.getSelection();
+      selection.removeAllRanges(); selection.addRange(range);
+    };
+    const value = () => Array.from(unit.childNodes).filter(n => n !== preserved).map(text).join('');
+    const render = () => {
+      // The application reconciles by logical unit, replacing site-owned leaf
+      // identity without modifying the formatted noneditable sibling.
+      for (const node of Array.from(unit.childNodes)) if (node !== preserved) node.remove();
+      const next = document.createElement('span'); next.contentEditable = 'true';
+      next.setAttribute('aria-label', 'Trusted unit text');
+      next.textContent = model; unit.insertBefore(next, preserved); rerendered = true;
+    };
+    const publish = () => {
+      const siblingOK = preserved.parentNode === unit && text(preserved) === 'unit sibling';
+      report.textContent = `Trusted unit witness inputs ${inputs} trusted ${trusted} before ${before}` +
+        ` model ${model === 'unit replacement' ? 'accepted' : model === 'unit original' ? 'original' : 'other'}` +
+        ` rerender ${rerendered ? 'yes' : 'no'} leaf ${original.isConnected ? 'same' : 'replaced'}` +
+        ` sibling ${siblingOK ? 'intact' : 'changed'} decoy ${text(decoy) === 'unit decoy' ? 'intact' : 'changed'}` +
+        ` active ${active ? 'yes' : 'no'} sticky ${sticky ? 'yes' : 'no'} popup ${popup ? 'admitted' : 'denied'}` +
+        ` retained ${value() === model ? 'yes' : 'no'}`;
+    };
+    unit.addEventListener('beforeinput', event => {
+      before += 1;
+      if (trustedCase === 'cancel') event.preventDefault();
+      if (trustedCase === 'retarget') select(decoy);
+      if (trustedCase === 'navigation') window.location.assign('https://native-unit-denied.invalid/');
+    });
+    unit.addEventListener('textInput', () => {
+      if (trustedCase === 'retarget-text-input') select(decoy);
+    });
+    document.addEventListener('input', event => {
+      if (event.target !== unit && event.target !== decoy && event.target !== original) return;
+      inputs += 1; trusted += event.isTrusted ? 1 : 0;
+      active ||= navigator.userActivation.isActive;
+      sticky ||= navigator.userActivation.hasBeenActive;
+      popup ||= window.open('about:blank', '_blank') !== null;
+      if (event.target !== decoy && event.isTrusted) {
+        model = value(); queueMicrotask(render);
+      }
+    }, true);
+    primaryAction.addEventListener('click', () => {
+      select(original);
+      const selected = document.getSelection();
+      const range = selected.rangeCount === 1 ? selected.getRangeAt(0) : null;
+      setup.textContent = range && range.startContainer === original && range.endContainer === original
+        ? 'Trusted unit setup exact logical range' : 'Trusted unit setup ambiguous';
+      if (trustedCase === 'retarget-before-native') setTimeout(() => select(decoy), 450);
+      // Fixed bounded observation schedule, not a model-selected wait/command.
+      setTimeout(publish, 1200);
+    }, {once: true});
+  }
+  // Fixed responder authority experiment. The page owns setup; the native
+  // probe invokes only the existing ref-bound semantic button, never eval.
+  const responderCase = window.location.hash.slice('#native-responder-'.length);
+  if (window.location.hash.startsWith('#native-responder-') &&
+      ['flat', 'nested', 'retarget', 'cross-leaf'].includes(responderCase)) {
+    const flat = document.getElementById('semantic-fill-editable');
+    const target = responderCase === 'flat' ? flat : leaf;
+    const decoy = document.createElement('div');
+    decoy.contentEditable = 'true';
+    decoy.setAttribute('role', 'textbox');
+    decoy.setAttribute('aria-label', 'Responder unapproved decoy');
+    decoy.textContent = text(target);
+    document.body.appendChild(decoy);
+    const setup = document.createElement('h3');
+    const focus = document.createElement('h3');
+    const challenge = document.createElement('h3');
+    const witness = document.createElement('h3');
+    document.body.append(setup, focus, challenge, witness);
+    let edits = 0;
+    for (const kind of ['beforeinput', 'input', 'change', 'compositionstart', 'compositionupdate', 'compositionend']) {
+      document.addEventListener(kind, () => { edits += 1; }, true);
+    }
+    const select = node => {
+      node.focus({preventScroll: true});
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const selection = document.getSelection();
+      selection.removeAllRanges(); selection.addRange(range);
+    };
+    primaryAction.addEventListener('click', () => {
+      select(target);
+      const selected = document.getSelection();
+      setup.textContent = selected.rangeCount === 1 &&
+        selected.getRangeAt(0).startContainer === target &&
+        selected.getRangeAt(0).endContainer === target
+        ? 'Responder setup selected exact leaf' : 'Responder setup ambiguous';
+      focus.textContent = document.activeElement === target ? 'Responder setup focus exact leaf'
+        : document.activeElement === editor ? 'Responder setup focus editing ancestor'
+        : 'Responder setup focus other';
+      setTimeout(() => {
+        if (responderCase === 'retarget') {
+          select(decoy);
+          challenge.textContent = document.activeElement === decoy &&
+            document.getSelection().getRangeAt(0).startContainer === decoy
+            ? 'Responder challenge focus decoy selection decoy' : 'Responder challenge failed';
+        } else if (responderCase === 'cross-leaf') {
+          const range = document.createRange();
+          range.setStart(leaf.firstChild, 0);
+          range.setEnd(sibling.firstChild.firstChild, text(sibling).length);
+          const selection = document.getSelection();
+          selection.removeAllRanges(); selection.addRange(range);
+          const actual = selection.rangeCount === 1 ? selection.getRangeAt(0) : null;
+          challenge.textContent = actual && actual.startContainer === leaf.firstChild &&
+            actual.endContainer === sibling.firstChild.firstChild
+            ? 'Responder challenge selection crosses leaf sibling'
+            : 'Responder challenge selection normalized by engine';
+        } else {
+          const selection = document.getSelection();
+          const actual = selection.rangeCount === 1 ? selection.getRangeAt(0) : null;
+          challenge.textContent = actual && actual.startContainer === target && actual.endContainer === target
+            ? 'Responder challenge selection remains exact leaf' : 'Responder challenge failed';
+        }
+        witness.textContent = intact() && text(flat) === 'fixture editable' &&
+          text(leaf) === 'diagnostic' && text(decoy) === text(target) &&
+          nestedModel === 'diagnostic' && nestedInputs === 0 && edits === 0
+          ? 'Responder witness fields intact events zero model unchanged' : 'Responder witness mismatch';
+      }, 450);
+    }, {once: true});
+  }
+  if (axProbe) {
+    const flat = document.getElementById('semantic-fill-editable');
+    let flatModel = text(flat);
+    flat.addEventListener('input', () => {
+      flatModel = text(flat);
+      queueMicrotask(() => {
+        replace(flat, flatModel);
+        const report = document.createElement('h3');
+        report.textContent = flatModel === 'ax flat replacement' && !navigator.userActivation.isActive && !navigator.userActivation.hasBeenActive
+          ? 'AX flat application retained' : 'AX flat application mismatch';
+        document.body.appendChild(report);
+      });
+    });
+  }
+  const intact = () => leaf.parentNode === editor && sibling.parentNode === editor &&
+    sibling.firstChild === siblingChild && text(sibling) === 'retained sibling';
+  editor.addEventListener('input', event => {
+    if (event.target !== leaf) return;
+    nestedInputs += 1;
+    nestedModel = text(leaf);
+    queueMicrotask(() => {
+      replace(leaf, nestedModel);
+      if (axProbe) {
+        nestedStatus.textContent = intact() && nestedModel === 'nested replacement' && nestedInputs === 1 &&
+          !navigator.userActivation.isActive && !navigator.userActivation.hasBeenActive
+          ? 'AX nested application retained' : 'AX nested application mismatch';
+        return;
+      }
+      nestedStatus.textContent = intact() && text(leaf) === 'nested replacement' &&
+        nestedModel === 'nested replacement' && nestedInputs === 1 &&
+        event.data === nestedModel && event.inputType === 'insertReplacementText' && !event.isTrusted
+        ? 'Nested editor delegated model retained' : 'Nested editor model mismatch';
+    });
+  });
+  leaf.addEventListener('beforeinput', event => {
+    const mode = event.data;
+    if (!['nested move', 'nested relabel', 'nested protected', 'nested credential', 'nested editability', 'nested rich'].includes(mode)) return;
+    if (mode === 'nested move') destination.appendChild(leaf);
+    if (mode === 'nested relabel') leaf.setAttribute('aria-label', 'Repurposed nested leaf');
+    if (mode === 'nested protected') editor.setAttribute('aria-readonly', 'true');
+    if (mode === 'nested credential') editor.setAttribute('aria-label', 'Password');
+    if (mode === 'nested editability') editor.setAttribute('contenteditable', 'false');
+    if (mode === 'nested rich') leaf.appendChild(document.createElement('span'));
+    setTimeout(() => {
+      const unchanged = text(leaf) === 'nested replacement' && nestedModel === 'nested replacement' && nestedInputs === 1;
+      editor.insertBefore(leaf, sibling);
+      leaf.setAttribute('aria-label', 'Fill support editable ancestor');
+      editor.removeAttribute('aria-readonly'); editor.removeAttribute('aria-label');
+      editor.setAttribute('contenteditable', 'true');
+      if (mode === 'nested rich') leaf.lastChild.remove();
+      nestedStatus.textContent = unchanged && intact()
+        ? `Nested editor refused ${mode} intact` : 'Nested editor unauthorized mutation';
+    }, 75);
+  });
   if (window.location.pathname === '/semantic-runtime-relay-hostile-v1.html') {
+    const unauthorized = document.createElement('input');
+    unauthorized.type = 'text';
+    unauthorized.hidden = true;
+    unauthorized.value = 'unapproved original';
+    document.body.append(unauthorized);
+    unauthorized.dispatchEvent(new CustomEvent('zephium-fill-request-v1', {
+      detail: JSON.stringify({ v: 1, a: 997, z: 'unapproved replacement' }),
+      bubbles: false, cancelable: false, composed: false
+    }));
+    const unauthorizedStatus = document.createElement('h3');
+    unauthorizedStatus.textContent = unauthorized.value === 'unapproved original'
+      ? 'Semantic page-origin fill blocked'
+      : 'Semantic page-origin fill unauthorized';
+    document.body.append(unauthorizedStatus);
+    unauthorized.remove();
+    // Deterministic negative control for the old transport: a reconciler
+    // registered first removes COMMAND before the consumer can reread it.
+    const batchingStatus = document.createElement('h3');
+    batchingStatus.textContent = 'Semantic relay transport pending';
+    document.body.append(batchingStatus);
+    const legacy = document.createElement('input');
+    legacy.hidden = true;
+    document.body.append(legacy);
+    const legacyCommand = 'data-zephium-fill-relay-command-v1';
+    const legacyTerminal = 'data-zephium-fill-relay-terminal-v1';
+    const relayGet = Element.prototype.getAttribute;
+    const readRelayAttr = (node, name) => Reflect.apply(relayGet, node, [name]);
+    const stripping = new MutationObserver(() => legacy.removeAttribute(legacyCommand));
+    stripping.observe(legacy, { attributes: true, attributeFilter: [legacyCommand] });
+    const consuming = new MutationObserver(() => {
+      const lost = readRelayAttr(legacy, legacyCommand) === null &&
+        readRelayAttr(legacy, legacyTerminal) === null;
+      stripping.disconnect();
+      consuming.disconnect();
+      batchingStatus.textContent = lost
+        ? 'Semantic relay transport legacy command-gone reproduced'
+        : 'Semantic relay transport negative control failed';
+      legacy.remove();
+    });
+    consuming.observe(legacy, { attributes: true, attributeFilter: [legacyCommand] });
+    legacy.setAttribute(legacyCommand, 'closed-negative-control');
+
+    // The actual admitted contenteditable action runs with the same hostile
+    // reconciliation behavior. An attribute-based transport would be erased.
+    const editable = document.getElementById('semantic-fill-editable');
+    const interference = document.createElement('h3');
+    interference.textContent = 'Semantic relay interference pending';
+    document.body.append(interference);
+    let transportAttributes = 0;
+    const editableStripping = new MutationObserver((records) => {
+      transportAttributes += records.length;
+      editable.removeAttribute(legacyCommand);
+      editable.removeAttribute(legacyTerminal);
+    });
+    editableStripping.observe(editable, {
+      attributes: true, attributeFilter: [legacyCommand, legacyTerminal]
+    });
+    editable.addEventListener('input', () => {
+      interference.textContent = transportAttributes === 0 &&
+        readRelayAttr(editable, legacyCommand) === null && readRelayAttr(editable, legacyTerminal) === null
+        ? 'Semantic relay attribute interference avoided'
+        : 'Semantic relay attribute interference observed';
+    });
+    const fixedDispatch = EventTarget.prototype.dispatchEvent;
+    const FixedCustomEvent = CustomEvent;
+    const capturedValueGet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').get;
+    const capturedDetailGet = Object.getOwnPropertyDescriptor(CustomEvent.prototype, 'detail').get;
+    const retarget = document.createElement('input');
+    retarget.type = 'text';
+    retarget.hidden = true;
+    retarget.value = 'retarget original';
+    document.body.append(retarget);
+    const retargetStatus = document.createElement('h3');
+    retargetStatus.textContent = 'Semantic captured-payload retarget pending';
+    document.body.append(retargetStatus);
+    retarget.addEventListener('input', () => {
+      retargetStatus.textContent = 'Semantic captured-payload retarget unauthorized';
+    });
+    editable.addEventListener('zephium-fill-request-v1', event => {
+      Reflect.apply(fixedDispatch, retarget, [new FixedCustomEvent('zephium-fill-request-v1', {
+        detail: Reflect.apply(capturedDetailGet, event, [])
+      })]);
+    });
+    editable.addEventListener('input', () => Promise.resolve().then(() => {
+      retargetStatus.textContent = Reflect.apply(capturedValueGet, retarget, []) === 'retarget original'
+        ? 'Semantic captured-payload retarget blocked'
+        : 'Semantic captured-payload retarget unauthorized';
+    }));
+    const forgedReply = (node, detail) => Reflect.apply(fixedDispatch, node, [
+      new FixedCustomEvent('zephium-fill-result-v1', { detail })
+    ]);
     const hostile = document.getElementById('semantic-hostile-fill');
     const recovery = document.getElementById('semantic-hostile-recovery');
     const hostileStatus = document.getElementById('semantic-hostile-status');
@@ -1177,7 +1563,7 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
     const relayTerminal = 'data-zephium-fill-relay-terminal-v1';
     const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').get;
     let armed = true;
-    hostile.setAttribute(relayTerminal, '1|5|ok');
+    forgedReply(hostile, '1|5|ok');
     hostile.addEventListener('beforeinput', (event) => {
       if (!armed) return;
       armed = false;
@@ -1187,8 +1573,8 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
       const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
       const popupDenied = popup === null;
       if (popup) setTimeout(() => popup.close(), 0);
-      hostile.setAttribute(relayTerminal, '1|5|ok');
-      recovery.setAttribute(relayTerminal, '1|6|ok');
+      forgedReply(hostile, '1|5|ok');
+      forgedReply(recovery, '1|6|ok');
       quarantine.append(hostile);
       hostile.type = 'password';
       Promise.resolve().then(() => {
@@ -1218,7 +1604,7 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
       const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
       const popupDenied = popup === null;
       if (popup) setTimeout(() => popup.close(), 0);
-      credential.setAttribute(relayTerminal, '1|7|ok');
+      forgedReply(credential, '1|7|ok');
       credential.setAttribute('aria-labelledby', 'semantic-hostile-credential-label');
       Promise.resolve().then(() => {
         credential.removeAttribute('aria-labelledby');
@@ -1469,6 +1855,62 @@ mod tests {
         response
     }
 
+    #[test]
+    fn retained_local_form_is_non_submitting_and_has_no_page_code_or_remote_resources() {
+        let server = FixtureServer::start().expect("server");
+        let response = fetch(&server, FixtureRoute::RetainedLocalForm);
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(RETAINED_LOCAL_FORM_HTML));
+        for required in [
+            "script-src 'none'",
+            "form-action 'none'",
+            "frame-src 'none'",
+            "value=\"Unprepared\"",
+        ] {
+            assert!(RETAINED_LOCAL_FORM_HTML.contains(required));
+        }
+        for forbidden in [
+            "<script",
+            "<form",
+            "<button",
+            "<iframe",
+            "src=",
+            "https://",
+            "oninput=",
+            "onchange=",
+            "Ready for review",
+        ] {
+            assert!(!RETAINED_LOCAL_FORM_HTML.contains(forbidden));
+        }
+        server.shutdown().expect("joined healthy fixture");
+    }
+
+    #[test]
+    fn retained_back_fixture_is_closed_script_free_and_requires_a_relevant_link_choice() {
+        let server = FixtureServer::start().expect("server");
+        let origin = fetch(&server, FixtureRoute::RetainedBackOrigin);
+        let register = fetch(&server, FixtureRoute::RetainedBackRegister);
+        let handbook = fetch(&server, FixtureRoute::RetainedBackHandbook);
+        for response in [&origin, &register, &handbook] {
+            assert!(response.starts_with("HTTP/1.1 200 OK"));
+            assert!(response.contains("script-src 'unsafe-inline'"));
+        }
+        for body in [
+            RETAINED_BACK_ORIGIN_HTML,
+            RETAINED_BACK_REGISTER_HTML,
+            RETAINED_BACK_HANDBOOK_HTML,
+        ] {
+            for forbidden in ["<script", "<form", "<button", "<iframe", "https://"] {
+                assert!(!body.contains(forbidden));
+            }
+        }
+        assert!(RETAINED_BACK_ORIGIN_HTML.contains("ZEPH-R7-492"));
+        assert!(RETAINED_BACK_ORIGIN_HTML.contains("Compatibility register"));
+        assert!(RETAINED_BACK_ORIGIN_HTML.contains("Release handbook"));
+        assert!(RETAINED_BACK_REGISTER_HTML.contains("cleared for native history validation"));
+        assert!(!RETAINED_BACK_HANDBOOK_HTML.contains("ZEPH-R7-492"));
+        server.shutdown().expect("joined healthy fixture");
+    }
     #[test]
     fn rendering_fixture_is_closed_provider_free_and_keeps_independent_async_controls() {
         let server = FixtureServer::start().expect("server");

@@ -354,6 +354,7 @@ pub struct ContextNavigationRequest {
     operation: ContextOperationJoin,
     target: ContextNavigationTarget,
     redirect_policy: Option<ContextNavigationRedirectPolicy>,
+    document_policy: crate::WorkBrowserDocumentPolicy,
 }
 
 impl ContextNavigationRequest {
@@ -367,6 +368,7 @@ impl ContextNavigationRequest {
             operation,
             target,
             redirect_policy: None,
+            document_policy: crate::WorkBrowserDocumentPolicy::Exact,
         })
     }
 
@@ -381,7 +383,30 @@ impl ContextNavigationRequest {
             operation,
             target,
             redirect_policy: Some(redirect_policy),
+            document_policy: crate::WorkBrowserDocumentPolicy::Exact,
         })
+    }
+
+    /// Freezes trusted finalization authority into this exact operation. This
+    /// never authorizes a different load or any redirect.
+    pub fn try_new_with_document_policy(
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+        document_policy: crate::WorkBrowserDocumentPolicy,
+    ) -> Result<Self, ContextPortContractError> {
+        let mut request = Self::try_new(operation, target)?;
+        if document_policy == crate::WorkBrowserDocumentPolicy::InitialQueryFinalization
+            || !document_policy.admits_request(request.target())
+        {
+            return Err(ContextPortContractError::NavigationTarget);
+        }
+        request.document_policy = document_policy;
+        Ok(request)
+    }
+
+    /// Operation-specific finalization authority, separate from redirect scope.
+    pub const fn document_policy(&self) -> crate::WorkBrowserDocumentPolicy {
+        self.document_policy
     }
 
     /// Exact navigation operation and complete lifecycle join.
@@ -417,6 +442,7 @@ impl fmt::Debug for ContextNavigationRequest {
             .field("operation", &self.operation)
             .field("target", &self.target)
             .field("redirect_policy", &self.redirect_policy)
+            .field("document_policy", &self.document_policy)
             .finish()
     }
 }
@@ -949,6 +975,20 @@ pub enum ContextNativeEvent {
     SemanticRuntimeSettled(Box<SemanticRuntimeSettlement>),
 }
 
+/// One bounded PNG of a hosted Work page at a fixed reduced width. Frames are
+/// transient, per resource, and replaced in place; they carry no authority.
+#[derive(Clone, Debug)]
+pub struct WorkBrowserFrame {
+    /// Monotonic per resource; a newer frame replaces an older one.
+    pub generation: u64,
+    /// Encoded width in pixels.
+    pub width: u32,
+    /// Encoded height in pixels.
+    pub height: u32,
+    /// Metadata-free PNG bytes under the frame budget.
+    pub png: std::sync::Arc<Vec<u8>>,
+}
+
 /// Move-only terminal callback for one admitted native viewport capture.
 ///
 /// A port returning [`ContextDispatch::Scheduled`] must invoke this exactly
@@ -975,6 +1015,52 @@ pub type SemanticActionNativeCompletion =
 /// never project owned contexts into tab/session/extension inventories and
 /// must retain no queue, worker, timer, or page when no contexts exist.
 pub trait AgentBrowserPort: Send + Sync {
+    /// Whether this bound native adapter implements the production history
+    /// retention/reactivation contract on the running platform version.
+    fn supports_work_resource_history_back(&self) -> bool {
+        false
+    }
+
+    /// Already policy-authorized semantic effect on one retained execution
+    /// lease. An adapter must own the exact recipe, native callback and physical
+    /// callback-return debt; it must not route this through legacy tab contexts.
+    /// Unsupported adapters preserve the original request without a callback.
+    fn work_resource_act(
+        &self,
+        request: crate::WorkBrowserActionRequest,
+        _completion: crate::WorkBrowserActionCompletionCallback,
+    ) -> crate::WorkBrowserActionDispatch {
+        crate::WorkBrowserActionDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
+
+    /// Policy-bound exact document transition on an existing execution lease.
+    /// Unsupported adapters return the original request without a callback.
+    fn work_resource_navigate(
+        &self,
+        request: crate::WorkBrowserNavigationRequest,
+        _completion: crate::WorkBrowserNavigationCompletionCallback,
+    ) -> crate::WorkBrowserNavigationDispatch {
+        crate::WorkBrowserNavigationDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
+
+    /// Policy-bound exact predecessor traversal on a retained execution lease.
+    /// Unsupported adapters return the original request without a callback.
+    fn work_resource_back(
+        &self,
+        request: crate::WorkBrowserHistoryBackRequest,
+        _completion: crate::WorkBrowserHistoryBackCompletionCallback,
+    ) -> crate::WorkBrowserHistoryBackDispatch {
+        crate::WorkBrowserHistoryBackDispatch::Rejected {
+            request: Box::new(request),
+            failure: ContextPortFailure::Unsupported,
+        }
+    }
     /// Product resource-lifetime seam, unsupported until an adapter proves
     /// persistent resource ownership and exact scoped lease drain. This does
     /// not reuse legacy cancellation, unseal a port or grant a model tool.
@@ -1043,6 +1129,15 @@ pub trait AgentBrowserPort: Send + Sync {
         request: SemanticActionNativeRequest,
         completion: SemanticActionNativeCompletion,
     ) -> ContextDispatch;
+
+    /// The newest bounded frame of one hosted Work page, for the person
+    /// watching the canvas. Never model-visible; `None` when nothing is hosted.
+    fn latest_work_frame(
+        &self,
+        _resource: &crate::WorkBrowserResourceJoin,
+    ) -> Option<std::sync::Arc<WorkBrowserFrame>> {
+        None
+    }
 
     /// Attempts one bounded viewport capture outside the cloneable event bus.
     fn capture_semantic_screenshot(
@@ -1322,7 +1417,39 @@ mod tests {
         let exact = ContextNavigationRequest::try_new(navigation, requested.clone())
             .expect("exact request");
         assert!(exact.redirect_policy().is_none());
+        assert_eq!(
+            exact.document_policy(),
+            crate::WorkBrowserDocumentPolicy::Exact
+        );
         assert!(!exact.allows_redirect_target(&redirected));
+
+        let finalized = ContextNavigationRequest::try_new_with_document_policy(
+            navigation,
+            requested.clone(),
+            crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+        )
+        .unwrap();
+        assert_eq!(finalized.target(), &requested);
+        assert!(finalized.redirect_policy().is_none());
+        assert!(!finalized.allows_redirect_target(&redirected));
+        assert!(ContextNavigationRequest::try_new_with_document_policy(
+            navigation,
+            requested.clone(),
+            crate::WorkBrowserDocumentPolicy::InitialQueryFinalization,
+        )
+        .is_err());
+        for invalid in [
+            "http://start.test/path",
+            "https://start.test/path?x=1",
+            "https://start.test/path#fragment",
+        ] {
+            assert!(ContextNavigationRequest::try_new_with_document_policy(
+                navigation,
+                ContextNavigationTarget::parse(invalid).unwrap(),
+                crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+            )
+            .is_err());
+        }
 
         let scoped =
             ContextNavigationRequest::try_new_with_redirect_policy(navigation, requested, policy)
@@ -1332,6 +1459,10 @@ mod tests {
             Some(1)
         );
         assert!(scoped.allows_redirect_target(&redirected));
+        assert_eq!(
+            scoped.document_policy(),
+            crate::WorkBrowserDocumentPolicy::Exact
+        );
         assert!(!format!("{scoped:?}").contains("final.test"));
     }
 
@@ -1512,7 +1643,7 @@ mod tests {
             ContextShutdownDispatch::AuditScheduled
         );
         let mut resources =
-            crate::WorkBrowserResources::new(crate::WorkId::from_raw(99), ProfileId::from(9));
+            crate::WorkBrowserResources::new(crate::WorkId::from(99), ProfileId::from(9));
         let resource_request = resources
             .construct(
                 crate::WorkBrowserResourceId::from_raw(100),

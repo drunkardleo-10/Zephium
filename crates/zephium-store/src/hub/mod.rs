@@ -11,18 +11,16 @@ mod blocker;
 mod compatibility;
 mod deletion;
 mod downloads;
-mod extension_grants;
-mod extension_profile_policy;
-mod extensions;
 mod favicons;
 mod filesystem;
 mod history;
-mod native_ownership;
+pub mod media;
 mod page_permissions;
 mod resources;
 mod session;
 mod settings;
 mod userscripts;
+mod work_document;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -74,9 +72,12 @@ pub(crate) const MAX_TITLE_BYTES: usize = zephium_core::item::MAX_PAGE_TITLE_CHA
 pub(crate) const MAX_NAME_BYTES: usize = MAX_SESSION_NAME_CHARS * 4;
 
 pub struct Hub {
+    work_runtime_session: zephium_core::work::WorkRuntimeSessionId,
+    work_runtime_epoch: std::time::Instant,
     #[cfg(feature = "work-execution")]
     work: Option<std::sync::Arc<agent_work::WorkOwnership>>,
     dir: Option<PathBuf>,
+    media: Option<media::MediaStore>,
     meta: Connection,
     profiles: HashMap<ProfileId, Connection>,
     registry: HashSet<ProfileId>,
@@ -98,12 +99,6 @@ pub struct Hub {
     fail_profile_deletion_after_local_purge_once: bool,
     #[cfg(test)]
     ambiguous_page_permission_commit_once: bool,
-    #[cfg(test)]
-    ambiguous_extension_install_commit_once: bool,
-    #[cfg(test)]
-    ambiguous_extension_grant_commit_once: bool,
-    #[cfg(test)]
-    ambiguous_extension_native_ownership_commit_once: bool,
 }
 
 pub(crate) struct AuthoritativeLoad {
@@ -142,9 +137,12 @@ impl Hub {
             |row| row.get::<_, bool>(0),
         )?;
         let mut hub = Self {
+            work_runtime_session: zephium_core::work::WorkRuntimeSessionId::generate(),
+            work_runtime_epoch: std::time::Instant::now(),
             #[cfg(feature = "work-execution")]
             work: None,
             dir: Some(dir.clone()),
+            media: Some(media::MediaStore::new(dir.join("media"))),
             meta,
             profiles: HashMap::new(),
             registry: HashSet::new(),
@@ -158,14 +156,9 @@ impl Hub {
             fail_profile_deletion_after_local_purge_once: false,
             #[cfg(test)]
             ambiguous_page_permission_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_install_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_grant_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_native_ownership_commit_once: false,
         };
         hub.load_registry()?;
+        let _ = hub.recover_qa_settings_tab_quarantine()?;
         // The snapshot and registry must agree before profile files are
         // migrated, purged, or reconciled. A corrupt authoritative row must
         // fail startup without destroying the only recoverable profile data.
@@ -245,9 +238,12 @@ impl Hub {
         configure(&meta)?;
         migrations::apply(&mut meta, migrations::META)?;
         Ok(Self {
+            work_runtime_session: zephium_core::work::WorkRuntimeSessionId::generate(),
+            work_runtime_epoch: std::time::Instant::now(),
             #[cfg(feature = "work-execution")]
             work: None,
             dir: None,
+            media: None,
             meta,
             profiles: HashMap::new(),
             registry: HashSet::new(),
@@ -261,12 +257,6 @@ impl Hub {
             fail_profile_deletion_after_local_purge_once: false,
             #[cfg(test)]
             ambiguous_page_permission_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_install_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_grant_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_native_ownership_commit_once: false,
         })
     }
 

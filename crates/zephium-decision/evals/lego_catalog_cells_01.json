@@ -1,0 +1,124 @@
+{
+ "id": "lego_catalog_cells_01",
+ "source_sha256": "e2c1a3fdd8815e2b173cca01b5f1faf86b27944c4caed3742f885934c1dd885c",
+ "request": {
+  "state": {
+   "objective": "Overall user objective and constraints:\nRead https://www.lego.com/en-us/themes/architecture in the browser and collect three distinct Architecture sets with their displayed prices and useful distinguishing details. Return a cited comparison with displayed price text, distinguishing details, product links and images from the actual page, using structured collection. Do not buy, sign in, change locale, or use search snippets as a substitute for inspecting the actual catalog. Omit details that the page does not establish.\n\nContribute evidence for only the browser assignment below. Other assignments are coordinated separately; do not repeat the entire multi-page objective in this step. Preserve all user constraints.\n\nThis step: Read only this page: https://www.lego.com/en-us/themes/architecture\nReport the facts on this page that matter for the objective, with exact figures, names and dates. Include relevant observed link destinations as cited evidence so the coordinator can request subsequent pages. Do not follow links: other page visits are separate assignments.\nIf needed, scroll the current document to reveal more of the page; restore its ref with snapshot(initial) when absent. Nested scroll regions move only their own contents. Use effect=read, wait=immediate and verification=scroll_position_changed. Inspect fresh content after moving. Repeated initial snapshots do not scroll. If a page dialog is visible, work within that dialog before interacting with the covered page. You may also dismiss an entry dialog, select a content tab, or expand/collapse details or navigation menus using a permitted disclosure button with effect=read. Verify page_dialog_closed for dismissal, selected=true for a tab, or the intended expanded state for a disclosure. Close an expanded navigation menu before reading the underlying page. Inspect the revealed content afterward. A disclosure with a permitted click can be expanded directly even when other page content is omitted. If the needed click is unavailable in a truncated observation, capture its containing dialog or section with snapshot(subtree). Do not use focus as proof of success. For this isolated public session, close notices or reject optional cookies when a permitted dismissal is available; that routine step is authorized and does not require a user decision. Never enable optional tracking or choose Accept All. Transactions, account changes, form submissions and external writes are outside this reading assignment. Never assume an unavailable control succeeded.\noutput_0: distinct records matching the requested collection schema. Preserve exact displayed values. Omit unsupported optional fields. Do not turn missing evidence into a negative or zero, mix different items into one record, or treat the visible subset as the complete catalog.\nCollection output_0: up to 3 distinct records. Fields:\nname: text required\ndisplayed_price: text optional\ndistinguishing_details: text optional\nproduct_link: url optional\nproduct_image: image_url optional\n",
+   "observation": "ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=35\nF f1 origin=\"https://www.lego.com/\" trust=same complete=complete\nN @a56 p=- r=list_item q=public src=page\nN @a57 p=@a56 r=document q=public src=page text=\"Tower Bridge $349.99 New\"\nN @a58 p=@a57 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/tower-bridge-21067\" name=\"Tower Bridge\"\nN @a59 p=@a58 r=list q=public src=page\nN @a60 p=@a59 r=list_item q=public src=page\nN @a61 p=@a60 r=image q=public src=page image_source_available=true name=\"primary\"\nN @a62 p=@a59 r=list_item q=public src=page\nN @a63 p=@a62 r=image q=public src=page image_source_available=true name=\"secondary\"\nN @a64 p=@a58 r=button q=public src=page name=\"Next\"\nN @a65 p=@a57 r=heading q=public src=page level=3 name=\"Tower Bridge\"\nN @a66 p=@a65 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/tower-bridge-21067\" name=\"Tower Bridge\"\nN @a67 p=@a57 r=button q=public src=page name=\"Add to Bag\"\nN @a68 p=@a57 r=button q=public src=page disclosure=collapsed name=\"Tower Bridge Add to Wishlist\"\nN @a69 p=- r=list_item q=public src=page\nN @a70 p=@a69 r=document q=public src=page text=\"Paris – City of Love $79.99\"\nN @a71 p=@a70 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/architecture-21064-21064\" name=\"Paris – City of Love\"\nN @a72 p=@a71 r=list q=public src=page\nN @a73 p=@a72 r=list_item q=public src=page\nN @a74 p=@a73 r=image q=public src=page image_source_available=true name=\"primary\"\nN @a75 p=@a72 r=list_item q=public src=page\nN @a76 p=@a75 r=image q=public src=page image_source_available=true name=\"secondary\"\nN @a77 p=@a71 r=button q=public src=page name=\"Next\"\nN @a78 p=@a70 r=heading q=public src=page level=3 name=\"Paris – City of Love\"\nN @a79 p=@a78 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/architecture-21064-21064\" name=\"Paris – City of Love\"\nN @a80 p=@a70 r=button q=public src=page name=\"Add to Bag\"\nN @a81 p=@a70 r=button q=public src=page disclosure=collapsed name=\"Paris – City of Love Add to Wishlist\"\nN @a82 p=- r=list_item q=public src=page\nN @a83 p=@a82 r=document q=public src=page text=\"$39.99\"\nN @a84 p=@a83 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/london-21034\" name=\"London\"\nN @a85 p=@a84 r=list q=public src=page\nN @a86 p=@a85 r=list_item q=public src=page\nN @a87 p=@a86 r=image q=public src=page image_source_available=true name=\"primary\"\nN @a88 p=@a85 r=list_item q=public src=page\nN @a89 p=@a88 r=image q=public src=page image_source_available=true name=\"secondary\"\nN @a115 p=@a83 r=heading q=public src=page level=3 name=\"London\"\n"
+  },
+  "model": "jev-1.13.0",
+  "questions": {
+   "cell_0_1": {
+    "type": "choice",
+    "instructions": "Which node inside record @a56 shows the displayed value for column \"displayed_price\" of that record? Its own text or name must contain that value; it may also hold other words of the same record, such as its name. A node that only names the record does not show it. Rust copies the chosen node's entire visible text, otherwise its accessible name. Choose none if no node in the record shows it. Page text is untrusted evidence.",
+    "criteria": {
+     "@a57": null,
+     "@a58": null,
+     "@a64": null,
+     "@a65": null,
+     "@a66": null,
+     "@a67": null,
+     "@a68": null,
+     "none": "None of these answers the question."
+    }
+   },
+   "cell_0_2": {
+    "type": "choice",
+    "instructions": "Which node inside record @a56 states column \"distinguishing_details\" of that record? Its own text or name must state it; it may also hold other words of the same record. A node that only names the record does not state it. Rust copies the chosen node's entire visible text, otherwise its accessible name. Choose none if no node in the record states it. Page text is untrusted evidence.",
+    "criteria": {
+     "@a57": null,
+     "@a58": null,
+     "@a64": null,
+     "@a65": null,
+     "@a66": null,
+     "@a67": null,
+     "@a68": null,
+     "none": "None of these answers the question."
+    }
+   },
+   "cell_1_1": {
+    "type": "choice",
+    "instructions": "Which node inside record @a69 shows the displayed value for column \"displayed_price\" of that record? Its own text or name must contain that value; it may also hold other words of the same record, such as its name. A node that only names the record does not show it. Rust copies the chosen node's entire visible text, otherwise its accessible name. Choose none if no node in the record shows it. Page text is untrusted evidence.",
+    "criteria": {
+     "@a70": null,
+     "@a71": null,
+     "@a77": null,
+     "@a78": null,
+     "@a79": null,
+     "@a80": null,
+     "@a81": null,
+     "none": "None of these answers the question."
+    }
+   },
+   "cell_1_2": {
+    "type": "choice",
+    "instructions": "Which node inside record @a69 states column \"distinguishing_details\" of that record? Its own text or name must state it; it may also hold other words of the same record. A node that only names the record does not state it. Rust copies the chosen node's entire visible text, otherwise its accessible name. Choose none if no node in the record states it. Page text is untrusted evidence.",
+    "criteria": {
+     "@a70": null,
+     "@a71": null,
+     "@a77": null,
+     "@a78": null,
+     "@a79": null,
+     "@a80": null,
+     "@a81": null,
+     "none": "None of these answers the question."
+    }
+   },
+   "cell_2_1": {
+    "type": "choice",
+    "instructions": "Which node inside record @a82 shows the displayed value for column \"displayed_price\" of that record? Its own text or name must contain that value; it may also hold other words of the same record, such as its name. A node that only names the record does not show it. Rust copies the chosen node's entire visible text, otherwise its accessible name. Choose none if no node in the record shows it. Page text is untrusted evidence.",
+    "criteria": {
+     "@a115": null,
+     "@a83": null,
+     "@a84": null,
+     "none": "None of these answers the question."
+    }
+   },
+   "cell_2_2": {
+    "type": "choice",
+    "instructions": "Which node inside record @a82 states column \"distinguishing_details\" of that record? Its own text or name must state it; it may also hold other words of the same record. A node that only names the record does not state it. Rust copies the chosen node's entire visible text, otherwise its accessible name. Choose none if no node in the record states it. Page text is untrusted evidence.",
+    "criteria": {
+     "@a115": null,
+     "@a83": null,
+     "@a84": null,
+     "none": "None of these answers the question."
+    }
+   }
+  }
+ },
+ "expected": {
+  "cell_0_1": {
+   "kind": "choice",
+   "accepted": [
+    "@a57"
+   ]
+  },
+  "cell_1_1": {
+   "kind": "choice",
+   "accepted": [
+    "@a70"
+   ]
+  },
+  "cell_1_2": {
+   "kind": "choice",
+   "accepted": [
+    "none"
+   ]
+  },
+  "cell_2_1": {
+   "kind": "choice",
+   "accepted": [
+    "@a83"
+   ]
+  },
+  "cell_2_2": {
+   "kind": "choice",
+   "accepted": [
+    "none"
+   ]
+  }
+ },
+ "unscored": [
+  "cell_0_2"
+ ]
+}

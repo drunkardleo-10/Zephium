@@ -271,6 +271,8 @@ fn lifecycle_trace(
     let (terminal, failure, admission_failure) = match event {
         WorkBrowserResourceEvent::Retained(_) => ("retained", None, None),
         WorkBrowserResourceEvent::Acquired(_) => ("acquired", None, None),
+        WorkBrowserResourceEvent::HumanPresented(_) => ("human_presented", None, None),
+        WorkBrowserResourceEvent::HumanContinued(_) => ("human_continued", None, None),
         WorkBrowserResourceEvent::RevocationRequired(_) => ("revocation_required", None, None),
         WorkBrowserResourceEvent::LeaseEnded(_) => ("lease_ended", None, None),
         WorkBrowserResourceEvent::Quarantined(failure) => ("quarantined", Some(*failure), None),
@@ -503,10 +505,8 @@ pub fn start_retained_controller_witness(
         return Err("already_used");
     }
     let started = Instant::now();
-    let issued = now()?;
     let deadline = started.checked_add(TOTAL).ok_or("deadline")?;
-    let expires =
-        AgentPolicyInstant::from_millis(issued.millis().checked_add(150_000).ok_or("clock")?);
+    let (issued, expires) = crate::native_work_clock::authority_window(deadline)?;
     let profile = AgentWorkProfileId::generate();
     let generation = ContentPolicyGeneration::new(1).ok_or("generation")?;
     let (tx, rx) = mpsc::sync_channel(4);
@@ -961,6 +961,7 @@ impl Driver {
             Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) => {
                 ("closed_unsuccessfully", Some(closed.failure()))
             }
+            Some(AgentWorkRetainedOutcome::WaitingForHuman(_)) => ("waiting_for_human", None),
             Some(AgentWorkRetainedOutcome::Recovery(recovery)) => {
                 ("recovery", Some(recovery.failure()))
             }

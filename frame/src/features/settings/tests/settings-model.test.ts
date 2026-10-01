@@ -15,17 +15,19 @@ describe("settings discovery", () => {
 });
 
 it("finds the reserved agent destinations without exposing unimplemented controls", async () => {
-  const { searchSettings, emptySections } = await import("../lib/settings-model");
-  for (const id of ["ai", "models", "plugins", "mcp", "skills", "memory"] as const)
-    expect(emptySections.has(id)).toBe(true);
-  expect(
-    searchSettings("models").some(
-      (result) => result.section === "models" && result.target === null,
-    ),
-  ).toBe(true);
-  expect(
-    searchSettings("MCP").some((result) => result.section === "mcp" && result.target === null),
-  ).toBe(true);
+  const { searchSettings, searchSections, emptySections } = await import("../lib/settings-model");
+  for (const id of ["plugins"] as const) expect(emptySections.has(id)).toBe(true);
+  expect(emptySections.has("ai")).toBe(false);
+  expect(searchSections("models").some((section) => section.id === "ai")).toBe(true);
+  expect(searchSections("MCP").some((section) => section.id === "mcp")).toBe(true);
   expect(searchSettings("API key")).toEqual([]);
   expect(searchSettings("updates").some((result) => result.target === "updates.check")).toBe(true);
+});
+
+it("hides Account from navigation and search", async () => {
+  const { sections, searchSettings } = await import("../lib/settings-model");
+  expect(sections.some((section) => String(section.id) === "account")).toBe(false);
+  expect(searchSettings("account").some((result) => String(result.section) === "account")).toBe(
+    false,
+  );
 });

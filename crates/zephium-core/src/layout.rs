@@ -42,6 +42,39 @@ pub fn clamp_sidebar_width(width: f64) -> f64 {
     width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
 }
 
+/// The Work browser pane never shrinks below a usable page; the frame around
+/// it is drawn by chrome from the applied rect, so clamping is safe here.
+pub const MIN_WORK_PANE_WIDTH: f64 = 480.0;
+pub const MIN_WORK_PANE_HEIGHT: f64 = 320.0;
+
+/// Fits a requested Work pane rect into the window. `None` when the request
+/// is not finite or the window cannot host the minimum pane.
+pub fn clamp_work_pane_rect(window: Size, rect: Rect) -> Option<Rect> {
+    if ![
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        window.width,
+        window.height,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || window.width < MIN_WORK_PANE_WIDTH
+        || window.height < MIN_WORK_PANE_HEIGHT
+    {
+        return None;
+    }
+    let width = rect.width.clamp(MIN_WORK_PANE_WIDTH, window.width);
+    let height = rect.height.clamp(MIN_WORK_PANE_HEIGHT, window.height);
+    Some(Rect::new(
+        rect.x.clamp(0.0, window.width - width),
+        rect.y.clamp(0.0, window.height - height),
+        width,
+        height,
+    ))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub chrome: Rect,
@@ -110,6 +143,31 @@ mod tests {
         let l = compute(Size::new(1200.0, 800.0), Mode::Sidebar, M, false);
         assert_eq!(l.chrome, Rect::new(8.0, 8.0, 1184.0, 784.0));
         assert!(l.content.is_none());
+    }
+
+    #[test]
+    fn work_pane_rect_is_fitted_into_the_window_or_refused() {
+        let window = Size::new(1200.0, 800.0);
+        assert_eq!(
+            clamp_work_pane_rect(window, Rect::new(100.0, 80.0, 700.0, 500.0)),
+            Some(Rect::new(100.0, 80.0, 700.0, 500.0))
+        );
+        assert_eq!(
+            clamp_work_pane_rect(window, Rect::new(900.0, 700.0, 100.0, 100.0)),
+            Some(Rect::new(720.0, 480.0, 480.0, 320.0))
+        );
+        assert_eq!(
+            clamp_work_pane_rect(window, Rect::new(-50.0, -50.0, 5000.0, 5000.0)),
+            Some(Rect::new(0.0, 0.0, 1200.0, 800.0))
+        );
+        assert_eq!(
+            clamp_work_pane_rect(window, Rect::new(f64::NAN, 0.0, 600.0, 400.0)),
+            None
+        );
+        assert_eq!(
+            clamp_work_pane_rect(Size::new(400.0, 300.0), Rect::new(0.0, 0.0, 600.0, 400.0)),
+            None
+        );
     }
 
     #[test]

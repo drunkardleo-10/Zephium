@@ -5,12 +5,18 @@
   let {
     sites,
     above,
+    extensions,
     compact = false,
+    tools = true,
   }: {
     sites?: Snippet;
+    /** Extension buttons stacked into the tool case, at rail width only. */
+    extensions?: Snippet;
     /** Kept sites that did not fit beside the shelf, in rows over it. */
     above?: Snippet;
     compact?: boolean;
+    /** The browser's tool case; Work keeps its own tools on the canvas. */
+    tools?: boolean;
   } = $props();
 </script>
 
@@ -24,8 +30,8 @@
 <footer class="dock" data-compact={compact} data-cascade style:--cascade={8}>
   {#if above}{@render above()}{/if}
   <div class="dock-base">
-    <ToolShelf {compact} />
-    <span class="dock-rule" aria-hidden="true"></span>
+    {#if tools}<ToolShelf {compact} {extensions} />
+      <span class="dock-rule" aria-hidden="true"></span>{/if}
     {#if sites}<div class="dock-sites-slot">{@render sites()}</div>{/if}
   </div>
 </footer>

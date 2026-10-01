@@ -1,0 +1,44 @@
+{
+  "scope": {
+    "provider": "open_ai",
+    "model": "gpt-5.6-luna",
+    "query": "Svelte Flow npm bundle size license GitHub maintenance 2026"
+  },
+  "evidence": {
+    "actual_input_tokens": 12841,
+    "actual_output_tokens": 677,
+    "answer": "As of September 14, 2026, Svelte Flow is published as @xyflow/svelte. npm lists version 1.6.6 as the latest stable release, with 1.6.6 published recently and 2.0.0-next.3 available as a prerelease. ([npmjs.com](https://www.npmjs.com/package/%40xyflow/svelte?utm_source=openai))\n\nBundle size: there is no single authoritative browser-bundle number published in the npm metadata. The package is a Svelte component library with two runtime dependencies, @svelte-put/shortcut and @xyflow/system, so the final size depends on your bundler, imports, CSS, and enabled features. Measure the production output of your application rather than treating the npm tarball size as shipped JavaScript. ([npmjs.com](https://www.npmjs.com/package/%40xyflow/svelte?activeTab=dependencies&utm_source=openai))\n\nLicense: MIT. This applies to Svelte Flow and is explicitly stated by both the project site and npm. ([svelteflow.dev](https://svelteflow.dev/?utm_source=openai))\n\nGitHub maintenance: it appears actively maintained by the xyflow team. The repository reports hundreds of releases, and the npm package has had recent stable releases plus an active 2.0 prerelease line. The maintainers also openly fund ongoing maintenance through Svelte Flow Pro, GitHub sponsorship, and OpenCollective. ([github.com](https://github.com/xyflow/xyflow?utm_source=openai))\n\nOverall assessment for 2026: Svelte Flow is a low-risk choice if you want an MIT-licensed, actively maintained Svelte graph/editor library. The main caveat is bundle size: obtain a real figure from your own production build, because a generic “Svelte Flow bundle size” would be misleading.",
+    "citations": [
+      {
+        "end_index": 277,
+        "start_index": 198,
+        "title": "@xyflow/svelte - npm",
+        "url": "https://www.npmjs.com/package/%40xyflow/svelte?utm_source=openai"
+      },
+      {
+        "end_index": 788,
+        "start_index": 686,
+        "title": "@xyflow/svelte - npm",
+        "url": "https://www.npmjs.com/package/%40xyflow/svelte?activeTab=dependencies&utm_source=openai"
+      },
+      {
+        "end_index": 952,
+        "start_index": 891,
+        "title": "The Node-Based UI for Svelte - Svelte Flow",
+        "url": "https://svelteflow.dev/?utm_source=openai"
+      },
+      {
+        "end_index": 1341,
+        "start_index": 1275,
+        "title": "GitHub - xyflow/xyflow: React Flow | Svelte Flow - Powerful open source libraries for building node-based UIs with React (https://reactflow.dev) or Svelte (https://svelteflow.dev). Ready out-of-the-box and infinitely customizable. · GitHub",
+        "url": "https://github.com/xyflow/xyflow?utm_source=openai"
+      }
+    ],
+    "model": "gpt-5.6-luna",
+    "provider": "open_ai",
+    "response_id": "resp_03d74bd5d54b1ee7006aa85861b34887d2ac7663d193145588",
+    "response_model": "gpt-5.6-luna",
+    "search_call_id": "ws_03d74bd5d54b1ee7006aa85862f7dc87d2bf0f244c4e65b698",
+    "version": 1
+  }
+}

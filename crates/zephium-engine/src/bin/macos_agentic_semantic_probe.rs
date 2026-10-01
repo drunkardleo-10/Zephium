@@ -9,6 +9,25 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == ["--ci-anonymous-session"] {
+        match zephium_engine::run_macos_anonymous_work_session_probe() {
+            Ok(()) => eprintln!("macos-anonymous-session-probe: passed; native_cookie_continuity=true; cross_attempt_isolation=true; closed_session_refused=true; cache_released=true; provider=absent"),
+            Err(stage) => { eprintln!("macos-anonymous-session-probe: failed; stage={stage}"); std::process::exit(1); }
+        }
+        return;
+    }
+    if arguments.as_slice() == ["--ci-history-runtime"] {
+        match zephium_engine::run_macos_agentic_history_runtime_probe() {
+            Ok(report) => eprintln!(
+                "macos-agentic-history-runtime-probe: {report:?}; release_excluded=1; fixture=loopback-only; provider=absent; exact_native_item=required; product_authority=false"
+            ),
+            Err(stage) => {
+                eprintln!("macos-agentic-history-runtime-probe: failed; stage={stage}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.as_slice() == ["--ci-presented-rendering-readiness"] {
         match zephium_engine::run_macos_agentic_presented_rendering_probe() {
             Ok(report) => eprintln!("macos-agentic-presented-rendering-probe: {report:?}; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=explicitly-onscreen; input=ignored; key_authority=absent; main_authority=absent; scheduling=throttle; hidden_restore=verified; original_native_teardown=verified"),
@@ -63,14 +82,26 @@ fn main() {
         "standard"
     };
     match zephium_engine::run_macos_agentic_semantic_probe() {
+        Ok(()) if std::env::var_os("ZEPHIUM_LOCAL_OWNED_SURFACE_PROBE").is_some() => eprintln!(
+            "macos-agentic-owned-surface-probe: measurement_complete; release_excluded=1; fixture=loopback-only; provider=absent; profile=ephemeral; production_admission=absent; activation_independent_containment=unqualified; hidden_restore=verified; native_teardown=verified"
+        ),
+        Ok(()) if std::env::var_os("ZEPHIUM_LOCAL_TRUSTED_EDIT_PROBE").is_some() => eprintln!(
+            "macos-agentic-trusted-edit-probe: measurement_complete; release_excluded=1; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=explicitly-onscreen-nonkey; production_admission=absent; hidden_restore=verified; native_teardown=verified"
+        ),
+        Ok(()) if std::env::var_os("ZEPHIUM_LOCAL_RESPONDER_FILL_PROBE").is_some() => eprintln!(
+            "macos-agentic-responder-fill-probe: measurement_complete; fill=refused-before-native-dispatch; target_lease=unproven; native_insert_dispatches=0; native_composition_authority=unproven; application_model_acceptance=unmeasured; release_excluded=1; fixture=loopback-only; provider=absent; profile=ephemeral; presentation=explicitly-onscreen-nonkey; production_admission=absent; hidden_restore=verified; native_teardown=verified"
+        ),
+        Ok(()) if std::env::var_os("ZEPHIUM_LOCAL_AX_FILL_PROBE").as_deref() == Some(std::ffi::OsStr::new("1")) => eprintln!(
+            "macos-agentic-ax-fill-probe: passed; release_excluded=1; fixture=loopback-only; provider=absent; profile=ephemeral; production_admission=absent; controls=flat,nested; application_model=retained; native_teardown=verified"
+        ),
         Ok(()) if hostile_relay_probe => eprintln!(
-            "macos-agentic-semantic-probe: passed; release_excluded=1; profile=ephemeral; extensions=absent; presentation=hidden; fixture=loopback-only; fixture_variant=hostile-prototype; snapshots=14; world_epochs=4; page_world_compatibility_fill=behavioral-proof; controls=text-input,search-input,textarea; beforeinput=untrusted; input=untrusted; change=absent; exact_value=verified; fill_postcondition=exact-value; hostile_terminal_spoof=refused; hostile_cross_node_terminal=refused; hostile_reparent_type_repurpose=applied-unverified; hostile_reparent_recovery=verified; hostile_credential_relabel=applied-unverified; hostile_credential_recovery=verified; user_activation=0; popup_admitted=0; focus_theft=0; fresh_semantic_postcondition=verified; fixed_click=verified; click_postcondition=expanded; mutation_recovery=verified; epoch_rotation_fill=verified; full_policy_host_controller_path=excluded; retained_views=0"
+            "macos-agentic-semantic-probe: passed; release_excluded=1; profile=ephemeral; extensions=absent; presentation=hidden; fixture=loopback-only; fixture_variant=hostile-prototype; snapshots=22; world_epochs=4; isolated_fixed_fill=behavioral-proof; controls=text-input,search-input,textarea,contenteditable,nested-leaf; nested_delegated_model=retained; nested_context_attacks=6-refused-nonretryable; beforeinput=untrusted; input=untrusted; change=absent; exact_value=verified; fill_postcondition=exact-value; page_origin_fill=blocked; captured_payload_retarget=blocked; hostile_terminal_spoof=ignored; hostile_cross_node_terminal=refused; hostile_reparent_type_repurpose=applied-unverified; hostile_reparent_recovery=verified; hostile_credential_relabel=applied-unverified; hostile_credential_recovery=verified; user_activation=0; popup_admitted=0; focus_theft=0; fresh_semantic_postcondition=verified; fixed_click=verified; click_postcondition=expanded; mutation_recovery=verified; epoch_rotation_fill=verified; full_policy_host_controller_path=excluded; retained_views=0"
         ),
         Ok(()) if page_relay_probe => eprintln!(
-            "macos-agentic-semantic-probe: passed; release_excluded=1; profile=ephemeral; extensions=absent; presentation=hidden; fixture=loopback-only; fixture_variant={fixture_variant}; snapshots=10; world_epochs=4; page_world_compatibility_fill=behavioral-proof; controls=text-input,search-input,textarea; beforeinput=untrusted; input=untrusted; change=absent; exact_value=verified; fill_postcondition=exact-value; user_activation=0; popup_admitted=0; focus_theft=0; fresh_semantic_postcondition=verified; fixed_click=verified; click_postcondition=expanded; mutation_recovery=verified; epoch_rotation_fill=verified; full_policy_host_controller_path=excluded; retained_views=0"
+            "macos-agentic-semantic-probe: passed; release_excluded=1; profile=ephemeral; extensions=absent; presentation=hidden; fixture=loopback-only; fixture_variant={fixture_variant}; snapshots=18; world_epochs=4; isolated_fixed_fill=behavioral-proof; controls=text-input,search-input,textarea,contenteditable,nested-leaf; nested_delegated_model=retained; nested_context_attacks=6-refused-nonretryable; beforeinput=untrusted; input=untrusted; change=absent; exact_value=verified; fill_postcondition=exact-value; user_activation=0; popup_admitted=0; focus_theft=0; fresh_semantic_postcondition=verified; fixed_click=verified; click_postcondition=expanded; mutation_recovery=verified; epoch_rotation_fill=verified; full_policy_host_controller_path=excluded; retained_views=0"
         ),
         Ok(()) => eprintln!(
-            "macos-agentic-semantic-probe: passed; profile=ephemeral; extensions=absent; presentation=hidden; viewport=1280x800-logical; fixture=loopback-only; snapshots=10; world_epochs=4; fixed_click=verified; click_postcondition=expanded; page_world_compatibility_fill=verified; controls=text-input,search-input,textarea; fill_postcondition=exact-value; event_trust=untrusted; user_activation=0; popup_admitted=0; mutation_gate=host-released; stale_anchor=refused; mutation_recovery=verified; epoch_rotation_fill=verified; secrets=redacted; focus_theft=0; retained_views=0"
+            "macos-agentic-semantic-probe: passed; profile=ephemeral; extensions=absent; presentation=hidden; viewport=1280x800-logical; fixture=loopback-only; snapshots=18; world_epochs=4; fixed_click=verified; click_postcondition=expanded; isolated_fixed_fill=verified; controls=text-input,search-input,textarea,contenteditable,nested-leaf; nested_delegated_model=retained; nested_context_attacks=6-refused-nonretryable; fill_postcondition=exact-value; event_trust=untrusted; user_activation=0; popup_admitted=0; mutation_gate=host-released; stale_anchor=refused; mutation_recovery=verified; epoch_rotation_fill=verified; secrets=redacted; focus_theft=0; retained_views=0"
         ),
         Err(stage) => {
             eprintln!(

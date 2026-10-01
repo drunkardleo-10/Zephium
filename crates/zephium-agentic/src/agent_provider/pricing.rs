@@ -213,7 +213,7 @@ impl AgentProviderCatalogBinding {
         self.profile
     }
 
-    const fn rates(&self) -> AgentProviderTokenRates {
+    pub(super) const fn rates(&self) -> AgentProviderTokenRates {
         self.rates
     }
 

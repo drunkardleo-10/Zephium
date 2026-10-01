@@ -9,6 +9,158 @@ use zephium_agent_runtime::{
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
+fn initial_document_policy_is_trusted_validated_and_preserved_for_retention() {
+    let original = input();
+    assert_eq!(
+        original.context.document_policy,
+        WorkBrowserDocumentPolicy::Exact,
+        "the ordinary constructor must remain exact"
+    );
+    let context = AgentWorkContextSpec::try_new_with_document_policy(
+        original.context.identity,
+        original.context.storage,
+        original.context.target.clone(),
+        WorkBrowserDocumentPolicy::InitialQueryFinalization,
+    )
+    .expect("query-free HTTPS target admits trusted initial finalization");
+    // Re-admission is only testing the policy join; keep its absolute wall
+    // horizon well inside the unchanged policy expiry instead of reusing the
+    // fixture's deliberately maximal horizon after setup time has elapsed.
+    let mut settings = original.settings;
+    settings.deadline = Instant::now() + Duration::from_secs(1);
+    let admitted = AgentWorkRunInput::try_new(
+        original.manifest,
+        original.lease,
+        context,
+        "Verify a deterministic fixture.".into(),
+        settings,
+    )
+    .expect("trusted policy is part of ordinary run admission");
+    assert_eq!(
+        admitted.retained_resource_spec().unwrap().document_policy,
+        WorkBrowserDocumentPolicy::InitialQueryFinalization
+    );
+
+    let identity = ContextIdentity::new(
+        ContextId::generate(),
+        ContextRunId::generate(),
+        AgentWorkProfileId::generate(),
+        ContextKind::Owned,
+    );
+    let already_queried =
+        ContextNavigationTarget::parse("https://work-fixture.invalid/?page=1").unwrap();
+    assert!(AgentWorkContextSpec::try_new_with_document_policy(
+        identity,
+        ContextProfileStorageClass::Ephemeral,
+        already_queried,
+        WorkBrowserDocumentPolicy::InitialQueryFinalization,
+    )
+    .is_err());
+}
+
+#[test]
+fn temporal_admission_millisecond_crossing_keeps_the_original_deadline() {
+    struct CrossingClock(AtomicU64);
+    impl TerraControllerClock for CrossingClock {
+        fn now(&self) -> Result<AgentPolicyInstant, super::super::TerraControllerClockError> {
+            // A deterministic elapsed-time sample crosses 999us -> 1000us.
+            self.0.store(1_000, Ordering::SeqCst);
+            Ok(AgentPolicyInstant::from_millis(
+                FIXTURE_POLICY_NOW_MILLIS + 1,
+            ))
+        }
+    }
+    let original = input();
+    let expires = original
+        .manifest
+        .plan_node(original.lease.node())
+        .unwrap()
+        .expires_at();
+    let base = Instant::now();
+    let deadline = base + Duration::from_millis(expires.millis() - FIXTURE_POLICY_NOW_MILLIS);
+    let clock = Arc::new(CrossingClock(AtomicU64::new(999)));
+
+    // Negative control: the previous ordering spuriously refuses this exact
+    // deadline, without relying on scheduler timing or sleeping at a boundary.
+    let early_wall = base + Duration::from_micros(clock.0.load(Ordering::SeqCst));
+    let late_policy = clock.now().unwrap();
+    let old_horizon = deadline.duration_since(early_wall);
+    let policy_remaining = Duration::from_millis(expires.millis() - late_policy.millis());
+    assert_eq!(old_horizon - policy_remaining, Duration::from_micros(1));
+
+    clock.0.store(999, Ordering::SeqCst);
+    let mut settings = original.settings;
+    settings.clock = clock.clone();
+    settings.deadline = deadline;
+    let admitted = AgentWorkRunInput::try_new_with_monotonic_now(
+        original.manifest,
+        original.lease,
+        original.context,
+        "Verify a deterministic fixture.".into(),
+        settings,
+        || base + Duration::from_micros(clock.0.load(Ordering::SeqCst)),
+    )
+    .expect("policy-before-wall sampling admits the same original expiry");
+    assert_eq!(admitted.settings.deadline, deadline);
+    assert_eq!(
+        admitted
+            .manifest
+            .plan_node(admitted.lease.node())
+            .unwrap()
+            .expires_at(),
+        expires
+    );
+}
+
+#[test]
+fn temporal_admission_preserves_expiry_and_hard_horizon_refusals() {
+    for case in 0..8 {
+        let original = input();
+        let expires = original
+            .manifest
+            .plan_node(original.lease.node())
+            .unwrap()
+            .expires_at();
+        let base = Instant::now();
+        let (policy_now, deadline) = match case {
+            0 => (FIXTURE_POLICY_NOW_MILLIS, base),
+            1 => (FIXTURE_POLICY_NOW_MILLIS, base - Duration::from_nanos(1)),
+            2 => (
+                FIXTURE_POLICY_NOW_MILLIS,
+                base + super::super::MAX_TERRA_CONTROLLER_HARD_DEADLINE + Duration::from_nanos(1),
+            ),
+            3 => (0, base + Duration::from_millis(1)), // Before manifest issuance.
+            4 => (expires.millis() + 1, base + Duration::from_millis(1)),
+            5 => (expires.millis(), base + Duration::from_millis(1)),
+            6 => (
+                expires.millis() - 100,
+                base + Duration::from_millis(100) + Duration::from_nanos(1),
+            ),
+            _ => (expires.millis() - 100, base + Duration::from_millis(100)),
+        };
+        let mut settings = original.settings;
+        settings.clock = Arc::new(Clock(AtomicU64::new(policy_now)));
+        settings.deadline = deadline;
+        let result = AgentWorkRunInput::try_new_with_monotonic_now(
+            original.manifest,
+            original.lease,
+            original.context,
+            "Verify a deterministic fixture.".into(),
+            settings,
+            || base,
+        );
+        if case == 7 {
+            assert_eq!(result.unwrap().settings.deadline, deadline);
+        } else {
+            assert!(
+                matches!(result, Err(AgentWorkFailure::Deadline)),
+                "case {case}"
+            );
+        }
+    }
+}
+
+#[test]
 fn deferred_audit_recovery_consumes_only_original_inflight_terminal_once() {
     let _serial = lock(&SERIAL);
     fn fixture() -> (AgentWorkController, AgentAuditDeliverySettlement) {
@@ -110,6 +262,55 @@ fn main_document_keeps_unadmitted_frames_explicit_without_child_native_calls() {
                 .omissions()
                 .contains(SemanticReadOmission::SourceIncomplete));
             assert_eq!(read.stats().incomplete_frames(), 1);
+            // Discovery may use the same main document, but only the explicit
+            // policy refusal is admitted; other missing-frame reasons stay closed.
+            for reason in [
+                Some(SemanticFrameUnsupported::PolicyBlocked),
+                Some(SemanticFrameUnsupported::RuntimeUnavailable),
+                Some(SemanticFrameUnsupported::PlatformIsolationUnavailable),
+                None,
+            ] {
+                let mut assembler = SemanticObservationAssembler::new(
+                    observation.request().clone(),
+                    observation.frames()[0].clone(),
+                )
+                .unwrap();
+                if let Some(reason) = reason {
+                    assembler
+                        .mark_frame_unsupported(FrameId::MAIN, boundary.reference(), reason)
+                        .unwrap();
+                } else {
+                    assembler
+                        .defer_frame(
+                            FrameId::MAIN,
+                            boundary.reference(),
+                            SemanticFrameDeferral::OutsideScope,
+                        )
+                        .unwrap();
+                }
+                let candidate = assembler.finish().unwrap();
+                let mut discovery = crate::AgentWorkDiscoveryTask::try_new(
+                    observation.request().context().identity(),
+                    AgentNavigationDiscovery::try_new(
+                        ContextNavigationTarget::parse("https://work-fixture.invalid/").unwrap(),
+                        "/".into(),
+                        2,
+                    )
+                    .unwrap(),
+                    vec![
+                        SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap(),
+                    ],
+                )
+                .unwrap();
+                assert_eq!(
+                    discovery.evaluate(&candidate),
+                    if reason == Some(SemanticFrameUnsupported::PolicyBlocked) {
+                        Ok(AgentWorkTaskProgress::Continue)
+                    } else {
+                        Err(AgentWorkFailure::Contract)
+                    },
+                );
+            }
             Ok(AgentWorkTaskProgress::Complete)
         }
         fn assess(
@@ -202,6 +403,63 @@ fn baseline_read_capability_is_frozen_before_any_provider_or_native_action() {
 }
 
 #[test]
+fn progressive_extraction_requires_baseline_read_but_not_navigation_authority() {
+    let _serial = lock(&SERIAL);
+    let task = AgentWorkExtractionTask::try_new(
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+        AgentAccountScope::Anonymous,
+    )
+    .unwrap()
+    .with_progressive_observation();
+    assert!(task.allows_progressive_observation());
+    assert!(!task.allows_baseline_read());
+    assert!(matches!(
+        AgentWorkController::try_new(
+            input(),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "synthetic-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::None)),
+            Box::new(task),
+        ),
+        Err(AgentWorkFailure::Contract)
+    ));
+
+    let task = AgentWorkExtractionTask::try_new(
+        vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+        AgentAccountScope::Anonymous,
+    )
+    .unwrap()
+    .with_baseline_read()
+    .with_progressive_observation();
+    assert!(task.allows_baseline_read());
+    assert!(task.allows_progressive_observation());
+    let admitted = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(task),
+    );
+    let (controller, _) = admitted.expect("progressive extraction is admitted");
+    assert!(
+        controller
+            .state
+            .as_ref()
+            .expect("admitted controller owns work state")
+            .requires_decision_budget(),
+        "progressive extraction must receive the same bounded decision guidance as navigation"
+    );
+}
+
+#[test]
 fn production_form_initial_completion_or_missing_field_never_calls_provider() {
     let _serial = lock(&SERIAL);
     for name in ["Field", "Missing"] {
@@ -274,6 +532,9 @@ use read_tests::{ReadFault, ReadTask};
 mod account_tests;
 #[cfg(feature = "probe-harness")]
 use account_tests::{AccountFault, AccountTask};
+#[cfg(feature = "probe-harness")]
+#[path = "work_decision_tests.rs"]
+mod decision_tests;
 #[cfg(feature = "probe-harness")]
 #[path = "work_navigation_tests.rs"]
 mod navigation_tests;
@@ -466,6 +727,39 @@ fn input_with_route(
     allowed: &[SemanticEffectClass],
     route: Option<AgentNavigationRoute>,
 ) -> AgentWorkRunInput {
+    input_with_navigation(allowed, route, None)
+}
+
+fn input_with_navigation(
+    allowed: &[SemanticEffectClass],
+    route: Option<AgentNavigationRoute>,
+    discovery: Option<AgentNavigationDiscovery>,
+) -> AgentWorkRunInput {
+    input_with_navigation_budget(allowed, route, discovery, 24)
+}
+
+fn input_with_navigation_budget(
+    allowed: &[SemanticEffectClass],
+    route: Option<AgentNavigationRoute>,
+    discovery: Option<AgentNavigationDiscovery>,
+    operations: u32,
+) -> AgentWorkRunInput {
+    input_with_navigation_account(
+        allowed,
+        route,
+        discovery,
+        operations,
+        AgentAccountScope::Anonymous,
+    )
+}
+
+fn input_with_navigation_account(
+    allowed: &[SemanticEffectClass],
+    route: Option<AgentNavigationRoute>,
+    discovery: Option<AgentNavigationDiscovery>,
+    operations: u32,
+    account: AgentAccountScope,
+) -> AgentWorkRunInput {
     let profile = 1_u128.into();
     let context = ContextIdentity::new(
         ContextId::generate(),
@@ -475,13 +769,13 @@ fn input_with_route(
     );
     let origin = SemanticOrigin::parse("https://work-fixture.invalid/").expect("origin");
     let effects = AgentEffectScope::try_new(allowed).expect("effects");
-    let budget = AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).expect("budget");
+    let budget = AgentRunBudget::try_new(operations, 1_000_000, 1_000_000, 1).expect("budget");
     let node = AgentPlanNodeId::generate();
     let policy_expires = FIXTURE_POLICY_NOW_MILLIS
         + zephium_agent_provider_transport::MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS;
     let authority = AgentPlanNodeAuthority::try_new(
         vec![profile],
-        vec![AgentAccountScope::Anonymous],
+        vec![account],
         vec![origin.clone()],
         SemanticSensitivity::Public,
         effects,
@@ -492,12 +786,17 @@ fn input_with_route(
     } else {
         authority
     };
+    let authority = if let Some(discovery) = discovery {
+        authority.with_navigation_discovery(discovery).unwrap()
+    } else {
+        authority
+    };
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         context.owner(),
         AgentRunScope::try_new(
             vec![profile],
-            vec![AgentAccountScope::Anonymous],
+            vec![account],
             vec![origin.clone()],
             SemanticSensitivity::Public,
             effects,
@@ -550,10 +849,15 @@ fn input_with_route(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     #[cfg(feature = "probe-harness")]
+    DecisionClick(bool),
+    #[cfg(feature = "probe-harness")]
     Navigation(NavigationFault),
     #[cfg(feature = "probe-harness")]
     Scoped(ScopedFault),
     None,
+    Hydration,
+    SkeletonHydration,
+    SkeletonPersistent,
     EmbeddedFrame,
     ConstructDispatch,
     ConstructCallback,
@@ -583,7 +887,13 @@ enum Fault {
     #[cfg(feature = "probe-harness")]
     ActionVerification,
     #[cfg(feature = "probe-harness")]
+    ScrollVerification,
+    #[cfg(feature = "probe-harness")]
     ActionApplied,
+    #[cfg(feature = "probe-harness")]
+    ActionAppliedBoundary,
+    #[cfg(feature = "probe-harness")]
+    ActionAppliedLargeDiff,
     #[cfg(feature = "probe-harness")]
     ActionBudget,
     #[cfg(feature = "probe-harness")]
@@ -600,6 +910,8 @@ enum Fault {
     ActionNeedsHumanNativeLost,
     #[cfg(feature = "probe-harness")]
     ActionNeedsHumanTakeover,
+    #[cfg(feature = "probe-harness")]
+    ModelHumanTakeover,
     CancelObservation,
     TakeoverObservation,
     SuspendObservation,
@@ -755,17 +1067,99 @@ impl AgentBrowserPort for Port {
         let correlation = invocation.correlation();
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if lock(&self.calls).contains(&7) { 2 } else { 1 }
+            if matches!(
+                self.fault,
+                Fault::Hydration | Fault::SkeletonHydration | Fault::SkeletonPersistent
+            ) {
+                lock(&self.calls).iter().filter(|call| **call == 3).count() as u64
+            } else if lock(&self.calls).contains(&7) {
+                2
+            } else {
+                1
+            }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ScrollVerification {
+            wire.replace(
+                r#""r":"document","o":16"#,
+                r#""r":"document","o":16,"b":{"x":0,"y":0,"w":800,"h":600}"#,
+            )
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ActionAppliedBoundary
+            && correlation.snapshot_generation().get() == 1
+        {
+            wire.replace(
+                "]}",
+                ",{\"k\":9,\"p\":0,\"r\":\"paragraph\",\"t\":\"Public detail before edit\"}]}",
+            )
+        } else {
+            wire
+        };
         let wire = if self.fault == Fault::EmbeddedFrame {
             wire.replace("]}", ",{\"k\":3,\"p\":0,\"r\":\"frame_boundary\"}]}")
         } else {
             wire
         };
+        let wire = if self.fault == Fault::SkeletonPersistent
+            || (self.fault == Fault::SkeletonHydration
+                && correlation.snapshot_generation().get() == 1)
+        {
+            let placeholders = (3..7)
+                .map(|key| {
+                    format!(
+                        r#",{{"k":{key},"p":0,"r":"progress","v":{{"k":"ordinal","value":0}}}}"#
+                    )
+                })
+                .collect::<String>();
+            wire.replace("]}", &format!("{placeholders}]}}"))
+        } else {
+            wire
+        };
         #[cfg(feature = "probe-harness")]
-        let wire = if self.fault == Fault::ActionApplied && lock(&self.calls).contains(&7) {
+        let wire = if matches!(
+            self.fault,
+            Fault::ActionApplied | Fault::ActionAppliedBoundary | Fault::ActionAppliedLargeDiff
+        ) && lock(&self.calls).contains(&7)
+        {
             wire.replace("\"value\":\"\"", "\"value\":\"fixture value\"")
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ActionAppliedBoundary && lock(&self.calls).contains(&7) {
+            wire.replace("]}", ",{\"k\":3,\"p\":0,\"r\":\"frame_boundary\"}]}")
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::ActionAppliedLargeDiff && lock(&self.calls).contains(&7)
+        {
+            wire.replace(
+                "]}",
+                &format!(
+                    ",{{\"k\":3,\"p\":0,\"r\":\"paragraph\",\"t\":\"{}\"}}]}}",
+                    "New details ".repeat(180)
+                ),
+            )
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if let Fault::DecisionClick(applied) = self.fault {
+            format!(
+                r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document"}},{{"k":2,"p":0,"r":"button","n":"Details","o":1,"s":{},"ak":6,"fc":true,"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#,
+                correlation.invocation().get(),
+                correlation.snapshot_generation().get(),
+                if applied && lock(&self.calls).contains(&7) {
+                    4
+                } else {
+                    0
+                }
+            )
         } else {
             wire
         };
@@ -865,6 +1259,13 @@ impl AgentBrowserPort for Port {
                 .unwrap()
                 .stop_and_seal(AgentRuntimeStopReason::HumanTakeover);
         }
+        #[cfg(feature = "probe-harness")]
+        if self.fault == Fault::ModelHumanTakeover {
+            lock(&self.control)
+                .as_ref()
+                .unwrap()
+                .stop_and_seal(AgentRuntimeStopReason::HumanTakeover);
+        }
         if self.fault == Fault::CleanupAuditLost {
             return ContextShutdownDispatch::AuditScheduled;
         }
@@ -919,10 +1320,41 @@ impl AgentBrowserPort for Port {
     ) -> ContextDispatch {
         lock(&self.calls).push(7);
         match self.fault {
+            Fault::DecisionClick(_) => {
+                let now = request.requested_at();
+                let geometry = request.expected_geometry();
+                completion(request.complete(
+                    SemanticActionExecutionBackend::FixedSemanticRecipe,
+                    SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                    SemanticActionNativeViewport::try_new(800, 600).unwrap(),
+                    geometry,
+                    now,
+                    now,
+                ));
+                return ContextDispatch::Scheduled;
+            }
             Fault::ActionDispatch => return ContextDispatch::Unsupported,
             Fault::ActionCallback => {}
+            Fault::ScrollVerification => {
+                let now = request.requested_at();
+                let geometry = request.expected_geometry();
+                completion(request.complete(
+                    SemanticActionExecutionBackend::FixedSemanticRecipe,
+                    SemanticActionNativeReadiness::ExactConnectedScrollTarget,
+                    SemanticActionNativeViewport::try_new(800, 600).unwrap(),
+                    geometry,
+                    now,
+                    now,
+                ));
+                return ContextDispatch::Scheduled;
+            }
             Fault::ActionVerification
             | Fault::ActionApplied
+            | Fault::ActionAppliedBoundary
+            | Fault::ActionAppliedLargeDiff
+            | Fault::Navigation(
+                NavigationFault::DiscoveryAction(_) | NavigationFault::DiscoveryActionRefusal(_, _),
+            )
             | Fault::Scoped(ScopedFault::Combined) => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
@@ -1016,7 +1448,7 @@ fn drive_with_control(
     Vec<u8>,
     Vec<AgentWorkEvent>,
 ) {
-    drive_with_schedule(controller, handle, fault, control, None)
+    drive_with_schedule(controller, handle, fault, control, false, None)
 }
 
 fn drive_with_schedule(
@@ -1024,6 +1456,7 @@ fn drive_with_schedule(
     mut handle: AgentWorkHandle,
     fault: Fault,
     control: Arc<Mutex<Option<AgentRuntimeHandle>>>,
+    drain_live: bool,
     #[cfg(feature = "probe-harness")] navigation_schedule: Option<
         Arc<navigation_tests::NavigationSchedule>,
     >,
@@ -1054,7 +1487,14 @@ fn drive_with_schedule(
     assert!(lock(&port.calls).is_empty());
     runtime.start_run().expect("run");
     let wait_deadline = Instant::now() + Duration::from_secs(12);
+    let mut events = Vec::new();
+    #[cfg(feature = "probe-harness")]
+    let drain_live = drain_live
+        || matches!(fault, Fault::Navigation(NavigationFault::DiscoveryBudget(limit, ..)) if limit > 8);
     let outcome = loop {
+        if drain_live {
+            events.extend(std::iter::from_fn(|| handle.take_event()));
+        }
         // Never keep the diagnostic mutex across the blocking lifecycle join:
         // cleanup callbacks on the worker also append their call codes.
         let shutdown_ready = fault == Fault::ShutdownObservation && lock(&port.calls).contains(&3);
@@ -1085,7 +1525,7 @@ fn drive_with_schedule(
             .shutdown_until(Instant::now() + Duration::from_secs(2))
     });
     let calls = lock(&port.calls).clone();
-    let events = std::iter::from_fn(|| handle.take_event()).collect();
+    events.extend(std::iter::from_fn(|| handle.take_event()));
     (outcome, shutdown, calls, events)
 }
 
@@ -1122,6 +1562,356 @@ fn explicit_readiness_preserves_snapshot_generation_and_stop_reasons_are_first_w
     }
 }
 
+#[test]
+fn startup_loading_signal_distinguishes_skeletons_from_usable_progress_pages() {
+    struct Cases;
+    impl AgentWorkTask for Cases {
+        fn evaluate(
+            &mut self,
+            source: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            let progress = serde_json::json!({"r":"progress", "v":{"k":"ordinal","value":0}});
+            let named = serde_json::json!({"r":"progress", "n":"Upload progress", "v":{"k":"ordinal","value":0}});
+            let advanced = serde_json::json!({"r":"progress", "v":{"k":"ordinal","value":30}});
+            let text = serde_json::json!({"r":"progress", "t":"Task completion", "v":{"k":"ordinal","value":0}});
+            let control = serde_json::json!({"r":"button", "n":"Open", "o":1});
+            let disabled = serde_json::json!({"r":"button", "n":"Open", "s":8});
+            for (mut children, expected) in [
+                (vec![], false),
+                (vec![progress.clone()], false),
+                (vec![named; 12], false),
+                (vec![advanced; 12], false),
+                (vec![text; 12], false),
+                (vec![progress.clone(); 12], true),
+                (vec![serde_json::json!({"r":"progress"}); 4], true),
+                (
+                    [vec![progress.clone(); 3], vec![control; 3]].concat(),
+                    false,
+                ),
+                ([vec![progress; 3], vec![disabled; 3]].concat(), true),
+                // An app still booting says so and shows next to nothing.
+                (
+                    vec![
+                        serde_json::json!({"r":"paragraph", "n":"Page title", "t":"New chat"}),
+                        serde_json::json!({"r":"link", "n":"Skip to content", "o":1}),
+                        serde_json::json!({"r":"paragraph", "t":"Loading…"}),
+                    ],
+                    true,
+                ),
+                (
+                    [
+                        vec![serde_json::json!({"r":"paragraph", "t":"Loading…"})],
+                        vec![serde_json::json!({"r":"button", "n":"Open", "o":1}); 20],
+                    ]
+                    .concat(),
+                    false,
+                ),
+            ] {
+                let mut nodes = vec![serde_json::json!({"k":1,"r":"document","o":16})];
+                for (index, node) in children.iter_mut().enumerate() {
+                    node["k"] = (index + 2).into();
+                    node["p"] = 0.into();
+                }
+                nodes.extend(children);
+                let frame = &source.frames()[0];
+                let wire = serde_json::to_vec(&serde_json::json!({
+                    "v":1,"i":frame.invocation().get(),"g":frame.generation().get(),"c":"complete","n":nodes
+                })).unwrap();
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        frame.invocation(),
+                        frame.frame().clone(),
+                        frame.generation(),
+                    ),
+                    &wire,
+                )
+                .unwrap();
+                let candidate =
+                    SemanticObservationAssembler::new(source.request().clone(), snapshot)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                assert_eq!(has_dominant_loading_placeholders(&candidate), expected);
+            }
+            Ok(AgentWorkTaskProgress::Complete)
+        }
+        fn assess(
+            &self,
+            _: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            panic!("no actions")
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let _guard = lock(&SERIAL);
+    let (controller, handle) = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(Cases),
+    )
+    .unwrap();
+    let (outcome, shutdown, calls, _) = drive(controller, handle, Fault::None);
+    assert!(
+        matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+        "{outcome:?}"
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls.iter().filter(|call| **call == 3).count(), 1);
+}
+
+#[test]
+fn generic_initial_loading_gate_precedes_default_task_evaluation_without_vetoing_it() {
+    let _guard = lock(&SERIAL);
+    for fault in [Fault::SkeletonHydration, Fault::SkeletonPersistent] {
+        let (mut controller, handle) = AgentWorkController::try_new(
+            input(),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(fault)),
+            Box::new(Task), // No task-specific readiness predicate.
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        let state = controller.state.as_mut().unwrap();
+        state.input.as_mut().unwrap().settings.deadline = deadline;
+        state.native.deadline = deadline;
+        let (outcome, shutdown, calls, events) = drive(controller, handle, fault);
+        let reads = calls.iter().filter(|call| **call == 3).count();
+        assert!(
+            matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+            "{outcome:?}"
+        );
+        if fault == Fault::SkeletonHydration {
+            assert_eq!(reads, 2);
+        } else {
+            assert!((2..=3).contains(&reads));
+        }
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert!(!calls.contains(&7));
+        assert!(!events.iter().any(|event| matches!(
+            event.kind(),
+            AgentWorkEventKind::ModelActive | AgentWorkEventKind::ActionActive
+        )));
+    }
+
+    struct Pending;
+    impl AgentWorkTask for Pending {
+        fn initial_readiness(
+            &self,
+            _: &SemanticObservation,
+        ) -> Result<AgentWorkInitialReadiness, AgentWorkFailure> {
+            Ok(AgentWorkInitialReadiness::Pending)
+        }
+        fn evaluate(
+            &mut self,
+            source: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            Task.evaluate(source)
+        }
+        fn assess(
+            &self,
+            action: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            Task.assess(action)
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let (mut controller, handle) = AgentWorkController::try_new(
+        input(),
+        AgentProviderTransportConfig::STANDARD,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(Fault::SkeletonPersistent)),
+        Box::new(Pending),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    let state = controller.state.as_mut().unwrap();
+    state.input.as_mut().unwrap().settings.deadline = deadline;
+    state.native.deadline = deadline;
+    let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::SkeletonPersistent);
+    let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+        panic!("trusted pending readiness must remain fail-closed: {outcome:?}");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert!(!calls.contains(&7));
+    assert!(!events.iter().any(|event| matches!(
+        event.kind(),
+        AgentWorkEventKind::ModelActive | AgentWorkEventKind::ActionActive
+    )));
+}
+
+#[test]
+fn initial_hydration_is_read_only_fresh_bounded_and_reattests_account() {
+    struct Hydrating {
+        samples: Arc<AtomicU64>,
+        attestations: Arc<AtomicU64>,
+        ready_at: u64,
+        refuse_account_at: u64,
+    }
+    impl AgentWorkTask for Hydrating {
+        fn initial_readiness(
+            &self,
+            observation: &SemanticObservation,
+        ) -> Result<AgentWorkInitialReadiness, AgentWorkFailure> {
+            let sample = self.samples.fetch_add(1, Ordering::SeqCst) + 1;
+            assert_eq!(observation.frames()[0].generation().get(), sample);
+            assert_eq!(
+                validate_initial_readiness_successor(observation, observation),
+                Err(AgentWorkFailure::Context)
+            );
+            let foreign_frame = SemanticFrameJoin::try_new(
+                observation.request().context(),
+                FrameId::MAIN,
+                observation.request().context().frame_generation(),
+                SemanticOrigin::parse("https://different-fixture.invalid/").unwrap(),
+                SemanticFrameTrust::SameOrigin,
+            )
+            .unwrap();
+            let wire = format!(
+                r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document","o":16}}]}}"#,
+                sample + 1,
+                sample + 1
+            );
+            let foreign_snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(sample + 1).unwrap(),
+                    foreign_frame,
+                    SemanticSnapshotGeneration::new(sample + 1).unwrap(),
+                ),
+                wire.as_bytes(),
+            )
+            .unwrap();
+            let foreign = SemanticObservationAssembler::new(
+                SemanticObservationRequest::initial(
+                    SemanticObservationId::new(sample + 1).unwrap(),
+                    observation.request().context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
+                foreign_snapshot,
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+            assert_eq!(
+                validate_initial_readiness_successor(observation, &foreign),
+                Err(AgentWorkFailure::Context)
+            );
+            Ok(if sample >= self.ready_at {
+                AgentWorkInitialReadiness::Ready
+            } else {
+                AgentWorkInitialReadiness::Pending
+            })
+        }
+        fn evaluate(
+            &mut self,
+            _: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            assert!(self.samples.load(Ordering::SeqCst) >= self.ready_at);
+            Ok(AgentWorkTaskProgress::Complete)
+        }
+        fn assess(
+            &self,
+            _: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            panic!("hydration must never admit an action")
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            if self.attestations.fetch_add(1, Ordering::SeqCst) + 1 >= self.refuse_account_at {
+                return Err(AgentWorkFailure::Contract);
+            }
+            Task.attest_account(context, now)
+        }
+    }
+    let _guard = lock(&SERIAL);
+    for (ready_at, refuse_account_at) in [(2, u64::MAX), (u64::MAX, u64::MAX), (2, 3)] {
+        let samples = Arc::new(AtomicU64::new(0));
+        let attestations = Arc::new(AtomicU64::new(0));
+        let (mut controller, handle) = AgentWorkController::try_new(
+            input(),
+            AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-not-a-secret".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::Hydration)),
+            Box::new(Hydrating {
+                samples: samples.clone(),
+                attestations: attestations.clone(),
+                ready_at,
+                refuse_account_at,
+            }),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        let state = controller.state.as_mut().unwrap();
+        state.input.as_mut().unwrap().settings.deadline = deadline;
+        state.native.deadline = deadline;
+        let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::Hydration);
+        if ready_at == 2 && refuse_account_at == u64::MAX {
+            assert!(
+                matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+                "{outcome:?}"
+            );
+            assert_eq!(samples.load(Ordering::SeqCst), 2);
+            assert!(attestations.load(Ordering::SeqCst) >= 3);
+        } else {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(
+                closed.failure(),
+                if refuse_account_at == 3 {
+                    AgentWorkFailure::Contract
+                } else {
+                    AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)
+                }
+            );
+            assert!(samples.load(Ordering::SeqCst) <= 3);
+        }
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert!(!calls.contains(&7));
+        assert!(!events.iter().any(|event| matches!(
+            event.kind(),
+            AgentWorkEventKind::ModelActive | AgentWorkEventKind::ActionActive
+        )));
+    }
+}
+
 #[cfg(feature = "probe-harness")]
 #[test]
 fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
@@ -1143,6 +1933,9 @@ enum ProviderFault {
     CancelStream,
     Native(Fault),
     Extraction(ExtractionFault),
+    HumanRequest,
+    HumanRequestTakeover,
+    HumanExtractionRequest,
 }
 
 #[cfg(feature = "probe-harness")]
@@ -1150,6 +1943,7 @@ enum ProviderFault {
 enum ExtractionFault {
     None,
     RoleSelection,
+    EmptyEvidence,
     WrongSchema,
     ExpandedScope,
     WrongKind,
@@ -1166,6 +1960,7 @@ fn extraction_uses_the_same_worker_and_never_publishes_failed_or_unsettled_outpu
     for fault in [
         ExtractionFault::None,
         ExtractionFault::RoleSelection,
+        ExtractionFault::EmptyEvidence,
         ExtractionFault::WrongSchema,
         ExtractionFault::ExpandedScope,
         ExtractionFault::WrongKind,
@@ -1214,8 +2009,28 @@ fn settled_provider_refusals_and_count_stream_cancellation_close_without_success
 }
 
 #[cfg(feature = "probe-harness")]
+#[test]
+fn model_requested_human_is_a_clean_terminal_handoff_without_resume_authority() {
+    let _guard = lock(&SERIAL);
+    for fault in [
+        ProviderFault::HumanRequest,
+        ProviderFault::HumanRequestTakeover,
+        ProviderFault::HumanExtractionRequest,
+    ] {
+        provider_fixture(fault);
+    }
+}
+
+#[cfg(feature = "probe-harness")]
 fn provider_fixture(fault: ProviderFault) {
     provider_fixture_with_form(fault, None);
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn independent_uncertain_effect_reinspection_preserves_original_failure() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Native(Fault::ActionCallback));
 }
 
 #[cfg(feature = "probe-harness")]
@@ -1255,9 +2070,42 @@ fn provider_fixture_with_account(
     form: Option<&str>,
     account: Option<AccountFault>,
 ) {
+    provider_fixture_with_discovery_account(fault, form, account, None);
+}
+
+#[cfg(feature = "probe-harness")]
+fn provider_fixture_with_discovery_account(
+    fault: ProviderFault,
+    form: Option<&str>,
+    account: Option<AccountFault>,
+    discovery_account: Option<AgentAccountScope>,
+) {
     use std::io::{Read as _, Write as _};
-    struct Continue;
+    struct Continue {
+        human_request: bool,
+    }
     impl AgentWorkTask for Continue {
+        fn model_action_operations(
+            &self,
+            node: &SemanticNode,
+            _: &SemanticObservation,
+        ) -> Result<SemanticOperations, AgentWorkFailure> {
+            // This fixture's native faults target one exact synthetic fill.
+            // Without the advertised operation, the production driver correctly
+            // rejects the proposal before the fault being tested can occur.
+            if node.role() == SemanticRole::Document {
+                SemanticOperations::try_new(&[SemanticOperationClass::Scroll])
+                    .map_err(|_| AgentWorkFailure::Contract)
+            } else if node.name().is_some_and(|name| name.as_str() == "Field") {
+                SemanticOperations::try_new(&[SemanticOperationClass::Fill])
+                    .map_err(|_| AgentWorkFailure::Contract)
+            } else {
+                Ok(SemanticOperations::NONE)
+            }
+        }
+        fn allows_human_request(&self) -> bool {
+            self.human_request
+        }
         fn evaluate(
             &mut self,
             _: &SemanticObservation,
@@ -1271,7 +2119,11 @@ fn provider_fixture_with_account(
             Ok(AgentEffectAssessment::new(
                 action,
                 action.frame().origin().clone(),
-                SemanticEffectClass::LocalWrite,
+                if action.kind() == SemanticActionKind::Scroll {
+                    SemanticEffectClass::Read
+                } else {
+                    SemanticEffectClass::LocalWrite
+                },
             ))
         }
         fn attest_account(
@@ -1280,6 +2132,40 @@ fn provider_fixture_with_account(
             now: AgentPolicyInstant,
         ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
             Task.attest_account(context, now)
+        }
+    }
+    struct HumanExtraction(AgentWorkExtractionTask);
+    impl AgentWorkTask for HumanExtraction {
+        fn allows_human_request(&self) -> bool {
+            true
+        }
+        fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+            self.0.extraction_schema()
+        }
+        fn evaluate(
+            &mut self,
+            observation: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            self.0.evaluate(observation)
+        }
+        fn assess(
+            &self,
+            action: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            self.0.assess(action)
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            self.0.attest_account(context, now)
+        }
+        fn accept_extraction(
+            &mut self,
+            result: &SemanticExtractionResult<'_>,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            self.0.accept_extraction(result)
         }
     }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
@@ -1319,12 +2205,22 @@ fn provider_fixture_with_account(
             ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
             ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
             ProviderFault::Extraction(
-                ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope,
+                ExtractionFault::WrongSchema
+                | ExtractionFault::ExpandedScope
+                | ExtractionFault::EmptyEvidence,
             ) => 2,
             ProviderFault::Extraction(_) => 4,
             _ => 2,
         }
     };
+    // Construct the client before the server's request deadline. Platform
+    // transport setup is not part of the native fault under test.
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        &endpoint,
+        "http://127.0.0.1:9/v1/messages",
+    )
+    .expect("loopback transport");
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut turns = 0;
@@ -1407,6 +2303,76 @@ fn provider_fixture_with_account(
             if let ProviderFault::Navigation(fault) = fault {
                 fault.check_request(&request[header + 4..], turns);
             }
+            if matches!(
+                fault,
+                ProviderFault::Combined(CombinedFault::None | CombinedFault::BoundaryAfterAction)
+            ) && turns == 1
+            {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let progress = wire["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|item| item["content"].as_array().into_iter().flatten())
+                    .filter_map(|part| part["text"].as_str())
+                    .find(|text| text.contains("ZEPHIUM_HOST_ACTION_PROGRESS_V1"))
+                    .expect("verified action history reaches count and generation requests");
+                assert!(progress.contains("ExactTargetValue"));
+                assert!(!progress.contains("fixture value") && !progress.contains("@a2"));
+            }
+            if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) && turns == 1 {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let input = wire["input"].as_array().unwrap();
+                let outputs = input
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect::<Vec<_>>();
+                assert_eq!(outputs.len(), 1);
+                assert_eq!(outputs[0]["call_id"], "call_1");
+                let output: serde_json::Value =
+                    serde_json::from_str(outputs[0]["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["status"], "verified");
+                assert_eq!(output["update"], "replace_observation");
+                let observation = output["observation"].as_str().unwrap();
+                assert!(
+                    observation.contains("fixture value")
+                        && observation.contains("snapshot=2")
+                        && observation.contains("frame_boundary")
+                );
+            }
+            if fault == ProviderFault::Combined(CombinedFault::OversizedDiffAfterAction)
+                && turns == 1
+            {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let output = wire["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                let output: serde_json::Value =
+                    serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["status"], "verified");
+                assert_eq!(output["update"], "replace_observation");
+                assert!(output["observation"]
+                    .as_str()
+                    .unwrap()
+                    .contains("New details"));
+            }
+            if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) && turns == 2 {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let input = serde_json::to_string(&wire["input"]).unwrap();
+                assert!(
+                    input.contains("Public detail before edit"),
+                    "pre-action evidence reaches terminal mapping without an extra snapshot"
+                );
+                assert!(input.contains("snapshot=1"));
+                assert!(input.contains("refs=historical_read_only"));
+            }
             let (kind, body) = if is_count {
                 (
                     "application/json",
@@ -1426,16 +2392,20 @@ fn provider_fixture_with_account(
                     } else if let ProviderFault::Scoped(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Combined(fault) = fault {
-                        if fault == CombinedFault::Ceiling && turns < 7 {
+                        if fault == CombinedFault::Ceiling && turns == 1 {
+                            tool_stream(turns, true)
+                        } else if fault == CombinedFault::Ceiling && turns < 7 {
                             tool_stream(turns, false)
                         } else if fault == CombinedFault::Ceiling && turns == 7 {
-                            tool_stream(turns, true)
-                        } else if fault == CombinedFault::Ceiling {
                             named_tool_stream(
                                 turns,
                                 "extract",
                                 r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
                             )
+                        } else if fault == CombinedFault::Ceiling {
+                            extraction_stream(ExtractionFault::None)
+                                .replace("resp_2", &format!("resp_{turns}"))
+                                .replace("msg_2", &format!("msg_{turns}"))
                         } else if turns == 1 && fault != CombinedFault::Premature {
                             tool_stream(turns, true)
                         } else if turns <= 2 {
@@ -1475,6 +2445,19 @@ fn provider_fixture_with_account(
                         } else {
                             extraction_stream(fault)
                         }
+                    } else if matches!(
+                        fault,
+                        ProviderFault::HumanRequest
+                            | ProviderFault::HumanRequestTakeover
+                            | ProviderFault::HumanExtractionRequest
+                    ) {
+                        named_tool_stream(turns, "show_for_human", r#"{\"reason\":\"sign_in\"}"#)
+                    } else if fault == ProviderFault::Native(Fault::ScrollVerification) {
+                        named_tool_stream(
+                            turns,
+                            "act",
+                            r#"{\"actions\":[{\"kind\":\"scroll\",\"target\":\"@a1\",\"amount\":\"page\",\"direction\":\"down\",\"effect\":\"read\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"scroll_position_changed\"},\"settle_millis\":2000}]}"#,
+                        )
                     } else {
                         let stream = tool_stream(turns, matches!(fault, ProviderFault::Native(_)));
                         if fault == ProviderFault::Native(Fault::ActionBudget) {
@@ -1501,18 +2484,77 @@ fn provider_fixture_with_account(
         }
         turns
     });
-    let transport = AgentProviderTransport::try_new_loopback(
-        AgentProviderTransportConfig::STANDARD,
-        &endpoint,
-        "http://127.0.0.1:9/v1/messages",
-    )
-    .expect("loopback transport");
     let credential = AgentProviderCredential::try_new(
         AgentProviderKind::OpenAiResponses,
         "fixture-not-a-secret".to_owned(),
     )
     .expect("credential");
-    let mut approved = if let ProviderFault::Navigation(NavigationFault::Route(_)) = fault {
+    let mut approved = if matches!(
+        fault,
+        ProviderFault::Navigation(
+            NavigationFault::Discovery
+                | NavigationFault::DiscoveryAction(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
+                | NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
+                | NavigationFault::DiscoveryBudget(..)
+                | NavigationFault::DiscoveryTwoHops
+                | NavigationFault::DiscoveryTwoHopsBlockedFrame
+                | NavigationFault::DiscoveryMissingLink
+                | NavigationFault::DiscoveryNavigationRefusal(_)
+        )
+    ) {
+        input_with_navigation_account(
+            if matches!(
+                fault,
+                ProviderFault::Navigation(
+                    NavigationFault::DiscoveryAction(_)
+                        | NavigationFault::DiscoveryActionRefusal(_, _)
+                )
+            ) {
+                &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
+            } else {
+                &[SemanticEffectClass::Read]
+            },
+            None,
+            Some(
+                if fault
+                    == ProviderFault::Navigation(NavigationFault::DiscoveryNavigationRefusal(4))
+                {
+                    navigation_tests::query_discovery_scope()
+                } else {
+                    navigation_tests::discovery_scope()
+                },
+            ),
+            match fault {
+                ProviderFault::Navigation(NavigationFault::DiscoveryScopeRefusal(3)) => 6,
+                ProviderFault::Navigation(NavigationFault::DiscoveryNavigationRefusal(3)) => 4,
+                ProviderFault::Navigation(NavigationFault::DiscoveryBudget(_, _, operations)) => {
+                    operations
+                }
+                _ => 24,
+            },
+            discovery_account.unwrap_or(AgentAccountScope::Anonymous),
+        )
+    } else if matches!(
+        fault,
+        ProviderFault::Ceiling
+            | ProviderFault::Read(
+                ReadFault::Ceiling | ReadFault::LocateMissCeiling | ReadFault::LongExtraction
+            )
+            | ProviderFault::Scoped(ScopedFault::Ceiling)
+            | ProviderFault::Combined(CombinedFault::Ceiling)
+    ) {
+        // These cases isolate the provider-call ceiling. Leave enough operation
+        // authority for every admitted model call and semantic tool operation so
+        // the independent manifest budget cannot become the earlier stop reason.
+        input_with_navigation_budget(
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            None,
+            None,
+            64,
+        )
+    } else if let ProviderFault::Navigation(NavigationFault::Route(_)) = fault {
         input_with_route(
             &[SemanticEffectClass::Read],
             Some(navigation_tests::route_tests::route()),
@@ -1522,7 +2564,23 @@ fn provider_fixture_with_account(
     } else {
         input()
     };
+    if fault == ProviderFault::Read(ReadFault::LongExtraction) {
+        approved.settings = approved.settings.with_max_model_calls(24).unwrap();
+    }
     let navigation_schedule = if let ProviderFault::Navigation(fault) = fault {
+        if matches!(fault, NavigationFault::DiscoveryScopeRefusal(case) if case != 3)
+            || matches!(
+                fault,
+                NavigationFault::DiscoveryActionRefusal(_, _)
+                    | NavigationFault::DiscoveryNavigationRefusal(_)
+                    | NavigationFault::DiscoveryMissingLink
+            )
+        {
+            approved.settings = approved.settings.with_max_model_calls(6).unwrap();
+        }
+        if let NavigationFault::DiscoveryBudget(limit, _, _) = fault {
+            approved.settings = approved.settings.with_max_model_calls(limit).unwrap();
+        }
         let schedule = Arc::new(navigation_tests::NavigationSchedule::new(fault));
         approved.settings.clock =
             Arc::new(navigation_tests::NavigationClock::new(schedule.clone()));
@@ -1551,7 +2609,79 @@ fn provider_fixture_with_account(
             .unwrap(),
         )
     } else if let ProviderFault::Navigation(fault) = fault {
-        if let NavigationFault::Route(fault) = fault {
+        if matches!(
+            fault,
+            NavigationFault::Discovery
+                | NavigationFault::DiscoveryAction(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
+                | NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
+                | NavigationFault::DiscoveryBudget(..)
+                | NavigationFault::DiscoveryTwoHops
+                | NavigationFault::DiscoveryTwoHopsBlockedFrame
+                | NavigationFault::DiscoveryMissingLink
+                | NavigationFault::DiscoveryNavigationRefusal(_)
+        ) {
+            let fields =
+                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()];
+            let task = if let Some(account) = discovery_account {
+                struct Source {
+                    account: AgentAccountScope,
+                    clock: Arc<dyn TerraControllerClock>,
+                }
+                impl crate::AgentWorkAccountSource for Source {
+                    fn sample(
+                        &self,
+                        context: ContextJoin,
+                    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+                        // Independent synthetic account authority for this fixture.
+                        Ok(AgentContextAccountBinding::new(
+                            AgentAccountAttestationId::generate(),
+                            context,
+                            self.account,
+                            self.clock.now().map_err(|_| AgentWorkFailure::Contract)?,
+                        ))
+                    }
+                }
+                crate::AgentWorkDiscoveryTask::try_new_with_account_source(
+                    approved.context.identity,
+                    if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+                        navigation_tests::query_discovery_scope()
+                    } else {
+                        navigation_tests::discovery_scope()
+                    },
+                    fields,
+                    account,
+                    Box::new(Source {
+                        account,
+                        clock: approved.settings.clock.clone(),
+                    }),
+                )
+                .unwrap()
+            } else {
+                crate::AgentWorkDiscoveryTask::try_new(
+                    approved.context.identity,
+                    if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+                        navigation_tests::query_discovery_scope()
+                    } else {
+                        navigation_tests::discovery_scope()
+                    },
+                    fields,
+                )
+                .unwrap()
+            };
+            Box::new(
+                if matches!(
+                    fault,
+                    NavigationFault::DiscoveryAction(_)
+                        | NavigationFault::DiscoveryActionRefusal(_, _)
+                ) {
+                    task.with_local_actions(Box::new(navigation_tests::LocalActionPolicy))
+                } else {
+                    task
+                },
+            )
+        } else if let NavigationFault::Route(fault) = fault {
             Box::new(navigation_tests::route_tests::RouteTask::new(
                 fault,
                 navigation_schedule.as_ref().unwrap().clone(),
@@ -1582,15 +2712,34 @@ fn provider_fixture_with_account(
             AgentAccountScope::Anonymous,
         )
         .unwrap();
-        Box::new(if extraction_fault == ExtractionFault::RoleSelection {
+        Box::new(if extraction_fault == ExtractionFault::EmptyEvidence {
+            // The native snapshot is valid but none of its fields qualify as
+            // evidence under the trusted schema's role selection.
+            extraction.with_source_roles(
+                SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
+            )
+        } else if extraction_fault == ExtractionFault::RoleSelection {
             extraction.with_source_roles(
                 SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
             )
         } else {
             extraction
         })
+    } else if fault == ProviderFault::HumanExtractionRequest {
+        Box::new(HumanExtraction(
+            AgentWorkExtractionTask::try_new(
+                vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
+                AgentAccountScope::Anonymous,
+            )
+            .unwrap(),
+        ))
     } else {
-        Box::new(Continue)
+        Box::new(Continue {
+            human_request: matches!(
+                fault,
+                ProviderFault::HumanRequest | ProviderFault::HumanRequestTakeover
+            ),
+        })
     };
     let task: Box<dyn AgentWorkTask> = match account {
         Some(AccountFault::Static) => task,
@@ -1644,10 +2793,16 @@ fn provider_fixture_with_account(
         Fault::Scoped(fault)
     } else if fault == ProviderFault::Combined(CombinedFault::ActionLost) {
         Fault::ActionLost
+    } else if fault == ProviderFault::Combined(CombinedFault::OversizedDiffAfterAction) {
+        Fault::ActionAppliedLargeDiff
+    } else if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) {
+        Fault::ActionAppliedBoundary
     } else if matches!(fault, ProviderFault::Combined(_)) {
         Fault::ActionApplied
     } else if let ProviderFault::Native(fault) = fault {
         fault
+    } else if fault == ProviderFault::HumanRequestTakeover {
+        Fault::ModelHumanTakeover
     } else {
         Fault::None
     };
@@ -1656,14 +2811,17 @@ fn provider_fixture_with_account(
         handle,
         native_fault,
         control,
+        fault == ProviderFault::Read(ReadFault::LongExtraction),
         navigation_schedule,
     );
     if let ProviderFault::Navigation(fault) = fault {
+        // Report the original controller failure before a missing follow-up
+        // request can obscure it as a fixture-server timeout.
+        navigation_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         assert_eq!(
             server.join().expect("navigation fixture server"),
             requests / 2
         );
-        navigation_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         return;
     }
     if let Some(account) = account.filter(|fault| *fault != AccountFault::Slow) {
@@ -1678,7 +2836,12 @@ fn provider_fixture_with_account(
         return;
     }
     if let ProviderFault::Read(fault) = fault {
-        assert_eq!(server.join().expect("read fixture server"), requests / 2);
+        assert_eq!(
+            server.join().unwrap_or_else(|error| panic!(
+                "read fixture server: {fault:?}; outcome={outcome:?}; {error:?}"
+            )),
+            requests / 2
+        );
         read_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         return;
     }
@@ -1715,6 +2878,12 @@ fn provider_fixture_with_account(
         return;
     }
     if let ProviderFault::Combined(fault) = fault {
+        if fault == CombinedFault::BoundaryAfterAction {
+            assert!(
+                matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+                "{outcome:?}"
+            );
+        }
         assert_eq!(
             server.join().expect("combined fixture server"),
             requests / 2
@@ -1731,7 +2900,9 @@ fn provider_fixture_with_account(
                 .count(),
             if matches!(
                 fault,
-                ExtractionFault::WrongSchema | ExtractionFault::ExpandedScope
+                ExtractionFault::WrongSchema
+                    | ExtractionFault::ExpandedScope
+                    | ExtractionFault::EmptyEvidence
             ) {
                 1
             } else {
@@ -1788,7 +2959,17 @@ fn provider_fixture_with_account(
             assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
             assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
             assert_eq!(closed.policy_settlement().closure().effects(), 0);
-            if matches!(
+            if fault == ExtractionFault::EmptyEvidence {
+                assert_eq!(closed.policy_settlement().closure().model_calls(), 1);
+                assert_eq!(
+                    closed.policy_settlement().closure().outcome(),
+                    AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+                );
+                assert_eq!(
+                    closed.failure(),
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::NoExtractionEvidence)
+                );
+            } else if matches!(
                 fault,
                 ExtractionFault::CancelCount | ExtractionFault::CancelStream
             ) {
@@ -1817,6 +2998,30 @@ fn provider_fixture_with_account(
                 );
             }
         }
+        return;
+    }
+    if matches!(
+        fault,
+        ProviderFault::HumanRequest
+            | ProviderFault::HumanRequestTakeover
+            | ProviderFault::HumanExtractionRequest
+    ) {
+        let AgentWorkOutcome::WaitingForHuman(waiting) = outcome else {
+            panic!("model handoff must be a clean waiting outcome: {outcome:?}");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(waiting.request().reason(), AgentBrowserHumanReason::SignIn);
+        assert!(waiting.request().retained_resource().is_none());
+        assert_eq!(
+            waiting.closure().outcome(),
+            AgentRunProgressOutcome::Failed(AgentSupervisorFailure::PolicyDenied)
+        );
+        assert_eq!(waiting.closure().effects(), 0);
+        assert_eq!(waiting.closure().model_calls(), 1);
+        assert!(events.iter().any(|event| event.kind()
+            == AgentWorkEventKind::ModelRequestedHuman(AgentBrowserHumanReason::SignIn)));
+        assert_eq!(server.join().expect("fixture server"), 1);
         return;
     }
     if matches!(
@@ -1854,6 +3059,22 @@ fn provider_fixture_with_account(
             event.kind(),
             AgentWorkEventKind::Verified | AgentWorkEventKind::Terminal
         )));
+        assert_eq!(server.join().unwrap(), 1);
+        return;
+    }
+    if fault == ProviderFault::Native(Fault::ScrollVerification) {
+        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+            panic!("completed failed scroll must close: {outcome:?}");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+        assert_eq!(closed.policy_settlement().closure().effects(), 1);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.kind(), AgentWorkEventKind::ActionUnverified(_))));
+        assert!(!events
+            .iter()
+            .any(|event| event.kind() == AgentWorkEventKind::Verified));
         assert_eq!(server.join().unwrap(), 1);
         return;
     }
@@ -1920,7 +3141,7 @@ fn provider_fixture_with_account(
         assert_eq!(server.join().expect("fixture server"), requests / 2);
         return;
     }
-    let AgentWorkOutcome::Recovery(recovery) = outcome else {
+    let AgentWorkOutcome::Recovery(mut recovery) = outcome else {
         panic!("native debt cannot close: {fault:?}: {outcome:?}");
     };
     if fault == ProviderFault::Ceiling {
@@ -2007,6 +3228,14 @@ fn provider_fixture_with_account(
             1
         }
     );
+    if fault == ProviderFault::Native(Fault::ActionCallback) {
+        let session = recovery.state.session.as_mut().unwrap();
+        crate::work_reinspection::tests::exercise(
+            session.action.as_mut().unwrap(),
+            session.account,
+        );
+        assert_eq!(session.policy.pending_effects(), 0);
+    }
     assert_eq!(server.join().expect("fixture server"), requests / 2);
 }
 
@@ -2293,4 +3522,38 @@ fn product_backpressure_is_bounded_sticky_and_content_free() {
         Err(AgentWorkFailure::Backpressure)
     );
     assert!(!format!("{:?}", events.queue).contains("work-fixture"));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn completed_unverified_read_scroll_closes_without_replay_or_native_debt() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Native(Fault::ScrollVerification));
+}
+
+#[test]
+fn isolated_storage_requirement_preserves_the_approved_scope_and_deadline() {
+    let input = input();
+    let original = input.retained_resource_spec().unwrap();
+    let manifest = (
+        input.manifest.id(),
+        input.manifest.budget(),
+        input.manifest.scope().max_sensitivity(),
+        input.manifest.scope().accounts().to_vec(),
+    );
+    let isolated = input.with_isolated_website_data();
+    let spec = isolated.retained_resource_spec().unwrap();
+    assert!(spec.isolated_public);
+    assert_eq!(spec.identity, original.identity);
+    assert_eq!(spec.target, original.target);
+    assert_eq!(spec.deadline, original.deadline);
+    assert_eq!(
+        (
+            isolated.manifest.id(),
+            isolated.manifest.budget(),
+            isolated.manifest.scope().max_sensitivity(),
+            isolated.manifest.scope().accounts().to_vec()
+        ),
+        manifest
+    );
 }

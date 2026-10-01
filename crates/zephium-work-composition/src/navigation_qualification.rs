@@ -7,9 +7,66 @@ use zephium_agentic::*;
 
 #[path = "navigation_qualification_input.rs"]
 mod input;
+#[cfg(any(
+    feature = "discovery-qualification",
+    feature = "retained-product-qualification"
+))]
+pub(crate) use input::load_configured_request;
 pub use input::load_request;
+#[path = "navigation_qualification_observer.rs"]
+mod observer;
+pub use observer::{cancel, ApplicationObserver, ApplicationReport};
 
 const ORIGIN: &str = "https://react.dev";
+const MAX_HOPS: u64 = 1;
+const DISCOVERY: bool = false;
+
+pub(crate) struct QualificationDefinition {
+    pub initial: &'static str,
+    pub document_policy: WorkBrowserDocumentPolicy,
+    pub origin: &'static str,
+    pub task_name: &'static str,
+    pub retention_name: &'static str,
+    pub objective: &'static str,
+    pub task: fn(ContextIdentity) -> Result<Box<dyn AgentWorkTask>, AgentWorkFailure>,
+    pub authority: fn(AgentPlanNodeAuthority) -> Result<AgentPlanNodeAuthority, &'static str>,
+    pub configure_request: fn(crate::TrustedWorkRequest) -> crate::TrustedWorkRequest,
+    pub max_hops: u64,
+    pub inspection: bool,
+    pub verify_owned: fn(&SemanticOwnedExtractionResult) -> bool,
+}
+const DEFINITION: QualificationDefinition = QualificationDefinition {
+    initial: "https://react.dev/learn",
+    document_policy: WorkBrowserDocumentPolicy::Exact,
+    origin: ORIGIN,
+    task_name: "react-one-hop-v1",
+    retention_name: "stateless",
+    objective: OBJECTIVE,
+    task,
+    authority,
+    configure_request,
+    max_hops: MAX_HOPS,
+    inspection: DISCOVERY,
+    verify_owned,
+};
+
+impl QualificationDefinition {
+    pub(crate) fn configuration_diagnostic(&self) -> String {
+        format!("work-application-navigation-config: provider=OpenAIResponses model=gpt-5.6-luna retention={} task={}", self.retention_name, self.task_name)
+    }
+}
+
+/// Content-free configuration of the exact statically selected witness.
+pub fn configuration_diagnostic() -> String {
+    DEFINITION.configuration_diagnostic()
+}
+
+fn authority(authority: AgentPlanNodeAuthority) -> Result<AgentPlanNodeAuthority, &'static str> {
+    Ok(authority)
+}
+fn configure_request(request: crate::TrustedWorkRequest) -> crate::TrustedWorkRequest {
+    request
+}
 const DESTINATION: &str = "https://react.dev/learn/your-first-component";
 const DEPARTURE: &str = "Quick Start";
 const ARRIVAL: &str = "Your First Component";
@@ -189,8 +246,9 @@ impl AgentWorkTask for ReactNavigationTask {
         } else {
             0
         };
-        // Only this closed qualifier's newly constructed ephemeral profile is
-        // in scope: no imported session, credential input, action or auth step.
+        // Only this closed qualifier's fresh isolated application profile (or
+        // the standalone host's new ephemeral profile) is in scope: no imported
+        // session, credential input, action or auth step.
         // Its isolated anonymous basis is sampled once per verified document;
         // cached samples never renew. This is not login/account detection.
         let sample = AgentContextAccountBinding::new(

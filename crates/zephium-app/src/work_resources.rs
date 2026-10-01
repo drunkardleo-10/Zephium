@@ -2,8 +2,9 @@
 //!
 //! The original owner has no actor-runtime, journal or Store admission authority.
 //! Its opt-in child supplies only the common controller's narrow lease facade;
-//! durable/scoped product admission must precede exposure from the shell.
-#![allow(dead_code)] // Private until the independently reviewed product admission cut.
+//! Its private application child joins scoped/durable actor admission; selected
+//! profile construction and Shell attachment live in the bounded product child.
+#![allow(dead_code)] // Other private resource primitives await explicit product joins.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -15,6 +16,34 @@ use zephium_core::ids::ProfileId;
 #[cfg(feature = "work-execution")]
 #[path = "work_resources_controller.rs"]
 mod controller;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_navigation.rs"]
+mod navigation;
+#[cfg(feature = "work-execution")]
+use navigation::PendingNavigation;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_action.rs"]
+mod action;
+#[cfg(feature = "work-execution")]
+use action::PendingAction;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_application.rs"]
+mod application;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_product.rs"]
+pub(super) mod product;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_shutdown.rs"]
+mod shutdown;
+
+#[cfg(feature = "work-execution")]
+#[path = "work_resources_wait.rs"]
+mod wait;
 
 #[cfg(feature = "work-execution-probe")]
 #[path = "work_resources_probe.rs"]
@@ -47,6 +76,8 @@ struct Notifications {
     wake: WakeApplication,
     #[cfg(feature = "work-execution")]
     actors: Mutex<Vec<std::sync::Weak<controller::LeaseSignal>>>,
+    #[cfg(feature = "work-execution")]
+    epoch: wait::NotificationEpoch,
 }
 impl Notifications {
     fn publish(&self) -> bool {
@@ -61,6 +92,10 @@ impl Notifications {
         }
         #[cfg(feature = "work-execution")]
         self.publish_actor_wakes();
+        #[cfg(feature = "work-execution")]
+        if !self.epoch.publish() {
+            self.failed.store(true, Ordering::Release);
+        }
         !self.failed.load(Ordering::Acquire)
     }
 }
@@ -78,6 +113,9 @@ struct Resource {
     failed: AtomicBool,
     flights: AtomicUsize,
     reads: AtomicUsize,
+    navigations: AtomicUsize,
+    actions: AtomicUsize,
+    orphaned_actions: AtomicUsize,
     reusable: AtomicBool,
     slots: Mutex<Vec<OwnedSlot>>,
     facade: Mutex<Option<WorkBrowserExecutionLease>>,
@@ -119,7 +157,8 @@ impl Resource {
                 index += 1;
             }
         }
-        // One lifecycle, one read and one overtaking destruction maximum.
+        // One lifecycle, one document operation (read/navigation/action), and one
+        // overtaking destruction maximum; the core enforces the exclusion.
         let result = if slots.len() >= 3 {
             self.fail();
             Err(Refusal::Busy)
@@ -202,6 +241,8 @@ impl WorkResourceOwner {
             wake,
             #[cfg(feature = "work-execution")]
             actors: Mutex::new(Vec::with_capacity(MAX_LIVE_CONTEXTS)),
+            #[cfg(feature = "work-execution")]
+            epoch: wait::NotificationEpoch::default(),
         });
         // Resource-local events use their exact sticky observer, not this lane.
         // Only original global audit events belong here. Overflow/unexpected
@@ -310,13 +351,48 @@ impl WorkResourceOwner {
         policy: zephium_agentic::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
+        self.construct_isolated(id, context, storage, target, policy, false, None, None, now)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn construct_isolated(
+        &self,
+        id: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        target: ContextNavigationTarget,
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+        isolated_public: bool,
+        anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+        construction_window: Option<(
+            zephium_agentic::WorkBrowserConstructionAttempt,
+            std::time::Instant,
+        )>,
+        now: AgentPolicyInstant,
+    ) -> Result<PendingLifecycle, Refusal> {
         if !self.shared.global_current() {
             return Err(Refusal::Uncertain);
         }
-        let request = self
-            .shared
-            .lock_rows()?
-            .construct_document_with_policy(id, context, storage, target, policy, now)?;
+        let request = self.shared.lock_rows()?.construct_document_with_isolation(
+            id,
+            context,
+            storage,
+            target,
+            policy,
+            isolated_public,
+            now,
+        )?;
+        let request = match anonymous_session {
+            Some(session) => request
+                .with_anonymous_session(session)
+                .map_err(|_| Refusal::Uncertain)?,
+            None => request,
+        };
+        let request = match construction_window {
+            Some((attempt, deadline)) => request
+                .with_construction_window(attempt, deadline)
+                .map_err(|_| Refusal::Uncertain)?,
+            None => request,
+        };
         let (request, mut health) = request
             .track_resource_health()
             .map_err(|_| Refusal::Uncertain)?;
@@ -329,6 +405,9 @@ impl WorkResourceOwner {
             failed: AtomicBool::new(false),
             flights: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
+            navigations: AtomicUsize::new(0),
+            actions: AtomicUsize::new(0),
+            orphaned_actions: AtomicUsize::new(0),
             reusable: AtomicBool::new(false),
             slots: Mutex::new(Vec::with_capacity(3)),
             facade: Mutex::new(None),
@@ -349,6 +428,7 @@ impl WorkResourceOwner {
         let resource = self.shared.resource(join)?;
         self.shared.current(&resource)?;
         if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
             || !resource.reusable.load(Ordering::Acquire)
         {
             return Err(Refusal::Busy);
@@ -388,12 +468,52 @@ impl WorkResourceOwner {
             || !resource.current()
             || !matches!(
                 self.shared.lock_rows()?.phase(join)?,
-                WorkBrowserResourcePhase::Retained | WorkBrowserResourcePhase::Destroyed
+                WorkBrowserResourcePhase::Retained
+                    | WorkBrowserResourcePhase::Destroyed
+                    | WorkBrowserResourcePhase::PresentingHuman
+                    | WorkBrowserResourcePhase::PresentedHuman
+                    | WorkBrowserResourcePhase::ContinuingAfterHuman
             )
         {
             self.shared.lock_rows()?.quarantine(join)?;
         }
         let request = self.shared.lock_rows()?.destroy(join)?;
+        PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+    }
+
+    fn human_lifecycle(
+        &self,
+        join: &WorkBrowserResourceJoin,
+        step: application::HumanStep,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> Result<PendingLifecycle, Refusal> {
+        let resource = self.shared.resource(join)?;
+        self.shared.current(&resource)?;
+        if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
+        {
+            return Err(Refusal::Busy);
+        }
+        let request = match step {
+            application::HumanStep::Present(..) | application::HumanStep::HandOver
+                if !resource.reusable.load(Ordering::Acquire) =>
+            {
+                return Err(Refusal::Busy);
+            }
+            application::HumanStep::Present(region, sign_in) => self
+                .shared
+                .lock_rows()?
+                .present_human_for(join, region, now, deadline, sign_in)?,
+            application::HumanStep::HandOver => self
+                .shared
+                .lock_rows()?
+                .hand_over_unpresented(join, now, deadline)?,
+            application::HumanStep::Continue => {
+                self.shared.lock_rows()?.continue_after_human(join, now)?
+            }
+        };
+        resource.reusable.store(false, Ordering::Release);
         PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
     }
 
@@ -408,6 +528,7 @@ impl WorkResourceOwner {
     ) -> Result<WorkBrowserResourceIdentity, Refusal> {
         let resource = self.shared.resource(join)?;
         if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
             || !resource.lock_local(&resource.health)?.reporter_retired()
         {
             return Err(Refusal::Busy);
@@ -439,6 +560,7 @@ impl WorkResourceOwner {
             && self.shared.lock_resources().is_ok_and(|resources| {
                 resources.values().all(|resource| {
                     resource.flights.load(Ordering::Acquire) == 0
+                        && resource.orphaned_actions.load(Ordering::Acquire) == 0
                         && resource.lock_local(&resource.health).is_ok_and(|health| {
                             health.reporter_retired()
                                 && matches!(
@@ -634,6 +756,8 @@ struct Flight<T> {
     abandoned: bool,
     contradictory: bool,
     read: bool,
+    navigation: bool,
+    action: bool,
 }
 impl<T: Send + 'static> Flight<T> {
     fn new(
@@ -666,6 +790,8 @@ impl<T: Send + 'static> Flight<T> {
                 abandoned: false,
                 contradictory: false,
                 read,
+                navigation: false,
+                action: false,
             },
             callback,
         )
@@ -702,6 +828,12 @@ impl<T: Send + 'static> Flight<T> {
             resource.flights.fetch_sub(1, Ordering::AcqRel);
             if self.read {
                 resource.reads.fetch_sub(1, Ordering::AcqRel);
+            }
+            if self.navigation {
+                resource.navigations.fetch_sub(1, Ordering::AcqRel);
+            }
+            if self.action {
+                resource.actions.fetch_sub(1, Ordering::AcqRel);
             }
         }
     }
@@ -812,7 +944,11 @@ impl LifecycleOperation {
         // Native read callbacks can be physically returned but still queued in
         // their original application slot. Settle those exact reads before the
         // core's zero-read revocation terminal; never infer drain from order.
-        if self.delivery.is_some() && resource.reads.load(Ordering::Acquire) != 0 {
+        if self.delivery.is_some()
+            && (resource.reads.load(Ordering::Acquire) != 0
+                || resource.navigations.load(Ordering::Acquire) != 0
+                || resource.actions.load(Ordering::Acquire) != 0)
+        {
             return Ok(None);
         }
         if self.ended.is_none() {
@@ -1012,12 +1148,20 @@ impl ReadOperation {
 enum OwnedSlot {
     Lifecycle(Arc<Mutex<LifecycleOperation>>),
     Read(Arc<Mutex<ReadOperation>>),
+    #[cfg(feature = "work-execution")]
+    Navigation(Arc<Mutex<navigation::NavigationOperation>>),
+    #[cfg(feature = "work-execution")]
+    Action(Arc<Mutex<action::ActionOperation>>),
 }
 impl OwnedSlot {
     fn is_poisoned(&self) -> bool {
         match self {
             Self::Lifecycle(slot) => slot.is_poisoned(),
             Self::Read(slot) => slot.is_poisoned(),
+            #[cfg(feature = "work-execution")]
+            Self::Navigation(slot) => slot.is_poisoned(),
+            #[cfg(feature = "work-execution")]
+            Self::Action(slot) => slot.is_poisoned(),
         }
     }
     fn finished(&self, resource: &Resource) -> bool {
@@ -1034,6 +1178,24 @@ impl OwnedSlot {
             },
             Self::Read(slot) => match slot.try_lock() {
                 Ok(slot) => slot.flight.finished,
+                Err(TryLockError::Poisoned(_)) => {
+                    resource.fail();
+                    false
+                }
+                Err(TryLockError::WouldBlock) => false,
+            },
+            #[cfg(feature = "work-execution")]
+            Self::Navigation(slot) => match slot.try_lock() {
+                Ok(slot) => slot.flight.finished,
+                Err(TryLockError::Poisoned(_)) => {
+                    resource.fail();
+                    false
+                }
+                Err(TryLockError::WouldBlock) => false,
+            },
+            #[cfg(feature = "work-execution")]
+            Self::Action(slot) => match slot.try_lock() {
+                Ok(slot) => slot.finished(),
                 Err(TryLockError::Poisoned(_)) => {
                     resource.fail();
                     false
@@ -1060,6 +1222,20 @@ impl OwnedSlot {
                 if slot.flight.abandoned && !slot.flight.finished {
                     let _ = slot.poll(shared, resource, now);
                 }
+            }
+            #[cfg(feature = "work-execution")]
+            Self::Navigation(slot) => {
+                let mut slot = resource.lock_local(slot)?;
+                if slot.flight.abandoned && !slot.flight.finished {
+                    // This only drains resource ownership after abandonment.
+                    // The lost controller policy receipt remains recovery debt.
+                    let _ = slot.poll(shared, resource, now);
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Self::Action(slot) => {
+                let mut slot = resource.lock_local(slot)?;
+                slot.drain_abandoned(shared, resource, now);
             }
         }
         Ok(())

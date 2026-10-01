@@ -1,0 +1,50 @@
+[
+  {
+    "link": {
+      "extraction_id": "01M34YA0R8S2EYS7B2ZVVK72JP",
+      "source_id": 67
+    },
+    "link_destination": "https://www.lego.com/en-us/product/tower-bridge-21067",
+    "origin": "https://www.lego.com/",
+    "role": "link",
+    "source": {
+      "kind": "native_extraction"
+    },
+    "source_bytes": "53",
+    "text": "https://www.lego.com/en-us/product/tower-bridge-21067",
+    "truncated": false,
+    "version": 1
+  },
+  {
+    "link": {
+      "extraction_id": "01M34YA0R8S2EYS7B2ZVVK72JP",
+      "source_id": 80
+    },
+    "link_destination": "https://www.lego.com/en-us/product/architecture-21064-21064",
+    "origin": "https://www.lego.com/",
+    "role": "link",
+    "source": {
+      "kind": "native_extraction"
+    },
+    "source_bytes": "59",
+    "text": "https://www.lego.com/en-us/product/architecture-21064-21064",
+    "truncated": false,
+    "version": 1
+  },
+  {
+    "link": {
+      "extraction_id": "01M34YA0R8S2EYS7B2ZVVK72JP",
+      "source_id": 93
+    },
+    "link_destination": "https://www.lego.com/en-us/product/new-york-city-the-big-apple-21066",
+    "origin": "https://www.lego.com/",
+    "role": "link",
+    "source": {
+      "kind": "native_extraction"
+    },
+    "source_bytes": "68",
+    "text": "https://www.lego.com/en-us/product/new-york-city-the-big-apple-21066",
+    "truncated": false,
+    "version": 1
+  }
+]

@@ -11,36 +11,6 @@ native-isolation-probes = []
 # Builds the local-origin WKWebView page-permission denial/deferral probe. It
 # never resolves native Allow or grants device authority.
 native-page-permission-probes = []
-# Builds the macOS 15.4+ WKWebExtension behavioral and lifecycle probe. This
-# remains separate from native-isolation-probes so ordinary builds do not carry
-# the probe fixture, delegate graph, HTTP harness, or diagnostic surfaces.
-native-web-extension-probes = [
-    "dep:tempfile",
-    "dep:sha2",
-    "dep:serde",
-    "objc2-web-kit/WKWebExtension",
-    "objc2-web-kit/WKWebExtensionAction",
-    "objc2-web-kit/WKWebExtensionContext",
-    "objc2-web-kit/WKWebExtensionController",
-    "objc2-web-kit/WKWebExtensionControllerConfiguration",
-    "objc2-web-kit/WKWebExtensionDataRecord",
-    "objc2-web-kit/WKWebExtensionDataType",
-    "objc2-web-kit/WKWebExtensionMatchPattern",
-    "objc2-web-kit/WKWebExtensionMessagePort",
-    "objc2-web-kit/WKWebExtensionPermission",
-    "objc2-web-kit/WKHTTPCookieStore",
-    "objc2-web-kit/WKURLSchemeHandler",
-    "objc2-web-kit/WKURLSchemeTask",
-]
-# Adds only redacted native-adapter phase diagnostics consumed by the separate
-# authenticated product-path probe. Ordinary engine and desktop builds do not
-# compile these diagnostics.
-native-extension-product-probes = []
-# Enables inspectable native extension contexts and content views only in the
-# separately identified private browser lab. Popovers remain transient unless
-# the explicit inspector-retention environment switch is set. Shipping
-# contexts and content remain non-inspectable and transient.
-native-extension-lab-diagnostics = []
 # Compiles the intentionally non-product Windows CDP feasibility harness. The
 # default product must not contain this path until Phase 0a's live gates pass.
 windows-cdp-spike = []
@@ -69,9 +39,17 @@ native-agentic-foreground-probe = ["native-agentic-semantic-probe"]
 # Two execution leases over one page in that same actual-app qualification shell.
 native-agentic-work-resource-probe = ["native-agentic-foreground-probe"]
 native-agentic-public-resource-probe = ["native-agentic-work-resource-probe"]
+# Content-free first lifetime-failure cause; no witness or rendering authority.
+native-agentic-work-lifetime-diagnostic = ["agentic-browser"]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]
+agentic-browser-qa = ["agentic-browser", "objc2-web-kit/WKHTTPCookieStore"]
+
+[[bin]]
+name = "macos-agentic-liveness-probe"
+path = "src/bin/macos_agentic_liveness_probe.rs"
+required-features = ["agentic-browser-qa"]
 
 [[bin]]
 name = "macos-principal-isolation-probe"
@@ -82,36 +60,6 @@ required-features = ["native-isolation-probes"]
 name = "macos-page-permission-probe"
 path = "src/bin/macos_page_permission_probe.rs"
 required-features = ["native-page-permission-probes"]
-
-[[bin]]
-name = "macos-web-extension-probe"
-path = "src/bin/macos_web_extension_probe.rs"
-required-features = ["native-web-extension-probes"]
-
-[[bin]]
-name = "macos-bitwarden-core-probe"
-path = "src/bin/macos_bitwarden_core_probe.rs"
-required-features = ["native-web-extension-probes"]
-
-[[bin]]
-name = "macos-stock-password-manager-probe"
-path = "src/bin/macos_stock_password_manager_probe.rs"
-required-features = ["native-web-extension-probes"]
-
-[[bin]]
-name = "macos-web-extension-resource-probe"
-path = "src/bin/macos_web_extension_resource_probe.rs"
-required-features = ["native-web-extension-probes"]
-
-[[bin]]
-name = "macos-extension-compatibility-probe"
-path = "src/bin/macos_extension_compatibility_probe.rs"
-required-features = ["native-web-extension-probes"]
-
-[[bin]]
-name = "macos-vimium-probe"
-path = "src/bin/macos_vimium_probe.rs"
-required-features = ["native-web-extension-probes"]
 
 [[bin]]
 name = "macos-agentic-input-probe"
@@ -133,20 +81,14 @@ name = "windows-agentic-semantic-probe"
 path = "src/bin/windows_agentic_semantic_probe.rs"
 required-features = ["native-agentic-semantic-probe"]
 
-[[bin]]
-name = "macos-representative-extension-probe"
-path = "src/bin/macos_representative_extension_probe.rs"
-required-features = ["native-web-extension-probes"]
-
 [dependencies]
 zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
-zephium-extension-runtime-api.workspace = true
 wry.workspace = true
 dirs = "6"
 serde_json.workspace = true
+sha2 = "=0.10.9"
 serde = { workspace = true, optional = true }
-sha2 = { version = "=0.10.9", optional = true }
 tempfile = { workspace = true, optional = true }
 url.workspace = true
 zeroize = { version = "=1.9.0", optional = true }
@@ -154,13 +96,19 @@ zeroize = { version = "=1.9.0", optional = true }
 [dev-dependencies]
 tempfile.workspace = true
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+zephium-blocker = { workspace = true, features = ["runtime"] }
+flate2 = "=1.1.9"
+
 [target.'cfg(target_os = "windows")'.dependencies]
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 raw-window-handle.workspace = true
 webview2-com = "0.38"
 windows = { version = "0.61", features = [
     "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
@@ -208,6 +156,8 @@ objc2-security = { version = "0.3", default-features = false, features = [
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
     "objc2-app-kit",
+    "WKBackForwardList",
+    "WKBackForwardListItem",
     "WKDownload",
     "WKDownloadDelegate",
     "WKContentWorld",
@@ -215,7 +165,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKContentRuleListStore",
     "WKError",
     "WKNavigationAction",
+    "WKNavigation",
     "WKNavigationDelegate",
+    "WKUIDelegate",
+    "WKWindowFeatures",
     "WKPreferences",
     "WKFrameInfo",
     "WKScriptMessage",
@@ -223,21 +176,8 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKSnapshotConfiguration",
     "WKUserContentController",
     "WKUserScript",
-    "WKWebExtension",
     "WKWebExtensionAction",
-    "WKWebExtensionCommand",
-    "WKWebExtensionContext",
     "WKWebExtensionController",
-    "WKWebExtensionControllerConfiguration",
-    "WKWebExtensionControllerDelegate",
-    "WKWebExtensionDataRecord",
-    "WKWebExtensionDataType",
-    "WKWebExtensionMatchPattern",
-    "WKWebExtensionMessagePort",
-    "WKWebExtensionPermission",
-    "WKWebExtensionTab",
-    "WKWebExtensionTabConfiguration",
-    "WKWebExtensionWindow",
     "WKWebView",
     "WKWebViewConfiguration",
     "WKWebsiteDataRecord",
@@ -245,4 +185,5 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 ] }
 objc2-quartz-core = "0.3"
 raw-window-handle.workspace = true
-zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
+zephium-webext-macos = { path = "../zephium-webext-macos", version = "=0.1.0" }

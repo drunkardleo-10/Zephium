@@ -1,4 +1,5 @@
 use super::*;
+use zephium_core::ids::ProfileId;
 fn task() -> ResourceDraft {
     ResourceDraft {
         title: "Research a topic".into(),
@@ -44,16 +45,17 @@ fn durable_create_retry_conflict_trash_and_restore() {
     let path = dir.path().join("resources.sqlite");
     let mut conn = connection(&path);
     let create = command("create", ResourceIntent::Create { draft: task() });
-    let first = applied(mutate(&mut conn, create.clone()).unwrap());
+    let first = applied(mutate(&mut conn, ProfileId::from(1), create.clone()).unwrap());
     drop(conn);
     let mut conn = connection(&path);
-    let replay = applied(mutate(&mut conn, create.clone()).unwrap());
+    let replay = applied(mutate(&mut conn, ProfileId::from(1), create.clone()).unwrap());
     assert_eq!(first, replay);
     let mut draft = task();
     draft.title = "Changed".into();
     assert!(matches!(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             ResourceCommand {
                 intent: ResourceIntent::Create {
                     draft: draft.clone()
@@ -69,6 +71,7 @@ fn durable_create_retry_conflict_trash_and_restore() {
     let updated = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 "edit",
                 ResourceIntent::Replace {
@@ -84,6 +87,7 @@ fn durable_create_retry_conflict_trash_and_restore() {
     assert!(matches!(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 "stale",
                 ResourceIntent::Trash {
@@ -100,6 +104,7 @@ fn durable_create_retry_conflict_trash_and_restore() {
     let deleted = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 "trash",
                 ResourceIntent::Trash {
@@ -114,6 +119,7 @@ fn durable_create_retry_conflict_trash_and_restore() {
     let restored = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 "restore",
                 ResourceIntent::Restore {
@@ -231,6 +237,101 @@ fn acknowledged_updates_still_cannot_reapply_an_old_revision() {
 }
 
 #[test]
+fn schema28_widens_resource_kinds_and_keeps_receipts_joined() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("resources.sqlite");
+    let mut conn = Connection::open(&path).unwrap();
+    configure(&conn).unwrap();
+    migrations::apply(&mut conn, &migrations::PROFILE[..30]).unwrap();
+    let create = command("create", ResourceIntent::Create { draft: task() });
+    let first = applied(mutate(&mut conn, ProfileId::from(1), create.clone()).unwrap());
+    let bytes_before: i64 = conn
+        .query_row(
+            "SELECT bytes FROM user_resource_usage WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    migrations::apply(&mut conn, migrations::PROFILE).unwrap();
+    assert!(migrations::apply(&mut conn, &migrations::PROFILE[..30]).is_err());
+    conn.execute(
+        "INSERT INTO resource_titles_fts(resource_titles_fts) VALUES('integrity-check')",
+        [],
+    )
+    .unwrap();
+    let violations: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_foreign_key_check('user_resource_receipts')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(violations, 0);
+    let bytes_after: i64 = conn
+        .query_row(
+            "SELECT bytes FROM user_resource_usage WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bytes_before, bytes_after);
+    let joined: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM user_resource_receipts r JOIN user_resources u ON u.id=r.resource_id WHERE r.request_id=?1",
+            [&create.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(joined, 1);
+    let replay = applied(mutate(&mut conn, ProfileId::from(1), create).unwrap());
+    assert_eq!(replay.id, first.id);
+    let object = ResourceDraft {
+        title: "Shortlist".into(),
+        pinned: false,
+        content: ResourceContent::Object {
+            object: WorkObjectV1 {
+                version: 1,
+                data: zephium_core::work::artifact::WorkArtifactDataV1::Checklist {
+                    items: vec![zephium_core::work::artifact::WorkChecklistItem {
+                        text: "Compare pricing".into(),
+                        completed: false,
+                    }],
+                },
+                evidence: vec![],
+                provenance: None,
+            },
+        },
+        related: vec![],
+    };
+    let created = applied(
+        mutate(
+            &mut conn,
+            ProfileId::from(1),
+            command("object", ResourceIntent::Create { draft: object }),
+        )
+        .unwrap(),
+    );
+    assert_eq!(created.draft.kind(), ResourceKind::Object);
+    let page = list(
+        &conn,
+        ResourceQuery {
+            completed: None,
+            kind: ResourceKind::Object,
+            search: "pricing".into(),
+            trashed: false,
+            after: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    let ResourceResponse::Page { items, .. } = page else {
+        panic!("expected page");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].title, "Shortlist");
+}
+
+#[test]
 fn legacy_notes_are_read_out_once_and_never_written_again() {
     let mut hub = Hub::in_memory().unwrap();
     let profile = ProfileId::from(1);
@@ -341,7 +442,14 @@ fn a_listed_task_carries_everything_its_row_draws() {
         sort_key: Some("m".into()),
         work: None,
     };
-    applied(mutate(&mut conn, command("row", ResourceIntent::Create { draft })).unwrap());
+    applied(
+        mutate(
+            &mut conn,
+            ProfileId::from(1),
+            command("row", ResourceIntent::Create { draft }),
+        )
+        .unwrap(),
+    );
     let items = match list(
         &conn,
         ResourceQuery {
@@ -385,6 +493,7 @@ fn task_views_filter_before_paging_and_counts_ignore_search() {
     let old = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command("old-task", ResourceIntent::Create { draft: old }),
         )
         .unwrap(),
@@ -392,6 +501,7 @@ fn task_views_filter_before_paging_and_counts_ignore_search() {
     for index in 0..105 {
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 &format!("future-{index}"),
                 ResourceIntent::Create { draft: task() },
@@ -444,6 +554,7 @@ fn task_cursor_survives_boundary_deletion_and_rejects_other_views() {
     for index in 0..4 {
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 &format!("task-{index}"),
                 ResourceIntent::Create { draft: task() },
@@ -518,11 +629,13 @@ fn task_lists_preserve_tasks_and_replay_creation_exactly() {
             title: "Zephium".into(),
         },
     );
-    let ResourceResponse::TaskListApplied { list, .. } = mutate(&mut conn, create.clone()).unwrap()
+    let ResourceResponse::TaskListApplied { list, .. } =
+        mutate(&mut conn, ProfileId::from(1), create.clone()).unwrap()
     else {
         panic!()
     };
-    let ResourceResponse::TaskListApplied { list: replay, .. } = mutate(&mut conn, create).unwrap()
+    let ResourceResponse::TaskListApplied { list: replay, .. } =
+        mutate(&mut conn, ProfileId::from(1), create).unwrap()
     else {
         panic!()
     };
@@ -540,6 +653,7 @@ fn task_lists_preserve_tasks_and_replay_creation_exactly() {
     let record = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command("list-task", ResourceIntent::Create { draft }),
         )
         .unwrap(),
@@ -570,6 +684,7 @@ fn task_lists_preserve_tasks_and_replay_creation_exactly() {
     assert!(matches!(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 "remove-list",
                 ResourceIntent::DeleteTaskList {
@@ -604,6 +719,7 @@ fn task_completion_time_is_native_and_foreign_lists_are_rejected() {
     assert!(matches!(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command("foreign-list", ResourceIntent::Create { draft })
         )
         .unwrap(),
@@ -626,6 +742,7 @@ fn task_completion_time_is_native_and_foreign_lists_are_rejected() {
     let record = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command("complete-time", ResourceIntent::Create { draft }),
         )
         .unwrap(),
@@ -653,6 +770,7 @@ fn task_completion_time_is_native_and_foreign_lists_are_rejected() {
     let reopened = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command(
                 "reopen-time",
                 ResourceIntent::Replace {
@@ -677,6 +795,7 @@ fn field_updates_merge_independent_edits_and_refuse_stale_expectations() {
     let created = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             command("field-create", ResourceIntent::Create { draft: task() }),
         )
         .unwrap(),
@@ -695,6 +814,7 @@ fn field_updates_merge_independent_edits_and_refuse_stale_expectations() {
     applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             update(
                 "field-priority",
                 vec![TaskField::Priority {
@@ -708,6 +828,7 @@ fn field_updates_merge_independent_edits_and_refuse_stale_expectations() {
     let record = applied(
         mutate(
             &mut conn,
+            ProfileId::from(1),
             update(
                 "field-title",
                 vec![
@@ -745,6 +866,7 @@ fn field_updates_merge_independent_edits_and_refuse_stale_expectations() {
 
     let stale = mutate(
         &mut conn,
+        ProfileId::from(1),
         update(
             "field-stale",
             vec![TaskField::Title {
@@ -764,6 +886,7 @@ fn field_updates_merge_independent_edits_and_refuse_stale_expectations() {
     ));
     let invalid = mutate(
         &mut conn,
+        ProfileId::from(1),
         update(
             "field-invalid",
             vec![TaskField::Schedule {
@@ -806,7 +929,15 @@ fn a_deadline_places_a_task_by_whichever_day_comes_first() {
             *due_date = due.map(Into::into);
             details.deadline = deadline.map(Into::into);
         }
-        applied(mutate(&mut conn, command(key, ResourceIntent::Create { draft })).unwrap()).id
+        applied(
+            mutate(
+                &mut conn,
+                ProfileId::from(1),
+                command(key, ResourceIntent::Create { draft }),
+            )
+            .unwrap(),
+        )
+        .id
     };
     let missed = create("deadline-missed", Some("2026-09-30"), Some("2026-09-21"));
     let owed = create("deadline-today", None, Some("2026-09-22"));

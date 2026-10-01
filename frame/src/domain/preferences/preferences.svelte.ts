@@ -17,6 +17,8 @@ const defaults = {
   "ui.newtab-clock-format": "system",
   "ui.newtab-tasks": "true",
   "ui.tab-layout": "vertical",
+  "ai.enabled": "true",
+  "work.enabled": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });

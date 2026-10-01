@@ -8,11 +8,14 @@ build = false
 
 [features]
 default = []
+decision-eval = ["live-probe", "dep:zephium-agent-model-catalog", "dep:zephium-decision", "zephium-decision/evals"]
+durable-runtime = ["live-probe", "zephium-agentic/probe-harness", "zephium-work-composition/durable-runtime", "zephium-work-composition/retained-lifetime-diagnostic", "dep:zephium-agent-model-catalog"]
 live-probe = [
     "dep:zephium-app",
     "zephium-agent-controller/probe-harness",
     "zephium-agent-provider-transport/probe-harness",
     "zephium-engine/native-agentic-semantic-probe",
+    "zephium-engine/agentic-browser-qa",
     "zephium-work-composition/public-qualification",
     "zephium-work-composition/navigation-qualification",
 ]
@@ -23,9 +26,13 @@ path = "src/main.rs"
 required-features = ["live-probe"]
 
 [dependencies]
+zephium-agent-model-catalog = { workspace = true, optional = true }
+serde_json.workspace = true
+zephium-ipc.workspace = true
 zephium-agent-controller.workspace = true
 zephium-agent-provider-transport.workspace = true
 zephium-agentic.workspace = true
+zephium-decision = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-agent-runtime.workspace = true
 zephium-store.workspace = true
@@ -34,6 +41,5 @@ zephium-app = { workspace = true, optional = true }
 zephium-work-composition.workspace = true
 zephium-blocker = { workspace = true, features = ["webkit"] }
 zephium-blocker-service.workspace = true
-zephium-extension-service.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }

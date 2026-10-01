@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "work": {
+    "lifecycle": "active",
+    "objective_revision": "1",
+    "context_revision": "1",
+    "objective_author": "user",
+    "schema_version": 2,
+    "id": "00000000000000000000000002",
+    "profile": "00000000000000000000000001",
+    "revision": "3",
+    "objective": "Prepare a release checklist",
+    "status": "plan_ready",
+    "plan": {
+      "author": "primary_agent",
+      "revision": "2",
+      "basis_revision": "1",
+      "draft": {
+        "id": "00000000000000000000000003",
+        "nodes": [
+          {
+            "id": "00000000000000000000000004",
+            "objective": "Prepare a checklist of release checks",
+            "dependencies": [],
+            "outputs": [
+              {
+                "name": "checklist",
+                "description": "A release checklist ready for human review",
+                "review": "user_acceptance"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "questions": []
+  },
+  "executions": [
+    {
+      "id": "00000000000000000000000005",
+      "approved_revision": "3",
+      "spec": {
+        "plan_revision": "2",
+        "limits": {
+          "model_tokens": 8000,
+          "cost_micro_usd": 10000,
+          "operations": 32,
+          "timeout_seconds": 300,
+          "max_workers": 1
+        },
+        "nodes": [
+          {
+            "node": "00000000000000000000000004",
+            "parent": null,
+            "capability": {
+              "kind": "synthesize"
+            },
+            "limits": {
+              "model_tokens": 8000,
+              "cost_micro_usd": 10000,
+              "operations": 32,
+              "timeout_seconds": 300,
+              "max_workers": 1
+            }
+          }
+        ]
+      },
+      "status": "approved",
+      "attempts": [],
+      "artifacts": []
+    }
+  ],
+  "interrupted": []
+}

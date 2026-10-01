@@ -12,15 +12,15 @@ test ! -L "${probe}"
 for invariant in \
   'private let maximumArtifactBytes: Int64 = 32 * 1024 * 1024' \
   'private let nativeDeadlineSeconds: TimeInterval = 170' \
-  'private let productionColdCompileBudgetSeconds: TimeInterval = 120' \
+  'private let productionColdCompileBudgetSeconds: TimeInterval = 15' \
   'O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK' \
   '(before.st_mode & S_IFMT) == S_IFREG' \
   'before.st_nlink == 1' \
   'blocker artifact changed while it was being admitted' \
   'private let identifierPrefix = "app.zephium.rules.v1."' \
   'private let artifactDigestDomain = Data("zephium-webkit-content-rules".utf8)' \
-  'private let artifactFormatVersion: UInt32 = 3' \
-  '"013ba907e71408a63231b458c48858021c1aff559937ce20de6ed431aeed7a6a"' \
+  'private let artifactFormatVersion: UInt32 = 4' \
+  '"46ae68d21f9f81cb816c113d9cd4d4246fe61e9b13c26f8db314e42a67186a29"' \
   'guard digest == expectedReleaseArtifactDigest else' \
   'let store = WKContentRuleListStore(url: cacheURL)' \
   'store.compileContentRuleList(' \
@@ -68,7 +68,7 @@ test "$(
 test "$(grep -Fc 'scripts/ci/probe_macos_blocker_seed.swift' "${workflow}")" -eq 1
 test "$(
   grep -Fc \
-    'const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);' \
+    'const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);' \
     "${engine_policy}"
 )" -eq 1
 

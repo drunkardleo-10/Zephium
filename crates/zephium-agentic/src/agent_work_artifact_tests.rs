@@ -2,6 +2,7 @@ use super::*;
 
 fn document() -> ArchivedDocument {
     ArchivedDocument {
+        page_title: None,
         version: 1,
         id: [1; 16],
         profile: 2_u128.into(),
@@ -44,6 +45,10 @@ fn document() -> ArchivedDocument {
             },
         ],
         sources: vec![ArchivedSource {
+            fields_complete: None,
+            observation: None,
+            observation_generation: None,
+            captured_millis: None,
             id: 1,
             origin: "https://artifact.fixture.invalid/".into(),
             role: "paragraph".into(),
@@ -61,6 +66,29 @@ fn document() -> ArchivedDocument {
                 value: "Fixture label".into(),
             },
         }],
+    }
+}
+
+#[test]
+fn archived_page_title_is_optional_bounded_and_restart_readable() {
+    let old = document();
+    let (_, bytes) = encode(&old);
+    assert!(!std::str::from_utf8(&bytes).unwrap().contains("page_title"));
+    let mut titled = document();
+    titled.version = 8;
+    titled.page_title = Some("Observed page title".into());
+    for source in &mut titled.sources {
+        source.observation = Some(4);
+        source.observation_generation = Some(1);
+        source.captured_millis = Some(5);
+    }
+    let (descriptor, bytes) = encode(&titled);
+    let archived = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert_eq!(archived.page_title(), Some("Observed page title"));
+    assert!(!format!("{archived:?}").contains("Observed page title"));
+    for title in ["x".repeat(513), "bad\ntitle".into(), String::new()] {
+        titled.page_title = Some(title);
+        assert!(titled.validate().is_err());
     }
 }
 
@@ -147,6 +175,24 @@ fn archive_identity_digest_length_and_canonical_encoding_are_exact() {
         MAX_AGENT_WORK_ARTIFACT_BYTES as u32 + 1
     )
     .is_none());
+}
+
+#[test]
+fn archive_v2_preserves_individual_source_capture_lineage_and_rejects_partial_metadata() {
+    let mut document = document();
+    document.version = 2;
+    document.sources[0].observation = Some(31);
+    document.sources[0].observation_generation = Some(2);
+    document.sources[0].captured_millis = Some(101);
+    let (descriptor, bytes) = encode(&document);
+    let result = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    let source = &result.document.sources[0];
+    assert_eq!(source.observation(), Some(31));
+    assert_eq!(source.observation_generation(), Some(2));
+    assert_eq!(source.captured_millis(), Some(101));
+    document.sources[0].captured_millis = None;
+    let (descriptor, bytes) = encode(&document);
+    assert!(AgentWorkArchivedExtraction::decode(descriptor, &bytes).is_err());
 }
 
 #[test]
@@ -237,4 +283,177 @@ fn preview_provenance_rejects_false_truncation_and_kind_joins() {
             accepted
         );
     }
+}
+
+#[test]
+fn record_archive_roundtrip_preserves_cells_and_refuses_nesting_or_foreign_sources() {
+    let mut doc = document();
+    doc.version = 3;
+    for source in &mut doc.sources {
+        source.observation = Some(4);
+        source.observation_generation = Some(1);
+        source.captured_millis = Some(5);
+    }
+    let row = doc.fields.drain(..3).collect::<Vec<_>>();
+    doc.fields = vec![ArchivedField {
+        name: "records".into(),
+        value: ArchivedValue::Rows { items: vec![row] },
+    }];
+    let (descriptor, bytes) = encode(&doc);
+    let archive = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    let ArchivedValue::Rows { items } = archive.fields()[0].value() else {
+        panic!()
+    };
+    assert_eq!(items[0].len(), 3);
+    let ArchivedValue::Unsigned { value, sources } = items[0][2].value() else {
+        panic!()
+    };
+    assert_eq!(*value, 12);
+    assert!(archive.source(sources[0]).is_some());
+    doc.version = 2;
+    assert!(doc.validate().is_err());
+    doc.version = 3;
+    let ArchivedValue::Rows { items } = &mut doc.fields[0].value else {
+        panic!()
+    };
+    items[0][2].value = ArchivedValue::Unsigned {
+        value: 12,
+        sources: vec![999],
+    };
+    assert!(doc.validate().is_err());
+    let ArchivedValue::Rows { items } = &mut doc.fields[0].value else {
+        panic!()
+    };
+    items[0][2].value = ArchivedValue::Rows { items: vec![] };
+    assert!(doc.validate().is_err());
+}
+
+#[test]
+fn url_archive_roundtrip_revalidates_version_destination_and_source_kind() {
+    let mut d = document();
+    d.version = 4;
+    let url = "https://shop.example.test/product/42";
+    d.fields = vec![ArchivedField {
+        name: "url".into(),
+        value: ArchivedValue::Url {
+            value: url.into(),
+            sources: vec![1],
+        },
+    }];
+    let source = &mut d.sources[0];
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    source.role = "link".into();
+    source.field = 6;
+    source.content = ArchivedSourceContent::Preview {
+        value: url.into(),
+        source_bytes: url.len() as u64,
+        truncated: false,
+    };
+    let (descriptor, bytes) = encode(&d);
+    let decoded = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert!(
+        matches!(decoded.fields()[0].value(), ArchivedValue::Url { value, .. } if value == url)
+    );
+    assert_eq!(decoded.source(1).unwrap().link_destination(), Some(url));
+    d.version = 3;
+    assert!(d.validate().is_err());
+    d.version = 4;
+    d.sources[0].field = 3;
+    assert!(d.validate().is_err());
+    d.sources[0].field = 6;
+    d.fields[0].value = ArchivedValue::Url {
+        value: "https://shop.example.test/product/43".into(),
+        sources: vec![1],
+    };
+    assert!(d.validate().is_err());
+}
+#[test]
+fn image_archive_roundtrip_revalidates_version_destination_and_source_kind() {
+    let mut d = document();
+    d.version = 5;
+    let url = "https://shop.example.test/product/42";
+    d.fields = vec![ArchivedField {
+        name: "url".into(),
+        value: ArchivedValue::ImageUrl {
+            value: url.into(),
+            sources: vec![1],
+        },
+    }];
+    let source = &mut d.sources[0];
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    source.role = "image".into();
+    source.field = 7;
+    source.content = ArchivedSourceContent::Preview {
+        value: url.into(),
+        source_bytes: url.len() as u64,
+        truncated: false,
+    };
+    let (descriptor, bytes) = encode(&d);
+    let decoded = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert!(
+        matches!(decoded.fields()[0].value(), ArchivedValue::ImageUrl { value, .. } if value == url)
+    );
+    assert_eq!(decoded.source(1).unwrap().link_destination(), None);
+    d.version = 4;
+    assert!(d.validate().is_err());
+    d.version = 5;
+    d.sources[0].field = 3;
+    assert!(d.validate().is_err());
+    d.sources[0].field = 7;
+    d.fields[0].value = ArchivedValue::ImageUrl {
+        value: "https://shop.example.test/product/43".into(),
+        sources: vec![1],
+    };
+    assert!(d.validate().is_err());
+}
+
+#[test]
+fn money_archive_revalidates_amount_currency_version_and_citations() {
+    let mut d = document();
+    d.version = 6;
+    d.fields = vec![ArchivedField {
+        name: "price".into(),
+        value: ArchivedValue::Money {
+            amount: "20.00".into(),
+            currency: "USD".into(),
+            sources: vec![1],
+        },
+    }];
+    let source = &mut d.sources[0];
+    source.fields_complete = Some(true);
+    source.observation = Some(4);
+    source.observation_generation = Some(1);
+    source.captured_millis = Some(5);
+    source.content = ArchivedSourceContent::Text {
+        value: "$20.00 USD".into(),
+    };
+    let (descriptor, bytes) = encode(&d);
+    let decoded = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert!(
+        matches!(decoded.fields()[0].value(), ArchivedValue::Money { amount, currency, .. } if amount == "20.00" && currency == "USD")
+    );
+    d.sources[0].fields_complete = None;
+    assert!(d.validate().is_err());
+    d.sources[0].fields_complete = Some(false);
+    assert!(d.validate().is_err());
+    d.sources[0].fields_complete = Some(true);
+    d.version = 5;
+    assert!(d.validate().is_err());
+    d.version = 6;
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "$20.00".into(),
+    };
+    assert!(d.validate().is_err());
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "$21.00 USD".into(),
+    };
+    assert!(d.validate().is_err());
+    d.sources[0].content = ArchivedSourceContent::Text {
+        value: "$20.00 EUR".into(),
+    };
+    assert!(d.validate().is_err());
 }

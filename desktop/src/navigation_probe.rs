@@ -1,0 +1,487 @@
+//! Development-only observer around actual trusted application admission.
+//! No engine/store/native/runtime owner or replacement lifecycle lives here.
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use tauri::Manager;
+#[cfg(not(feature = "macos-work-retained-product-probe"))]
+use zephium_app::AgentWorkApplicationHandle;
+#[cfg(feature = "macos-work-retained-product-probe")]
+use zephium_app::RetainedWorkHandle as AgentWorkApplicationHandle;
+#[cfg(feature = "macos-work-discovery-probe")]
+use zephium_work_composition::discovery_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(not(any(
+    feature = "macos-work-discovery-probe",
+    feature = "macos-work-retained-product-probe"
+)))]
+use zephium_work_composition::navigation_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(feature = "macos-work-retained-action-probe")]
+use zephium_work_composition::retained_action_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(feature = "macos-work-retained-back-probe")]
+use zephium_work_composition::retained_back_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(feature = "macos-work-retained-notion-probe")]
+use zephium_work_composition::retained_notion_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(feature = "macos-work-retained-notion-write-probe")]
+use zephium_work_composition::retained_notion_write_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+#[cfg(all(
+    feature = "macos-work-retained-product-probe",
+    not(feature = "macos-work-retained-action-probe"),
+    not(feature = "macos-work-retained-back-probe"),
+    not(feature = "macos-work-retained-notion-probe"),
+    not(feature = "macos-work-retained-notion-write-probe")
+))]
+use zephium_work_composition::retained_product_qualification::{
+    self as qualifier, ApplicationObserver, ApplicationReport,
+};
+
+#[path = "../navigation_probe_config.rs"]
+mod configuration;
+#[path = "../navigation_probe_control.rs"]
+mod control;
+#[path = "../foreground_probe_admission.rs"]
+mod foreground;
+
+const TICK: Duration = Duration::from_millis(50);
+const CHROME_WAIT: Duration = Duration::from_secs(30);
+// This does not extend the request's original 150-second execution deadline.
+// After this observation window the ordinary shutdown owner handles any debt.
+const OBSERVER_HANDOFF: Duration = Duration::from_secs(160);
+#[cfg(any(
+    feature = "macos-work-profile-enrollment",
+    feature = "macos-work-retained-notion-probe",
+    feature = "macos-work-retained-notion-write-probe"
+))]
+const ENROLLED_PROFILE_MARKER: &[u8] = b"zephium-authenticated-qualification-profile-v1\n";
+
+#[derive(Default)]
+struct Control {
+    admission: control::AdmissionFence<ApplicationReport>,
+    view: Mutex<Option<(AgentWorkApplicationHandle, bool)>>,
+    worker_joined: AtomicBool,
+}
+struct State {
+    control: Arc<Control>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+pub(super) fn validate_data_root(root: &std::path::Path) -> std::io::Result<()> {
+    configuration::validate(&serde_json::from_str(include_str!(
+        "../tauri.work-navigation-probe.conf.json"
+    ))?)?;
+    #[cfg(feature = "macos-work-profile-enrollment")]
+    return validate_enrolled_profile_root(root, false);
+    #[cfg(all(
+        not(feature = "macos-work-profile-enrollment"),
+        any(
+            feature = "macos-work-retained-notion-probe",
+            feature = "macos-work-retained-notion-write-probe"
+        )
+    ))]
+    return validate_enrolled_profile_root(root, true);
+    #[cfg(not(any(
+        feature = "macos-work-profile-enrollment",
+        feature = "macos-work-retained-notion-probe",
+        feature = "macos-work-retained-notion-write-probe"
+    )))]
+    match std::fs::read_dir(root) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    "navigation qualification requires a fresh empty data root",
+                ))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(std::io::Error::other(
+            "navigation qualification requires a fresh empty data root",
+        )),
+    }
+}
+
+#[cfg(any(
+    feature = "macos-work-profile-enrollment",
+    feature = "macos-work-retained-notion-probe",
+    feature = "macos-work-retained-notion-write-probe"
+))]
+fn validate_enrolled_profile_root(
+    root: &std::path::Path,
+    marker_required: bool,
+) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !marker_required => {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "authenticated qualification data root is not a private directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::other(
+                "authenticated qualification data root is not private",
+            ));
+        }
+    }
+    let mut entries = std::fs::read_dir(root)?;
+    if !marker_required && entries.next().is_none() {
+        return Ok(());
+    }
+    let regular_nonempty = |path: &std::path::Path| -> std::io::Result<bool> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(metadata.file_type().is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.len() > 0)
+    };
+    if !regular_nonempty(&root.join("meta.sqlite"))?
+        || !std::fs::symlink_metadata(root.join("web-content"))?
+            .file_type()
+            .is_dir()
+    {
+        return Err(std::io::Error::other(
+            "authenticated qualification profile storage is incomplete",
+        ));
+    }
+    let mut profiles = 0_u8;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(std::io::Error::other(
+                "authenticated qualification data root contains a non-UTF-8 entry",
+            ));
+        };
+        if name.starts_with("profile-") && name.ends_with(".sqlite") {
+            if !regular_nonempty(&entry.path())? {
+                return Err(std::io::Error::other(
+                    "authenticated qualification profile database is invalid",
+                ));
+            }
+            profiles = profiles.saturating_add(1);
+        }
+    }
+    if profiles != 1 {
+        return Err(std::io::Error::other(
+            "authenticated qualification requires exactly one enrolled profile",
+        ));
+    }
+    if marker_required {
+        let marker = root.join("authenticated-qualification-profile-v1");
+        if !regular_nonempty(&marker)? || std::fs::read(marker)? != ENROLLED_PROFILE_MARKER {
+            return Err(std::io::Error::other(
+                "authenticated qualification profile enrollment is missing",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "macos-work-profile-enrollment")]
+pub(super) fn mark_profile_enrollment(root: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = root.join("authenticated-qualification-profile-v1");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            file.write_all(ENROLLED_PROFILE_MARKER)?;
+            file.sync_all()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::read(path)? == ENROLLED_PROFILE_MARKER {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    "authenticated qualification profile marker is invalid",
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn install(app: &tauri::AppHandle) -> std::io::Result<()> {
+    let control = Arc::new(Control::default());
+    if !app.manage(State {
+        control: control.clone(),
+        worker: Mutex::new(None),
+    }) {
+        return Err(std::io::Error::other(
+            "navigation qualifier already installed",
+        ));
+    }
+    let worker_app = app.clone();
+    let worker = std::thread::Builder::new()
+        .name("work-navigation-qualification".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run(&worker_app, &control)
+            }))
+            .unwrap_or(Err("observer_worker_panic"));
+            control
+                .view
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            // No credential, request or application projection remains on this
+            // worker when it authorizes the normal application shutdown handoff.
+            let settled = control.admission.settle(result);
+            super::write_diagnostic(format_args!(
+                "work-application-navigation-report: terminal={settled:?} content=redacted"
+            ));
+            worker_app.exit(0);
+        });
+    let worker = match worker {
+        Ok(worker) => worker,
+        Err(error) => {
+            let state = app.state::<State>();
+            state.control.admission.settle(Err("observer_worker_spawn"));
+            state.control.worker_joined.store(true, Ordering::Release);
+            return Err(error);
+        }
+    };
+    *app.state::<State>()
+        .worker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+    Ok(())
+}
+
+fn wait_for_foreground(app: &tauri::AppHandle, control: &Control) -> Result<(), &'static str> {
+    let started = Instant::now();
+    let mut gate = foreground::AdmissionGate::default();
+    loop {
+        if control.admission.cancelled() {
+            gate.close();
+            return Err("cancelled_before_admission");
+        }
+        if gate.waiting_chrome() {
+            if app
+                .try_state::<super::UiStartupGate>()
+                .is_some_and(|gate| gate.is_visible())
+            {
+                gate.begin(Instant::now());
+            } else if started.elapsed() >= CHROME_WAIT {
+                return Err("chrome_deadline");
+            }
+        }
+        if gate.awaiting_foreground() {
+            let decision = match gate.begin_check(Instant::now()) {
+                Some(foreground::ForegroundCheck::Capture) => {
+                    let focused = app.get_webview_window("main").is_some_and(|window| {
+                        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+                    });
+                    gate.poll(Instant::now(), focused)
+                }
+                Some(foreground::ForegroundCheck::DeferredForeground) => {
+                    Some(foreground::AdmissionDecision::DeferredForeground)
+                }
+                None => return Err("foreground_owner"),
+            };
+            if decision != Some(foreground::AdmissionDecision::Wait) {
+                let (waited_ms, checks) = gate.counts(Instant::now());
+                super::write_diagnostic(format_args!("work-application-navigation-admission: decision={decision:?} waited_ms={waited_ms} checks={checks}"));
+                gate.close();
+                return if decision == Some(foreground::AdmissionDecision::Admit) {
+                    Ok(())
+                } else {
+                    Err("deferred_foreground")
+                };
+            }
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+fn request_stop(control: &Control) {
+    let Ok(mut slot) = control.view.lock() else {
+        return;
+    };
+    match slot.as_mut() {
+        Some((view, requested)) if !*requested => *requested = qualifier::cancel(view),
+        _ => {}
+    }
+}
+
+fn run(app: &tauri::AppHandle, control: &Control) -> Result<ApplicationReport, &'static str> {
+    wait_for_foreground(app, control)?;
+    if control.admission.cancelled() {
+        return Err("cancelled_before_credential");
+    }
+    let started = Instant::now();
+    let profile = wait_for_profile(app, control, started, None)?;
+    // Qualification credential loading is noncancellable. A quit keeps this
+    // original worker retained; its late result is dropped, never admitted or
+    // detached.
+    let request = qualifier::load_request(started, profile)?;
+    // Lookup can outlive a browser selection/policy transition. Reconcile only
+    // this same binding before admission; never follow a new profile silently.
+    wait_for_profile(app, control, started, Some(profile))?;
+    let view = control
+        .admission
+        .admit(|| {
+            #[cfg(feature = "macos-work-retained-product-probe")]
+            let admit = super::admit_retained_trusted_work;
+            #[cfg(not(feature = "macos-work-retained-product-probe"))]
+            let admit = super::admit_trusted_work;
+            let view = admit(app, request).map_err(|error| {
+                super::write_diagnostic(format_args!(
+                    "work-application-navigation-refusal: {error:?}"
+                ));
+                "trusted_admission"
+            })?;
+            *control.view.lock().map_err(|_| "projection_owner")? = Some((view.clone(), false));
+            Ok::<_, &'static str>(view)
+        })
+        .ok_or("cancelled_after_credential")??;
+    super::write_diagnostic(format_args!("{}", qualifier::configuration_diagnostic()));
+    let mut observer = ApplicationObserver::default();
+    loop {
+        if control.admission.cancelled() || !observer.healthy() {
+            request_stop(control);
+        }
+        #[cfg(feature = "macos-work-retained-product-probe")]
+        let report = observer.poll(&view, || {
+            super::work::retained_resource_failure_cause(app, &view)
+        });
+        #[cfg(not(feature = "macos-work-retained-product-probe"))]
+        let report = observer.poll(&view);
+        if let Some(report) = report {
+            return Ok(report);
+        }
+        if started.elapsed() >= OBSERVER_HANDOFF {
+            request_stop(control);
+            super::write_diagnostic(format_args!("work-application-navigation-handoff: report={:?} phase={:?} cleanup_owner=ordinary_shutdown", observer.report(), view.snapshot().phase));
+            return Err("observer_deadline_handoff");
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+fn wait_for_profile(
+    app: &tauri::AppHandle,
+    control: &Control,
+    started: Instant,
+    mut pinned: Option<zephium_app::AgentWorkProfileBinding>,
+) -> Result<zephium_app::AgentWorkProfileBinding, &'static str> {
+    use zephium_app::AgentWorkProfileReadiness as Readiness;
+    let shell = app
+        .try_state::<zephium_app::Handle>()
+        .ok_or("profile_owner")?;
+    let mut pending = None;
+    let mut prior = None;
+    loop {
+        if let Some(failure) =
+            control::profile_wait_failure(started, Instant::now(), control.admission.cancelled())
+        {
+            return Err(failure);
+        }
+        let request = pending.get_or_insert_with(|| shell.work_profile_binding());
+        if let Some(readiness) = request.try_recv() {
+            pending = None;
+            if prior != Some(readiness) {
+                super::write_diagnostic(format_args!(
+                    "work-application-navigation-profile: state={readiness:?} content=redacted"
+                ));
+                prior = Some(readiness);
+            }
+            match readiness {
+                Readiness::Ready(binding) | Readiness::PolicyPending(binding) => {
+                    if pinned.is_some_and(|prior| prior != binding) {
+                        return Err("profile_selection_changed");
+                    }
+                    pinned = Some(binding);
+                    if matches!(readiness, Readiness::Ready(_)) {
+                        return Ok(binding);
+                    }
+                }
+                Readiness::ProfileMissing => return Err("profile_missing"),
+                Readiness::PolicyMissing => return Err("profile_policy_missing"),
+                Readiness::PolicyFailed => return Err("profile_policy_failed"),
+                Readiness::Unavailable => return Err("profile_query_unavailable"),
+            }
+        }
+        std::thread::sleep(TICK);
+    }
+}
+
+/// Retain exit only while the original observer/credential worker can still
+/// admit or access its projection. Native cleanup belongs to ShutdownCoordinator.
+pub(super) fn on_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) -> bool {
+    let Some(state) = app.try_state::<State>() else {
+        return false;
+    };
+    match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            if state.control.admission.cancel() {
+                request_stop(&state.control);
+                api.prevent_exit();
+                return true;
+            }
+            if let Some(worker) = state
+                .worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                state
+                    .control
+                    .worker_joined
+                    .store(worker.join().is_ok(), Ordering::Release);
+            }
+        }
+        tauri::RunEvent::Exit => {
+            let joined = state.control.worker_joined.load(Ordering::Acquire);
+            let normal_shutdown_clean =
+                app.try_state::<super::ShutdownCoordinator>()
+                    .is_some_and(|owner| {
+                        owner.authorized_exit_code.load(Ordering::Acquire) == 0
+                            && !owner.terminal_failure.load(Ordering::Acquire)
+                    });
+            let accepted =
+                matches!(state.control.admission.terminal(), Some(Ok(report)) if report.accepted);
+            let qualified = accepted && joined && normal_shutdown_clean;
+            super::write_diagnostic(format_args!("work-application-navigation-closure: qualified={qualified} accepted={accepted} observer_worker_joined={joined} normal_shutdown_clean={normal_shutdown_clean}"));
+        }
+        _ => {}
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn actual_navigation_adapter_refuses_existing_session_data() {
+        let empty = tempfile::tempdir().unwrap();
+        super::validate_data_root(empty.path()).unwrap();
+        super::validate_data_root(&empty.path().join("absent")).unwrap();
+        std::fs::create_dir(empty.path().join("prior-session")).unwrap();
+        assert!(super::validate_data_root(empty.path()).is_err());
+    }
+}

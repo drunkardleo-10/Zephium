@@ -117,6 +117,8 @@ pub(crate) struct AgentOwnedView {
     navigation: AgentNavigationController,
     work_navigation: Option<crate::platform::work_document_navigation::WorkDocumentNavigation>,
     semantic: Option<AgentSemanticRuntimeRegistration>,
+    history: super::agent_history::AgentHistoryLedger,
+    next_document_runtime: u64,
     viewport: ContextOwnedViewport,
     _navigation_observer: super::InstalledNavigationObserver,
     view: WebView,
@@ -147,9 +149,135 @@ impl AgentOwnedView {
     }
 
     pub(crate) fn retire_semantic_runtime(&mut self) -> bool {
+        self.history.clear();
         self.semantic
             .take()
             .is_some_and(|registration| registration.retire().is_ok())
+    }
+
+    pub(crate) fn enroll_current_work_history_get(
+        &mut self,
+        target: zephium_agentic::ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        let runtime = super::agent_history::AgentDocumentRuntimeId::new(self.next_document_runtime)
+            .ok_or(())?;
+        let page = super::native_webview(&self.view);
+        // SAFETY: all owned-view lifecycle operations run on WebKit's main
+        // thread. objc2 retains the current native history item.
+        let item = unsafe { page.backForwardList().currentItem() }.ok_or(())?;
+        self.history.enroll_get(item, target, runtime)?;
+        if self
+            .semantic
+            .as_mut()
+            .ok_or(())?
+            .bind_active_runtime(runtime)
+            .is_err()
+        {
+            self.history.clear();
+            return Err(());
+        }
+        self.next_document_runtime = self.next_document_runtime.checked_add(1).ok_or(())?;
+        Ok(())
+    }
+
+    pub(crate) fn begin_history_lease(
+        &mut self,
+        target: zephium_agentic::ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        self.history.clear();
+        self.semantic
+            .as_mut()
+            .ok_or(())?
+            .reset_history_authority()?;
+        self.enroll_current_work_history_get(target)
+    }
+
+    pub(crate) fn park_semantic_runtime(
+        &mut self,
+        completion: impl FnOnce(bool) + 'static,
+    ) -> Result<(), ()> {
+        self.semantic.as_mut().ok_or(())?.park_active(completion)
+    }
+
+    pub(crate) fn semantic_runtime_parked(&self) -> bool {
+        self.semantic
+            .as_ref()
+            .is_some_and(AgentSemanticRuntimeRegistration::active_parked)
+    }
+
+    pub(crate) fn semantic_runtime_ready_for_history(&self) -> bool {
+        self.semantic
+            .as_ref()
+            .is_some_and(AgentSemanticRuntimeRegistration::active_ready_for_history)
+    }
+
+    pub(crate) fn prepare_history_back(
+        &mut self,
+    ) -> Result<super::agent_history::AgentHistoryBackTicket, ()> {
+        let page = super::native_webview(&self.view);
+        // SAFETY: owned agent views and their native history are confined to
+        // WebKit's main thread for this entire authorization read.
+        let (current, predecessor) = unsafe {
+            let list = page.backForwardList();
+            (list.currentItem(), list.backItem())
+        };
+        self.history.authorize_back(
+            current.as_deref().ok_or(())?,
+            predecessor.as_deref().ok_or(())?,
+        )
+    }
+
+    pub(crate) fn reactivate_history_destination(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> Result<zephium_agentic::ContextNavigationTarget, ()> {
+        let target = self.history.destination_target(ticket).cloned().ok_or(())?;
+        self.semantic
+            .as_mut()
+            .ok_or(())?
+            .reactivate_runtime(ticket.destination_runtime())?;
+        Ok(target)
+    }
+
+    pub(crate) fn dispatch_history_back(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> bool {
+        let page = super::native_webview(&self.view);
+        // SAFETY: all values are retained from this exact page's native list
+        // and immediately revalidated by opaque identity before dispatch.
+        let (current, predecessor) = unsafe {
+            let list = page.backForwardList();
+            (list.currentItem(), list.backItem())
+        };
+        let Some(item) = current.as_deref().and_then(|current| {
+            predecessor
+                .as_deref()
+                .and_then(|predecessor| self.history.dispatch_item(ticket, current, predecessor))
+        }) else {
+            return false;
+        };
+        // SAFETY: the ledger returned the exact retained predecessor after an
+        // immediate identity join against this page's current native list.
+        unsafe { page.goToBackForwardListItem(item) }.is_some()
+    }
+
+    pub(crate) fn settle_history_back(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> Result<(), ()> {
+        let page = super::native_webview(&self.view);
+        // SAFETY: currentItem is a bounded retained identity read on WebKit's
+        // main thread; the ledger requires the authorized destination exactly.
+        let current = unsafe { page.backForwardList().currentItem() }.ok_or(())?;
+        self.history.settle_back(ticket, &current, None)
+    }
+
+    pub(crate) fn refuse_history_back(
+        &mut self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> bool {
+        self.history.refuse_back(ticket)
     }
 
     pub(crate) fn dispatch_semantic(
@@ -205,6 +333,28 @@ impl AgentOwnedView {
         self.semantic()?.pending_for_audit()
     }
 
+    pub(crate) fn dispatch_retained_semantic_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        admitted_at: Instant,
+        authority: Box<dyn Fn() -> bool>,
+        completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
+    ) {
+        let Some(semantic) = self.semantic() else {
+            let completed_at = request.requested_at();
+            completion(request.fail(SemanticActionNativeFailure::Shutdown, completed_at));
+            return;
+        };
+        super::semantic_action::dispatch_guarded(
+            &self.view,
+            semantic,
+            request,
+            admitted_at,
+            Some(authority),
+            completion,
+        );
+    }
+
     pub(crate) fn attest(
         &self,
         profile: ProfileId,
@@ -256,6 +406,8 @@ const fn map_semantic_runtime_failure(
 
 /// Typed callback cohort retained by one native view delegate graph.
 pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic> {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    failure_diagnostic: Option<Rc<dyn Fn(crate::WorkResourceFailureCause)>>,
     navigation: Navigation,
     location: Location,
     renderer_lost: RendererLost,
@@ -274,12 +426,22 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
         panic: Panic,
     ) -> Self {
         Self {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            failure_diagnostic: None,
             navigation,
             location,
             renderer_lost,
             invariant,
             panic,
         }
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(crate) fn with_failure_diagnostic(
+        mut self,
+        diagnostic: impl Fn(crate::WorkResourceFailureCause) + 'static,
+    ) -> Self {
+        self.failure_diagnostic = Some(Rc::new(diagnostic));
+        self
     }
 }
 
@@ -359,12 +521,16 @@ where
     Panic: Fn() + 'static,
 {
     let AgentOwnedViewCallbacks {
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        failure_diagnostic,
         navigation: on_navigation,
         location: on_location,
         renderer_lost: on_renderer_lost,
         invariant: on_invariant_failure,
         panic: on_callback_panic,
     } = callbacks;
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    let navigation_diagnostic = failure_diagnostic.clone();
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
     let navigation_events = navigation.clone();
@@ -391,6 +557,8 @@ where
     )
     .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
     let navigation_semantic = semantic.controller().clone();
+    let human_semantic_prepare = semantic.human_navigation_preparer();
+    let follow_semantic_prepare = semantic.follow_navigation_preparer();
     let renderer_semantic = semantic.controller().clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
@@ -407,22 +575,69 @@ where
         })
         .with_visible(false)
         .with_focused(false)
-        .with_devtools(false)
+        .with_devtools(owned_agent_view_inspectable())
         .with_autoplay(false)
         .with_fullscreen_enabled(false)
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
-        .with_navigation_handler(move |target| {
-            work_policy.as_ref().map_or_else(
+        .with_apple_navigation_action_handler(move |target, action| {
+            let prepare_human = work_policy.as_ref().is_some_and(|gate| {
+                gate.human_load_preparation_needed(action.target_is_main_frame)
+            });
+            let allowed = work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),
-                |gate| gate.allows(&target),
-            )
+                |gate| gate.allows_apple_action(&target, action),
+            );
+            // An action's own admitted load replaces the document: the old
+            // document's reads end, and the runtime waits for the new one.
+            let allowed = allowed
+                && (!work_policy.as_ref().is_some_and(|gate| gate.take_hand_on())
+                    || follow_semantic_prepare());
+            #[cfg(feature = "agentic-browser-qa")]
+            if action.target_is_main_frame != Some(false) {
+                super::agentic_liveness_probe::trace(format_args!(
+                    "agent_view frame=main requested=true allowed={allowed} human_prepare={prepare_human} cause={:?} get={}",
+                    action.navigation_type, action.is_get));
+            }
+            if allowed && prepare_human && !human_semantic_prepare() {
+                #[cfg(feature = "agentic-browser-qa")]
+                {
+                    super::agentic_liveness_probe::trace(format_args!(
+                        "agent_view human_prepare_failed=true"
+                    ));
+                }
+                if let Some(gate) = &work_policy {
+                    gate.retire();
+                }
+                return false;
+            }
+            #[cfg(feature = "agentic-browser-qa")]
+            if url::Url::parse(&target)
+                .is_ok_and(|url| url.host_str() == Some("challenges.cloudflare.com"))
+            {
+                super::agentic_liveness_probe::trace(format_args!(
+                    "agent_view frame=challenge requested=true allowed={allowed} main={:?}",
+                    action.target_is_main_frame
+                ));
+            }
+            allowed
         })
         .with_navigation_event_handler(move |event| {
+            #[cfg(feature = "agentic-browser-qa")]
+            {
+                super::agentic_liveness_probe::trace(format_args!(
+                    "agent_view frame=main phase={:?}",
+                    event.phase
+                ));
+            }
             if let Some(gate) = &work_events {
                 match gate.observe(event) {
                     Ok((committed, notify)) => {
                         if gate.failed() {
+                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                            if let Some(report) = &navigation_diagnostic {
+                                report(crate::WorkResourceFailureCause::NavigationEventRefused);
+                            }
                             invoke_owned_unit_callback(
                                 navigation_invariant_failure.as_ref(),
                                 navigation_callback_panicked.as_ref(),
@@ -500,6 +715,7 @@ where
         .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
         .with_page_close_policy(PageClosePolicy::Ignore)
         .with_allow_link_preview(false)
+        .with_user_agent(super::safari_user_agent())
         .with_webview_configuration(configuration);
 
     let builder = if storage_class == ContextProfileStorageClass::Ephemeral {
@@ -528,37 +744,63 @@ where
     let location_invariant = invariant_failure_callback.clone();
     let location_panic = on_callback_panic.clone();
     let work_location_semantic = semantic.controller().clone();
-    let navigation_observer =
-        super::install_navigation_observer(&view, move || {
-            match work_location.as_ref().map_or_else(
-                || location_events.request_location_check(),
-                crate::platform::work_document_navigation::WorkDocumentNavigation::location_changed,
-            ) {
-                Ok(true) => {
-                    if work_location.as_ref().is_some_and(|gate| gate.failed()) {
-                        invoke_owned_unit_callback(
-                            location_invariant.as_ref(),
-                            location_panic.as_ref(),
+    let navigation_observer = super::install_navigation_observer(&view, move |observation| {
+        match work_location.as_ref().map_or_else(
+            || location_events.request_location_check(),
+            |gate| match observation {
+                super::navigation::NavigationObservation::Url(current) => {
+                    gate.location_changed(current.as_deref())
+                }
+                super::navigation::NavigationObservation::HistoryAvailability => {
+                    Ok(gate.history_availability_changed())
+                }
+            },
+        ) {
+            Ok(true) => {
+                if work_location.as_ref().is_some_and(|gate| gate.failed()) {
+                    // Close semantic admission and install the exact in-flight
+                    // lifetime witness before any callback can progress the host.
+                    work_location_semantic.revoke_document_authority();
+                    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                    if let Some(report) = &failure_diagnostic {
+                        report(
+                            work_location
+                                .as_ref()
+                                .and_then(|gate| gate.url_observation_failure())
+                                .map_or(
+                                    crate::WorkResourceFailureCause::SemanticNativeInvariant,
+                                    crate::WorkResourceFailureCause::UrlObservationRefused,
+                                ),
                         );
-                        work_location_semantic.cancel();
                     }
-                    invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
+                    invoke_owned_unit_callback(
+                        location_invariant.as_ref(),
+                        location_panic.as_ref(),
+                    );
                 }
-                Ok(false) => {}
-                Err(()) => {
-                    invoke_owned_unit_callback(location_invariant.as_ref(), location_panic.as_ref())
-                }
+                invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
             }
-        })
-        .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+            Ok(false) => {}
+            Err(()) => {
+                invoke_owned_unit_callback(location_invariant.as_ref(), location_panic.as_ref())
+            }
+        }
+    })
+    .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     Ok(AgentOwnedView {
         navigation,
         work_navigation,
         semantic: Some(semantic),
+        history: super::agent_history::AgentHistoryLedger::default(),
+        next_document_runtime: 1,
         viewport,
         _navigation_observer: navigation_observer,
         view,
     })
+}
+
+const fn owned_agent_view_inspectable() -> bool {
+    cfg!(all(debug_assertions, feature = "agentic-browser-qa"))
 }
 
 fn harden_owned_agent_view(view: &WebView) -> Result<(), AgentOwnedViewConstructionError> {
@@ -569,7 +811,7 @@ fn harden_owned_agent_view(view: &WebView) -> Result<(), AgentOwnedViewConstruct
     let page = super::native_webview(view);
     // SAFETY: the marker above proves main-thread access and `page` is the
     // retained WKWebView owned by the live Wry handle for this call.
-    unsafe { page.setInspectable(false) };
+    unsafe { page.setInspectable(owned_agent_view_inspectable()) };
     let native_view: &NSView = &page;
     native_view.setTranslatesAutoresizingMaskIntoConstraints(true);
     native_view.setAutoresizingMask(Mask::ViewNotSizable);
@@ -639,7 +881,7 @@ pub(crate) fn attest_owned_agent_view(
     let native_view: &NSView = &page;
     let frame = native_view.frame();
     // SAFETY: main-thread access and the live retained page were proven above.
-    if unsafe { page.isInspectable() }
+    if unsafe { page.isInspectable() } != owned_agent_view_inspectable()
         || native_view.autoresizingMask() != Mask::ViewNotSizable
         || frame.size.width != f64::from(viewport.width())
         || frame.size.height != f64::from(viewport.height())
@@ -660,6 +902,38 @@ mod tests {
         ContextRunId,
     };
     use zephium_core::ids::ProfileId;
+
+    #[cfg(not(feature = "agentic-browser-qa"))]
+    #[test]
+    fn ordinary_agent_views_never_enable_inspection() {
+        assert!(!super::owned_agent_view_inspectable());
+    }
+
+    #[cfg(feature = "agentic-browser-qa")]
+    #[test]
+    fn qa_agent_views_enable_inspection_only_in_debug_builds() {
+        assert_eq!(
+            super::owned_agent_view_inspectable(),
+            cfg!(debug_assertions)
+        );
+    }
+
+    #[test]
+    fn refused_url_closes_semantic_authority_before_notifying_any_observer() {
+        let source = include_str!("agent_context.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let branch = source
+            .split("if work_location.as_ref().is_some_and(|gate| gate.failed()) {")
+            .nth(1)
+            .unwrap();
+        let close = branch
+            .find("work_location_semantic.revoke_document_authority()")
+            .unwrap();
+        assert!(close < branch.find("report(").unwrap());
+        assert!(close < branch.find("invoke_owned_unit_callback(").unwrap());
+    }
 
     fn navigation_operation() -> zephium_agentic::ContextOperationJoin {
         let identity = ContextIdentity::new(
@@ -747,7 +1021,7 @@ mod tests {
         ] {
             assert!(!source.contains(forbidden));
         }
-        assert!(source.contains("with_navigation_handler(move |target|"));
+        assert!(source.contains("with_apple_navigation_action_handler(move |target, action|"));
         assert!(source.contains("state.bootstrap_available = false"));
         assert!(source.contains("controller.userScripts()"));
     }

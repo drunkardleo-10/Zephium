@@ -10,6 +10,73 @@ const EMPTY_DIGEST: [u8; 32] = [
 ];
 
 #[test]
+fn historical_evidence_requires_exact_profile_source_and_verified_archive_bytes() {
+    use sha2::{Digest, Sha256};
+    use zephium_core::work::{artifact::WorkEvidenceLink, WorkError};
+    let _process = work_test_guard();
+    let (_directory, mut hub, owner) = open();
+    let (running, succeeded, original) = fixture(&mut hub, owner);
+    let source = r#""sources":[{"id":1,"origin":"https://fixture.invalid/","role":"paragraph","field":1,"context":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"context_generation":1,"navigation_epoch":1,"frame":1,"frame_generation":1,"invocation":1,"snapshot":1,"reference":1,"browser_derived":true,"content":{"kind":"text","value":"Historical source quotation"}}]"#;
+    let body = std::str::from_utf8(EMPTY_ARCHIVE)
+        .unwrap()
+        .replace("\"sources\":[]", source);
+    let descriptor = AgentWorkArtifactDescriptor::decode(
+        original.descriptor.id(),
+        1_u128.into(),
+        running.key(),
+        Sha256::digest(body.as_bytes()).into(),
+        body.len() as u32,
+    )
+    .unwrap();
+    AgentWorkArchivedExtraction::decode(descriptor, body.as_bytes()).unwrap();
+    compare_and_set_records(
+        &mut hub.meta,
+        Some(running),
+        succeeded,
+        None,
+        Some(ArtifactStorageValue {
+            descriptor,
+            body: body.as_bytes(),
+        }),
+    )
+    .unwrap();
+    let link = WorkEvidenceLink {
+        extraction_id: u128::from_be_bytes(descriptor.id()).into(),
+        source_id: 1,
+    };
+    let preview = read_work_evidence(&hub.meta, 1_u128.into(), link.clone()).unwrap();
+    assert_eq!(preview.text, "Historical source quotation");
+    assert!(!preview.truncated);
+    assert_eq!(preview.source_bytes, preview.text.len().to_string());
+    assert!(!format!("{preview:?}").contains("quotation"));
+    assert!(matches!(
+        read_work_evidence(&hub.meta, 2_u128.into(), link.clone()),
+        Err(WorkError::NotFound)
+    ));
+    let mut missing = link.clone();
+    missing.source_id = 2;
+    assert!(matches!(
+        read_work_evidence(&hub.meta, 1_u128.into(), missing),
+        Err(WorkError::NotFound)
+    ));
+    // Corrupt persisted bytes are not promoted to source content.
+    hub.meta
+        .execute_batch("DROP TRIGGER agent_work_artifact_immutable")
+        .unwrap();
+    let tampered = body.replace("Historical", "Tampered!!");
+    hub.meta
+        .execute(
+            "UPDATE agent_work_artifacts SET body = ?1",
+            [tampered.as_bytes()],
+        )
+        .unwrap();
+    assert!(matches!(
+        read_work_evidence(&hub.meta, 1_u128.into(), link),
+        Err(WorkError::Invalid)
+    ));
+}
+
+#[test]
 fn artifact_migration_limits_and_profile_erasure_match_the_closed_contract() {
     let source = include_str!("../migrations.rs");
     assert!(source.contains(&format!(

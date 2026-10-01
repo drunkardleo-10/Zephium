@@ -5,6 +5,20 @@ use zephium_agent_controller::AgentBrowserRetention;
 
 struct RefusedTask;
 impl AgentWorkTask for RefusedTask {
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        _: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        // Reach the exact effect-policy refusal under test. Advertising this
+        // synthetic operation does not approve its LocalWrite effect.
+        if node.name().is_some_and(|name| name.as_str() == "Field") {
+            SemanticOperations::try_new(&[SemanticOperationClass::Fill])
+                .map_err(|_| AgentWorkFailure::Contract)
+        } else {
+            Ok(SemanticOperations::NONE)
+        }
+    }
     fn evaluate(
         &mut self,
         _: &SemanticObservation,

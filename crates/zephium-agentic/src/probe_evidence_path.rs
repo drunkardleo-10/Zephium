@@ -1,4 +1,4 @@
-//! Filesystem-shape checks for release-excluded physical evidence.
+//! Filesystem-shape checks and local sinks for release-excluded probe evidence.
 
 use std::fs::Metadata;
 
@@ -43,6 +43,20 @@ const fn metadata_has_no_windows_reparse_point(_metadata: &Metadata) -> bool {
 #[cfg(any(test, target_os = "windows"))]
 const fn windows_attributes_have_no_reparse_point(attributes: u32) -> bool {
     attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT == 0
+}
+
+/// Best-effort local proof record for an inspectable probe run.
+#[cfg(any(test, feature = "provider-transport"))]
+pub(crate) fn write_runtime_proof(name: &str, bytes: &[u8]) {
+    let directory = std::path::Path::new("target/work-runtime-proof");
+    let _ = std::fs::create_dir_all(directory);
+    let _ = std::fs::write(directory.join(name), bytes);
+}
+
+/// Content-free probe trace line; production modules never print.
+pub(crate) fn trace(line: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 #[cfg(test)]

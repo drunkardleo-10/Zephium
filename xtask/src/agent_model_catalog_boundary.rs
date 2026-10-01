@@ -234,11 +234,17 @@ fn validate_all_sources(
     let mut paths = Vec::new();
     collect_rust_sources(root, crate_root, &mut paths)?;
     paths.sort();
-    let mut expected = vec![library_root.to_path_buf(), tests_root.to_path_buf()];
+    // 1783cf12 adds src/public_search.rs, a pinned search-only pricing profile.
+    let public_search = library_root.with_file_name("public_search.rs");
+    let mut expected = vec![
+        library_root.to_path_buf(),
+        tests_root.to_path_buf(),
+        public_search.clone(),
+    ];
     expected.sort();
     if paths != expected {
         return Err(
-            "Terra catalog source inventory must contain only src/lib.rs and src/tests.rs"
+            "Terra catalog source inventory must contain only src/lib.rs, src/public_search.rs and src/tests.rs"
                 .to_owned(),
         );
     }
@@ -246,6 +252,8 @@ fn validate_all_sources(
         let source = read_text(&path)?;
         if path == library_root {
             validate_root(&source)?;
+        } else if path == public_search {
+            validate_public_search(&path, &source)?;
         } else {
             validate_test_source(&path, &source)?;
         }
@@ -304,6 +312,35 @@ fn validate_source(path: &Path, source: &str) -> Result<(), String> {
                 path.display()
             ));
         }
+    }
+    Ok(())
+}
+
+// Search profile: gpt-4.1-mini at fixed non-reasoning rates, or the reviewed
+// Luna entries unchanged; no other model and no endpoint or transport.
+fn validate_public_search(path: &Path, source: &str) -> Result<(), String> {
+    validate_source(path, source)?;
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let compact = compact(production);
+    for required in [
+        "ifmax_output_tokens==0||max_output_tokens>8192{returnErr(E::OutputTokens);}",
+        "ifrequested_model==GPT6_LUNA_MODEL_REVISION{returntry_gpt6_luna_provider_exact_call_config(max_output_tokens).map_err(|_|E::Catalog);}",
+        "ifrequested_model==LUNA_MODEL_REVISION{returntry_luna_provider_exact_call_config(max_output_tokens).map_err(|_|E::Catalog);}",
+        "ifrequested_model!=\"gpt-4.1-mini\"{returnErr(E::Model);}",
+        "vec![model(\"gpt-4.1-mini\")?,model(\"gpt-4.1-mini-2025-04-14\")?]",
+        "AgentProviderReasoningEffort::None,",
+        "SemanticTokenizerRevision::try_new(\"openai:gpt-4.1-mini:search-v1\".into())",
+        "AgentProviderPricingRevision::new(20_260_913)",
+        "AgentProviderTokenRates::try_new(400_000,100_000,400_000,1_600_000)",
+    ] {
+        if !compact.contains(required) {
+            return Err(format!("public search catalog profile drifted: {required}"));
+        }
+    }
+    if production.matches("gpt-").count() != 6 || compact.matches("pubfn").count() != 1 {
+        return Err("public search catalog admits another model or entry point".to_owned());
     }
     Ok(())
 }
@@ -417,7 +454,33 @@ fn validate_root(source: &str) -> Result<(), String> {
             "staticLUNA_PRICING_SCHEDULE:OnceLock<Result<AgentProviderPricingSchedule,LunaModelCatalogError>,>=OnceLock::new();",
             1,
         ),
-        ("AgentProviderPricingSchedule", 9),
+        // b297aa6f/75b04c5c: GPT-6 Luna joins Luna through one table-driven
+        // builder, plus three pinned decision efforts on the same prices.
+        ("AgentProviderPricingSchedule", 14),
+        ("pubconstGPT6_LUNA_MODEL_REVISION:&str=\"gpt-6-luna\";", 1),
+        ("pubconstGPT6_LUNA_TOKENIZER_REVISION:&str=\"openai:gpt-6-luna:v1\";", 1),
+        ("pubconstGPT6_LUNA_PRICING_CATALOG_REVISION:u64=20_260_923;", 1),
+        ("pubconstGPT6_LUNA_STANDARD_RATE_MIN_INPUT_TOKENS:u64=1;", 1),
+        ("pubconstGPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS:u64=272_000;", 1),
+        ("pubconstGPT6_LUNA_MAX_OUTPUT_TOKENS:u32=128_000;", 1),
+        ("pubconstGPT6_LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS:u64=100_000;", 1),
+        ("pubconstGPT6_LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS:u64=10_000;", 1),
+        ("pubconstGPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS:u64=125_000;", 1),
+        ("pubconstGPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS:u64=500_000;", 1),
+        (
+            "constLUNA_ENTRY:LunaEntry=LunaEntry{model:LUNA_MODEL_REVISION,tokenizer:LUNA_TOKENIZER_REVISION,revision:LUNA_PRICING_CATALOG_REVISION,input_range:(LUNA_STANDARD_RATE_MIN_INPUT_TOKENS,LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,),rates:[LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,],effort:AgentProviderReasoningEffort::Medium,};",
+            1,
+        ),
+        (
+            "constGPT6_LUNA_ENTRY:LunaEntry=LunaEntry{model:GPT6_LUNA_MODEL_REVISION,tokenizer:GPT6_LUNA_TOKENIZER_REVISION,revision:GPT6_LUNA_PRICING_CATALOG_REVISION,input_range:(GPT6_LUNA_STANDARD_RATE_MIN_INPUT_TOKENS,GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,),rates:[GPT6_LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,GPT6_LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,GPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,GPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,],effort:AgentProviderReasoningEffort::Medium,};",
+            1,
+        ),
+        (
+            "constfnprovider(self)->AgentProviderReasoningEffort{matchself{Self::None=>AgentProviderReasoningEffort::None,Self::Low=>AgentProviderReasoningEffort::Low,Self::Medium=>AgentProviderReasoningEffort::Medium,}}",
+            1,
+        ),
+        ("build_luna_entry_schedule(&LunaEntry{effort:effort.provider(),..GPT6_LUNA_ENTRY})", 1),
+        ("LunaEntry{", 4),
         (
             "AgentProviderModelRevision::try_new(TERRA_MODEL_REVISION.to_owned())",
             2,
@@ -426,14 +489,8 @@ fn validate_root(source: &str) -> Result<(), String> {
             "AgentProviderPricingRevision::new(TERRA_PRICING_CATALOG_REVISION)",
             1,
         ),
-        (
-            "AgentProviderModelRevision::try_new(LUNA_MODEL_REVISION.to_owned())",
-            2,
-        ),
-        (
-            "AgentProviderPricingRevision::new(LUNA_PRICING_CATALOG_REVISION)",
-            1,
-        ),
+        ("AgentProviderModelRevision::try_new(entry.model.to_owned())", 2),
+        ("AgentProviderPricingRevision::new(entry.revision)", 1),
         (
             "AgentProviderPricingProfile::try_for_input_range(revision,TERRA_STANDARD_RATE_MIN_INPUT_TOKENS,TERRA_STANDARD_RATE_MAX_INPUT_TOKENS,)",
             1,
@@ -443,21 +500,18 @@ fn validate_root(source: &str) -> Result<(), String> {
             1,
         ),
         (
-            "AgentProviderPricingProfile::try_for_input_range(revision,LUNA_STANDARD_RATE_MIN_INPUT_TOKENS,LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,)",
+            "AgentProviderPricingProfile::try_for_input_range(revision,entry.input_range.0,entry.input_range.1,)",
             1,
         ),
-        (
-            "AgentProviderTokenRates::try_new(LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,)",
-            1,
-        ),
+        ("AgentProviderTokenRates::try_new(uncached,cached,cache_write,output)", 1),
         ("AgentProviderPricingSchedule::try_new(", 2),
         ("AgentProviderKind::OpenAiResponses,", 2),
         ("vec![allowed_effective_model],", 2),
         ("AgentProviderResponseRoute::OpenAiDefault,", 2),
-        ("AgentProviderReasoningEffort::Medium,", 2),
+        ("AgentProviderReasoningEffort::Medium,", 4),
         (
             ".try_provider_exact_call_config(max_output_tokens,AgentProviderStreamBudget::STANDARD)",
-            2,
+            4,
         ),
         (
             "ifmax_output_tokens==0||max_output_tokens>TERRA_MAX_OUTPUT_TOKENS",
@@ -528,7 +582,8 @@ fn validate_root(source: &str) -> Result<(), String> {
             ));
         }
     }
-    if production.matches("gpt-").count() != 4 {
+    // b297aa6f adds gpt-6-luna: three reviewed model/tokenizer label pairs.
+    if production.matches("gpt-").count() != 6 {
         return Err(
             "model catalog must contain exactly the reviewed Terra/Luna model and tokenizer labels"
                 .to_owned(),

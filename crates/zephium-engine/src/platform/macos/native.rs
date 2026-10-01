@@ -279,12 +279,7 @@ pub fn configure(
         }
     }
 
-    unsafe {
-        wk.setInspectable(cfg!(any(
-            debug_assertions,
-            feature = "native-extension-lab-diagnostics"
-        )))
-    };
+    unsafe { wk.setInspectable(cfg!(debug_assertions)) };
     let view: &NSView = &wk;
     // Fill the assigned region and follow window resize in AppKit's layout pass.
     view.setTranslatesAutoresizingMaskIntoConstraints(true);

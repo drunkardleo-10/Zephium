@@ -6,6 +6,12 @@ use zephium_agent_provider_transport::{AgentProviderTransport, AgentProviderTran
 pub(crate) fn fixture_provider_responses(
     responses: Vec<String>,
 ) -> (AgentProviderTransport, std::thread::JoinHandle<usize>) {
+    fixture_provider_inspect(responses, |_, _| {})
+}
+pub(crate) fn fixture_provider_inspect(
+    responses: Vec<String>,
+    mut inspect: impl FnMut(usize, &str) + Send + 'static,
+) -> (AgentProviderTransport, std::thread::JoinHandle<usize>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
@@ -60,7 +66,16 @@ pub(crate) fn fixture_provider_responses(
                     "{\"object\":\"response.input_tokens\",\"input_tokens\":17}".to_owned(),
                 )
             } else {
+                // Every ordinary application/retained loopback path is stateless,
+                // even when the release-excluded public adapter is compiled.
+                assert!(std::str::from_utf8(&request)
+                    .unwrap()
+                    .contains("\"store\":false"));
+                assert!(!std::str::from_utf8(&request)
+                    .unwrap()
+                    .contains("\"store\":true"));
                 turns += 1;
+                inspect(turns, std::str::from_utf8(&request).unwrap());
                 ("text/event-stream", responses[turns - 1].clone())
             };
             write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();

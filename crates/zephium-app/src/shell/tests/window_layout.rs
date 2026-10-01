@@ -102,23 +102,6 @@ fn split_group_survives_tab_switches() {
 }
 
 #[test]
-fn extension_center_uses_existing_full_window_chrome_and_restores_native_content() {
-    let (mut shell, engine, screen) = setup();
-    shell.handle(Command::Bootstrap);
-    let active = active_id(&screen);
-    navigate_and_commit(&mut shell, active, "center.example");
-    assert_eq!(engine.last_layout(), vec![active.to_string()]);
-
-    shell.handle(Command::SetExtensionManagementVisible(true));
-    assert!(shell.extension_management.visible_profile().is_some());
-    assert!(engine.last_layout().is_empty());
-
-    shell.handle(Command::SetExtensionManagementVisible(false));
-    assert!(shell.extension_management.visible_profile().is_none());
-    assert_eq!(engine.last_layout(), vec![active.to_string()]);
-}
-
-#[test]
 fn items_projection_tracks_retained_split_group_in_native_pane_order() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

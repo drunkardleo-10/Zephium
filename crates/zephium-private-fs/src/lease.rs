@@ -33,11 +33,20 @@ pub(crate) struct NamespaceLease {
     seal_child_identity_fault: AtomicBool,
     #[cfg(test)]
     same_parent_publish_syncs: AtomicUsize,
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     tree_removal_mutation_fault_ordinal: AtomicUsize,
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     tree_removal_final_parent_sync_fault: AtomicBool,
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     tree_removal_preexecution_identity_fault: AtomicBool,
 }
 
@@ -157,11 +166,20 @@ impl NamespaceLease {
             seal_child_identity_fault: AtomicBool::new(false),
             #[cfg(test)]
             same_parent_publish_syncs: AtomicUsize::new(0),
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            #[cfg(all(
+                test,
+                any(target_os = "macos", target_os = "linux", target_os = "windows")
+            ))]
             tree_removal_mutation_fault_ordinal: AtomicUsize::new(0),
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            #[cfg(all(
+                test,
+                any(target_os = "macos", target_os = "linux", target_os = "windows")
+            ))]
             tree_removal_final_parent_sync_fault: AtomicBool::new(false),
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            #[cfg(all(
+                test,
+                any(target_os = "macos", target_os = "linux", target_os = "windows")
+            ))]
             tree_removal_preexecution_identity_fault: AtomicBool::new(false),
         }
     }
@@ -271,7 +289,14 @@ impl NamespaceLease {
         self.fail_next_settlement.store(true, Ordering::Release);
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_committed_mutation_fault(&self, fault: CommittedMutationFault) {
         self.committed_mutation_faults
             .fetch_or(fault as u16, Ordering::AcqRel);
@@ -286,7 +311,14 @@ impl NamespaceLease {
             != 0
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_streaming_fault(&self, fault: StreamingFault) {
         self.streaming_faults
             .fetch_or(fault as u16, Ordering::AcqRel);
@@ -298,7 +330,14 @@ impl NamespaceLease {
         self.streaming_faults.fetch_and(!mask, Ordering::AcqRel) & mask != 0
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_lifecycle_fault(&self, fault: LifecycleFault) {
         self.lifecycle_faults
             .fetch_or(fault as u32, Ordering::AcqRel);
@@ -310,7 +349,14 @@ impl NamespaceLease {
         self.lifecycle_faults.fetch_and(!mask, Ordering::AcqRel) & mask != 0
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_remove_empty_race(&self) {
         self.remove_empty_race.store(true, Ordering::Release);
     }
@@ -320,7 +366,14 @@ impl NamespaceLease {
         self.remove_empty_race.swap(false, Ordering::AcqRel)
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_seal_child_identity_fault(&self) {
         self.seal_child_identity_fault
             .store(true, Ordering::Release);
@@ -337,19 +390,36 @@ impl NamespaceLease {
             .fetch_add(1, Ordering::AcqRel);
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn same_parent_publish_sync_count(&self) -> usize {
         self.same_parent_publish_syncs.load(Ordering::Acquire)
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_tree_removal_mutation_fault(&self, ordinal: usize) {
         assert_ne!(ordinal, 0, "tree-removal mutation ordinals are one-based");
         self.tree_removal_mutation_fault_ordinal
             .store(ordinal, Ordering::Release);
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     pub(crate) fn take_tree_removal_mutation_fault_ordinal(&self) -> Option<usize> {
         match self
             .tree_removal_mutation_fault_ordinal
@@ -360,25 +430,45 @@ impl NamespaceLease {
         }
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_tree_removal_final_parent_sync_fault(&self) {
         self.tree_removal_final_parent_sync_fault
             .store(true, Ordering::Release);
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     pub(crate) fn take_tree_removal_final_parent_sync_fault(&self) -> bool {
         self.tree_removal_final_parent_sync_fault
             .swap(false, Ordering::AcqRel)
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(target_os = "windows", feature = "windows-namespace-validation")
+        )
+    ))]
     pub(crate) fn inject_tree_removal_preexecution_identity_fault(&self) {
         self.tree_removal_preexecution_identity_fault
             .store(true, Ordering::Release);
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     pub(crate) fn take_tree_removal_preexecution_identity_fault(&self) -> bool {
         self.tree_removal_preexecution_identity_fault
             .swap(false, Ordering::AcqRel)

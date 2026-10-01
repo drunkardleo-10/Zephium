@@ -8,18 +8,21 @@ license.workspace = true
 default = ["runtime", "runtime-exact", "webkit"]
 runtime = []
 runtime-exact = ["runtime", "adblock/embedded-domain-resolver"]
-webkit = ["adblock/content-blocking", "dep:serde", "dep:serde_json"]
+webkit = ["adblock/content-blocking"]
 
 [dependencies]
 zephium-core.workspace = true
-adblock = { version = "=0.13.2", default-features = false, features = ["full-regex-handling"] }
+adblock = { version = "=0.13.2", default-features = false, features = ["full-regex-handling", "css-validation", "embedded-domain-resolver"] }
 idna = "=1.1.0"
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
 sha2 = "=0.10.9"
 thiserror.workspace = true
 
 [dev-dependencies]
+regex = "=1.12.4"
+flate2 = "=1.1.9"
 proptest.workspace = true
 tempfile.workspace = true
 

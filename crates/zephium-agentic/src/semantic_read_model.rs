@@ -1,7 +1,7 @@
 //! Deterministic token-admitted model encoding for bounded semantic reads.
 //!
 //! Read content stays private until the selected tokenizer port admits the
-//! exact `ZREAD2` bytes. Committed transport acknowledges only the exact read
+//! exact `ZREAD3` bytes. Committed transport acknowledges only the exact read
 //! projection; refused or cancelled transport consumes the payload without
 //! creating authority.
 
@@ -15,12 +15,12 @@ use crate::{
     ContextJoin, SemanticCaptureInstant, SemanticFrameJoin, SemanticModelDeliveryError,
     SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticModelEncodingError,
     SemanticObservationGeneration, SemanticObservationId, SemanticReadContent, SemanticReadField,
-    SemanticReadOmission, SemanticReadResult, SemanticSensitivity, SemanticTokenCounter,
-    SemanticTokenMeasurement, SemanticTokenizerRevision,
+    SemanticReadOmission, SemanticReadProvenance, SemanticReadResult, SemanticSensitivity,
+    SemanticTokenCounter, SemanticTokenMeasurement, SemanticTokenizerRevision,
 };
 
 /// Version of the compact semantic-read model-input grammar.
-pub const SEMANTIC_READ_MODEL_SCHEMA_VERSION: u16 = 2;
+pub const SEMANTIC_READ_MODEL_SCHEMA_VERSION: u16 = 3;
 
 /// Content-free deterministic semantic-read encoding metrics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -408,13 +408,23 @@ impl fmt::Debug for SemanticReadDeliveryReceipt {
     }
 }
 
-/// Encodes one bounded semantic read into deterministic compact `ZREAD2` lines.
+/// Encodes one bounded semantic read into deterministic compact `ZREAD3` lines.
 pub fn encode_semantic_read(
     read: &SemanticReadResult<'_>,
     budget: SemanticModelEncodingBudget,
 ) -> Result<SemanticEncodedRead, SemanticModelEncodingError> {
     validate_read(read)?;
     let frames = read_frames(read);
+    let cross_document = frames.iter().any(|frame| frame.context() != read.context());
+    let mut cohorts = Vec::new();
+    if read.has_retained_evidence() {
+        for fragment in read.fragments() {
+            let source = fragment.provenance();
+            if !cohorts.iter().any(|prior| same_capture(*prior, source)) {
+                cohorts.push(source);
+            }
+        }
+    }
     let capacity = usize::try_from(budget.max_bytes().min(8 * 1024))
         .map_err(|_| SemanticModelEncodingError::Budget)?;
     let mut output = BoundedModelBuffer::new(capacity, budget.max_bytes());
@@ -430,6 +440,23 @@ pub fn encode_semantic_read(
         ),
     )?;
     write_omissions(&mut output, read)?;
+    let all_fields_unproven = !read.fragments().is_empty()
+        && read
+            .fragments()
+            .iter()
+            .all(|fragment| !fragment.provenance().fields_complete());
+    if read.has_retained_evidence() {
+        checked_write(
+            &mut output,
+            format_args!(" retained_history=true refs=historical_read_only provenance=cohorts_v1"),
+        )?;
+    }
+    if read.includes_image_sources() {
+        checked_write(&mut output, format_args!(" image_sources=true"))?;
+    }
+    if read.includes_link_destinations() {
+        checked_write(&mut output, format_args!(" link_destinations=true"))?;
+    }
     if read.source_roles() != crate::SemanticReadRoleSelection::ALL {
         checked_write(&mut output, format_args!(" selected_roles="))?;
         for (index, role) in read.source_roles().roles().enumerate() {
@@ -440,6 +467,40 @@ pub fn encode_semantic_read(
         }
     }
     checked_write(&mut output, format_args!("\n"))?;
+    // Explicit columns and defaults remove repeated metadata, never evidence.
+    // Nondefault provenance is written on the exact row or its capture cohort;
+    // quoted values cannot introduce a row, declaration or override.
+    checked_write(
+        &mut output,
+        format_args!("C columns=id,ref,field,role,value"),
+    )?;
+    if read.has_retained_evidence() {
+        checked_write(
+            &mut output,
+            format_args!(
+                " default_p={}",
+                if cohorts.is_empty() { "none" } else { "p1" }
+            ),
+        )?;
+    } else {
+        checked_write(
+            &mut output,
+            format_args!(
+                " default_f={}",
+                if frames.is_empty() { "none" } else { "f1" }
+            ),
+        )?;
+    }
+    if all_fields_unproven {
+        checked_write(
+            &mut output,
+            format_args!(" default_fields_complete=unproven"),
+        )?;
+    }
+    checked_write(
+        &mut output,
+        format_args!(" default_source=page default_sensitivity=public\n"),
+    )?;
 
     for (index, frame) in frames.iter().enumerate() {
         let source = read
@@ -452,13 +513,41 @@ pub fn encode_semantic_read(
         write_quoted(&mut output, frame.origin().as_url().as_str())?;
         checked_write(
             &mut output,
-            format_args!(
-                " trust={} invocation={} snapshot={}\n",
-                frame_trust_label(frame.trust()),
-                source.invocation().get(),
-                source.snapshot().get(),
-            ),
+            format_args!(" trust={}", frame_trust_label(frame.trust())),
         )?;
+        if cross_document {
+            checked_write(
+                &mut output,
+                format_args!(
+                    " document_epoch={}",
+                    frame.context().navigation_epoch().get()
+                ),
+            )?;
+        }
+        if !read.has_retained_evidence() {
+            checked_write(
+                &mut output,
+                format_args!(
+                    " invocation={} snapshot={}",
+                    source.invocation().get(),
+                    source.snapshot().get()
+                ),
+            )?;
+        }
+        checked_write(&mut output, format_args!("\n"))?;
+    }
+
+    for (index, source) in cohorts.iter().enumerate() {
+        let frame = frames
+            .iter()
+            .position(|frame| *frame == source.frame())
+            .ok_or(SemanticModelEncodingError::Invariant)?
+            + 1;
+        checked_write(&mut output, format_args!(
+            "P p{} f=f{} historical_observation={} generation={} captured_at_ms={} invocation={} snapshot={}\n",
+            index + 1, frame, source.observation().get(), source.observation_generation().get(),
+            source.captured_at().millis(), source.invocation().get(), source.snapshot().get(),
+        ))?;
     }
 
     for fragment in read.fragments() {
@@ -470,14 +559,11 @@ pub fn encode_semantic_read(
         checked_write(
             &mut output,
             format_args!(
-                "R id=@r{} f=f{} ref={} field={} role={} source={} sensitivity={} value=",
+                "R @r{} {} {} {} ",
                 fragment.id().get(),
-                frame,
                 fragment.provenance().reference().model_token(),
                 field_label(fragment.field()),
                 role_label(fragment.role()),
-                source_label(fragment.provenance().trust()),
-                sensitivity_label(fragment.provenance().sensitivity()),
             ),
         )?;
         match fragment.content() {
@@ -492,6 +578,37 @@ pub fn encode_semantic_read(
             SemanticReadContent::Ordinal(value) => {
                 checked_write(&mut output, format_args!("{value}"))?;
             }
+        }
+        if !all_fields_unproven && !fragment.provenance().fields_complete() {
+            checked_write(&mut output, format_args!(" fields_complete=unproven"))?;
+        }
+        if frame != 1 && !read.has_retained_evidence() {
+            checked_write(&mut output, format_args!(" f=f{frame}"))?;
+        }
+        if read.has_retained_evidence() {
+            let cohort = cohorts
+                .iter()
+                .position(|source| same_capture(*source, fragment.provenance()))
+                .ok_or(SemanticModelEncodingError::Invariant)?
+                + 1;
+            if cohort != 1 {
+                checked_write(&mut output, format_args!(" p=p{cohort}"))?;
+            }
+        }
+        if fragment.provenance().trust() != crate::SemanticTrust::UntrustedPage {
+            checked_write(
+                &mut output,
+                format_args!(" source={}", source_label(fragment.provenance().trust())),
+            )?;
+        }
+        if fragment.provenance().sensitivity() != SemanticSensitivity::Public {
+            checked_write(
+                &mut output,
+                format_args!(
+                    " sensitivity={}",
+                    sensitivity_label(fragment.provenance().sensitivity())
+                ),
+            )?;
         }
         checked_write(&mut output, format_args!("\n"))?;
     }
@@ -519,6 +636,17 @@ pub fn encode_semantic_read(
     })
 }
 
+// A cohort shares capture coordinates only. Reference, source class and
+// sensitivity remain on each row, and values are never merged or deduplicated.
+fn same_capture(a: SemanticReadProvenance<'_>, b: SemanticReadProvenance<'_>) -> bool {
+    a.frame() == b.frame()
+        && a.observation() == b.observation()
+        && a.observation_generation() == b.observation_generation()
+        && a.captured_at() == b.captured_at()
+        && a.invocation() == b.invocation()
+        && a.snapshot() == b.snapshot()
+}
+
 fn validate_read(read: &SemanticReadResult<'_>) -> Result<(), SemanticModelEncodingError> {
     if usize::from(read.stats().items()) != read.fragments().len() {
         return Err(SemanticModelEncodingError::Invariant);
@@ -528,9 +656,11 @@ fn validate_read(read: &SemanticReadResult<'_>) -> Result<(), SemanticModelEncod
             u16::try_from(index + 1).map_err(|_| SemanticModelEncodingError::Invariant)?;
         let provenance = fragment.provenance();
         if fragment.id().get() != expected
-            || provenance.observation() != read.observation()
-            || provenance.observation_generation() != read.observation_generation()
-            || provenance.captured_at() != read.captured_at()
+            || ((provenance.context() != read.context()
+                || provenance.observation() != read.observation()
+                || provenance.observation_generation() != read.observation_generation()
+                || provenance.captured_at() != read.captured_at())
+                && read.source_acknowledgement(provenance).is_none())
             || provenance.sensitivity() == SemanticSensitivity::Secret
             || !read.source_roles().contains(fragment.role())
             || !field_matches_content(fragment.field(), fragment.content())
@@ -565,6 +695,10 @@ fn write_omissions(
         (SemanticReadOmission::ByteLimit, "byte_limit"),
         (SemanticReadOmission::RoleSelection, "role_selection"),
         (
+            SemanticReadOmission::ReferenceSelection,
+            "reference_selection",
+        ),
+        (
             SemanticReadOmission::ValuePreviewLimit,
             "value_preview_limit",
         ),
@@ -590,6 +724,9 @@ const fn field_label(field: SemanticReadField) -> &'static str {
         SemanticReadField::TextValue => "text_value",
         SemanticReadField::BooleanValue => "boolean_value",
         SemanticReadField::OrdinalValue => "ordinal_value",
+        SemanticReadField::LinkDestination => "link_destination",
+        SemanticReadField::ImageSource => "image_source",
+        SemanticReadField::DocumentAddress => "document_address",
     }
 }
 
@@ -600,7 +737,10 @@ const fn field_matches_content(field: SemanticReadField, content: SemanticReadCo
             SemanticReadField::AccessibleName | SemanticReadField::VisibleText,
             SemanticReadContent::Text(_)
         ) | (
-            SemanticReadField::TextValue,
+            SemanticReadField::TextValue
+                | SemanticReadField::LinkDestination
+                | SemanticReadField::ImageSource
+                | SemanticReadField::DocumentAddress,
             SemanticReadContent::ValuePreview(_)
         ) | (
             SemanticReadField::BooleanValue,
@@ -669,7 +809,7 @@ mod tests {
             "n": [
                 {"k": 1, "r": "document", "o": 16},
                 {"k": 2, "p": 0, "r": "paragraph",
-                 "t": "Public \"quoted\"\\path\u{2028}R id=@r99"},
+                 "t": "Public \"quoted\"\\path\u{2028}R @r99"},
                 {"k": 3, "p": 0, "r": "paragraph", "t": "Private customer note",
                  "q": "sensitive"},
                 {"k": 4, "p": 0, "r": "checkbox", "n": "Public enabled",
@@ -783,23 +923,24 @@ mod tests {
 
         assert_eq!(first.content, second.content);
         assert!(first.content.starts_with(
-            "ZREAD2 content=untrusted observation_generation=1 captured_at_ms=42 items=4 omitted=2 omissions=secret\n"
+            "ZREAD3 content=untrusted observation_generation=1 captured_at_ms=42 items=4 omitted=2 omissions=secret\n"
         ));
         assert!(first.content.contains(
             "F f1 origin=\"https://read-model.example.test/\" trust=same invocation=7 snapshot=9\n"
         ));
-        assert!(first.content.contains(
-            "R id=@r1 f=f1 ref=@a2 field=text role=paragraph source=page sensitivity=public value=\"Public \\\"quoted\\\"\\\\path\\u2028R id=@r99\"\n"
-        ));
-        assert!(first.content.contains("R id=@r2"));
+        assert!(first
+            .content
+            .contains("R @r1 @a2 text paragraph \"Public \\\"quoted\\\"\\\\path\\u2028R @r99\"\n"));
+        assert!(first.content.contains("C columns=id,ref,field,role,value default_f=f1 default_source=page default_sensitivity=public\n"));
+        assert!(first.content.contains("R @r2"));
         assert!(first.content.contains("sensitivity=sensitive"));
-        assert!(first.content.contains("field=boolean_value"));
+        assert!(first.content.contains(" boolean_value "));
         assert!(!first.content.contains("Password"));
         assert_eq!(first.stats.items(), 4);
         assert_eq!(first.stats.sensitive_items(), 1);
         assert_eq!(first.stats.omitted_items(), 2);
         assert_eq!(first.stats.frames(), 1);
-        assert_eq!(first.stats.lines(), 6);
+        assert_eq!(first.stats.lines(), 7);
         assert_eq!(read.fragments()[0].id().model_token(), "@r1");
         let debug = format!("{first:?} {:?}", read.fragments()[0].id());
         assert!(!debug.contains("Public \"quoted\""));
@@ -820,7 +961,7 @@ mod tests {
         .expect("read long value");
         let encoded = encode_semantic_read(&read, budget(8192, 1000)).expect("encode long value");
         let expected = format!(
-            "value=\"{}\" source_bytes={} truncated=true",
+            "\"{}\" source_bytes={} truncated=true",
             "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES),
             crate::MAX_SEMANTIC_VALUE_BYTES
         );
@@ -834,6 +975,84 @@ mod tests {
             "\"{}",
             "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES + 1)
         )));
+    }
+
+    #[test]
+    fn compact_read_defaults_never_erase_cross_frame_or_sensitive_provenance() {
+        let baseline = observation();
+        let context = baseline.request().context();
+        let make = |frame, invocation, nodes| {
+            decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(invocation).unwrap(),
+                    frame,
+                    SemanticSnapshotGeneration::new(10).unwrap(),
+                ),
+                &serde_json::to_vec(&json!({"v":1,"i":invocation,"g":10,"c":"complete","n":nodes}))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let main = make(
+            baseline.frames()[0].frame().clone(),
+            8,
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"paragraph","t":"Parent evidence"},
+                {"k":3,"p":0,"r":"frame_boundary"}
+            ]),
+        );
+        let child_frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::new(2).unwrap(),
+            context.frame_generation(),
+            SemanticOrigin::parse("https://child-read.example.test/").unwrap(),
+            SemanticFrameTrust::CrossOriginIsolated,
+        )
+        .unwrap();
+        let child = make(
+            child_frame.clone(),
+            9,
+            json!([
+                {"k":1,"r":"paragraph","t":"Child evidence","q":"sensitive"}
+            ]),
+        );
+        let mut assembler = SemanticObservationAssembler::new(
+            crate::SemanticObservationRequest::initial(
+                SemanticObservationId::new(2).unwrap(),
+                context,
+                SemanticObservationBudget::try_new(8, 8192, 2).unwrap(),
+            ),
+            main,
+        )
+        .unwrap();
+        assembler
+            .attach_frame(
+                FrameId::MAIN,
+                crate::SemanticReferenceId::new(3).unwrap(),
+                child,
+            )
+            .unwrap();
+        let observation = assembler.finish().unwrap();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(43),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let encoded = encode_semantic_read(&read, budget(8192, 8192)).unwrap();
+        assert_eq!(encoded.stats().frames(), 2);
+        assert_eq!(read.fragments()[1].provenance().frame(), &child_frame);
+        assert!(encoded
+            .content
+            .contains("F f2 origin=\"https://child-read.example.test/\" trust=cross_isolated"));
+        assert!(encoded
+            .content
+            .contains("R @r1 @a2 text paragraph \"Parent evidence\"\n"));
+        assert!(encoded
+            .content
+            .contains("R @r2 @a4 text paragraph \"Child evidence\" f=f2 sensitivity=sensitive\n"));
     }
 
     #[test]
@@ -876,7 +1095,7 @@ mod tests {
             .admit(&counter, &selected)
             .expect("admit");
         assert_eq!(payload.token_measurement().tokens(), 50);
-        assert!(payload.as_str().starts_with("ZREAD2 content=untrusted"));
+        assert!(payload.as_str().starts_with("ZREAD3 content=untrusted"));
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Private customer note"));
         let receipt = payload

@@ -7,11 +7,7 @@ use zephium_core::ports::engine::EngineEvent;
 
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 
-#[cfg(target_os = "macos")]
-use super::dispatch::with_extension_background_wake;
-use super::dispatch::{
-    with_extension_permit_invalidation, with_navigation_commit, with_navigation_settlement,
-};
+use super::dispatch::{with_navigation_commit, with_navigation_settlement};
 
 #[derive(Clone)]
 pub(super) struct Sink(crate::EngineEventIngressSink);
@@ -37,7 +33,12 @@ impl Sink {
 #[derive(Clone)]
 pub(super) struct EventPermit {
     state: Arc<Mutex<EventPermitState>>,
+    #[cfg(target_os = "windows")]
+    extensions: Option<ExtensionNavigationGrants>,
 }
+
+#[cfg(target_os = "windows")]
+pub(super) type ExtensionNavigationGrants = Arc<Mutex<std::collections::HashSet<String>>>;
 
 enum EventPermitState {
     #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
@@ -53,13 +54,35 @@ impl EventPermit {
     pub(super) fn inactive() -> Self {
         Self {
             state: Arc::new(Mutex::new(EventPermitState::Inactive)),
+            #[cfg(target_os = "windows")]
+            extensions: None,
         }
     }
 
     pub(super) fn bound(token: &Arc<AtomicBool>) -> Self {
         Self {
             state: Arc::new(Mutex::new(EventPermitState::Bound(Arc::downgrade(token)))),
+            #[cfg(target_os = "windows")]
+            extensions: None,
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn with_extensions(mut self, grants: ExtensionNavigationGrants) -> Self {
+        self.extensions = Some(grants);
+        self
+    }
+
+    pub(super) fn allows_target(&self, target: &str) -> bool {
+        if navigation::is_allowed_str(target) {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        if let (Some(grants), Ok(url)) = (&self.extensions, url::Url::parse(target)) {
+            return navigation::extension_document_id(&url)
+                .is_some_and(|id| grants.lock().is_ok_and(|grants| grants.contains(id)));
+        }
+        false
     }
 
     #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
@@ -126,7 +149,7 @@ impl EventPermit {
     }
 
     pub(super) fn allows_navigation(&self, target: &str) -> bool {
-        if !navigation::is_allowed_str(target) {
+        if !self.allows_target(target) {
             return false;
         }
         let state = self
@@ -191,72 +214,6 @@ pub(super) fn queue_navigation_commit(
     }
 }
 
-/// Wakes only matching authenticated document-background runtimes for one
-/// exact provisional navigation. This reconstructs the event wake which WebKit
-/// provides to service workers but does not reliably provide to its document
-/// background compatibility environment.
-#[cfg(target_os = "macos")]
-pub(super) fn queue_extension_background_wake(
-    id: ItemId,
-    permit: &EventPermit,
-    navigation: &NavigationEpochTracker,
-    epoch: NavigationEpoch,
-    target: String,
-) {
-    if permit.active_token().is_none() || !navigation.matches_current_target(epoch, &target) {
-        return;
-    }
-    let queued_permit = permit.clone();
-    let queued_navigation = navigation.clone();
-    let admitted = with_extension_background_wake(id, move |host| {
-        host.wake_matching_document_backgrounds(
-            id,
-            &queued_permit,
-            &queued_navigation,
-            epoch,
-            &target,
-        );
-    });
-    if !admitted {
-        // This is a usability compatibility hint, not a security mutation.
-        // WebKit retains its native behavior and the extension call may fail
-        // closed; ordinary browsing remains valid.
-        eprintln!("engine: matching extension background wake was not admitted");
-    }
-}
-
-/// A provisional main-frame transition permanently consumes every one-shot
-/// document permit issued before it. Its dedicated queue key never crosses an
-/// intervening operation. The navigation tracker's synchronous, non-rearmable
-/// operation generation remains the primary authority barrier even if host
-/// settlement is delayed or refused.
-pub(super) fn queue_navigation_authority_invalidation(
-    id: ItemId,
-    permit: &EventPermit,
-    navigation: &NavigationEpochTracker,
-) {
-    if permit.active_token().is_none() {
-        return;
-    }
-    let queued_permit = permit.clone();
-    let queued_navigation = navigation.clone();
-    let admitted = with_extension_permit_invalidation(id, move |host| {
-        host.invalidate_extension_document_permits_for_navigation(
-            id,
-            &queued_permit,
-            &queued_navigation,
-        );
-    });
-    if !admitted {
-        // Losing this mutation could make an old permit valid again after a
-        // provisional failure restores its document. Retire the entire native
-        // generation instead of accepting that replay window.
-        permit.revoke();
-        navigation.revoke();
-        eprintln!("security: extension document-permit invalidation was not admitted");
-    }
-}
-
 pub(super) fn queue_navigation_completion(
     id: ItemId,
     permit: &EventPermit,
@@ -274,6 +231,12 @@ pub(super) fn queue_navigation_completion(
         {
             host.complete_title_attribution(id, &queued_permit, &queued_navigation, epoch);
             host.emit_navigation_ready(id, &queued_permit, &queued_navigation, epoch);
+            #[cfg(target_os = "macos")]
+            if let Some((committed, url)) = queued_navigation.committed_snapshot() {
+                if committed == epoch {
+                    host.count_site_load(id, &url);
+                }
+            }
         }
     });
 }

@@ -10,16 +10,76 @@ fn route_fixture_with_targets(
     tokens: u64,
     destinations: Vec<ContextNavigationTarget>,
 ) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    navigation_fixture(operations, tokens, destinations, false)
+}
+fn discovery_observation(context: ContextJoin, id: u64) -> SemanticObservation {
+    observation(
+        context,
+        origin("source"),
+        id,
+        vec![
+            json!({"k":1,"r":"link","n":"Next","u":target().as_url().as_str()}),
+            json!({"k":2,"r":"link","n":"Final","u":final_target().as_url().as_str()}),
+        ],
+    )
+}
+fn navigation_fixture(
+    operations: u32,
+    tokens: u64,
+    destinations: Vec<ContextNavigationTarget>,
+    discovery: bool,
+) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    navigation_fixture_with_document_policy(
+        operations,
+        tokens,
+        destinations,
+        discovery,
+        crate::WorkBrowserDocumentPolicy::Exact,
+    )
+}
+fn navigation_fixture_with_document_policy(
+    operations: u32,
+    tokens: u64,
+    destinations: Vec<ContextNavigationTarget>,
+    discovery: bool,
+    document_policy: crate::WorkBrowserDocumentPolicy,
+) -> (PolicyFixture, ContextRegistry, SemanticObservation) {
     let (mut registry, context) = make_context_registry(901, 902, 903);
     registry
         .acknowledge_observation(context.identity().id(), context)
         .unwrap();
-    let source = origin("source");
-    let observation = actionable_observation(context, source.clone(), 1);
+    let public_page = document_policy == crate::WorkBrowserDocumentPolicy::PublicQueryFinalization;
+    let source = if public_page {
+        SemanticOrigin::parse("https://example.com").unwrap()
+    } else {
+        origin("source")
+    };
+    let observation = if public_page {
+        observation(
+            context,
+            source.clone(),
+            1,
+            vec![json!({"k":1,"r":"link","n":"Next","u":"https://example.com/next"})],
+        )
+    } else if discovery {
+        discovery_observation(context, 1)
+    } else {
+        actionable_observation(context, source.clone(), 1)
+    };
+    let sensitivity = if discovery {
+        SemanticSensitivity::Public
+    } else {
+        SemanticSensitivity::Sensitive
+    };
     let budget = run_budget(operations, tokens, 10_000);
     let effects = effects(&[SemanticEffectClass::Read]);
     let route = crate::AgentNavigationRoute::try_new(
-        ContextNavigationTarget::parse("https://source.example.test/start").unwrap(),
+        ContextNavigationTarget::parse(if public_page {
+            "https://example.com/start"
+        } else {
+            "https://source.example.test/start"
+        })
+        .unwrap(),
         destinations,
     )
     .unwrap();
@@ -27,12 +87,29 @@ fn route_fixture_with_targets(
         vec![profile(902)],
         vec![AgentAccountScope::Anonymous],
         vec![source.clone()],
-        SemanticSensitivity::Sensitive,
+        sensitivity,
         effects,
     )
-    .unwrap()
-    .with_navigation_route(route)
     .unwrap();
+    let authority = if discovery {
+        authority
+            .with_navigation_discovery(
+                if document_policy == crate::WorkBrowserDocumentPolicy::PublicQueryFinalization {
+                    crate::AgentNavigationDiscovery::try_new_public_page(route.departure().clone())
+                } else {
+                    crate::AgentNavigationDiscovery::try_new_with_document_policy(
+                        route.departure().clone(),
+                        "/".into(),
+                        2,
+                        document_policy,
+                    )
+                }
+                .unwrap(),
+            )
+            .unwrap()
+    } else {
+        authority.with_navigation_route(route).unwrap()
+    };
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::from_raw(1),
         ContextRunId::from_raw(901),
@@ -40,7 +117,7 @@ fn route_fixture_with_targets(
             vec![profile(902)],
             vec![AgentAccountScope::Anonymous],
             vec![source],
-            SemanticSensitivity::Sensitive,
+            sensitivity,
             effects,
             vec![],
         )
@@ -75,15 +152,860 @@ fn route_fixture_with_targets(
     (PolicyFixture { policy, lease }, registry, observation)
 }
 
+fn production_navigation_fixture() -> (PolicyFixture, ContextRegistry, SemanticObservation) {
+    let (mut registry, context) = make_context_registry(911, 912, 913);
+    registry
+        .acknowledge_observation(context.identity().id(), context)
+        .unwrap();
+    let source = origin("source");
+    let docs = origin("docs");
+    let destination =
+        ContextNavigationTarget::parse("https://docs.example.test/guide/result?q=rust#details")
+            .unwrap();
+    let observation = observation(
+        context,
+        source.clone(),
+        1,
+        vec![json!({"k":1,"r":"link","n":"Result","u":destination.as_url().as_str()})],
+    );
+    let budget = run_budget(16, 100_000, 10_000);
+    let effects = effects(&[SemanticEffectClass::Read]);
+    let discovery = crate::AgentNavigationDiscovery::try_new_production(
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap(),
+        vec![
+            crate::AgentNavigationOriginRule::try_new(source.clone(), "/".into(), true, true)
+                .unwrap(),
+            crate::AgentNavigationOriginRule::try_new(docs.clone(), "/guide/".into(), true, true)
+                .unwrap(),
+        ],
+        6,
+        2,
+    )
+    .unwrap();
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![profile(912)],
+        vec![AgentAccountScope::Anonymous],
+        vec![docs.clone(), source.clone()],
+        SemanticSensitivity::Public,
+        effects,
+    )
+    .unwrap()
+    .with_navigation_discovery(discovery)
+    .unwrap();
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::from_raw(11),
+        ContextRunId::from_raw(911),
+        AgentRunScope::try_new(
+            vec![profile(912)],
+            vec![AgentAccountScope::Anonymous],
+            vec![docs, source],
+            SemanticSensitivity::Public,
+            effects,
+            vec![],
+        )
+        .unwrap(),
+        budget,
+        AgentPolicyInstant::from_millis(ISSUED_AT),
+        AgentPolicyInstant::from_millis(EXPIRES_AT),
+        vec![AgentPlanNodeScope::new(
+            AgentPlanNodeId::from_raw(1),
+            authority,
+            budget,
+            AgentPolicyInstant::from_millis(EXPIRES_AT - 1),
+        )],
+    )
+    .unwrap();
+    let lease = AgentPlanLeaseId::from_raw(1);
+    let mut policy = AgentRunPolicy::try_new(
+        manifest,
+        vec![AgentPlanLeaseBinding::new(
+            lease,
+            AgentPlanNodeId::from_raw(1),
+        )],
+    )
+    .unwrap();
+    let departure =
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap();
+    let mut rows = crate::WorkBrowserResources::new(crate::WorkId::generate(), profile(912));
+    let construction = rows
+        .construct_document_with_policy(
+            crate::WorkBrowserResourceId::generate(),
+            ContextId::from_raw(913),
+            crate::ContextProfileStorageClass::Ephemeral,
+            departure.clone(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            AgentPolicyInstant::from_millis(0),
+        )
+        .unwrap();
+    let resource = construction.resource().clone();
+    let _ = rows
+        .settle_at(
+            construction.complete_document(departure),
+            AgentPolicyInstant::from_millis(0),
+        )
+        .unwrap();
+    let acquire = rows
+        .acquire(
+            &resource,
+            ContextRunId::from_raw(911),
+            AgentPolicyInstant::from_millis(1),
+            AgentPolicyInstant::from_millis(EXPIRES_AT),
+        )
+        .unwrap();
+    let retained_lease = acquire.lease().unwrap().clone();
+    let _ = rows
+        .settle_at(
+            acquire.complete(crate::WorkBrowserResourceNativeOutcome::Acquired),
+            AgentPolicyInstant::from_millis(1),
+        )
+        .unwrap();
+    let binding = rows
+        .read_binding(&retained_lease, AgentPolicyInstant::from_millis(2))
+        .unwrap();
+    policy.bind_retained_initial_document(&binding).unwrap();
+    commit_observation_to_model(
+        &mut policy,
+        lease,
+        1,
+        account(context, NOW - 1),
+        &observation,
+    );
+    (PolicyFixture { policy, lease }, registry, observation)
+}
+
+#[test]
+fn public_page_read_has_no_navigation_authority_even_for_observed_links() {
+    let destination = ContextNavigationTarget::parse("https://example.com/next").unwrap();
+    let (mut fixture, registry, observed) = navigation_fixture_with_document_policy(
+        5,
+        100_000,
+        vec![destination.clone()],
+        true,
+        crate::WorkBrowserDocumentPolicy::PublicQueryFinalization,
+    );
+    let request = route_request(
+        &fixture,
+        &registry,
+        &observed,
+        account(observed.request().context(), NOW - 1),
+    );
+    assert_eq!(
+        fixture
+            .policy
+            .authorize_navigation(request, &observed, &baseline(&observed), &destination)
+            .err(),
+        Some(AgentPolicyError::Navigation)
+    );
+}
+
+#[test]
+fn production_navigation_admits_scoped_cross_origin_queries_fragments_and_departure_revisit() {
+    let (mut fixture, mut registry, source) = production_navigation_fixture();
+    let destination =
+        ContextNavigationTarget::parse("https://docs.example.test/guide/result?q=rust#details")
+            .unwrap();
+    let source_target =
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap();
+
+    let request = route_request(
+        &fixture,
+        &registry,
+        &source,
+        account(source.request().context(), NOW - 1),
+    );
+    let permit = fixture
+        .policy
+        .authorize_navigation(request, &source, &baseline(&source), &destination)
+        .unwrap();
+    let operation = registry
+        .begin_navigation(
+            source.request().context().identity().id(),
+            ContextOperationId::new(2).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    let receipt = fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(operation, Ok(destination.clone())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    assert_eq!(receipt.hop(), 0);
+    registry
+        .settle_navigation(
+            operation.context().identity().id(),
+            operation,
+            ContextSettlement::Applied,
+        )
+        .unwrap();
+    registry
+        .acknowledge_observation(operation.context().identity().id(), operation.context())
+        .unwrap();
+    let docs = observation(
+        operation.context(),
+        origin("docs"),
+        2,
+        vec![json!({"k":1,"r":"link","n":"Back","u":source_target.as_url().as_str()})],
+    );
+    let binding = account(operation.context(), NOW);
+    commit_observation_to_model(&mut fixture.policy, fixture.lease, 2, binding, &docs);
+
+    let request = route_request(&fixture, &registry, &docs, binding);
+    assert!(
+        fixture
+            .policy
+            .authorize_navigation(request, &docs, &baseline(&docs), &destination)
+            .is_err(),
+        "current-document no-op must remain denied"
+    );
+    let permit = fixture
+        .policy
+        .authorize_navigation(request, &docs, &baseline(&docs), &source_target)
+        .unwrap();
+    let back = registry
+        .begin_navigation(
+            operation.context().identity().id(),
+            ContextOperationId::new(3).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, back, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    let receipt = fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(back, Ok(source_target)).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    assert_eq!(receipt.hop(), 1);
+    assert_eq!(fixture.policy.navigation_destinations[0], Some(destination));
+    assert_eq!(fixture.policy.accounting().consumed_operations(), 4);
+}
+
+#[test]
+fn native_back_is_policy_derived_and_advances_only_after_exact_committed_predecessor() {
+    let (mut fixture, mut registry, source) = production_navigation_fixture();
+    let destination =
+        ContextNavigationTarget::parse("https://docs.example.test/guide/result?q=rust#details")
+            .unwrap();
+    let departure =
+        ContextNavigationTarget::parse("https://source.example.test/start?q=one#top").unwrap();
+    assert!(fixture
+        .policy
+        .authorize_history_back(
+            route_request(
+                &fixture,
+                &registry,
+                &source,
+                account(source.request().context(), NOW - 1),
+            ),
+            &source,
+            &baseline(&source),
+        )
+        .is_err());
+
+    let permit = fixture
+        .policy
+        .authorize_navigation(
+            route_request(
+                &fixture,
+                &registry,
+                &source,
+                account(source.request().context(), NOW - 1),
+            ),
+            &source,
+            &baseline(&source),
+            &destination,
+        )
+        .unwrap();
+    let load = registry
+        .begin_navigation(
+            source.request().context().identity().id(),
+            ContextOperationId::new(2).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, load, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(load, Ok(destination)).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    registry
+        .settle_navigation(
+            load.context().identity().id(),
+            load,
+            ContextSettlement::Applied,
+        )
+        .unwrap();
+    registry
+        .acknowledge_observation(load.context().identity().id(), load.context())
+        .unwrap();
+    let current = observation(
+        load.context(),
+        origin("docs"),
+        2,
+        vec![json!({"k":1,"r":"link","n":"Other","u":"https://docs.example.test/guide/other"})],
+    );
+    let account = account(load.context(), NOW);
+    commit_observation_to_model(&mut fixture.policy, fixture.lease, 2, account, &current);
+
+    let permit = fixture
+        .policy
+        .authorize_history_back(
+            route_request(&fixture, &registry, &current, account),
+            &current,
+            &baseline(&current),
+        )
+        .unwrap();
+    assert_eq!(permit.target(), &departure);
+    let back = registry
+        .begin_navigation(
+            load.context().identity().id(),
+            ContextOperationId::new(3).unwrap(),
+        )
+        .unwrap();
+    let active = fixture
+        .policy
+        .dispatch_navigation(permit, back, AgentPolicyInstant::from_millis(NOW))
+        .unwrap();
+    assert_eq!(active.kind(), AgentNavigationKind::HistoryBack);
+    assert!(active.native_request().is_err());
+    assert!(fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(back, Ok(target())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .is_err());
+    let receipt = fixture
+        .policy
+        .settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(back, Ok(departure.clone())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        )
+        .unwrap();
+    assert_eq!(receipt.kind(), AgentNavigationKind::HistoryBack);
+}
+
 fn final_target() -> ContextNavigationTarget {
     ContextNavigationTarget::parse("https://source.example.test/final").unwrap()
+}
+
+#[test]
+fn a_whole_page_snapshot_refresh_keeps_its_predecessor_budget() {
+    // Recorded shape: a whole-page findings read on Airbnb asked for a plain
+    // snapshot; the retained successor used the whole-page budget and the
+    // checkpoint expected the filtered one, refusing the read for Authority.
+    let (mut f, _, initial) = navigation_fixture(6, 200_000, vec![target(), final_target()], true);
+    let context = initial.request().context();
+    let make = |request: SemanticObservationRequest, generation| {
+        let wire = serde_json::to_vec(&json!({
+            "v":1,"i":generation,"g":generation,"c":"complete",
+            "n":[{"k":1,"r":"heading","l":1,"n":"Vacation rentals"},{"k":2,"r":"paragraph","t":"Quick stats"}]
+        }))
+        .unwrap();
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(generation).unwrap(),
+                initial.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(generation).unwrap(),
+            ),
+            &wire,
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(request, snapshot)
+            .unwrap()
+            .finish()
+            .unwrap()
+    };
+    let previous = make(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(2).unwrap(),
+            context,
+            SemanticObservationBudget::WHOLE_PAGE,
+        ),
+        12,
+    );
+    let selected = tokenizer();
+    let config = provider_exact_config(selected.clone(), 128, 64_000)
+        .restrict_to_navigation_and_extraction()
+        .with_baseline_read()
+        .with_progressive_observation();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Report the places to stay this page shows".into(),
+        &selected,
+    )
+    .unwrap();
+    let payload = |observation: &SemanticObservation| {
+        encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap()
+    };
+    let binding = account(context, NOW);
+    let committed = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+        &mut f.policy,
+        call_request(2, f.lease, binding, 64_000, 128, 1_000, NOW),
+        &previous,
+        payload(&previous),
+        &objective,
+        config.clone(),
+    )
+    .unwrap()
+    .into_transport_input()
+    .commit(&mut f.policy)
+    .unwrap();
+    let (second, input, seed) = committed.into_parts();
+    let (active, _) = input.into_parts();
+    f.policy
+        .settle_model_call(active, AgentModelCallSettlement::Completed, 10_000, 4, 80)
+        .unwrap();
+    let arguments = r#"{"scope":{"kind":"initial"}}"#;
+    let tool = crate::AgentBrowserToolCall::decode_openai(
+        second.call(),
+        "fc_refresh".into(),
+        "call_refresh".into(),
+        "snapshot",
+        arguments.into(),
+    )
+    .unwrap();
+    let completion = crate::AgentProviderCompletion::new(
+        second.call(),
+        crate::AgentProviderStopReason::ToolCalls,
+        crate::AgentProviderUsage::try_new(10_000, 4, 0, 0, 0).unwrap(),
+        crate::AgentProviderStreamStats::new(200, 8, 0, 1, arguments.len() as u32),
+        true,
+    );
+    let checkpoint = seed
+        .unwrap()
+        .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
+        .unwrap()
+        .retire_for_observation(&previous, &config)
+        .unwrap();
+    let request = checkpoint
+        .request(&previous, SemanticObservationId::new(3).unwrap())
+        .unwrap();
+    assert_eq!(request.budget(), SemanticObservationBudget::WHOLE_PAGE);
+    // The retained resource observes under the same host capability.
+    let current = make(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(3).unwrap(),
+            context,
+            SemanticObservationBudget::WHOLE_PAGE,
+        ),
+        13,
+    );
+    let prepared = checkpoint
+        .prepare_successor(
+            &mut f.policy,
+            &previous,
+            &current,
+            call_request(3, f.lease, binding, 64_000, 128, 1_000, NOW),
+            config,
+            payload(&current),
+            &objective,
+        )
+        .expect("a whole-page refresh reaches the third call");
+    assert_eq!(
+        prepared.request().call().call(),
+        AgentModelCallId::new(3).unwrap()
+    );
+}
+
+#[test]
+fn structured_product_window_reaches_third_provider_request_with_original_policy() {
+    // Shape/route regression from retained commerce run twenty-second:
+    // 128 / NodeLimit -> @a122 window(1000,5000) -> 87 / ScopeBoundary.
+    // Page strings below are synthetic; no stored response or provider is used.
+    let (mut f, _, initial) = navigation_fixture(6, 200_000, vec![target(), final_target()], true);
+    let context = initial.request().context();
+    let make = |request: SemanticObservationRequest, generation, completeness, nodes| {
+        let wire = serde_json::to_vec(&json!({
+            "v":1,"i":generation,"g":generation,"c":completeness,"n":nodes
+        }))
+        .unwrap();
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(generation).unwrap(),
+                initial.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(generation).unwrap(),
+            ),
+            &wire,
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(request, snapshot)
+            .unwrap()
+            .finish()
+            .unwrap()
+    };
+    let mut nodes: Vec<_> = (1..=128)
+        .map(|key| json!({"k":key,"r":"paragraph","t":"previous-only product inventory"}))
+        .collect();
+    nodes[121] = json!({"k":122,"r":"heading","l":1,"n":"Product title"});
+    let previous = make(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(2).unwrap(),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        ),
+        12,
+        "node_limit",
+        nodes,
+    );
+    let selected = tokenizer();
+    let config = provider_exact_config(selected.clone(), 128, 64_000)
+        .restrict_to_navigation_and_extraction()
+        .with_baseline_read()
+        .with_progressive_observation();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Research the observed product without buying".into(),
+        &selected,
+    )
+    .unwrap();
+    let payload = |observation: &SemanticObservation| {
+        encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap()
+    };
+    let binding = account(context, NOW);
+    let committed = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+        &mut f.policy,
+        call_request(2, f.lease, binding, 64_000, 128, 1_000, NOW),
+        &previous,
+        payload(&previous),
+        &objective,
+        config.clone(),
+    )
+    .unwrap()
+    .into_transport_input()
+    .commit(&mut f.policy)
+    .unwrap();
+    let (second, input, seed) = committed.into_parts();
+    let (active, evidence) = input.into_parts();
+    let old_ack = evidence.observation_acknowledgement().unwrap().clone();
+    f.policy
+        .settle_model_call(active, AgentModelCallSettlement::Completed, 10_000, 4, 80)
+        .unwrap();
+    let arguments = r#"{"scope":{"kind":"surrounding_text","after_bytes":5000,"before_bytes":1000,"target":"@a122"}}"#;
+    let tool = crate::AgentBrowserToolCall::decode_openai(
+        second.call(),
+        "fc_window".into(),
+        "call_window".into(),
+        "snapshot",
+        arguments.into(),
+    )
+    .unwrap();
+    let completion = crate::AgentProviderCompletion::new(
+        second.call(),
+        crate::AgentProviderStopReason::ToolCalls,
+        crate::AgentProviderUsage::try_new(10_000, 4, 0, 0, 0).unwrap(),
+        crate::AgentProviderStreamStats::new(200, 8, 0, 1, arguments.len() as u32),
+        true,
+    );
+    let checkpoint = seed
+        .unwrap()
+        .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
+        .unwrap()
+        .retire_for_observation(&previous, &config)
+        .unwrap();
+    let request = checkpoint
+        .request(&previous, SemanticObservationId::new(3).unwrap())
+        .unwrap();
+    let mut nodes = vec![json!({"k":122,"r":"heading","l":1,"n":"Product title"})];
+    nodes.extend(
+        (201..=286)
+            .map(|key| json!({"k":key,"r":"paragraph","t":"new product dimension evidence"})),
+    );
+    let current = make(request, 13, "scope_boundary", nodes);
+    assert_eq!(previous.node_count(), 128);
+    assert_eq!(current.node_count(), 87);
+    assert!(current.frames()[0]
+        .nodes()
+        .iter()
+        .all(|node| node.parent().is_none()
+            && node.operations().is_empty()
+            && node.link_destination().is_none()));
+    let prepared = checkpoint
+        .prepare_successor(
+            &mut f.policy,
+            &previous,
+            &current,
+            call_request(3, f.lease, binding, 64_000, 128, 1_000, NOW),
+            config,
+            payload(&current),
+            &objective,
+        )
+        .expect("structured window reaches original third-call admission");
+    assert_eq!(
+        prepared.request().call().call(),
+        AgentModelCallId::new(3).unwrap()
+    );
+    let body = std::str::from_utf8(prepared.request().body()).unwrap();
+    assert!(
+        body.contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1")
+            && body.contains("new product dimension evidence")
+    );
+    assert!(!body.contains("previous-only product inventory") && !body.contains("@a122"));
+    let (third, input, _) = prepared
+        .into_transport_input()
+        .commit(&mut f.policy)
+        .unwrap()
+        .into_parts();
+    assert_eq!(third.call().call(), AgentModelCallId::new(3).unwrap());
+    let (active, evidence) = input.into_parts();
+    assert!(evidence
+        .observation_acknowledgement()
+        .unwrap()
+        .matches(&current));
+    assert!(!old_ack.matches(&current));
+    f.policy
+        .settle_model_call(active, AgentModelCallSettlement::Completed, 10_000, 4, 80)
+        .unwrap();
+    assert_eq!(f.policy.pending_model_calls(), 0);
+}
+
+#[test]
+fn initial_effective_metadata_requires_original_retained_binding_before_model_calls() {
+    use crate::*;
+    for fault in 0..5 {
+        let (f, _, _) = navigation_fixture(5, 10_000, vec![target(), final_target()], true);
+        let mut policy = if fault == 3 {
+            f.policy
+        } else {
+            AgentRunPolicy::try_new(
+                f.policy.manifest,
+                vec![AgentPlanLeaseBinding::new(
+                    f.lease,
+                    AgentPlanNodeId::from_raw(1),
+                )],
+            )
+            .unwrap()
+        };
+        let requested = ContextNavigationTarget::parse(if fault == 1 {
+            "https://source.example.test/other"
+        } else {
+            "https://source.example.test/start"
+        })
+        .unwrap();
+        let mut effective =
+            ContextNavigationTarget::parse(&format!("{}?opaque=initial", requested.as_url()))
+                .unwrap();
+        let mut rows = WorkBrowserResources::new(WorkId::generate(), profile(902));
+        let construction = rows
+            .construct_document_with_policy(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                requested.clone(),
+                WorkBrowserDocumentPolicy::DocumentQueryFinalization,
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        let resource = construction.resource().clone();
+        let _ = rows
+            .settle_at(
+                construction.complete_document(effective.clone()),
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        if fault == 4 {
+            let present = rows
+                .present_human(
+                    &resource,
+                    WorkBrowserHumanRegion::try_new(0, 0, 800, 600).unwrap(),
+                    AgentPolicyInstant::from_millis(0),
+                    AgentPolicyInstant::from_millis(500),
+                )
+                .unwrap();
+            let _ = rows
+                .settle_at(
+                    present.complete(WorkBrowserResourceNativeOutcome::HumanPresented),
+                    AgentPolicyInstant::from_millis(0),
+                )
+                .unwrap();
+            let resume = rows
+                .continue_after_human(&resource, AgentPolicyInstant::from_millis(0))
+                .unwrap();
+            effective = requested.clone();
+            let _ = rows
+                .settle_at(
+                    resume.complete_human_document(effective.clone()),
+                    AgentPolicyInstant::from_millis(0),
+                )
+                .unwrap();
+        }
+        let acquire = rows
+            .acquire(
+                &resource,
+                ContextRunId::from_raw(if fault == 2 { 999 } else { 901 }),
+                AgentPolicyInstant::from_millis(1),
+                AgentPolicyInstant::from_millis(EXPIRES_AT),
+            )
+            .unwrap();
+        let lease = acquire.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                acquire.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                AgentPolicyInstant::from_millis(1),
+            )
+            .unwrap();
+        let binding = rows
+            .read_binding(&lease, AgentPolicyInstant::from_millis(2))
+            .unwrap();
+        let result = policy.bind_retained_initial_document(&binding);
+        assert_eq!(result.is_ok(), matches!(fault, 0 | 4), "fault {fault}");
+        if matches!(fault, 0 | 4) {
+            assert_eq!(
+                binding.frame().context().navigation_epoch().get(),
+                if fault == 4 { 2 } else { 1 }
+            );
+            let context = binding.frame().context();
+            let observed = discovery_observation(context, 1);
+            let request = call_request(1, f.lease, account(context, NOW), 0, 0, 0, NOW);
+            let checkpoint = policy
+                .provider_navigation_checkpoint(request, &observed)
+                .unwrap()
+                .unwrap();
+            assert_eq!(checkpoint.current_document(), Some(&effective));
+            assert_eq!(checkpoint.current_requested_document(), Some(&requested));
+            assert!(policy.bind_retained_initial_document(&binding).is_err());
+        }
+    }
+}
+
+#[test]
+fn trusted_finalization_preserves_requested_progress_and_binds_effective_document() {
+    use crate::WorkBrowserDocumentPolicy as P;
+    for (policy, effective, accepted) in [
+        (
+            P::Exact,
+            "https://source.example.test/next?opaque=one",
+            false,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://source.example.test/next?opaque=one",
+            true,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://source.example.test/other?opaque=one",
+            false,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://foreign.test/next?opaque=one",
+            false,
+        ),
+        (
+            P::DocumentQueryFinalization,
+            "https://source.example.test/next?opaque=one#fragment",
+            false,
+        ),
+    ] {
+        let (mut f, mut registry, observed) = navigation_fixture_with_document_policy(
+            5,
+            10_000,
+            vec![target(), final_target()],
+            true,
+            policy,
+        );
+        // The actual fixture link remains the sole requested destination.
+        let destination = target();
+        let effective = ContextNavigationTarget::parse(effective).unwrap();
+        let request = route_request(
+            &f,
+            &registry,
+            &observed,
+            account(observed.request().context(), NOW - 1),
+        );
+        let permit = f
+            .policy
+            .authorize_navigation(request, &observed, &baseline(&observed), &destination)
+            .unwrap();
+        let operation = registry
+            .begin_navigation(
+                observed.request().context().identity().id(),
+                ContextOperationId::new(2).unwrap(),
+            )
+            .unwrap();
+        let active = f
+            .policy
+            .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+            .unwrap();
+        let native = active.native_request().unwrap();
+        assert_eq!(native.target(), &destination);
+        assert_eq!(native.document_policy(), policy);
+        assert!(native.redirect_policy().is_none());
+        let result = f.policy.settle_navigation(
+            &active,
+            &ContextNavigationSettlement::try_new(operation, Ok(effective.clone())).unwrap(),
+            AgentPolicyInstant::from_millis(NOW),
+        );
+        assert_eq!(result.is_ok(), accepted, "{effective:?}");
+        if !accepted {
+            continue;
+        }
+        let receipt = result.unwrap();
+        assert!(receipt.matches_source(&baseline(&observed), &destination));
+        assert!(!receipt.matches_source(&baseline(&observed), &effective));
+        assert_eq!(receipt.progress_id(), active.progress_id());
+        let successor = discovery_observation(operation.context(), 2);
+        let request = call_request(2, f.lease, account(operation.context(), NOW), 0, 0, 0, NOW);
+        let checkpoint = f
+            .policy
+            .provider_navigation_checkpoint(request, &successor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.current_document(), Some(&effective));
+        assert_eq!(checkpoint.current_requested_document(), Some(&destination));
+        f.policy.navigation_effective_destinations[0] = Some(destination.clone());
+        assert!(
+            f.policy
+                .provider_navigation_checkpoint(request, &successor)
+                .is_err(),
+            "even an otherwise policy-valid effective substitution must fail the receipt hash"
+        );
+    }
 }
 
 fn committed_route() -> (
     PolicyFixture,
     Vec<(AgentActiveNavigation, AgentNavigationReceipt)>,
 ) {
-    let (mut f, mut registry, mut current) = route_fixture(5);
+    committed_navigation(false)
+}
+fn committed_navigation(
+    discovery: bool,
+) -> (
+    PolicyFixture,
+    Vec<(AgentActiveNavigation, AgentNavigationReceipt)>,
+) {
+    let (mut f, mut registry, mut current) =
+        navigation_fixture(5, 10_000, vec![target(), final_target()], discovery);
     let mut terminals = vec![];
     for (hop, destination) in [target(), final_target()].into_iter().enumerate() {
         let binding = account(
@@ -126,10 +1048,229 @@ fn committed_route() -> (
         registry
             .acknowledge_observation(operation.context().identity().id(), operation.context())
             .unwrap();
-        current = actionable_observation(operation.context(), origin("source"), hop as u64 + 2);
+        current = if discovery {
+            discovery_observation(operation.context(), hop as u64 + 2)
+        } else {
+            actionable_observation(operation.context(), origin("source"), hop as u64 + 2)
+        };
         terminals.push((active, receipt));
     }
     (f, terminals)
+}
+
+#[test]
+fn discovery_progress_urls_join_exact_committed_receipts_and_current_document() {
+    for fault in 0..7 {
+        let (mut f, terminals) = committed_navigation(true);
+        let context = terminals[1].1.operation().context();
+        let observed = discovery_observation(context, 3);
+        match fault {
+            1 => f.policy.navigation_destinations[0] = None,
+            2 => f.policy.navigation_destinations.swap(0, 1),
+            3 => f.policy.navigation_destinations[1] = Some(target()),
+            4 => f.policy.navigation_receipts[1] = None,
+            5 => {
+                f.policy.navigation_destinations[0] =
+                    Some(ContextNavigationTarget::parse("https://other.invalid/foreign").unwrap())
+            }
+            _ => {}
+        }
+        let request = call_request(
+            3,
+            f.lease,
+            account(
+                if fault == 6 {
+                    terminals[0].1.operation().context()
+                } else {
+                    context
+                },
+                NOW,
+            ),
+            0,
+            0,
+            0,
+            NOW,
+        );
+        let checkpoint = f.policy.provider_navigation_checkpoint(request, &observed);
+        if fault != 0 {
+            assert!(checkpoint.is_err(), "substituted URL/context {fault}");
+            continue;
+        }
+        let checkpoint = checkpoint.unwrap().unwrap();
+        assert_eq!(checkpoint.current_document(), Some(&final_target()));
+        assert_eq!(
+            checkpoint.prior_documents().collect::<Vec<_>>(),
+            vec![
+                &ContextNavigationTarget::parse("https://source.example.test/start").unwrap(),
+                &target()
+            ]
+        );
+        assert_eq!(checkpoint.completed_hops(), 2);
+        assert!(checkpoint.next_target().is_none());
+        assert!(!format!("{:?}", terminals[0].1).contains("https://"));
+    }
+    let (f, _, observed) = navigation_fixture(5, 10_000, vec![target(), final_target()], true);
+    let checkpoint = f
+        .policy
+        .provider_navigation_checkpoint(
+            call_request(
+                2,
+                f.lease,
+                account(observed.request().context(), NOW),
+                0,
+                0,
+                0,
+                NOW,
+            ),
+            &observed,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        checkpoint.current_document().unwrap().as_url().as_str(),
+        "https://source.example.test/start"
+    );
+    assert_eq!(checkpoint.prior_documents().count(), 0);
+}
+
+#[test]
+fn historical_extraction_requires_the_exact_discovery_receipt_chain() {
+    for fault in 0..6 {
+        let (mut fixture, terminals) = committed_navigation(true);
+        let current = terminals[1].1.operation().context();
+        let request = call_request(
+            3,
+            if fault == 5 {
+                AgentPlanLeaseId::generate()
+            } else {
+                fixture.lease
+            },
+            if fault == 3 {
+                AgentContextAccountBinding::new(
+                    AgentAccountAttestationId::generate(),
+                    current,
+                    AgentAccountScope::Authenticated(AgentAccountId::generate()),
+                    AgentPolicyInstant::from_millis(NOW),
+                )
+            } else {
+                account(current, NOW)
+            },
+            0,
+            0,
+            0,
+            NOW,
+        );
+        match fault {
+            1 => fixture.policy.navigation_receipts[0] = None,
+            2 => fixture.policy.navigation_receipts.swap(0, 1),
+            4 => fixture.policy.navigation_attempts = 1,
+            _ => {}
+        }
+        let historical = fixture
+            .policy
+            .historical_extraction_contexts(request, current);
+        if fault != 0 {
+            assert!(historical.is_err(), "changed history {fault} must refuse");
+            continue;
+        }
+        let historical = historical.unwrap();
+        assert_eq!(
+            historical,
+            vec![terminals[1].1.source(), terminals[0].1.source()]
+        );
+        let node = fixture
+            .policy
+            .manifest()
+            .plan_node(AgentPlanNodeId::from_raw(1))
+            .unwrap();
+        let candidates = fixture.policy.taints.clone();
+        assert_eq!(
+            validate_context_scope(
+                fixture.policy.manifest(),
+                node,
+                current,
+                request.account(),
+                &candidates
+            ),
+            Err(AgentPolicyError::SourceOutsideScope)
+        );
+        assert!(validate_context_scope_with_history(
+            fixture.policy.manifest(),
+            node,
+            current,
+            request.account(),
+            &candidates,
+            &historical
+        )
+        .is_ok());
+    }
+
+    // Fixed-route qualifications still require their terminal document. They
+    // cannot gain historical extraction merely because some receipts exist.
+    let (fixture, terminals) = committed_navigation(false);
+    let current = terminals[1].1.operation().context();
+    let request = call_request(3, fixture.lease, account(current, NOW), 0, 0, 0, NOW);
+    assert!(fixture
+        .policy
+        .historical_extraction_contexts(request, current)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn historical_extraction_departed_read_rejoins_original_provider_taint() {
+    let (fixture, terminals) = committed_navigation(true);
+    let first = discovery_observation(terminals[0].1.source(), 1);
+    let last = discovery_observation(terminals[1].1.operation().context(), 3);
+    let first_ack = baseline(&first);
+    let last_ack = baseline(&last);
+    let read = |observation, acknowledgement| {
+        read_semantic_observation(
+            observation,
+            SemanticReadAuthority::Acknowledged(acknowledgement),
+            SemanticCaptureInstant::from_millis(NOW),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap()
+    };
+    let mut evidence = crate::SemanticRetainedReadEvidence::default();
+    evidence
+        .retain(&read(&first, &first_ack), &first_ack)
+        .unwrap();
+    assert!(evidence
+        .merge_for_extraction(read(&last, &last_ack))
+        .is_err());
+    assert!(evidence.advance_after_navigation(terminals[1].1).is_err());
+    evidence.advance_after_navigation(terminals[0].1).unwrap();
+    assert!(evidence.advance_after_navigation(terminals[0].1).is_err());
+    evidence.advance_after_navigation(terminals[1].1).unwrap();
+    let merged = evidence
+        .merge_for_extraction(read(&last, &last_ack))
+        .unwrap();
+    assert!(merged
+        .fragments()
+        .iter()
+        .any(|fragment| fragment.provenance().context() == first.request().context()));
+    assert!(crate::encode_semantic_read(
+        &merged,
+        SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE
+    )
+    .is_ok());
+
+    let binding = account(last.request().context(), NOW);
+    let mut taints = fixture.policy.taints.clone();
+    taints.extend(observation_taints(&last, binding).unwrap());
+    assert!(provider_extraction_read_taints(&merged, &last_ack, binding, &taints).is_ok());
+    assert_eq!(
+        provider_read_taints(&merged, &last_ack, binding, &taints),
+        Err(AgentPolicyError::Authority)
+    );
+    let current_only = observation_taints(&last, binding).unwrap();
+    assert_eq!(
+        provider_extraction_read_taints(&merged, &last_ack, binding, &current_only),
+        Err(AgentPolicyError::ReadBaselineMissing)
+    );
 }
 
 #[test]
@@ -392,7 +1533,12 @@ fn route_provider_request_counts_trusted_checkpoint_and_refuses_unsupported_or_s
             let prepared = result.unwrap();
             let body: Value = serde_json::from_slice(prepared.request().body()).unwrap();
             let input = body["input"].as_array().unwrap();
-            assert_eq!(input.len(), 3);
+            // Objective, observation, route checkpoint, then the act targets.
+            assert_eq!(input.len(), 4);
+            assert!(input[3]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("ZEPHIUM_HOST_ACT_TARGETS_V1\n"));
             assert_eq!(input[0]["role"], "user");
             assert_eq!(
                 input[0]["content"][0]["text"],
@@ -596,6 +1742,161 @@ fn route_locate_replay_revalidates_progress_before_new_policy_reservation() {
 }
 
 #[test]
+fn production_discovery_closes_all_navigation_receipts_after_success_or_refusal() {
+    for (hops, refused) in [(3_u64, false), (6, false), (4, true)] {
+        let (mut f, mut registry, mut current) = production_navigation_fixture();
+        let root = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(1).unwrap(),
+            AgentDelegationTopology::try_new(
+                f.policy.manifest(),
+                vec![AgentDelegationSpec::new(root, None)],
+            )
+            .unwrap(),
+        );
+        let mut accounting =
+            crate::AgentRunAccountingMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut progress =
+            crate::AgentRunProgressMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut audit = crate::AgentAuditLedger::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let actions =
+            crate::AgentRunActionPerformanceMetrics::try_new(f.policy.manifest(), &supervisor)
+                .unwrap();
+        let inputs =
+            crate::AgentRunProviderInputMetrics::try_new(f.policy.manifest(), &supervisor).unwrap();
+        let mut event_id = 0;
+        let mut record = |supervisor: &AgentRunSupervisor,
+                          progress: &mut crate::AgentRunProgressMetrics| {
+            event_id += 1;
+            progress
+                .record_event(
+                    audit
+                        .record_current(
+                            supervisor,
+                            root,
+                            crate::AgentAuditEventId::new(event_id).unwrap(),
+                            AgentPolicyInstant::from_millis(NOW + event_id),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+        };
+        record(&supervisor, &mut progress);
+        let execution = supervisor
+            .start(root, crate::AgentSupervisorAttemptId::new(1).unwrap())
+            .unwrap();
+        record(&supervisor, &mut progress);
+        for hop in 0..hops {
+            let destination = ContextNavigationTarget::parse(&if hop == 0 {
+                "https://docs.example.test/guide/result?q=rust#details".into()
+            } else {
+                format!("https://docs.example.test/guide/{hop}")
+            })
+            .unwrap();
+            let binding = account(
+                current.request().context(),
+                if hop == 0 { NOW - 1 } else { NOW },
+            );
+            if hop > 0 {
+                commit_observation_to_model(&mut f.policy, f.lease, hop + 1, binding, &current);
+            }
+            let permit = f
+                .policy
+                .authorize_navigation(
+                    route_request(&f, &registry, &current, binding),
+                    &current,
+                    &baseline(&current),
+                    &destination,
+                )
+                .unwrap();
+            let operation = registry
+                .begin_navigation(
+                    current.request().context().identity().id(),
+                    ContextOperationId::new(hop + 2).unwrap(),
+                )
+                .unwrap();
+            let active = f
+                .policy
+                .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+                .unwrap();
+            supervisor
+                .record_active_navigation(&execution, &active)
+                .unwrap();
+            record(&supervisor, &mut progress);
+            let receipt = f
+                .policy
+                .settle_navigation(
+                    &active,
+                    &ContextNavigationSettlement::try_new(operation, Ok(destination)).unwrap(),
+                    AgentPolicyInstant::from_millis(NOW),
+                )
+                .unwrap();
+            supervisor
+                .record_navigation_result(&execution, receipt)
+                .unwrap();
+            record(&supervisor, &mut progress);
+            accounting.record_navigation_receipt(receipt).unwrap();
+            assert_eq!(accounting.snapshot().navigations(), hop as u32 + 1);
+            registry
+                .settle_navigation(
+                    operation.context().identity().id(),
+                    operation,
+                    ContextSettlement::Applied,
+                )
+                .unwrap();
+            registry
+                .acknowledge_observation(operation.context().identity().id(), operation.context())
+                .unwrap();
+            current = observation(
+                operation.context(),
+                origin("docs"),
+                hop + 2,
+                vec![
+                    json!({"k":1,"r":"link","n":"Next","u":format!("https://docs.example.test/guide/{}", hop + 1)}),
+                ],
+            );
+        }
+        let completion = if refused {
+            let binding = account(current.request().context(), NOW);
+            commit_observation_to_model(&mut f.policy, f.lease, hops + 1, binding, &current);
+            assert!(f
+                .policy
+                .authorize_navigation(
+                    route_request(&f, &registry, &current, binding),
+                    &current,
+                    &baseline(&current),
+                    &ContextNavigationTarget::parse("https://outside.example.test/").unwrap(),
+                )
+                .is_err());
+            crate::AgentSupervisorCompletion::Failed(crate::AgentSupervisorFailure::PolicyDenied)
+        } else {
+            crate::AgentSupervisorCompletion::Succeeded
+        };
+        supervisor.complete(execution, completion).unwrap();
+        record(&supervisor, &mut progress);
+        let closure = crate::AgentRunMetricClosure::try_close(
+            f.policy.manifest(),
+            &supervisor,
+            &accounting,
+            &progress,
+            &actions,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(closure.navigations(), hops as u32);
+        assert_eq!(closure.operations(), hops as u32);
+        assert_eq!(
+            closure.outcome(),
+            if refused {
+                crate::AgentRunProgressOutcome::Failed(crate::AgentSupervisorFailure::PolicyDenied)
+            } else {
+                crate::AgentRunProgressOutcome::Succeeded
+            }
+        );
+    }
+}
+
+#[test]
 fn finite_navigation_route_metrics_require_two_distinct_ordered_exact_terminals() {
     for fault in 0..4 {
         let (f, terminals) = committed_route();
@@ -706,12 +2007,15 @@ fn finite_navigation_route_metrics_require_two_distinct_ordered_exact_terminals(
             );
             assert_eq!(progress.snapshot().navigation().unwrap().samples(), 2);
             assert_eq!(
-                progress.snapshot().navigation_terminals(),
+                &progress.snapshot().navigation_terminals()[..2],
                 &[
                     Some((terminals[0].1.progress_id(), terminals[0].1.settlement())),
                     Some((terminals[1].1.progress_id(), terminals[1].1.settlement()))
                 ]
             );
+            assert!(progress.snapshot().navigation_terminals()[2..]
+                .iter()
+                .all(Option::is_none));
         }
     }
 }
@@ -849,7 +2153,10 @@ fn finite_navigation_route_requires_each_exact_prior_checkpoint_and_retains_orig
         if fault != 0 {
             assert!(result.is_err(), "second checkpoint fault {fault}");
             assert_eq!(f.policy.pending_navigations(), 0);
-            assert_eq!(f.policy.navigation_receipts, [Some(receipt), None]);
+            assert_eq!(&f.policy.navigation_receipts[..2], &[Some(receipt), None]);
+            assert!(f.policy.navigation_receipts[2..]
+                .iter()
+                .all(Option::is_none));
             continue;
         }
         let permit = result.unwrap();
@@ -883,9 +2190,12 @@ fn finite_navigation_route_requires_each_exact_prior_checkpoint_and_retains_orig
         assert_ne!(receipt.progress_id(), second_receipt.progress_id());
         assert_eq!(second_receipt.source(), receipt.operation().context());
         assert_eq!(
-            f.policy.navigation_receipts,
+            &f.policy.navigation_receipts[..2],
             [Some(receipt), Some(second_receipt)]
         );
+        assert!(f.policy.navigation_receipts[2..]
+            .iter()
+            .all(Option::is_none));
         assert_eq!(f.policy.accounting().consumed_operations(), 4);
         assert_eq!(
             f.policy

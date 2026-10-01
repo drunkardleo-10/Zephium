@@ -54,10 +54,15 @@ Its security-relevant deltas currently enforce these invariants:
   the adapter prevents a second attacker-sized Rust allocation and stops body
   streaming at the limit. `native_admission.rs` additionally allows at most 32
   asynchronous custom-protocol requests per WebView (per verified WebKitGTK
-  context on Linux). Every accepted request carries a unique non-cloneable
-  RAII permit through response, cancellation, timeout, or teardown; overflow
-  completes synchronously with an empty 503 response and never acquires a
-  native deferral. Teardown seals and drains accounting, and late permit drops
+  context on Linux); on macOS the bound is per scheme of each WebView, so IPC
+  and assets never hold each other back. Every accepted request carries a
+  unique non-cloneable RAII permit through response, cancellation, timeout, or
+  teardown. On macOS a request past the bound waits, in arrival order within
+  its scheme, in a main-thread wait list of at most 512 tasks and starts as a
+  permit is released; a stopped task leaves the list, and teardown clears it.
+  Only a request past both bounds (and, on other platforms, past the in-flight
+  bound) completes synchronously with an empty 503 response and never acquires
+  a native deferral. Teardown seals and drains accounting, and late permit drops
   cannot underflow or reopen it. Zephium's page-evaluation integration accepts
   primitive-only contracts: fixed-size discard and favicon results and one
   explicitly bounded HTML string. Page objects and attacker-controlled object

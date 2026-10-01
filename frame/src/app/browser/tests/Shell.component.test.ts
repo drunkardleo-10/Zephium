@@ -1,10 +1,14 @@
+import "$styles/global.css";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
+import { page, userEvent } from "vitest/browser";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { tabFixture, revision } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
 import Shell from "../Shell.svelte";
+
+vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -14,7 +18,7 @@ afterEach(() => {
   surface.dispose();
   tabs.dispose();
 });
-test("Settings return restores the active browser identity synchronously", async () => {
+test("Settings uses its sidebar navigation and returns to the same web tab", async () => {
   await surface.init();
   await tabs.init();
   const tab = tabFixture();
@@ -32,7 +36,9 @@ test("Settings return restores the active browser identity synchronously", async
   const screen = await render(Shell);
   emitNativeEvent("uiCommand", "browser.settings");
   expect(screen.container.querySelector('[data-zephium-surface="settings"]')).not.toBeNull();
-  emitNativeEvent("browserReturn", items);
+  expect(screen.container.querySelector(".settings-sidebar-navigation")).not.toBeNull();
+  expect(screen.container.querySelector(`[data-zephium-tab-id="${tab.id}"]`)).toBeNull();
+  emitNativeEvent("browserReturn", { ...items, projection_revision: revision(11) });
   expect(screen.container.querySelector('[data-zephium-surface="browse"]')).not.toBeNull();
   const rows = screen.container.querySelectorAll(`[data-zephium-tab-id="${tab.id}"]`);
   expect(rows).toHaveLength(1);
@@ -40,4 +46,50 @@ test("Settings return restores the active browser identity synchronously", async
   expect(screen.container.querySelector<HTMLInputElement>("[data-zephium-address]")?.value).toBe(
     "example.com",
   );
+});
+
+test("Work keeps the column as the rail of tabs, and a tab chosen there opens over the canvas", async () => {
+  await surface.init();
+  await tabs.init();
+  const tab = tabFixture();
+  emitNativeEvent("itemsChanged", {
+    projection_revision: revision(20),
+    profile: { id: "profile", name: "Personal", kind: "default" },
+    spaces: [{ id: "space", name: "Home" }],
+    active_space_id: "space",
+    nodes: [],
+    tabs: [tab],
+    active: tab.id,
+    split_group: null,
+  });
+  const screen = await render(Shell);
+  const column = screen.container.querySelector("aside")!;
+  expect(screen.container.querySelector(".shelf")).not.toBeNull();
+
+  emitNativeEvent("uiCommand", "browser.work");
+  await expect.poll(() => column.style.width).toBe("56px");
+  await expect.poll(() => screen.container.querySelector("[data-work-stage-stub]")).not.toBeNull();
+  await page.viewport(900, 640);
+  const rail = page.elementLocator(column);
+  await rail.screenshot({ path: "../../../../../target/work-shell/rail-work.png" });
+  await screen.getByRole("button", { name: "Work", exact: true }).click();
+  await expect.element(screen.getByRole("button", { name: "Browse", exact: true })).toBeVisible();
+  await new Promise((done) => setTimeout(done, 400));
+  await rail.screenshot({ path: "../../../../../target/work-shell/rail-work-open.png" });
+  await userEvent.keyboard("{Escape}");
+  // The same column, not a new one: the rail, its tabs, no tool case.
+  expect(screen.container.querySelector("aside")).toBe(column);
+  expect(screen.container.querySelector(".shelf")).toBeNull();
+  const row = screen.container.querySelector<HTMLElement>(
+    `[data-zephium-tab-id="${tab.id}"] button`,
+  )!;
+  expect(row).not.toBeNull();
+  const { tabRequest } = await import("$session/work-tab.svelte");
+  row.click();
+  await expect.poll(() => tabRequest()?.tab).toBe(tab.id);
+  expect(surface.currentPage()).toBe("work");
+
+  emitNativeEvent("uiCommand", "browser.return");
+  await expect.poll(() => screen.container.querySelector(".shelf")).not.toBeNull();
+  expect(screen.container.querySelector("aside")).toBe(column);
 });

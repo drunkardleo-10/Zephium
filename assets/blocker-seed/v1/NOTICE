@@ -11,15 +11,15 @@ Upstream terms: https://easylist.to/pages/licence.html
 
 EasyList
 Source: https://easylist.to/easylist/easylist.txt
-Version: 202607241759
-Commit: 27d84e2a73c991c9a2e167adf5681e7b330af967
-Raw SHA-256: 4e12031a4fd46849ba15a1d2bfcd5ed809c0f4c885fe918e9feeef672ca1af70
+Version: 202609300903
+Commit: 874846183d2c7d918674435b498cd669df54bc04
+Raw SHA-256: 46bbe34319d4d91a202196d3dd3b06b1a86773be080bae8052a433bdc20955d9
 
 EasyPrivacy
 Source: https://easylist.to/easylist/easyprivacy.txt
-Version: 202607241748
-Commit: fc8fbefa900efc7211cbc901d2adc0308d0ba14a
-Raw SHA-256: 211ff378b9b1952037cc8695e3b6d3627a00aee6e43c93827adf87359b19ec70
+Version: 202609300903
+Commit: 874846183d2c7d918674435b498cd669df54bc04
+Raw SHA-256: f8d7d2a2f3b7fa4fb27363126acab3cc9d1a038894c7aba8e17f5be325798fd4
 
 The upstream authors do not endorse Zephium. Release engineering must regenerate
 and verify this record with `cargo xtask update-blocker-seed` whenever either

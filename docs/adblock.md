@@ -1,732 +1,254 @@
-# Native network blocker
+# Ad and tracker protection
 
-## Status
+## Status and release scope
 
-This document describes the backend and exact bundled policy in the current
-tree. It is a usable native network blocker, not yet a claim of complete
-filter-language parity or continuously maintained online protection.
+The desktop implements network blocking, static cosmetic hiding, per-site pause,
+and personal element hiding on macOS and Windows. The quick menu exposes site
+controls and the picker; Privacy settings owns the live profile toggle, source
+refresh, and retry. Rust owns durable state and exact operation settlement.
 
-- Signed application builds embed one release-authenticated, immutable
-  EasyList + EasyPrivacy seed. The exact compressed and raw bytes, upstream
-  versions/commits, license metadata, compiler reports, and platform artifacts
-  are reproducibly verified by `cargo xtask check-blocker-seed`.
-- The parser/compiler, persistent compiled-artifact caches, profile lifecycle,
-  native enforcement adapters, and bounded cache maintenance are active. The
-  authenticated TUF updater is retained behind an explicit `tuf` Cargo
-  feature and tested independently, but production keys and repository
-  origins are deliberately not provisioned. The desktop release-bundle graph
-  links no TUF, HTTP, TLS, update-worker, timer, or source-cache implementation
-  and performs no source-network request.
-- New profile preferences default to `enabled = false`.
-- Privileged main chrome has a minimal focused-profile diagnostics control for
-  source status, enable/disable, and exact-generation retry. Manual refresh is
-  exposed only for a future TUF-backed source. It has no profile selector,
-  filter text, URL/request telemetry, or raw-page command surface.
-- The embedded seed is authoritative but protection remains opt-in. Enabling
-  compiles or loads the exact platform artifact and holds first navigation
-  until native installation settles. It never labels an empty rule set as
-  protection.
+The implementation is on `adblock-release`. macOS native fixtures and the
+isolated browser QA build have been exercised. Windows cross-compilation is
+not WebView2 runtime qualification: the separate Windows machine must complete
+[the handoff](adblock-windows-qualification.md). Merge remains gated on user QA.
+Linux is not a release qualification target for this change.
 
-Claims of continuously maintained protection remain gated on authenticated
-online maintenance, packaged native validation, and operational evidence in
-[Enablement gates](#enablement-gates).
+Protection defaults on for new profiles. META migration 23 enables existing
+profiles once, preserving site pauses and personal hides; subsequent explicit
+opt-outs remain durable. Both enabled and disabled profiles receive a locally prepared,
+explicit empty policy at startup without joining the compiler queue. Enabled
+profiles prepare real protection in the background. Browsing is available as
+soon as the empty native policy is acknowledged; the UI never describes that
+policy as active protection. Updates retain the installed policy throughout.
+Already issued requests cannot be blocked retroactively.
 
-## Scope
-
-v1 enforces network blocking rules only. Sources may use the supported
-network subset of ABP/uBlock syntax or hosts-file syntax. Parsing uses the
-vendored, pinned `adblock-rust` 0.13.2 fork described in
+Scriptlets, procedural cosmetics, resource replacement, response-CSP mutation,
+URL-parameter rewriting, and YouTube-specific ad blocking are out of scope.
+There is no proxy, TLS interception, local root certificate, or replacement
+HTTP stack. Supported syntax and losses are reported, not advertised as complete
+uBlock/Safari parity. The pinned adblock-rust fork is documented in
 [`vendor/adblock/UPSTREAM.md`](../vendor/adblock/UPSTREAM.md).
-The current durable per-profile preference is only an enabled bit; every
-enabled profile would share the same immutable process catalog.
 
-The compiler rejects or reports, rather than silently promising, syntax
-outside the audited cross-platform policy:
+## Ownership and startup
 
-- cosmetic selectors and procedural cosmetics;
-- redirect and redirect-rule resources;
-- scriptlets;
-- response CSP mutation;
-- URL-parameter rewriting (`$removeparam`);
-- generic-hide controls;
-- tag-driven rules.
+- `zephium-blocker-update` validates immutable catalogs and owns the official
+  HTTPS source store, conditional fetches, candidate staging and recovery.
+- `zephium-blocker-service` coordinates source preparation, native preflight,
+  durable activation, the compiler worker and monotonic catalog status.
+- `zephium-blocker` parses bounded sources, prepares immutable platform policies,
+  resolves cosmetic exceptions, and persists compiled artifacts.
+- `zephium-app` owns profile preference revisions, site-control revisions,
+  compile/install generations, private-session state and operation settlement.
+- `zephium-engine` owns exact native registrations, view/frame lifetime,
+  pause gates, fixed stylesheet delivery and host-initiated picker evaluation.
+- Svelte projects the Rust state and sends typed intent. Admission does not
+  imply durable or native success.
 
-WebKit conversion additionally reports rules it cannot represent exactly,
-including `$important`, HTTP-method predicates, full regular expressions,
-mixed positive/negative domain constraints, and unsupported resource
-semantics. WebKit's `svg-document` and `other` categories are the closest
-available representations of adblock `$object` and `$other`; affected input
-rules are counted in the separate resource-approximation dimension. A final
-ABP `^` becomes one terminally anchored optional suffix: WebKit's documented
-group and `?`/`*` subset represents both a separator byte and exact end-of-URL
-without unsupported alternation or rule fan-out. `$badfilter` is resolved
-before publication. Compilation fails
-if the selected platform would receive no blocking-rule entry. Every
-published artifact carries the post-control count of structurally represented
-native blocking entries; exceptions and platform-omitted rules are not
-counted. This count is an admission invariant, not proof that exceptions
-leave every entry semantically reachable for some request.
+A source-cache hit avoids downloading; a compiled-policy hit avoids parsing;
+a native artifact hit avoids WebKit compilation. Cache formats bind compiler
+versions, limits, source identity and supported resource vocabulary. The actual
+release-corpus restart regression proves the worker skips source loading on a
+warm hit, including after releasing declarative JSON.
 
-There is no application proxy, TLS interception, local root certificate, or
-second page-derived HTTP stack. Blocked Windows requests receive an empty
-`403 Blocked` response with `Cache-Control: no-store`; Zephium does not run
-redirect resources or page-world replacement code.
+Worker retirement is ordered after accepted work and in-progress callback
+completion. Exact generations independently reject stale application/native
+callbacks. Shutdown shares one absolute deadline through service, updater,
+compiler and native cleanup; missing termination proof is unclean. The new
+local startup artifact does not weaken worker retirement barriers.
 
-## Ownership and data flow
+## Official list maintenance
 
-The boundary is intentionally split by responsibility:
+Desktop builds use these fixed publisher endpoints:
 
-1. `zephium-blocker-update` always defines and validates the canonical catalog
-   format. Its optional `tuf` feature additionally authenticates a
-   fixed-origin repository, enforces the release's exact license policy and
-   source budgets, and crash-safely stages immutable source catalogs.
-2. `zephium-blocker-service` admits either the signed release bundle or the
-   independently authenticated TUF authority, owns updater/compiler
-   coordination, and exposes one monotonic catalog state to the application.
-3. `zephium-blocker` consumes only an already-authenticated immutable catalog.
-   One bounded worker canonicalizes source order, parses rules, builds the
-   platform artifact, and publishes an immutable result.
-4. `zephium-app` owns the authoritative per-profile state machine. Durable
-   preference revisions and process-local compile/install generations are
-   separate identities.
-5. `zephium-engine` installs one exact generation on the profile's existing
-   views, warm spare, and every later-created view. It reports applied,
-   retained-previous, or unavailable with exact generation identity.
-6. The native adapter owns platform registrations and their teardown.
+- `https://easylist.to/easylist/easylist.txt`
+- `https://easylist.to/easylist/easyprivacy.txt`
 
-The first create/navigate effect for a profile is held until an explicit
-native policy exists. Disabled profiles compile an explicit allow-all
-generation; absence is never interpreted as allow-all. A successful
-replacement is installed across the profile cohort before the prior
-registrations are retired. If replacement fails cleanly, a previous
-known-good generation remains authoritative. If no generation exists, raw
-navigation stays held.
+HTTPS authenticates the server/transport; these downloads do not have an
+independent publisher signature. The app trusts the official publisher's site.
+The signed application also embeds a licensed offline EasyList/EasyPrivacy pair.
+Optional TUF support remains independently tested, but no TUF publication
+infrastructure or signing keys are required by this release design.
 
-The backend exposes typed, bounded source refresh, focused-profile status,
-durable enable/disable, and exact-failed-generation retry commands only to
-privileged main chrome. Only failures classified as plausibly transient are
-retryable. Candidate source repair admits at most three attempts for one exact
-candidate identity per process: the initial automatic attempt and at most two
-explicit retries. There is no raw-page bridge, profile selector, automatic
-native retry loop, or silent durable disable.
+The updater uses system TLS verification, bounded streaming, no redirects,
+cookies or referrer, conditional ETag/Last-Modified requests, and one worker.
+It persists a due time approximately 24–30 hours after a successful check,
+respects longer server backoff, and performs no startup fetch while fresh.
+Manual refresh coalesces and is rate-limited. Existing application maintenance
+triggers due work; the blocker adds no idle polling timer.
 
-An enabled compile that cannot read the exact installed package reports its
-authenticated revision and manifest digest to one process-bounded repair signal.
-Failures from multiple profiles coalesce onto one automatic authenticated
-current-package refresh for that exact identity and process. A successful
-same-identity repair advances a checked, monotonic, process-local material
-epoch exactly once. The application then retries only the exact failed
-profile/desired generation whose compile attempt used that installed identity
-at an older epoch; stale and duplicate callbacks cannot arm unrelated work.
+Headers, titles, URLs, lengths, hashes, rule counts and suspicious shrinkage are
+validated. Both sources form one candidate. The worker prepares the policy,
+then macOS preflights the native network artifact before durable
+activation. Static cosmetic syntax and budgets are validated by the compiler. Windows prepares its frozen matcher before publication. Failed
+candidates leave the working policy installed. Current, previous and bundled
+source material provide recovery; current bytes are verified with a bounded
+streaming buffer. A 304 is accepted only for the exact verified retained bytes
+and validators actually sent; otherwise one unconditional retry is allowed.
+Unchanged source bytes avoid policy recompilation.
 
-Later loss of the same material, or a retryable transport failure during the
-automatic attempt, enters an explicit-refresh-required state instead of
-looping. Unsafe file identities are never replaced and terminalize
-enabled-policy admission when authenticated repair reports storage failure.
-A strictly newer repository package enters the ordinary candidate
-prepare/commit/activate barrier and never mints a same-identity material
-epoch. Shutdown seals the repair signal, so a late compiler callback cannot
-start network or retry work.
+The current bundled pair is **202609300903**, 3,568,061 uncompressed bytes.
+`assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
+attribution, license, and deterministic quality report. Release tooling and SBOM
+checks bind those artifacts to the shipping graph (`release-bundle` plus
+`official-https`), rather than claiming downloaded bytes are release-signed.
 
-Privileged diagnostics distinguish an active source-material repair from an
-explicit-refresh-required repair. Both reject new enabled-policy admission.
-Only active repair receives bounded internal settlement polling; explicit
-repair remains idle until the user refreshes sources.
+## macOS
 
-Status delivery is revision-exact. Rust derives effective protection from the
-durable preference, desired generation, proved retained native generation,
-applied coverage, and exact current/installed source identities; JavaScript
-does not infer `active` from an enable bit. Main chrome subscribes before its
-bounded bootstrap query and accepts only a newer fixed-width projection
-revision, so an older query cannot replace a newer event. Revision zero is a
-static unavailable fallback and cannot supersede actor state. Source
-identities expose only bounded public package revision/SHA-256 metadata, never
-profile IDs, URLs, request decisions, filter text, or native/parser strings.
-The minimal diagnostics control treats command admission as pending—not
-success—and enables a blocking preference only when current and installed
-package revision and manifest digest match exactly with no candidate
-activation pending and no active or explicit-refresh-required source-material
-repair.
+Network filtering uses digest-addressed `WKContentRuleList` artifacts installed
+before protected navigation. Network exceptions remain in the same artifact as
+their blocks. The previous blanket native cosmetic sidecar and child-frame
+stylesheet adapters have been removed after the interactive performance review.
 
-Preference mutation is one bounded operation per profile. The application
-does not change desired or applied policy before the store's exact
-compare-and-swap callback. A successful durable change retains its operation
-identity through compilation and exact native settlement; disabling is
-complete only after an explicit allow-all generation applies. Conflicts fold
-the returned authoritative row, while an indeterminate commit is reported as
-indeterminate and starts a token-tagged asynchronous single-row
-reconciliation. During that bounded retry/backoff path the UI reports
-preference authority as reconciling or unavailable instead of guessing.
-An atomic return/callback handoff gives each accepted compile completion one
-prompt actor wake whether it publishes before, during, or after `compile`
-returns. The profile-keyed mailbox coalesces duplicates; if overload rejects
-the wake, maintenance still drains the bounded result inbox.
-Shutdown/profile retirement settle or invalidate every retained operation id.
+Cosmetics now use the main-document selective pipeline described below. Personal
+hides remain independent from subscriptions. Pause removes subscription styles
+live; reload is still needed for requests/scripts that already ran.
 
-Profile deletion retires compiler results and native policy ownership before
-the profile identity can be reused. Blocker compilation participates in the
-same process shutdown deadline as the application actor, storage, and native
-engine.
+Native network compilation retains its bounded queue: one physical compile,
+two distinct active/queued jobs, 64 MiB of encoded artifacts and a 60-second
+watchdog. Timeout never reuses a physical slot before the callback returns.
+The hostname-boundary optimization remains unchanged: the September corpus
+measured 2.187 seconds in the isolated native compile fixture. The old additional
+cosmetic compilation is no longer part of startup or update preflight.
 
-Blocker shutdown receives the caller's absolute deadline; compiler, updater,
-and service layers never replace it with fresh per-layer budgets. The service
-serializes shutdown only within the remaining time, seals catalog admission
-and the material-repair signal, starts updater shutdown, and asks the compiler
-to stop against that same instant. Compiler and updater teardown therefore
-normally overlap instead of consuming consecutive full timeouts; failure to
-spawn the helper falls back to updater teardown within the same remaining
-deadline.
+## Windows
 
-The compiler seals compile/retirement admission, disconnects its bounded
-queue after the already accepted cohort, and reports clean only after exact
-worker-exit proof, `is_finished`, and a successful join. The updater seals
-refresh and candidate-transition admission, publishes terminal status, orders
-shutdown behind any already accepted capacity-one refresh, and likewise
-requires exact exit proof and join. Its request and refresh-attempt deadlines
-bound internal I/O but never extend the outer deadline; it receives only the
-remaining duration. An unavailable updater is a clean absence, while timeout
-detaches a still-finishing worker and is unclean. The service reports clean
-only when compiler shutdown is clean and updater shutdown is complete or
-unavailable. Lock contention, missing terminal-status publication, panic,
-missing exit proof, failed join, or deadline expiry cannot be reported as
-clean. Once shutdown serialization records an outcome, later calls return
-that outcome; a caller that cannot acquire the serialization/result locks
-before its own deadline returns unclean without inventing success.
+WebView2 uses the shared immutable Rust matcher on `WebResourceRequested`.
+A native per-view pause/provisional gate bypasses matching before URL/method
+conversion. No per-tab regex compilation is performed. The callback does no
+filesystem, network, actor, UI, deferral or blocking-channel work; it never waits
+for a matcher lock. Values and evaluation work are bounded. Matcher/budget or
+response-construction errors fail open and increment aggregate health counters.
+Blocked responses are empty `403 Blocked`, with `Cache-Control: no-store`.
 
-Worker retirement is an ordered lifecycle barrier, not a process-lifetime
-tombstone. One bounded admission entry records whether a profile is compiling,
-delivering, or retiring. A retirement marker is ordered after already accepted
-work; it suppresses a queued compile which has not acquired delivery and waits
-for an already-running completion callback to return. Only then does it remove
-the admission entry, invoke retirement completion, and permit a later
-lifecycle using the same profile identity. This avoids unbounded tombstone
-growth during create/delete churn. The application and engine still
-generation-check independent native/store callbacks, and the worker never
-holds its admission mutex while arbitrary callback code runs.
+Document-sourced stylesheet, image, media, font, script, XHR, fetch and beacon
+contexts are represented. Top/subdocument navigation, WebSockets, object/other
+contexts, service workers and already-running shared-worker requests are not
+intercepted by the current adapter. Registering environment worker requests on
+every tab would multiply synchronous work; they need a future environment owner.
 
-In unwind-enabled builds, each completion callback is contained so one
-misbehaving consumer cannot kill the sole compiler worker, strand later jobs,
-or prevent clean shutdown notification. A release configured with
-`panic = "abort"` still terminates the process on any panic by design.
+WebView2 does not supply an exact initiating frame URL in this callback. The
+matcher therefore applies source-independent decisions and conservatively
+allows requests where an unknown-attribution exception could matter. It never
+substitutes the mutable top-level URL or invents third-party classification.
+The report records this coverage loss separately from resource-type losses.
 
-## Platform enforcement
+Document-created fixed scripts and constructed sheets provide main-document
+cosmetics and personal hides. Live updates use `ExecuteScript`, with exact
+document token, URL, navigation identity and policy generation. There are no
+adblock FrameCreated/Frame2/Frame7 handlers, CDP, WebMessage or host objects.
+Physical Windows qualification must still establish CSP behavior and rendering.
 
-### Windows / WebView2
+## Cosmetics, site controls and picker
 
-Windows publishes a frozen in-process matcher and installs one
-`WebResourceRequested` registration cohort on each raw WebView. Registration
-uses exact HTTP/HTTPS filters for document-sourced requests in these native
-contexts:
+Static selectors are parsed/validated, with procedural syntax rejected. The
+compiler uses adblock-rust's URL-specific resources, generic class/ID lookup,
+selector exceptions and generic-hide controls. For the current seed the initial
+CSS is about 25.8 KB. A shared 487 KB serialized class/ID lookup table travels to
+the main document once per policy/document; it does not become a blanket sheet.
+Unchanged same-document navigation and personal edits reuse the installed
+subscription identity instead of resending this payload. Removing the page copy
+altogether remains performance work, not a completed optimization.
+A bounded weak reference also reuses an identical live public cosmetic policy
+across later profile restores without retaining it after the last owner exits.
 
-- stylesheet;
-- image;
-- media;
-- font;
-- script;
-- XMLHttpRequest;
-- fetch;
-- ping/beacon.
+A bounded worker handles document lookup, hashing and script serialization.
+Completion returns through the existing main-thread dispatcher before native
+script evaluation. Heavy Rust preparation never runs on the UI thread.
 
-Top-level documents, subdocuments, WebSockets, objects, and the native
-`other` bucket are not intercepted in v1. Neither are requests sourced by
-service workers or by an already-running shared worker. WebView2 raises those
-environment-scoped worker requests once for every matching WebView; registering
-them per tab would multiply synchronous matcher work with resident-tab count.
-They remain unsupported until one profile/environment-owned registration can
-be swapped and retired with exact lifecycle proof. The `Document` source kind
-still includes ordinary frames, dedicated workers, and a shared worker's
-initial script request. Because every native context filter excludes the
-other source kinds, compilation conservatively marks every represented rule
-as having partial request-source-kind reachability; overlap with resource-type
-loss is counted once in the aggregate.
+The document installs generic CSS only for observed classes/IDs. Mutation work
+is limited to added elements and id/class changes, with at most 256 queued roots,
+200 elements / 2 ms per idle batch, and 2,048 discovered selectors. Attribute
+changes inspect only that element. Quiet pages schedule no timer, hidden pages
+and pagehide disconnect observation, and there are no child-frame deliveries.
+Initial document discovery and visibility/BFCache restoration are bounded walks.
+Network filtering still applies to supported frame requests; main-page rules
+can hide frame containers. These budgets deliberately prefer partial cosmetics
+to excessive rendering work on pathological documents.
 
-WebView2 does not provide the exact initiating frame URL at this callback.
-Zephium therefore does not substitute the mutable top-level `Source` or
-classify an absent source as third-party.
+Cache reads validate and compare network JSON one rule at a time rather than
+reconstructing/re-encoding the full object graph. Cold canonical serialization
+also avoids a second all-rules object vector. Personal rules never enter the
+subscription cache.
 
-The fork's source-independent path applies only rules whose block decision
-does not require a source domain or first/third-party classification. If a
-normal generic block matches but an attribution-sensitive exception could
-also match for the unknown initiator, the request is allowed. A
-source-independent `$important` rule retains its priority. This is an
-intentional fail-open coverage loss, recorded in the compilation report, not
-a claim of full list parity. The shipping Windows graph does not include the
-public-suffix resolver: this hot path parses only the target URL and cannot
-accidentally infer source attribution.
+Site scope is the exact canonical HTTP(S) host across schemes and ports;
+subdomains do not inherit a pause automatically. Durable pauses and personal
+hides have bounded storage and compare-and-swap revisions. Private-profile
+changes stay in memory and disappear when that private session closes. Source
+updates never erase or recompile personal edits into public cache artifacts.
 
-The callback reads the native context before copying URL/method strings,
-accepts at most a 32-KiB URL and 32-byte method, and reuses bounded
-apartment-thread UTF-8 buffer capacity after warm-up. It performs no
-filesystem, network, actor, UI, deferral, or blocking-channel work and never
-waits for the matcher lock. Re-entrant buffer access, malformed native values,
-oversized values, lock contention, matcher errors, and response-construction
-failures allow the request. Availability failures must not become an
-application-wide network outage.
+The picker only tracks pointer movement while open, uses animation frames for
+highlighting, prevents selected clicks from reaching page handlers, and expires
+after two minutes. Escape, navigation, tab/profile teardown and Cancel clean it
+up. Preview precedes Save. Save rereads the selection through native evaluation,
+validates bounded selector/label/count data in Rust, and binds admission to the
+current profile/site/native document. Closed shadows, canvas and frame interiors
+use container selection. Layout-dependent selectors are labelled as such.
 
-All regex-backed rules are compiled transactionally on the worker before the
-matcher is published. Frozen matching does not compile, evict, or mutate regex
-state. Preparation has aggregate and per-regex count/byte budgets, explicit
-regex NFA/DFA construction limits, and a 256-filter-evaluation ceiling shared
-by block, exception, redirect, and remove-parameter scans for an
-exact-attribution request. Source-independent block, exception, and
-unknown-attribution checks share the same ceiling. Exhausting either path
-returns a distinct candidate-budget error, and the native adapter allows that
-request.
+Personal/preview styles include a bounded fallback for author `!important`
+display rules. It preserves original inline values and restores only values the
+browser still owns. This explicit-edit/initial-DOM path is capped at 1,000
+matched elements and does not turn subscription CSS into a page scan.
 
-The immutable matcher owns saturating, lock-free, process-local health
-counters. The normal callback path adds one relaxed saturating atomic RMW; a
-fail-open classification adds one release RMW. Privileged chrome reads only aggregate
-counts for total decisions, candidate-budget exhaustion, unavailable or
-unprepared matcher state, unavailable attribution, and other evaluation
-errors. Matchers can be shared by profiles using the same exact policy, so
-these counters are deliberately not presented as per-profile measurements.
-They are volatile, are never persisted or networked, and contain no URL,
-origin, request metadata, rule identity, or profile identifier.
+## Blocking statistics
 
-### macOS / WKWebView
+Profiles retain seven local calendar-day buckets containing counts only. macOS
+uses the optional `_webView:contentRuleListWithIdentifier:performedAction:forURL:`
+SPI and `blockedLoad`, advertised only while an owned subscription counter is
+installed. No request URL is copied. The SPI's [declared availability](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKNavigationDelegatePrivate.h)
+is macOS 10.15; the runtime getter is also checked. Windows increments its profile
+atomic only after a blocking response is successfully installed.
 
-macOS receives canonical WebKit content-blocker JSON. The engine derives the
-native identifier from the exact artifact digest, looks up that identifier in
-Zephium's content-rule store first, and normally compiles only on a verified
-cache miss. The one repair exception is `WKErrorDomain` code 9 for that exact
-identifier: Zephium removes only that corrupt cache entry and performs one
-bounded compile attempt. Other lookup errors are not reclassified as misses.
-Cache hits, repaired entries, and newly compiled lists must report the exact
-expected identifier before the policy can be installed as a
-`WKContentRuleList`.
+The existing maintenance cycle collects dirty counters and writes at most once
+per 60 seconds, plus a final shutdown flush. Batches belong to their collection
+day, including across midnight, clock corrections and sleep. Private counts stay
+in memory; browsing-data clearing and profile deletion erase the totals.
+The Quit menu and Cmd+Q enter the coordinated shutdown path so the final flush
+runs before the store closes. Native QA verified saved totals after quitting and
+reopening; Dock Quit and OS termination have not been separately qualified.
 
-### Linux / WebKitGTK
+`blocker_stats(profile)` returns `today`, `last7Days`, and seven `days` values,
+oldest first. Only the focused profile is queryable. New Tab queries on show,
+tab changes, calendar-day changes and visibility restoration; statistics add no polling timer or event
+stream. Unavailable statistics produce an error, never an invented zero.
 
-Linux uses the same canonical WebKit JSON and digest-derived identifier. It
-loads from a Zephium-owned `WebKitUserContentFilterStore` before saving on an
-exact not-found result. Both load and save validate the returned filter's
-non-null, valid-UTF-8, exact identifier. The filter registration is owned per
-raw WebView and removed during replacement/teardown.
-
-### Shared declarative compiler control
-
-WebKit native compilation is asynchronous and process-bounded:
-
-- identical artifact digests coalesce onto one physical operation;
-- at most one physical native compile is active;
-- active plus queued distinct jobs are capped at two;
-- encoded artifacts retained by that queue are capped at 64 MiB;
-- each physical attempt has an exact non-wrapping identity and a measured
-  120-second watchdog. The exact release artifact cold-compiles in roughly
-  39-50 seconds on the current macOS release test host, while a fresh-store
-  exact cache lookup is below one millisecond;
-- at timeout, logical waiters and queued jobs fail and new cache-miss work is
-  rejected while the physical attempt remains unresolved;
-- on Linux, timeout cancels the load/save chain through its retained
-  `GCancellable`, but the physical slot is released only by that exact GLib
-  completion callback;
-- macOS exposes no `WKContentRuleListStore` cancellation handle, so its
-  physical slot remains occupied until the exact native callback returns;
-- the one-shot watchdog and native terminal callback share a dedicated
-  fixed two-slot FIFO which remains admissible after ordinary host ingress is
-  sealed, preserving their arrival order through native re-entry;
-- shutdown cancels advisory work and clears logical waiters, but it does not
-  report clean until the exact terminal callback has released the compiler
-  context, result, cancellation handle, and retained byte debt. The existing
-  process-wide shutdown deadline remains the bound if WebKit never replies.
-
-A late or duplicate callback cannot settle another attempt. Cache reuse is
-digest-exact. macOS and Linux native stores have bounded namespace-owned
-garbage collection. Maintenance accepts only Zephium's exact digest-shaped
-identifiers, shares the single native compiler/maintenance slot and shutdown
-barrier, and revalidates protection immediately before deletion. Applied,
-previous-known-good, queued, in-flight, and physically compiling digests are
-protected. One bounded page of candidates is handled per attempt; a complete
-clean scan is required before a cycle is considered settled. Maintenance is
-triggered only after an explicit policy transition, not as unbounded startup
-work.
-
-## Resource and performance budgets
-
-The default compiler ceilings are process invariants, not recommended source
-package sizes:
+## Budgets and evidence
 
 | Resource | Ceiling |
 |---|---:|
-| source count | 32 |
-| one source | 16 MiB |
-| all source bytes | 32 MiB |
-| one physical line | 64 KiB |
-| physical lines, including blanks/comments | 500,000 |
-| candidate rules | 250,000 |
-| emitted WebKit rules | 140,000 |
-| one expanded WebKit URL filter | 8 KiB |
-| canonical WebKit JSON | 32 MiB |
-| prepared runtime regexes | 1,152 |
-| runtime raw regex pattern bytes | 2 MiB total |
-| patterns in one prepared regex | 256 |
-| raw pattern bytes in one prepared regex | 128 KiB |
-| one regex NFA / DFA construction limit | 96 KiB / 16 KiB |
-| runtime filter evaluations per request | 256 |
-| runtime request URL | 32 KiB |
-| runtime source URL (where exact attribution exists) | 32 KiB |
+| One source / all sources | 16 MiB / 32 MiB |
+| Source count / candidate rules | 32 / 250,000 |
+| Physical line / lines | 64 KiB / 500,000 |
+| WebKit rules / JSON | 140,000 / 32 MiB |
+| Runtime regexes / raw pattern bytes | 1,152 / 2 MiB |
+| Filter evaluations per request | 256 |
+| Request/source URL | 32 KiB each |
+| Cosmetic rules / portable policy | 50,000 / 16 MiB |
+| One selector / document stylesheet | 4 KiB / 1 MiB |
+| Paused sites / personal hides | 256 / 256 |
 
-The pinned 2026-07-24 EasyList + EasyPrivacy seed is deliberately below every
-hard ceiling:
+The September report records 134,081 network candidates, 106,244 accepted input
+rules, 27,518,677 bytes of WebKit network JSON, 1,024 prepared runtime regexes,
+and 24,066 accepted static cosmetic rules. Network report rejections include
+cosmetic syntax intentionally processed by the separate cosmetic compiler;
+do not add those counts or describe them as total unsupported rules.
 
-| Exact release-seed measurement | Value |
-|---|---:|
-| uncompressed sources | 3,669,674 bytes |
-| compressed source assets | 1,217,782 bytes |
-| candidate / accepted / rejected input rules | 138,595 / 110,941 / 27,654 |
-| Windows runtime regexes | 1,003 / 1,152 |
-| Windows retained regex-pattern bytes | 19,500 |
-| Windows source-independent blocking entries | 102,600 |
-| WebKit emitted rules | 110,909 / 140,000 |
-| WebKit canonical JSON | 29,347,341 / 33,554,432 bytes |
+macOS whole-browser QA verified actual request blocking; generic-hide exceptions;
+main-document cosmetic hiding; picker preview/undo/save; hide reload persistence;
+live Show/Remove; site pause/reload/resume; and the real Privacy settings control.
+Independent native fixtures cover strict CSP, nested/cross-origin frames, live
+style clearing, stale document/generation rejection and click suppression.
+Child-frame cosmetic delivery is no longer enabled. Native QA also caught and
+fixed stale site controls after navigation: site identity/readiness now participate
+in status deduplication and focused tab updates publish that status.
+No test result claims Windows runtime, installer, battery or broad-web coverage.
 
-The compiler-quality manifest binds these measurements, every drop reason,
-the exact policy digest, the WebKit artifact digest, all compile limits, and
-the format/adblock-engine versions. Updating either list without regenerating
-and reviewing the report fails CI. These counts describe the network-only v1
-policy: the rejected EasyList rules are predominantly cosmetic syntax, which
-this backend intentionally does not claim to enforce.
+Use `cargo xtask check-blocker-seed` for exact bundled artifacts; blocker
+property/fuzz/fork-contract tests for compiler boundaries; and
+`synthetic_blocker_lab` for bounded matcher measurements. The native child-frame probe was removed with that delivery path. The `adblock-qa` desktop feature builds a separate,
+debug-only `app.zephium.protection-qa` application and data directory. This
+feature rejects opt-level 0; use `CARGO_PROFILE_DEV_OPT_LEVEL=2` for QA builds.
 
-The catalog validates source count, duplicate IDs, per-source bytes, and
-aggregate bytes before a job can clone source strings. A single worker uses a
-bounded profile-sized queue and serializes expensive compilation. It builds
-only the artifact used on the current OS, so Windows does not retain WebKit
-JSON and WebKit platforms do not retain the runtime matcher.
-
-Three independent persistence layers avoid unnecessary network, parse, and
-native compilation work:
-
-- The bundled seed is validated before the compiler worker starts, but its
-  gzip bodies are not inflated on browser startup. A persistent
-  compiled-artifact hit never reads them; a miss performs one bounded inflate
-  and exact raw length/SHA-256/header verification, then drops the raw source
-  strings after compilation. The signed binary retains only the compressed
-  source assets; declarative compiler bytes then follow the bounded
-  persistent/native ownership described below. Bundles also install the exact
-  CC-BY-SA-3.0 legal text and EasyList/EasyPrivacy attribution notice.
-- After current TUF metadata is authenticated, unchanged source targets can be
-  read from the private content-addressed store only when their signed digest
-  and length match. Metadata is still refreshed and authenticated; this is not
-  an offline trust shortcut.
-- The compiled-artifact cache key binds either the exact authenticated
-  manifest digest (whose signed targets bind every source digest and length)
-  or every inline source byte, plus the compile target, compiler/artifact
-  format versions, platform and architecture, pointer width and byte order,
-  and every compile limit. Records contain one exact cache/policy/WebKit
-  format header, are checksummed and bounded, are opened without following
-  unsafe filesystem objects, and are decoded and natively revalidated before
-  use. `current`, `previous`, and crash-only `stage` records are protected by
-  a lifetime lock and directory synchronization. Cache unavailability or
-  corruption falls back to authenticated source compilation. Deferred source
-  loaders serialize clone access and never memoize failures. Durable-package
-  loaders may memoize successful material; the release-seed reloadable mode
-  deliberately drops it. Both remain reusable after a source-store failure so
-  an authenticated same-process repair is not hidden by a cached error.
-- After a declarative artifact is durably cached, the worker retains only a
-  weak artifact handle plus its authenticated reload recipe. The canonical
-  WebKit JSON remains alive while an application delivery or native
-  compilation cohort owns it, then is released; a later request revalidates
-  and reloads the checksummed cache or recompiles from the exact source
-  recipe. A missing or failed persistent cache deliberately retains the
-  successful artifact strongly so memory reclamation can never make an
-  installed generation unrecoverable. Candidate activation revalidates this
-  exact recovery proof; a stale identity or temporarily unrecoverable
-  candidate cannot displace the prepared candidate or active compiler
-  authority.
-- macOS and Linux reuse exact digest-addressed native content-rule entries and
-  apply the bounded namespace garbage collection described above.
-
-Policy and artifact digests include explicit format versions (currently
-policy format 4 and WebKit artifact format 3). Coverage travels with the
-artifact as source, accepted, rejected, platform-omitted, and aggregate plus
-resource/source-kind/attribution approximation counts, together with the
-structural native blocking-entry count. Core admission checks that accepted
-plus rejected equals source, omitted does not exceed accepted, each detailed
-approximation count does not exceed the unique aggregate, and at most one
-blocking entry exists per represented input rule. A blocking artifact with an
-inconsistent report or zero blocking entries is rejected. The exact
-declarative bytes mint their own typed cache digest inside core and are
-bounded again at the core/engine boundary. These controls bound
-application-owned work; they do not replace real-list peak-RSS,
-request-tail-latency, startup, CPU wakeup, battery, or long-running
-native-cache measurements.
-
-The request callback does not record page URLs or per-request match telemetry.
-Policy and artifact digests identify public source/configuration bytes, not
-browsing decisions.
-
-## Failure policy
-
-“Fail closed” and “fail open” apply at different boundaries:
-
-- Before a first raw navigation, no policy means no view creation/navigation.
-  An enabled profile with missing/invalid sources cannot browse as though it
-  were protected.
-- A disabled profile uses an explicit versioned allow-all policy.
-- A failed update retains the previous exact native generation when cleanup
-  proves that generation remains installed.
-- Contradictory generations or ambiguous registration cleanup are never
-  accepted as a valid new policy.
-- Inside Windows' synchronous per-request callback, malformed metadata,
-  resource exhaustion, or temporary matcher unavailability fails open for
-  that request. Blocking on uncertain data would create a page-triggerable
-  browser outage and could misapply source-scoped rules.
-- Unsupported list capabilities are counted and omitted/rejected during
-  compilation. They are not approximated silently at request time.
-
-The blocker does not promise tracker completeness, anti-malware protection,
-fingerprinting resistance, cosmetic hiding, YouTube ad removal, or parity
-with Brave/uBlock Origin. Native engine limitations and filter-list quality
-remain observable product behavior.
-
-## Authenticated source packages
-
-The current source authority is the signed application release itself.
-`assets/blocker-seed/v1` is a closed seven-file set containing the two
-deterministically compressed source files, canonical catalog and packaging
-manifests, exact compiler-quality report, attribution notice, and reviewed
-CC-BY-SA-3.0 legal text. The publisher command accepts local source snapshots
-and license bytes only:
-
-```text
-cargo xtask update-blocker-seed \
-  --easylist PATH \
-  --easyprivacy PATH \
-  --license PATH
-cargo xtask check-blocker-seed
-```
-
-Generation validates the exact ABP headers, source URLs, upstream versions
-and commits, canonical timestamps, source hashes, license hash, deterministic
-RFC 1952 representation, closed file inventory, and both shipped compiler
-feature graphs. Publication replaces the directory transactionally and
-rejects rollback or same-revision equivocation. Verification runs offline and
-rebuilds both exact artifacts; it does not trust the recorded report.
-Release assembly additionally pins the reviewed revision and every one of the
-seven seed-file SHA-256 identities outside that self-describing file set.
-Artifact runners prove the seed, packaging configuration, build guard, and
-SBOM finalizer still match the exact release commit both before compilation
-and immediately before staging. Updating a subscription therefore requires a
-reviewed seed regeneration and an explicit release-anchor update; an
-internally consistent replacement package cannot self-attest.
-
-The catalog records the sources' recommended refresh interval, currently the
-four-day `! Expires` value published by EasyList. For release-bundle
-provenance, reaching that timestamp sets `source_refresh_due`: it advises that
-a newer Zephium build should carry newer lists, but it does not invalidate the
-signed release's immutable policy or degrade proved native protection. Only a
-newly reviewed application release can replace that authority today, and the
-UI offers no action that bundled mode cannot perform. The release workflow
-requires the reviewed source snapshot to remain inside its recommended
-refresh interval at the exact publication boundary; it does not invent a
-minimum remaining-validity window or reinterpret that recommendation as a
-client-side security expiry. In future TUF mode, the same timestamp is
-actionable source freshness and drives authenticated refresh.
-
-The source updater is a separate browser-owned component and accepts no
-page-derived configuration. Once provisioned, its release configuration will
-bind one stable repository identity, an embedded TUF root, fixed metadata and
-target HTTPS base URLs, a private storage namespace, exact accepted license
-expressions, and hard resource limits. There is no environment-variable or
-writable runtime override.
-
-The transport uses the system TLS verifier and proxy discovery, disables
-redirects and content encoding, admits only exact descendants of the two
-fixed base paths, and bounds connection, request, response, metadata, target,
-and total attempt work. Diagnostics redact target paths. TUF expiration and
-sequential root rotation are enforced by `tough`; delegated targets are not
-accepted in this format.
-
-The canonical signed catalog manifest has a monotonic revision, creation and
-expiry times, an exact target set, deterministic source IDs and formats,
-exact lengths and SHA-256 digests, and per-list license, attribution, and
-provenance metadata. Its license expression must byte-match the release's
-bounded allowlist. Sources must be UTF-8 and remain within the compiler's
-source count and byte ceilings before a catalog is published.
-
-Activation uses one lifetime-exclusive private namespace, no-follow
-file-identity checks, content-addressed objects, a journal and checkpoint,
-directory synchronization, a durable clock high-water record, and distinct
-current, previous, and candidate packages. An authenticated candidate first
-becomes durable without being represented as current. The compiler prepares
-an exact recoverable artifact: a healthy artifact cache persists it and can
-release declarative memory, while cache unavailability retains the validated
-artifact strongly. Only that exact candidate can then be committed as durable
-current. Activation revalidates the prepared recovery proof before changing
-compiler authority. A crash or failure between commit and activation leaves
-the exact candidate transition visible and recoverable rather than silently
-claiming the new policy is installed. Deterministic compiler rejection is
-bound to the exact compiler-policy fingerprint; transient source/storage
-failures are not made into permanent package rejection.
-
-TUF-backed startup either recovers one exact committed/candidate state or reports
-storage/clock unavailable; corruption and equivocation are not interpreted as
-first run. Every durable package also binds the canonical exact license
-allowlist and source/manifest admission limits under which it was verified.
-A missing or corrupt regular manifest may restore as deferred repairable
-material only when that fingerprint still matches; a policy change cannot use
-a compiled-artifact hit to bypass current manifest admission. Successful
-authenticated same-package verification rebinds the fingerprint.
-
-Object garbage collection is bounded and protects the current, previous,
-candidate, and committed TUF object graph. If any retained manifest is missing
-or regular-file corrupt, collection protects its manifest digest, performs no
-destructive object pass, and retains the already-validated crash-recovery
-capacity bound for that open. The smaller steady-state bound is enforced only
-after the complete retained reference graph is readable again. Unsafe
-filesystem identities and I/O ambiguity remain terminal.
-
-TUF refresh admission and status are bounded, manual refresh runs on one worker,
-failures use bounded backoff, and stale/expiry state remains visible. Shutdown
-seals new work, orders its barrier after an already accepted refresh, and must
-publish terminal status and prove and join worker exit within the caller's
-unchanged absolute deadline.
-
-Production TUF keys, root metadata, endpoints, repository identity, and the
-signing/rotation/recovery runbook still belong to the next implementation
-phase and release operations. TUF repository, transport, TLS, durable-update
-state, and worker code are preserved behind the `tuf` feature and exercised
-in their own CI matrix. That feature is absent from the desktop release graph,
-so bundled builds contain no dormant updater runtime to start or wake. The
-source service publishes the distinct `release_bundle` provenance instead of
-falsely labeling bundled bytes as TUF.
-Provisioning must preserve the embedded package as the trusted offline
-baseline. Refresh capability and current-package authority are separate
-state: startup begins with `(release_bundle, embedded identity)`, and only an
-exact, authenticated, non-older TUF package may atomically supersede it as
-`(tuf_repository, identity)`. The application and service state machines must
-carry that provenance with both current and candidate identities. Merely
-switching the service constructor to repository mode would discard the
-offline baseline and is explicitly not an acceptable integration.
-
-The vendored adblock fork retains no third-party list fixture or
-replacement-resource payload. Fixture-dependent upstream tests use minimal
-Zephium-authored reserved-domain vectors and deterministic generated corpora
-instead. The separately licensed release seed lives outside the fork with its
-own manifest, attribution, and legal text. The fork manifest declares one
-explicit `fork_contract` integration target, and CI runs it under every
-production feature graph to pin exact-attribution behavior, conservative
-unknown-attribution behavior, preparation budgets, typed matcher failures,
-and serialization.
-A clean-upstream differential remains separate rebase evidence because normal
-builds must not fetch executable source from the network.
-
-Production SBOM finalization independently requires pinned Syft to discover
-exactly one Cargo component for each shipping blocker layer at its lock-pinned
-version: `zephium-blocker`, `zephium-blocker-service`, and the
-`zephium-blocker-update` package validator. It separately binds the vendored
-`adblock` component to its reviewed provenance. The finalizer checks each
-component's package URL, lockfile discovery source, platform location, and
-uniqueness; records the runtime compiler feature graph selected for the
-release platform; and records the supply feature graph as `release-bundle`.
-CI proves the bundled desktop graph does not select `tuf`, `tough`, `reqwest`,
-`rustls-platform-verifier`, or `aws-lc-rs`, while a separate positive graph,
-Clippy, and test matrix keeps the retained TUF implementation buildable and
-audited.
-
-The finalizer also revalidates the staged closed release-seed inventory,
-boundedly inflates both gzip assets, cross-checks their raw and compressed
-digests against both the canonical manifests and independent release anchors,
-and emits CycloneDX 1.6 `data` components for the exact EasyList and
-EasyPrivacy versions. Those components carry the upstream source URL and
-commit, raw/compressed SHA-256 identities, package revision, and
-CC-BY-SA-3.0 license. Finalization derives the only acceptable installed paths
-from the platform and already-proven executable locations, then requires
-byte-exact copies of the EasyList/EasyPrivacy notice, CC-BY-SA-3.0 text, and
-Zephium's MPL-2.0 text in every extracted installer. The RPM metadata declares
-the aggregate `MPL-2.0 AND CC-BY-SA-3.0` expression and the release audit
-checks it after RPM rewriting.
-
-The standalone fork lock and provenance records are staged only after that
-graph scan, so their development dependency graph cannot duplicate or pollute
-the product inventory. The finalizer then binds the `adblock` component and
-release metadata to the reviewed upstream commit/tree/archive, selected
-platform feature graph, fork and inventory records, active/source manifests,
-standalone lockfile, and exact reviewed license bytes; only then does it add
-the verified MPL-2.0 declaration Syft's lockfile cataloger cannot supply.
-Every record is also hashed in the staged payload inventory, so a between-read
-replacement fails release assembly.
-
-## Deterministic quality tooling
-
-The source tree includes four complementary quality paths:
-
-- property tests generate and mutate bounded ABP/hosts policies under reserved
-  `.invalid` domains, then check deterministic compilation, source-order
-  independence, canonical WebKit output, digest stability, and stable runtime
-  decisions;
-- `synthetic_blocker_lab` measures bounded compile time plus exact-attribution
-  and Windows-style source-independent runtime p50/p95/p99/max decision
-  latency, and reports exact rule, artifact, budget-exhaustion, and other-error
-  counts as machine-readable JSON lines;
-- an independently locked `cargo-fuzz` package has source-admission,
-  request-match, and canonical-WebKit targets with retained Zephium-authored
-  `.invalid` seeds. CI audits that graph and runs a fixed-count deterministic
-  smoke campaign for every target with timeout, input-size, RSS, and artifact
-  bounds;
-- `check-blocker-seed` independently inflates the licensed EasyList and
-  EasyPrivacy snapshots, reconstructs both shipping feature graphs in offline
-  subprocesses, and requires byte-exact agreement with the reviewed compiler
-  report;
-- release CI materializes that exact 29,347,341-byte declarative artifact and
-  compiles and cache-reloads it through the supported native WebKit stores
-  under bounded deadlines on macOS and Fedora.
-
-The synthetic tools use no third-party lists, browsing data, live traffic, or
-exploit traffic. The release-seed gate uses only the explicitly licensed,
-attributed public subscriptions committed for distribution; it never uses
-browsing data. These deterministic gates prove that the harnesses build and
-exercise the boundaries, but they are not substitutes for sustained fuzzing,
-sanitizers, native hostile tests, or packaged endurance measurements.
-
-## Enablement gates
-
-Do not market stable, continuously maintained protection until all of these
-are complete:
-
-1. Provision and review the production TUF trust domain: offline root and
-   online role keys, thresholds, fixed origins, stable repository identity,
-   initial signed metadata/catalog, exact redistributable lists and license
-   allowlist, rotation/revocation/recovery runbook, and release provenance.
-   Exercise root rotation, rollback/equivocation, expiry, unsafe clocks,
-   storage loss, endpoint outage, and recovery against the exact release
-   infrastructure. Preserve the embedded release bundle as the offline
-   baseline and prove the provenance-carrying, monotonic
-   release-bundle-to-TUF transition.
-2. Run packaged hostile enforcement tests on real supported Windows, macOS,
-   and Fedora hosts. Cover block/exception priority, domains and party
-   predicates, methods and protocols, redirects, iframes, workers, service
-   workers, cache hit/miss/corruption, policy replacement, native callback
-   timeout/re-entry, profile deletion, crash recovery, and shutdown. On
-   WebView2, specifically prove that installing an identical replacement
-   filter cohort and retiring the prior cohort leaves interception active;
-   this is the runtime proof of Microsoft's documented duplicate-filter
-   reference-count contract.
-3. Record cold/warm/source-CAS compilation, request-match p50/p95/p99/max,
-   the percentage of Windows decisions allowed because the 256-check budget
-   was exhausted,
-   peak and retained RSS, startup impact, CPU wakeups, disk growth, battery,
-   and 24-hour endurance with representative redistributable lists.
-4. Run sustained fuzz and sanitizer campaigns for source admission,
-   parser/converter boundaries, canonical WebKit serialization, runtime
-   matching, compiled/source-cache decoding, updater manifest/state recovery,
-   and native request construction. Retain minimized regressions. The bounded
-   deterministic CI campaign is a smoke gate, not completion of this item.
-5. Differentially test the fork against its exact upstream revision and
-   re-review every patch according to
-   [`vendor/adblock/REBASE.md`](../vendor/adblock/REBASE.md).
-6. Preserve and hostile-test the focused-profile privileged source status and
-   refresh, enable/disable, and exact retry controls without granting raw
-   pages a blocker command surface.
-7. Obtain an external review of the updater/cache/parser/matcher/native-install
-   boundary
-   before describing the feature as stable protection.
-8. Complete release/legal approval for the selected CC-BY-SA-3.0
-   redistribution path and its aggregate package metadata.
-
-Until then, documentation and UI must distinguish the usable
-release-authenticated seed from a maintained TUF source, distinguish bundled
-refresh advice from an invalid authority, show genuine stale/degraded state
-honestly, and avoid claims of full EasyList semantics. Profiles must remain
-disabled by default; “enabled” is valid only after a non-empty exact artifact
-is installed for that profile.
+Before merge/release: run the [Windows qualification](adblock-windows-qualification.md),
+complete packaged endurance/process-family CPU/RAM/battery measurements, test
+representative daily-use pages and user QA, and resolve any release-blocking
+findings. These are evidence gates, not claims inferred from cross-compilation.

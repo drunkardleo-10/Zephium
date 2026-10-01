@@ -42,11 +42,10 @@ impl Cleanup {
         let deadline = Instant::now() + Duration::from_secs(12);
         let authorized = authorize(&store, profile);
         match authorized {
-            Ok(Authorization::Native(namespace)) => {
+            Ok(Authorization::Native) => {
                 let result = native.clone();
                 engine.erase_profile_data(
                     profile,
-                    namespace,
                     Box::new(move |outcome| {
                         result.store(
                             match outcome {
@@ -98,7 +97,7 @@ impl Cleanup {
 }
 
 enum Authorization {
-    Native(Option<zephium_core::extensions::ExtensionNativeNamespaceScope>),
+    Native,
     Verified,
 }
 
@@ -110,15 +109,11 @@ fn authorize(store: &zephium_store::SqliteStore, profile: ProfileId) -> Result<A
         if pending.profile != profile {
             return Err(());
         }
-        return if pending.native_erasure_verified {
-            if pending.extension_native_namespace.is_some() {
-                Err(())
-            } else {
-                Ok(Authorization::Verified)
-            }
+        return Ok(if pending.native_erasure_verified {
+            Authorization::Verified
         } else {
-            Ok(Authorization::Native(pending.extension_native_namespace))
-        };
+            Authorization::Native
+        });
     }
     if !pending.is_empty() {
         return Err(());
@@ -155,7 +150,7 @@ fn authorize(store: &zephium_store::SqliteStore, profile: ProfileId) -> Result<A
     if pending.profile != profile || pending.native_erasure_verified {
         return Err(());
     }
-    Ok(Authorization::Native(pending.extension_native_namespace))
+    Ok(Authorization::Native)
 }
 
 pub(super) fn recover(directory: &Path) -> Result<(), super::ProbeFailure> {

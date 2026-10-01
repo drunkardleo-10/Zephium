@@ -11,6 +11,11 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+mod public_search;
+pub use public_search::{
+    try_public_search_provider_exact_call_config, PublicSearchModelCatalogError,
+};
+
 use std::error::Error;
 use std::fmt;
 use std::sync::OnceLock;
@@ -67,6 +72,27 @@ pub const LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS: u64 = 250_000;
 /// Luna output price in micro-USD per million tokens.
 pub const LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 1_200_000;
 
+/// Exact OpenAI alias of the GPT-6 Luna entry; the sole published snapshot.
+pub const GPT6_LUNA_MODEL_REVISION: &str = "gpt-6-luna";
+/// Pinned tokenizer/counting implementation revision for the GPT-6 Luna entry.
+pub const GPT6_LUNA_TOKENIZER_REVISION: &str = "openai:gpt-6-luna:v1";
+/// Reproducible catalog revision effective with GPT-6 Luna's 2026-09-23 pricing.
+pub const GPT6_LUNA_PRICING_CATALOG_REVISION: u64 = 20_260_923;
+/// Inclusive lower edge of the ordinary GPT-6 Luna rate tier.
+pub const GPT6_LUNA_STANDARD_RATE_MIN_INPUT_TOKENS: u64 = 1;
+/// Inclusive upper edge before long-context (2x input and cache) pricing applies.
+pub const GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS: u64 = 272_000;
+/// Hard maximum output tokens accepted by the GPT-6 Luna provider entry.
+pub const GPT6_LUNA_MAX_OUTPUT_TOKENS: u32 = 128_000;
+/// GPT-6 Luna uncached-input price in micro-USD per million tokens.
+pub const GPT6_LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 100_000;
+/// GPT-6 Luna cached-input price in micro-USD per million tokens.
+pub const GPT6_LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 10_000;
+/// GPT-6 Luna cache-write price using the catalog's 1.25x input multiplier.
+pub const GPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS: u64 = 125_000;
+/// GPT-6 Luna output price in micro-USD per million tokens.
+pub const GPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 500_000;
+
 static TERRA_PRICING_SCHEDULE: OnceLock<
     Result<AgentProviderPricingSchedule, TerraModelCatalogError>,
 > = OnceLock::new();
@@ -74,6 +100,44 @@ static TERRA_PRICING_SCHEDULE: OnceLock<
 static LUNA_PRICING_SCHEDULE: OnceLock<
     Result<AgentProviderPricingSchedule, LunaModelCatalogError>,
 > = OnceLock::new();
+
+static GPT6_LUNA_PRICING_SCHEDULE: OnceLock<
+    Result<AgentProviderPricingSchedule, LunaModelCatalogError>,
+> = OnceLock::new();
+
+static GPT6_LUNA_DECISION_SCHEDULES: [OnceLock<
+    Result<AgentProviderPricingSchedule, LunaModelCatalogError>,
+>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+
+/// Reviewed reasoning efforts for small typed decisions on GPT-6 Luna. The
+/// pinned medium entry used for planning and agent turns is separate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Gpt6LunaDecisionEffort {
+    /// No reasoning tokens.
+    None,
+    /// Low reasoning effort.
+    Low,
+    /// The pinned medium effort.
+    Medium,
+}
+
+impl Gpt6LunaDecisionEffort {
+    const fn index(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+        }
+    }
+
+    const fn provider(self) -> AgentProviderReasoningEffort {
+        match self {
+            Self::None => AgentProviderReasoningEffort::None,
+            Self::Low => AgentProviderReasoningEffort::Low,
+            Self::Medium => AgentProviderReasoningEffort::Medium,
+        }
+    }
+}
 
 /// Fallible failure while constructing the fixed Luna entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -540,7 +604,24 @@ pub fn settle_luna_provider_terminal(
     settlement: AgentProviderPricingSettlement,
     policy: &mut AgentRunPolicy,
 ) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
-    let schedule = match luna_pricing_schedule() {
+    settle_luna_entry_terminal(luna_pricing_schedule(), settlement, policy)
+}
+
+/// Prices and settles one exact GPT-6 Luna provider EOF terminal against the
+/// pinned GPT-6 Luna schedule, with the same reservation-ceiling fallback.
+pub fn settle_gpt6_luna_provider_terminal(
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
+    settle_luna_entry_terminal(gpt6_luna_pricing_schedule(), settlement, policy)
+}
+
+fn settle_luna_entry_terminal(
+    schedule: Result<&'static AgentProviderPricingSchedule, LunaModelCatalogError>,
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
+    let schedule = match schedule {
         Ok(schedule) => schedule,
         Err(_) => return settle_luna_at_reservation_ceiling(settlement, policy),
     };
@@ -588,35 +669,125 @@ fn settle_luna_at_reservation_ceiling(
     }
 }
 
-fn build_luna_pricing_schedule() -> Result<AgentProviderPricingSchedule, LunaModelCatalogError> {
-    let requested_model = AgentProviderModelRevision::try_new(LUNA_MODEL_REVISION.to_owned())
-        .map_err(|_: AgentProviderContractError| LunaModelCatalogError::ModelRevision)?;
-    let allowed_effective_model =
-        AgentProviderModelRevision::try_new(LUNA_MODEL_REVISION.to_owned())
-            .map_err(|_: AgentProviderContractError| LunaModelCatalogError::ModelRevision)?;
-    let tokenizer = SemanticTokenizerRevision::try_new(LUNA_TOKENIZER_REVISION.to_owned())
-        .map_err(|_: SemanticTokenizerRevisionError| LunaModelCatalogError::TokenizerRevision)?;
-    let revision = AgentProviderPricingRevision::new(LUNA_PRICING_CATALOG_REVISION)
-        .ok_or(LunaModelCatalogError::PricingRevision)?;
-    let profile = AgentProviderPricingProfile::try_for_input_range(
-        revision,
+struct LunaEntry {
+    model: &'static str,
+    tokenizer: &'static str,
+    revision: u64,
+    input_range: (u64, u64),
+    rates: [u64; 4],
+    effort: AgentProviderReasoningEffort,
+}
+
+const LUNA_ENTRY: LunaEntry = LunaEntry {
+    model: LUNA_MODEL_REVISION,
+    tokenizer: LUNA_TOKENIZER_REVISION,
+    revision: LUNA_PRICING_CATALOG_REVISION,
+    input_range: (
         LUNA_STANDARD_RATE_MIN_INPUT_TOKENS,
         LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
-    )
-    .map_err(|_: AgentProviderPricingContractError| LunaModelCatalogError::PricingProfile)?;
-    let rates = AgentProviderTokenRates::try_new(
+    ),
+    rates: [
         LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,
         LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,
         LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,
         LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
+    ],
+    effort: AgentProviderReasoningEffort::Medium,
+};
+
+const GPT6_LUNA_ENTRY: LunaEntry = LunaEntry {
+    model: GPT6_LUNA_MODEL_REVISION,
+    tokenizer: GPT6_LUNA_TOKENIZER_REVISION,
+    revision: GPT6_LUNA_PRICING_CATALOG_REVISION,
+    input_range: (
+        GPT6_LUNA_STANDARD_RATE_MIN_INPUT_TOKENS,
+        GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
+    ),
+    rates: [
+        GPT6_LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,
+        GPT6_LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,
+        GPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,
+        GPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
+    ],
+    effort: AgentProviderReasoningEffort::Medium,
+};
+
+fn build_luna_pricing_schedule() -> Result<AgentProviderPricingSchedule, LunaModelCatalogError> {
+    build_luna_entry_schedule(&LUNA_ENTRY)
+}
+
+fn gpt6_luna_pricing_schedule(
+) -> Result<&'static AgentProviderPricingSchedule, LunaModelCatalogError> {
+    match GPT6_LUNA_PRICING_SCHEDULE.get_or_init(|| build_luna_entry_schedule(&GPT6_LUNA_ENTRY)) {
+        Ok(schedule) => Ok(schedule),
+        Err(error) => Err(*error),
+    }
+}
+
+/// Creates a provider-exact configuration for the fixed GPT-6 Luna schedule.
+///
+/// Only the output ceiling is selectable, exactly as for the GPT-5.6 entry.
+pub fn try_gpt6_luna_provider_exact_call_config(
+    max_output_tokens: u32,
+) -> Result<AgentProviderCallConfig, LunaModelCatalogError> {
+    if max_output_tokens == 0 || max_output_tokens > GPT6_LUNA_MAX_OUTPUT_TOKENS {
+        return Err(LunaModelCatalogError::OutputTokens);
+    }
+    gpt6_luna_pricing_schedule()?
+        .try_provider_exact_call_config(max_output_tokens, AgentProviderStreamBudget::STANDARD)
+        .map_err(LunaModelCatalogError::CallConfig)
+}
+
+/// Creates a GPT-6 Luna configuration for typed decisions at a reviewed
+/// effort: search ranking, link advice and decision emulation. Prices,
+/// identity and limits are the GPT-6 Luna entry's; only reasoning differs.
+pub fn try_gpt6_luna_decision_call_config(
+    max_output_tokens: u32,
+    effort: Gpt6LunaDecisionEffort,
+) -> Result<AgentProviderCallConfig, LunaModelCatalogError> {
+    if max_output_tokens == 0 || max_output_tokens > GPT6_LUNA_MAX_OUTPUT_TOKENS {
+        return Err(LunaModelCatalogError::OutputTokens);
+    }
+    let schedule = match GPT6_LUNA_DECISION_SCHEDULES[effort.index()].get_or_init(|| {
+        build_luna_entry_schedule(&LunaEntry {
+            effort: effort.provider(),
+            ..GPT6_LUNA_ENTRY
+        })
+    }) {
+        Ok(schedule) => schedule,
+        Err(error) => return Err(*error),
+    };
+    schedule
+        .try_provider_exact_call_config(max_output_tokens, AgentProviderStreamBudget::STANDARD)
+        .map_err(LunaModelCatalogError::CallConfig)
+}
+
+fn build_luna_entry_schedule(
+    entry: &LunaEntry,
+) -> Result<AgentProviderPricingSchedule, LunaModelCatalogError> {
+    let requested_model = AgentProviderModelRevision::try_new(entry.model.to_owned())
+        .map_err(|_: AgentProviderContractError| LunaModelCatalogError::ModelRevision)?;
+    let allowed_effective_model = AgentProviderModelRevision::try_new(entry.model.to_owned())
+        .map_err(|_: AgentProviderContractError| LunaModelCatalogError::ModelRevision)?;
+    let tokenizer = SemanticTokenizerRevision::try_new(entry.tokenizer.to_owned())
+        .map_err(|_: SemanticTokenizerRevisionError| LunaModelCatalogError::TokenizerRevision)?;
+    let revision = AgentProviderPricingRevision::new(entry.revision)
+        .ok_or(LunaModelCatalogError::PricingRevision)?;
+    let profile = AgentProviderPricingProfile::try_for_input_range(
+        revision,
+        entry.input_range.0,
+        entry.input_range.1,
     )
-    .map_err(|_: AgentProviderPricingContractError| LunaModelCatalogError::TokenRates)?;
+    .map_err(|_: AgentProviderPricingContractError| LunaModelCatalogError::PricingProfile)?;
+    let [uncached, cached, cache_write, output] = entry.rates;
+    let rates = AgentProviderTokenRates::try_new(uncached, cached, cache_write, output)
+        .map_err(|_: AgentProviderPricingContractError| LunaModelCatalogError::TokenRates)?;
     AgentProviderPricingSchedule::try_new(
         AgentProviderKind::OpenAiResponses,
         requested_model,
         vec![allowed_effective_model],
         AgentProviderResponseRoute::OpenAiDefault,
-        AgentProviderReasoningEffort::Medium,
+        entry.effort,
         tokenizer,
         profile,
         rates,

@@ -6,9 +6,34 @@ use zephium_agentic::*;
 /// Exact verified browser transition eligible for one provider replay.
 #[must_use]
 pub struct AgentBrowserVerifiedTransition {
-    pub(crate) continuation: AgentProviderContinuation,
-    pub(crate) diff: Box<SemanticDiff>,
+    pub(crate) continuation: Option<AgentProviderContinuation>,
+    #[cfg(feature = "probe-harness")]
+    pub(crate) probe_diff: Option<Box<SemanticDiff>>,
     pub(crate) terminal: Option<SemanticActionBatchResult>,
+}
+
+pub(crate) enum AgentBrowserVerifiedState {
+    Accounted(Box<SemanticActionResult>),
+    #[cfg(feature = "probe-harness")]
+    ProbeDiff(Box<SemanticDiff>),
+}
+
+impl AgentBrowserVerifiedState {
+    pub(crate) fn diff(&self) -> Option<&SemanticDiff> {
+        match self {
+            Self::Accounted(result) => result.diff(),
+            #[cfg(feature = "probe-harness")]
+            Self::ProbeDiff(diff) => Some(diff),
+        }
+    }
+
+    pub(crate) fn action_result(&self) -> Option<&SemanticActionResult> {
+        match self {
+            Self::Accounted(result) => Some(result),
+            #[cfg(feature = "probe-harness")]
+            Self::ProbeDiff(_) => None,
+        }
+    }
 }
 
 impl AgentBrowserVerifiedTransition {
@@ -18,15 +43,34 @@ impl AgentBrowserVerifiedTransition {
         self.terminal.as_ref()
     }
 
-    pub(crate) fn into_parts(self) -> (AgentProviderContinuation, Box<SemanticDiff>) {
-        (self.continuation, self.diff)
+    pub(crate) fn into_parts(
+        self,
+    ) -> Option<(AgentProviderContinuation, AgentBrowserVerifiedState)> {
+        #[cfg(feature = "probe-harness")]
+        if let Some(diff) = self.probe_diff {
+            return Some((
+                self.continuation?,
+                AgentBrowserVerifiedState::ProbeDiff(diff),
+            ));
+        }
+        Some((
+            self.continuation?,
+            AgentBrowserVerifiedState::Accounted(Box::new(self.terminal?.into_final_state()?)),
+        ))
     }
 }
 
 impl fmt::Debug for AgentBrowserVerifiedTransition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentBrowserVerifiedTransition")
-            .field("diff_stats", &self.diff.stats())
+            .field(
+                "next_state",
+                &self
+                    .terminal
+                    .as_ref()
+                    .and_then(|terminal| terminal.final_state())
+                    .map(SemanticActionResult::next_state),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -35,8 +79,30 @@ impl fmt::Debug for AgentBrowserVerifiedTransition {
 #[must_use]
 pub struct AgentBrowserActionProposal {
     action: SemanticPreparedAction,
-    continuation: AgentProviderContinuation,
+    baseline: SemanticObservationAcknowledgement,
+    continuation: Option<AgentProviderContinuation>,
     batch: SemanticActionBatchExecution,
+    refusal_context: Option<AgentProviderActionRefusalContext>,
+}
+
+pub(crate) enum AgentBrowserActionBinding {
+    Prepared(Box<AgentBrowserActionProposal>),
+    Refused(Box<AgentProviderActionRefusal>),
+}
+
+impl AgentBrowserActionProposal {
+    /// Declines a bound action before any permit: the continuation carries
+    /// the refusal back to the model and nothing was issued.
+    pub(crate) fn into_refusal(
+        self,
+        error: SemanticActionBindingError,
+    ) -> Option<AgentProviderActionRefusal> {
+        Some(AgentProviderActionRefusal::unissued(
+            self.continuation?,
+            error,
+            self.refusal_context,
+        ))
+    }
 }
 
 /// Original refused proposal, including its non-replayable continuation. Only
@@ -63,16 +129,42 @@ impl AgentBrowserActionProposal {
         observation: &SemanticObservation,
         frames: &[SemanticFrameJoin],
         batch: SemanticActionBatchId,
-    ) -> Result<Self, AgentBrowserActionError> {
-        let (proposal, continuation) = turn.into_parts();
-        let AgentBrowserToolProposal::Act(actions) = proposal else {
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentBrowserActionBinding, AgentBrowserActionError> {
+        let AgentBrowserToolProposal::Act(actions) = turn.proposal() else {
             return Err(AgentBrowserActionError::Tool);
         };
+        #[cfg(feature = "probe-harness")]
+        for action in actions.actions() {
+            let _ = std::io::Write::write_fmt(
+                &mut std::io::stderr(),
+                format_args!(
+                    "browser-act: kind={:?} effect={:?} verification={:?} wait={:?}\n",
+                    action.intent().kind(),
+                    action.effect(),
+                    action.verification(),
+                    action.wait()
+                ),
+            );
+        }
         if actions.actions().len() != 1 {
             return Err(AgentBrowserActionError::ActionCount);
         }
-        let batch = SemanticActionBatch::bind(batch, observation, frames, actions.into_actions())
-            .map_err(AgentBrowserActionError::Binding)?;
+        let (batch, continuation, context) =
+            match turn.resolve_action(batch, observation, frames, config) {
+                Ok(AgentProviderActionResolution::Bound(batch, continuation, context)) => {
+                    (batch, continuation, context)
+                }
+                Ok(AgentProviderActionResolution::Refused(refusal)) => {
+                    return Ok(AgentBrowserActionBinding::Refused(Box::new(refusal)));
+                }
+                Err(AgentProviderActionResolutionError::Binding(error)) => {
+                    return Err(AgentBrowserActionError::Binding(error));
+                }
+                Err(AgentProviderActionResolutionError::Continuation(_)) => {
+                    return Err(AgentBrowserActionError::State);
+                }
+            };
         let bound = batch
             .actions()
             .first()
@@ -85,39 +177,123 @@ impl AgentBrowserActionProposal {
         let action = bound
             .prepare(snapshot)
             .map_err(AgentBrowserActionError::Checkpoint)?;
+        // This vertical admits only independently snapshot-verifiable effects.
+        // Native navigation/dialog evidence needs its own host adapter; the
+        // model is told so and chooses again, nothing having been issued.
+        let unsupported = !AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&action.kind())
+            || matches!(
+                action.verification(),
+                SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_)
+            )
+            || !matches!(
+                action.wait(),
+                SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
+            );
+        if unsupported {
+            return Ok(AgentBrowserActionBinding::Refused(Box::new(
+                AgentProviderActionRefusal::unissued(
+                    continuation,
+                    SemanticActionBindingError::UnsupportedVerification,
+                    context,
+                ),
+            )));
+        }
         let batch =
             SemanticActionBatchExecution::new(&batch).map_err(AgentBrowserActionError::Batch)?;
-        // This vertical admits only independently snapshot-verifiable effects.
-        // Native navigation/dialog/scroll evidence needs its own host adapter.
-        if matches!(
-            action.verification(),
-            SemanticVerification::NavigationCommitted
-                | SemanticVerification::Dialog(_)
-                | SemanticVerification::ScrollPositionChanged
-        ) {
-            return Err(AgentBrowserActionError::EvidenceRequired);
-        }
-        if !matches!(
-            action.wait(),
-            SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
-        ) {
-            return Err(AgentBrowserActionError::EvidenceRequired);
-        }
         // A model cannot shorten the allowance below the current native
         // snapshot capability. Never extend a deadline after dispatch instead.
         if action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS {
             return Err(AgentBrowserActionError::SettleBudget);
         }
-        Ok(Self {
+        Ok(AgentBrowserActionBinding::Prepared(Box::new(Self {
             action,
-            continuation,
+            baseline: continuation.baseline().clone(),
+            continuation: Some(continuation),
             batch,
-        })
+            refusal_context: context,
+        })))
     }
 
     /// The exact prepared action for a trusted effect classifier.
     pub const fn action(&self) -> &SemanticPreparedAction {
         &self.action
+    }
+
+    pub(crate) fn baseline(&self) -> &SemanticObservationAcknowledgement {
+        &self.baseline
+    }
+
+    pub(crate) fn bind_decision(
+        selection: DecisionActionSelection,
+        recipe: SemanticActionProposal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+        batch: SemanticActionBatchId,
+    ) -> Result<Self, AgentBrowserActionError> {
+        let (batch, baseline) = selection
+            .bind_action(recipe, observation, frames, batch)
+            .map_err(|_| AgentBrowserActionError::State)?;
+        Self::bind_owned(batch, baseline, observation)
+    }
+
+    /// A step Rust chose on the exact observation it read it from (a
+    /// consent banner's refusal), with no model or decision in between. It
+    /// still needs the task's own assessment before any dispatch.
+    pub(crate) fn bind_code_owned(
+        recipe: SemanticActionProposal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+        batch: SemanticActionBatchId,
+    ) -> Result<Self, AgentBrowserActionError> {
+        let (baseline, _) = SemanticObservationAcknowledgement::whole_page_scope(observation)
+            .ok_or(AgentBrowserActionError::State)?;
+        let batch = SemanticActionBatch::bind(batch, observation, frames, vec![recipe])
+            .map_err(|_| AgentBrowserActionError::State)?;
+        Self::bind_owned(batch, baseline, observation)
+    }
+
+    fn bind_owned(
+        batch: SemanticActionBatch,
+        baseline: SemanticObservationAcknowledgement,
+        observation: &SemanticObservation,
+    ) -> Result<Self, AgentBrowserActionError> {
+        let bound = batch
+            .actions()
+            .first()
+            .ok_or(AgentBrowserActionError::ActionCount)?;
+        let snapshot = observation
+            .frames()
+            .iter()
+            .find(|snapshot| snapshot.frame() == bound.frame())
+            .ok_or(AgentBrowserActionError::State)?;
+        let action = bound
+            .prepare(snapshot)
+            .map_err(AgentBrowserActionError::Checkpoint)?;
+        if !AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&action.kind())
+            || matches!(
+                action.verification(),
+                SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_)
+            )
+            || !matches!(
+                action.wait(),
+                SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
+            )
+        {
+            return Err(AgentBrowserActionError::Binding(
+                SemanticActionBindingError::UnsupportedVerification,
+            ));
+        }
+        if action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS {
+            return Err(AgentBrowserActionError::SettleBudget);
+        }
+        Ok(Self {
+            action,
+            baseline,
+            continuation: None,
+            batch: SemanticActionBatchExecution::new(&batch)
+                .map_err(AgentBrowserActionError::Batch)?,
+            refusal_context: None,
+        })
     }
 
     /// Authorizes the separately assessed action and retains native authority.
@@ -194,6 +370,10 @@ impl AgentBrowserActionProposal {
             receipt: None,
             failed: None,
             journal_failed,
+            native_unverified: false,
+            applied_on_page_change: false,
+            reinspection_owner: None,
+            reinspection_result: None,
         })
     }
 }
@@ -210,6 +390,11 @@ impl fmt::Debug for AgentBrowserActionProposal {
 /// cannot turn dropped or malformed native work into successful continuation.
 #[must_use]
 pub struct AgentBrowserAction {
+    native_unverified: bool,
+    /// Verified by the page's change after its own target re-rendered.
+    applied_on_page_change: bool,
+    reinspection_owner: Option<std::sync::Arc<()>>,
+    reinspection_result: Option<crate::AgentWorkEffectReobservation>,
     journal_failed: bool,
     proposal: AgentBrowserActionProposal,
     reservation: SemanticActionExecutionReservation,
@@ -222,9 +407,85 @@ pub struct AgentBrowserAction {
 }
 
 impl AgentBrowserAction {
+    pub(crate) fn prepare_reinspection(
+        &mut self,
+        account: AgentContextAccountBinding,
+        resources: &mut WorkBrowserResources,
+        lease: &WorkBrowserExecutionLease,
+        target: crate::AgentWorkEffectReadTarget,
+        now: AgentPolicyInstant,
+    ) -> Result<
+        (
+            crate::AgentWorkEffectReinspection,
+            WorkBrowserObservationRequest,
+        ),
+        crate::AgentWorkEffectReinspectionError,
+    > {
+        use crate::AgentWorkEffectReinspectionError as Error;
+        if !self.native_unverified
+            || !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+        {
+            return Err(Error::Unavailable);
+        }
+        let failed = self
+            .failed
+            .as_ref()
+            .filter(|failed| {
+                failed.failure() == SemanticActionFailure::NeedsHuman
+                    && self.receipt == Some(failed.receipt())
+            })
+            .ok_or(Error::Unavailable)?;
+        if self.reinspection_owner.is_some() {
+            return Err(Error::AlreadyIssued);
+        }
+        let owner = std::sync::Arc::new(());
+        let prepared = crate::work_reinspection::AgentWorkEffectReinspection::prepare(
+            owner.clone(),
+            failed.receipt(),
+            &self.proposal.action,
+            account,
+            resources,
+            lease,
+            target,
+            now,
+        )?;
+        self.reinspection_owner = Some(owner);
+        Ok(prepared)
+    }
+
+    pub(crate) fn record_reinspection(
+        &mut self,
+        result: crate::AgentWorkEffectReobservation,
+    ) -> Result<(), Box<crate::AgentWorkEffectReobservation>> {
+        if self.reinspection_result.is_some()
+            || self
+                .reinspection_owner
+                .as_ref()
+                .is_none_or(|owner| !std::sync::Arc::ptr_eq(owner, &result.owner))
+            || self.receipt != Some(result.original_effect())
+        {
+            return Err(Box::new(result));
+        }
+        self.reinspection_result = Some(result);
+        Ok(())
+    }
+
+    pub(crate) fn reinspection_result(&self) -> Option<&crate::AgentWorkEffectReobservation> {
+        self.reinspection_result.as_ref()
+    }
+
     #[cfg(all(test, feature = "probe-harness"))]
     pub(crate) fn retained_failure(&self) -> Option<&AgentFailedSemanticEffect> {
         self.failed.as_ref()
+    }
+
+    #[cfg(all(test, feature = "probe-harness"))]
+    pub(crate) fn reinspection_test_action(&self) -> &SemanticPreparedAction {
+        &self.proposal.action
     }
 
     pub(crate) fn account_dispatch(
@@ -259,8 +520,277 @@ impl AgentBrowserAction {
         self.failed = Some(failed);
         AgentBrowserActionError::Failed(failure)
     }
+
+    /// Consumes only the exact fully-accounted synchronous refusal. The caller
+    /// proves native non-admission; a native failure callback is insufficient.
+    pub(crate) fn into_rejected_batch(self) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.failed.as_ref().is_none_or(|failed| {
+                failed.execution().is_some() || self.receipt != Some(failed.receipt())
+            })
+        {
+            return Err(Box::new(self));
+        }
+        self.into_failed_batch()
+    }
+
+    /// A rejected read-effect batch keeps its continuation: the model hears
+    /// the refusal and chooses again on a fresh observation.
+    pub(crate) fn into_rejected_refusal(
+        self,
+    ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
+        if self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.proposal.continuation.is_none()
+        {
+            return Err(Box::new(self));
+        }
+        let mut this = *self.into_rejected_batch_keeping()?;
+        let failed = this.failed.take().expect("checked original failed owner");
+        match this.proposal.batch.fail(&this.proposal.action, failed) {
+            Ok(terminal) => Ok((
+                terminal,
+                AgentProviderActionRefusal::unissued(
+                    this.proposal
+                        .continuation
+                        .take()
+                        .expect("checked provider continuation"),
+                    SemanticActionBindingError::DispatchRejected,
+                    this.proposal.refusal_context,
+                ),
+            )),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                this.proposal.batch = batch;
+                this.failed = Some(failed);
+                Err(Box::new(this))
+            }
+        }
+    }
+    /// A read-effect action that ran but whose outcome was not observed:
+    /// its batch fails with that reason and the model hears why.
+    pub(crate) fn into_unverified_refusal(
+        self,
+        local_writes: bool,
+    ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
+        let effect = self.proposal.action.effect();
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || !(effect == SemanticEffectClass::Read
+                || (local_writes && effect == SemanticEffectClass::LocalWrite))
+            || self.proposal.continuation.is_none()
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt()) || failed.verification_error().is_none()
+            })
+        {
+            return Err(Box::new(self));
+        }
+        let mut this = self;
+        let failed = this.failed.take().expect("checked original failed owner");
+        match this.proposal.batch.fail(&this.proposal.action, failed) {
+            Ok(terminal) => Ok((
+                terminal,
+                AgentProviderActionRefusal::unissued(
+                    this.proposal
+                        .continuation
+                        .take()
+                        .expect("checked provider continuation"),
+                    SemanticActionBindingError::Unverified,
+                    this.proposal.refusal_context,
+                ),
+            )),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                this.proposal.batch = batch;
+                this.failed = Some(failed);
+                Err(Box::new(this))
+            }
+        }
+    }
+    /// An action the page refused before it acted (its target covered, out
+    /// of view, changed or gone): nothing was pressed or typed, so a read or
+    /// a draft keeps its continuation and the model hears why.
+    pub(crate) fn into_covered_refusal(
+        self,
+    ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
+        let effect = self.proposal.action.effect();
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || !matches!(
+                effect,
+                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+            )
+            || self.proposal.continuation.is_none()
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt()) || !refused_before_acting(failed.failure())
+            })
+        {
+            return Err(Box::new(self));
+        }
+        let mut this = self;
+        let failed = this.failed.take().expect("checked original failed owner");
+        let reason = if failed.failure() == SemanticActionFailure::TargetOccluded {
+            SemanticActionBindingError::TargetCovered
+        } else {
+            SemanticActionBindingError::DispatchRejected
+        };
+        match this.proposal.batch.fail(&this.proposal.action, failed) {
+            Ok(terminal) => Ok((
+                terminal,
+                AgentProviderActionRefusal::unissued(
+                    this.proposal
+                        .continuation
+                        .take()
+                        .expect("checked provider continuation"),
+                    reason,
+                    this.proposal.refusal_context,
+                ),
+            )),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                this.proposal.batch = batch;
+                this.failed = Some(failed);
+                Err(Box::new(this))
+            }
+        }
+    }
+
+    /// A failed code-owned read (no model continuation) closes its batch so
+    /// the page goes on to the model's own first look.
+    pub(crate) fn into_failed_owned_read(self) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.proposal.continuation.is_some()
+            || self
+                .failed
+                .as_ref()
+                .is_none_or(|failed| self.receipt != Some(failed.receipt()))
+        {
+            return Err(Box::new(self));
+        }
+        self.into_failed_batch()
+    }
+
+    fn into_rejected_batch_keeping(self) -> Result<Box<Self>, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.failed.as_ref().is_none_or(|failed| {
+                failed.execution().is_some() || self.receipt != Some(failed.receipt())
+            })
+        {
+            return Err(Box::new(self));
+        }
+        Ok(Box::new(self))
+    }
+
+    pub(crate) fn into_failed_read_scroll_batch(
+        self,
+    ) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.proposal.action.kind() != SemanticActionKind::Scroll
+            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt())
+                    || failed.verification_error()
+                        != Some(SemanticVerificationError::OutcomeNotObserved)
+                    || failed.execution().is_none_or(|execution| {
+                        execution.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
+                    })
+            })
+        {
+            return Err(Box::new(self));
+        }
+        self.into_failed_batch()
+    }
+
+    pub(crate) fn into_failed_decision_read_batch(
+        self,
+    ) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.proposal.continuation.is_some()
+            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt())
+                    || failed.verification_error().is_none()
+                    || failed.execution().is_none_or(|execution| {
+                        execution.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
+                    })
+            })
+        {
+            return Err(Box::new(self));
+        }
+        self.into_failed_batch()
+    }
+
+    fn into_failed_batch(mut self) -> Result<SemanticActionBatchResult, Box<Self>> {
+        let failed = self.failed.take().expect("checked original failed owner");
+        match self.proposal.batch.fail(&self.proposal.action, failed) {
+            Ok(terminal) => Ok(terminal),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                self.proposal.batch = batch;
+                self.failed = Some(failed);
+                Err(Box::new(self))
+            }
+        }
+    }
     pub(crate) const fn journal_failed(&self) -> bool {
         self.journal_failed
+    }
+    pub(crate) const fn applied_on_page_change(&self) -> bool {
+        self.applied_on_page_change
+    }
+    /// A navigation-like read whose page has not changed yet while its settle
+    /// window is still open: a single-page app may draw the view it opened a
+    /// moment later, so the page is looked at again before it is verified.
+    pub(crate) fn awaits_page_change(
+        &self,
+        current: &SemanticObservation,
+        now: SemanticSettleInstant,
+    ) -> bool {
+        let action = &self.proposal.action;
+        action.effect() == SemanticEffectClass::Read
+            && matches!(
+                action.kind(),
+                SemanticActionKind::Click | SemanticActionKind::Press | SemanticActionKind::Select
+            )
+            && self.terminal.as_ref().is_some_and(|terminal| {
+                terminal
+                    .tracker()
+                    .deadline()
+                    .millis()
+                    .saturating_sub(now.millis())
+                    > PAGE_CHANGE_LOOK_MILLIS
+            })
+            && current
+                .frames()
+                .iter()
+                .find(|snapshot| snapshot.frame() == action.frame())
+                .is_some_and(|snapshot| action.page_unchanged(snapshot))
     }
 
     pub(crate) fn accepts_settlement(
@@ -331,9 +861,11 @@ impl AgentBrowserAction {
         {
             return Err(AgentBrowserActionError::State);
         }
+        let native_unverified = native.is_applied_unverified();
         let outcome = execution
             .settle(self.proposal.action.frame(), native)
             .map_err(AgentBrowserActionError::Native)?;
+        self.native_unverified = native_unverified;
         let start = match begin_semantic_action_settlement(outcome, &self.proposal.action) {
             Ok(start) => start,
             Err(refusal) => {
@@ -410,26 +942,49 @@ impl AgentBrowserAction {
         snapshot: &SemanticSnapshot,
         observed_at: SemanticSettleInstant,
     ) -> Result<AgentVerifiedSemanticEffect, AgentBrowserActionError> {
-        let evidence = prepare_semantic_action_snapshot_evidence(
+        let evidence = match prepare_semantic_action_snapshot_evidence(
             &self.proposal.action,
             self.reservation.attempt(),
             observed_at,
             snapshot,
-        )
-        .map_err(|_| AgentBrowserActionError::EvidenceRequired)?;
+        ) {
+            Ok(evidence) => Ok(evidence),
+            // The target left the page or changed after the action ran: the
+            // terminal settles as refused with that exact reason.
+            Err(SemanticSnapshotEvidenceError::Revalidation(error)) => Err(error),
+            Err(SemanticSnapshotEvidenceError::NonSnapshotEvidenceRequired) => {
+                return Err(AgentBrowserActionError::EvidenceRequired);
+            }
+        };
         let terminal = self.terminal.take().ok_or(AgentBrowserActionError::State)?;
-        let verified =
-            match verify_semantic_action_terminal(*terminal, &self.proposal.action, evidence) {
-                Ok(verified) => verified,
-                Err(refusal) => {
-                    let reason = refusal.error();
-                    let failed = policy
-                        .settle_refused_semantic_terminal(refusal)
-                        .map_err(AgentBrowserActionError::Policy)?;
-                    self.retain_failure(failed);
-                    return Err(AgentBrowserActionError::Verification(reason));
-                }
-            };
+        let verified = match evidence {
+            Ok(evidence) => {
+                verify_semantic_action_terminal(*terminal, &self.proposal.action, evidence)
+            }
+            Err(error) => Err(SemanticActionVerificationRefusal::unobserved(
+                *terminal,
+                observed_at,
+                error,
+            )),
+        };
+        // A read that opened something in a single-page app: its target
+        // re-rendered while the page changed, and that change is its proof.
+        let verified = verified.or_else(|refusal| {
+            let applied = refusal.applied_by_page_change(&self.proposal.action, snapshot);
+            self.applied_on_page_change = applied.is_ok();
+            applied
+        });
+        let verified = match verified {
+            Ok(verified) => verified,
+            Err(refusal) => {
+                let reason = refusal.error();
+                let failed = policy
+                    .settle_refused_semantic_terminal(refusal)
+                    .map_err(AgentBrowserActionError::Policy)?;
+                self.retain_failure(failed);
+                return Err(AgentBrowserActionError::Verification(reason));
+            }
+        };
         self.finished = true;
         policy
             .settle_verified_semantic_terminal(verified, &self.proposal.action)
@@ -447,20 +1002,15 @@ impl AgentBrowserAction {
             &self.proposal.action,
             accounted,
             baseline,
-            self.proposal.continuation.baseline(),
+            &self.proposal.baseline,
             SemanticPostActionObservation::new(observed_at, current.clone()),
             SemanticDiffBudget::ACTION,
         )
         .map_err(|refusal| {
             AgentBrowserActionFinalizationRefusal::Finalization(Box::new(refusal))
         })?;
-        // The finalizer already enforces the complete baseline/proof/current join.
-        // A fallback remains a typed stop; it cannot be replayed as an action diff.
-        let Some(diff) = result.result().diff().cloned() else {
-            return Err(AgentBrowserActionFinalizationRefusal::FreshSnapshot(
-                Box::new(result),
-            ));
-        };
+        // Both a delta and a fresh observation carry the same independently
+        // verified effect. Record its batch/accounting before provider delivery.
         self.proposal
             .batch
             .record_success(&self.proposal.action, result)
@@ -474,7 +1024,8 @@ impl AgentBrowserAction {
             .map_err(AgentBrowserActionFinalizationRefusal::Batch)?;
         Ok(AgentBrowserVerifiedTransition {
             continuation: self.proposal.continuation,
-            diff: Box::new(diff),
+            #[cfg(feature = "probe-harness")]
+            probe_diff: None,
             terminal: Some(terminal),
         })
     }
@@ -490,6 +1041,9 @@ impl fmt::Debug for AgentBrowserAction {
     }
 }
 
+/// How long a page waits before looking again for a read's change.
+pub(crate) const PAGE_CHANGE_LOOK_MILLIS: u64 = 400;
+
 /// Closed, content-free action refusal. No variant authorizes retry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentBrowserActionError {
@@ -497,6 +1051,8 @@ pub enum AgentBrowserActionError {
     Tool,
     /// This vertical accepts exactly one action per tool turn.
     ActionCount,
+    /// The retained native adapters do not dispatch this interaction kind.
+    UnsupportedInteraction,
     /// Exact observed references failed binding.
     Binding(SemanticActionBindingError),
     /// Fresh action checkpoint failed.
@@ -532,10 +1088,19 @@ pub enum AgentBrowserActionError {
 pub enum AgentBrowserActionFinalizationRefusal {
     /// The full charged owner and observation remain available for reconciliation.
     Finalization(Box<AgentAccountedSemanticActionResultRefusal>),
-    /// This exact action requires a new full-observation turn.
-    FreshSnapshot(Box<AgentAccountedSemanticActionResult>),
     /// Complete accounted result remains owned after batch correlation refusal.
     BatchAdmission(Box<SemanticActionBatchAdmissionRefusal>),
     /// Closed batch invariant failure; no successful continuation exists.
     Batch(SemanticActionBatchExecutionError),
+}
+
+/// Native refusals the page runtime makes before it presses or types.
+pub(crate) const fn refused_before_acting(failure: SemanticActionFailure) -> bool {
+    matches!(
+        failure,
+        SemanticActionFailure::TargetOccluded
+            | SemanticActionFailure::TargetChanged
+            | SemanticActionFailure::TargetDisabled
+            | SemanticActionFailure::StaleReference
+    )
 }

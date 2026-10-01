@@ -64,8 +64,20 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// Expensive work remains on the two dedicated bounded workers. Calls through
 /// [`BlockerCatalog`] perform only small lock-protected state transitions and
 /// nonblocking queue admission.
+/// Narrow native preflight port. The service never receives a WebView,
+/// navigation capability, or a native handle.
+pub type NativeRuleValidator = Arc<
+    dyn Fn(
+            Arc<zephium_core::blocker::ContentRules>,
+            zephium_core::ports::engine::ContentRuleValidationCompletion,
+        ) + Send
+        + Sync,
+>;
+
+/// Compiler and bounded source-update coordinator shared by all profiles.
 pub struct ManagedBlocker {
     compiler: Arc<WorkerBlocker>,
+    native_validation: Option<NativeRuleValidator>,
     updater: Mutex<Option<CatalogUpdateWorker>>,
     supply: SupplyMode,
     state: Mutex<ServiceState>,
@@ -83,6 +95,10 @@ enum SupplyMode {
     ReleaseSeed,
     #[cfg(feature = "tuf")]
     TufRepository,
+    #[cfg(feature = "official-https")]
+    OfficialHttps {
+        fallback_manifest: [u8; 32],
+    },
 }
 
 struct ServiceState {
@@ -101,6 +117,8 @@ struct ServiceState {
     source_material_epoch: u64,
     source_material_repair: Option<SourceMaterialRepair>,
     automatic_source_material_repair: Option<CatalogIdentity>,
+    native_retry: Option<(CatalogIdentity, u8, Instant)>,
+    official_verification: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -136,6 +154,7 @@ enum CatalogTransition {
 
 enum CatalogTransitionCompletion {
     Prepared(CatalogIdentity, CatalogPreparationOutcome),
+    NativeUnavailable(CatalogIdentity),
     Repaired(CatalogIdentity, CandidateRepairOutcome),
     Committed(CatalogIdentity, CandidateCommitOutcome),
     Activated(CatalogIdentity, bool),
@@ -210,6 +229,7 @@ impl ManagedBlocker {
             WorkerBlocker::start_with_cache(StaticPolicyCatalog::empty(), artifact_cache)?;
         Ok(Arc::new(Self {
             compiler,
+            native_validation: None,
             updater: Mutex::new(None),
             supply: SupplyMode::Unconfigured,
             state: Mutex::new(ServiceState {
@@ -228,6 +248,8 @@ impl ManagedBlocker {
                 source_material_epoch: 0,
                 source_material_repair: None,
                 automatic_source_material_repair: None,
+                native_retry: None,
+                official_verification: None,
             }),
             source_material_signal: Arc::new(SourceMaterialSignal::new()),
             transition_completion: Arc::new(Mutex::new(None)),
@@ -268,12 +290,97 @@ impl ManagedBlocker {
             source_material_epoch: 0,
             source_material_repair: None,
             automatic_source_material_repair: None,
+            native_retry: None,
+            official_verification: None,
         };
         state.publish_release_seed(now_unix());
         Ok(Arc::new(Self {
             compiler,
+            native_validation: None,
             updater: Mutex::new(None),
             supply: SupplyMode::ReleaseSeed,
+            state: Mutex::new(state),
+            source_material_signal: Arc::new(SourceMaterialSignal::new()),
+            transition_completion: Arc::new(Mutex::new(None)),
+            maintenance_serial: Mutex::new(()),
+            shutdown_serial: Mutex::new(()),
+            shutdown_result: Mutex::new(None),
+            sealed: AtomicBool::new(false),
+        }))
+    }
+
+    /// Starts official HTTPS updates with a bundled offline fallback and an
+    /// exact native validation barrier before durable source activation.
+    #[cfg(feature = "official-https")]
+    pub fn with_official_updates(
+        seed: ReleaseCatalogSeed,
+        artifact_cache: CompiledArtifactCacheConfig,
+        source_cache: std::path::PathBuf,
+        validate: NativeRuleValidator,
+    ) -> std::io::Result<Arc<Self>> {
+        let fallback = ActivatedCatalog {
+            identity: seed.identity.clone(),
+            catalog: seed.catalog.clone(),
+        };
+        let fallback_manifest = fallback.identity.manifest_sha256;
+        let updater = match CatalogUpdateWorker::start_official(source_cache, fallback) {
+            Ok(updater) => updater,
+            Err(_) => {
+                let fallback = Self::with_release_seed(seed, artifact_cache)?;
+                {
+                    let mut state = fallback.lock_state();
+                    state.fail(BlockerCatalogFailure::Storage, false);
+                    state.publish_release_seed(now_unix());
+                }
+                return Ok(fallback);
+            }
+        };
+        let (initial_status, initial, candidate) = updater.observe_and_take_catalogs();
+        let initial =
+            initial.expect("official worker always supplies its selected offline current");
+        let compiler =
+            match WorkerBlocker::start_with_policy_catalog(initial.catalog, artifact_cache) {
+                Ok(compiler) => compiler,
+                Err(error) => {
+                    let _ = updater.shutdown(Duration::from_secs(1));
+                    return Err(error);
+                }
+            };
+        let mut state = ServiceState {
+            snapshot: BlockerCatalogSnapshot::not_configured(),
+            observed_update: None,
+            installed: Some(initial.identity),
+            candidate: None,
+            pending: None,
+            transition: None,
+            failure_streak: 0,
+            next_automatic_refresh_unix: None,
+            refresh_jitter: Duration::ZERO,
+            terminal_failure: None,
+            enabled_policy_terminal: false,
+            repaired_candidate: None,
+            source_material_epoch: 0,
+            source_material_repair: None,
+            automatic_source_material_repair: None,
+            native_retry: None,
+            official_verification: None,
+        };
+        if let Some(candidate) = candidate {
+            state.admit_activation(candidate, now_unix());
+        }
+        state.recompute_schedule(&initial_status, now_unix());
+        state.publish_with_supply(
+            &initial_status,
+            Some((
+                fallback_manifest,
+                updater.official_freshness().is_none_or(|(_, due)| due),
+            )),
+        );
+        Ok(Arc::new(Self {
+            compiler,
+            native_validation: Some(validate),
+            updater: Mutex::new(Some(updater)),
+            supply: SupplyMode::OfficialHttps { fallback_manifest },
             state: Mutex::new(state),
             source_material_signal: Arc::new(SourceMaterialSignal::new()),
             transition_completion: Arc::new(Mutex::new(None)),
@@ -327,6 +434,8 @@ impl ManagedBlocker {
             source_material_epoch: 0,
             source_material_repair: None,
             automatic_source_material_repair: None,
+            native_retry: None,
+            official_verification: None,
         };
         if let Some(candidate) = candidate {
             state.admit_activation(candidate, now);
@@ -335,6 +444,7 @@ impl ManagedBlocker {
         state.publish(&initial_status);
         Ok(Arc::new(Self {
             compiler,
+            native_validation: None,
             updater: Mutex::new(Some(updater)),
             supply: SupplyMode::TufRepository,
             state: Mutex::new(state),
@@ -433,8 +543,22 @@ impl ManagedBlocker {
             self.drive_automatic_refresh(update.as_ref());
         }
 
+        let freshness = self
+            .lock_updater()
+            .as_ref()
+            .and_then(CatalogUpdateWorker::official_freshness);
         let mut state = self.lock_state();
         if let Some(update) = &update {
+            state.observe_official_verification(update, freshness);
+            #[cfg(feature = "official-https")]
+            if let SupplyMode::OfficialHttps { fallback_manifest } = self.supply {
+                state.publish_with_supply(
+                    update,
+                    Some((fallback_manifest, freshness.is_none_or(|(_, due)| due))),
+                );
+                return state.snapshot;
+            }
+            let _ = freshness;
             state.publish(update);
         } else if self.supply == SupplyMode::ReleaseSeed {
             state.publish_release_seed(now_unix());
@@ -483,7 +607,16 @@ impl ManagedBlocker {
                     | CatalogTransition::Discarding(_, _) => None,
                 }
             } else {
-                state.pending.clone().map(Action::Prepare)
+                state
+                    .pending
+                    .clone()
+                    .filter(|_| {
+                        state
+                            .native_retry
+                            .as_ref()
+                            .is_none_or(|(_, _, deadline)| Instant::now() >= *deadline)
+                    })
+                    .map(Action::Prepare)
             }
         };
         let Some(action) = action else {
@@ -494,22 +627,24 @@ impl ManagedBlocker {
                 let identity = candidate.identity.clone();
                 let callback_identity = identity.clone();
                 let completion = Arc::clone(&self.transition_completion);
-                let dispatch = self.compiler.prepare_catalog(
+                let native_validation = self.native_validation.clone();
+                let dispatch = self.compiler.prepare_catalog_rules(
                     identity.manifest_sha256,
                     candidate.catalog,
                     Box::new(move |outcome| {
-                        let mut slot = completion
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if slot
-                            .replace(CatalogTransitionCompletion::Prepared(
-                                callback_identity,
-                                outcome,
-                            ))
-                            .is_some()
-                        {
-                            // A second completion is an authority contradiction
-                            // and is terminalized by exact identity matching.
+                        let publish=move |value| {completion.lock().unwrap_or_else(|p|p.into_inner()).replace(value);};
+                        match outcome {
+                            Err(failure)=>publish(CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Failed(failure))),
+                            Ok(rules)=>if let Some(validate)=native_validation {
+                                validate(rules,zephium_core::ports::engine::ContentRuleValidationCompletion::new(move |outcome| {
+                                    use zephium_core::ports::engine::ContentRuleValidationOutcome;
+                                    publish(match outcome {
+                                        ContentRuleValidationOutcome::Valid=>CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Prepared),
+                                        ContentRuleValidationOutcome::Unavailable=>CatalogTransitionCompletion::NativeUnavailable(callback_identity),
+                                        ContentRuleValidationOutcome::Rejected(_)=>CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Failed(BlockerCompileFailure::InvalidSource)),
+                                    });
+                                }));
+                            } else {publish(CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Prepared));},
                         }
                     }),
                 );
@@ -840,6 +975,10 @@ impl ManagedBlocker {
             return;
         };
         let now = now_unix();
+        let persisted_due = self
+            .lock_updater()
+            .as_ref()
+            .and_then(CatalogUpdateWorker::next_refresh_unix);
         let due = {
             let state = self.lock_state();
             state.terminal_failure.is_none()
@@ -849,8 +988,8 @@ impl ManagedBlocker {
                     state.source_material_repair,
                     Some(SourceMaterialRepair::RetryPending(_))
                 )
-                && state
-                    .next_automatic_refresh_unix
+                && persisted_due
+                    .or(state.next_automatic_refresh_unix)
                     .is_some_and(|deadline| deadline <= now)
                 && !matches!(
                     update.status,
@@ -906,9 +1045,36 @@ impl ServiceState {
         match (transition, completion) {
             (
                 Some(CatalogTransition::Preparing(expected)),
+                CatalogTransitionCompletion::NativeUnavailable(completed),
+            ) if expected == completed => {
+                let attempts = self
+                    .native_retry
+                    .as_ref()
+                    .filter(|(identity, _, _)| identity == &completed)
+                    .map_or(0, |(_, attempts, _)| *attempts);
+                if attempts < 3 {
+                    self.native_retry = Some((
+                        completed,
+                        attempts + 1,
+                        Instant::now() + Duration::from_secs(30),
+                    ));
+                    self.transition = None;
+                } else {
+                    self.native_retry = None;
+                    self.pending = None;
+                    self.transition = Some(CatalogTransition::ReadyToReject(
+                        completed,
+                        FailureKind::Catalog,
+                        CandidateRejectionReason::CompilerPolicy,
+                    ));
+                }
+            }
+            (
+                Some(CatalogTransition::Preparing(expected)),
                 CatalogTransitionCompletion::Prepared(completed, outcome),
             ) if expected == completed => match outcome {
                 CatalogPreparationOutcome::Prepared => {
+                    self.native_retry = None;
                     self.pending = None;
                     self.transition = Some(CatalogTransition::ReadyToCommit(completed));
                 }
@@ -1229,6 +1395,7 @@ impl ServiceState {
         if self.repaired_candidate.as_ref() != Some(&activation.identity) {
             self.repaired_candidate = None;
         }
+        self.native_retry = None;
         self.candidate = Some(activation.identity.clone());
         if activation.identity.expires_unix <= now {
             self.pending = None;
@@ -1298,13 +1465,44 @@ impl ServiceState {
         }
     }
 
-    #[cfg(feature = "tuf")]
+    #[cfg(any(feature = "tuf", feature = "official-https"))]
     fn recompute_schedule(&mut self, update: &StatusSnapshot, now: u64) {
         self.observed_update = None;
         self.observe_update(update, now);
     }
 
+    fn observe_official_verification(
+        &mut self,
+        update: &StatusSnapshot,
+        freshness: Option<(u64, bool)>,
+    ) {
+        let Some((verification, _)) = freshness else {
+            return;
+        };
+        let previous = self.official_verification.replace(verification);
+        let current = match &update.status {
+            UpdateStatus::Ready(value) => Some(identity_for_availability(value)),
+            _ => None,
+        };
+        if previous.is_some_and(|previous| verification > previous)
+            && current == self.installed.as_ref()
+            && current.is_some_and(|current| {
+                self.snapshot.package_manifest_sha256 == Some(current.manifest_sha256)
+                    && self.snapshot.installed_manifest_sha256 == Some(current.manifest_sha256)
+            })
+        {
+            if let Some(epoch) = self.source_material_epoch.checked_add(1) {
+                self.source_material_epoch = epoch;
+            } else {
+                self.fail(BlockerCatalogFailure::Internal, true);
+            }
+        }
+    }
+
     fn publish(&mut self, update: &StatusSnapshot) {
+        self.publish_with_supply(update, None);
+    }
+    fn publish_with_supply(&mut self, update: &StatusSnapshot, official: Option<([u8; 32], bool)>) {
         let activation_pending = self.candidate.is_some();
         let mut next = snapshot_from_update(
             update,
@@ -1339,6 +1537,49 @@ impl ServiceState {
             next.phase = BlockerCatalogPhase::Refreshing;
         }
         next.enabled_policy_terminal = self.enabled_policy_terminal;
+        if let Some((fallback, due)) = official {
+            let provenance = |digest: Option<[u8; 32]>| {
+                digest.map(|digest| {
+                    if digest == fallback {
+                        BlockerCatalogProvenance::ReleaseBundle
+                    } else {
+                        BlockerCatalogProvenance::OfficialHttps
+                    }
+                })
+            };
+            next.package_provenance = provenance(next.package_manifest_sha256);
+            next.installed_provenance = provenance(next.installed_manifest_sha256);
+            next.candidate_provenance = provenance(next.candidate_manifest_sha256);
+            let available = match &update.status {
+                UpdateStatus::Ready(value) => Some(value),
+                UpdateStatus::Refreshing { current, .. } | UpdateStatus::Failed { current, .. } => {
+                    current.as_ref()
+                }
+                _ => None,
+            };
+            let stale =
+                available.is_some_and(|value| matches!(value, CatalogAvailability::Stale(_)));
+            next.package_stale = next.package_revision.map(|_| {
+                stale && next.package_provenance != Some(BlockerCatalogProvenance::ReleaseBundle)
+            });
+            next.source_refresh_due = next.package_revision.is_some() && due;
+            if next.package_provenance == Some(BlockerCatalogProvenance::ReleaseBundle) {
+                next.source_refresh_due |= self.snapshot.source_refresh_due
+                    || next
+                        .package_expires_unix
+                        .is_some_and(|expiry| expiry <= now_unix());
+            }
+            if matches!(
+                next.phase,
+                BlockerCatalogPhase::Fresh | BlockerCatalogPhase::Stale
+            ) {
+                next.phase = if next.package_stale == Some(true) {
+                    BlockerCatalogPhase::Stale
+                } else {
+                    BlockerCatalogPhase::Fresh
+                };
+            }
+        }
         self.replace_snapshot(next);
     }
 
@@ -1550,6 +1791,15 @@ impl BlockerCatalog for ManagedBlocker {
 }
 
 impl BlockerCompiler for ManagedBlocker {
+    fn prepare_site_preferences(
+        &self,
+        preferences: &zephium_core::blocker::BlockerSitePreferences,
+    ) -> Option<Arc<zephium_core::blocker::PreparedBlockerSites>> {
+        zephium_blocker::prepare_site_preferences(preferences)
+    }
+    fn validate_personal_selector(&self, selector: &str) -> Option<String> {
+        zephium_blocker::validate_personal_selector(selector)
+    }
     fn compile(
         &self,
         profile: ProfileId,
@@ -2178,6 +2428,8 @@ mod tests {
             source_material_epoch: 0,
             source_material_repair: None,
             automatic_source_material_repair: None,
+            native_retry: None,
+            official_verification: None,
         }
     }
 
@@ -3010,5 +3262,121 @@ mod tests {
         assert_eq!(after.package_stale, Some(true));
         assert!(!before.source_refresh_due);
         assert!(after.source_refresh_due);
+    }
+    #[test]
+    fn native_preflight_owns_candidate_completion_and_queue_refusal_is_bounded() {
+        use zephium_blocker::{PolicySource, SourceFormat, SourceId};
+        use zephium_core::ports::engine::{
+            ContentRuleValidationCompletion, ContentRuleValidationOutcome,
+        };
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut current = identity(1, 1);
+        current.created_unix = now_unix();
+        current.expires_unix = now_unix() + 86400;
+        let catalog = |hash| {
+            PolicyCatalog::authenticated(
+                [hash; 32],
+                StaticPolicyCatalog::new(vec![PolicySource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example.invalid^\n##.ad"),
+                )])
+                .unwrap(),
+            )
+        };
+        let mut service = ManagedBlocker::with_release_seed(
+            ReleaseCatalogSeed {
+                identity: current.clone(),
+                catalog: catalog(1),
+            },
+            CompiledArtifactCacheConfig::new(root.path().join("compiled")).unwrap(),
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ContentRuleValidationCompletion>(2);
+        Arc::get_mut(&mut service).unwrap().native_validation =
+            Some(Arc::new(move |rules, done| {
+                assert!(!matches!(
+                    rules.payload(),
+                    zephium_core::blocker::ContentRulesPayload::AllowAll
+                ));
+                tx.send(done).unwrap();
+            }));
+        let mut candidate = current.clone();
+        candidate.revision = 2;
+        candidate.manifest_sha256 = [2; 32];
+        service.lock_state().admit_activation(
+            ActivatedCatalog {
+                identity: candidate.clone(),
+                catalog: catalog(2),
+            },
+            now_unix(),
+        );
+        service.drive_locked(false);
+        let completion = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            service.lock_state().transition,
+            Some(CatalogTransition::Preparing(_))
+        ));
+        assert_eq!(service.lock_state().installed.as_ref(), Some(&current));
+        completion.finish(ContentRuleValidationOutcome::Unavailable);
+        service.drive_locked(false);
+        assert_eq!(service.lock_state().native_retry.as_ref().unwrap().1, 1);
+        service.drive_locked(false);
+        assert!(rx.try_recv().is_err());
+        service.lock_state().native_retry.as_mut().unwrap().2 = Instant::now();
+        service.drive_locked(false);
+        rx.recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .finish(ContentRuleValidationOutcome::Valid);
+        let completion = service
+            .transition_completion
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap();
+        service.lock_state().apply_transition_completion(completion);
+        assert!(matches!(
+            service.lock_state().transition,
+            Some(CatalogTransition::ReadyToCommit(_))
+        ));
+        assert_eq!(service.lock_state().installed.as_ref(), Some(&current));
+        assert_eq!(
+            service.shutdown_until(Instant::now() + Duration::from_secs(2)),
+            BlockerShutdownOutcome::Clean
+        );
+    }
+
+    #[test]
+    fn official_verification_can_refresh_unchanged_bytes_without_extending_tuf_expiry() {
+        let current = identity(1, 1);
+        let mut state = state_with_installed(current.clone());
+        let old = StatusSnapshot {
+            revision: 1,
+            last_refresh_attempt_unix: Some(10),
+            status: UpdateStatus::Ready(CatalogAvailability::Stale(current.clone())),
+        };
+        state.observe_official_verification(&old, Some((1, true)));
+        state.publish_with_supply(&old, Some(([0; 32], true)));
+        assert_eq!(state.snapshot.package_stale, Some(true));
+        let checked = StatusSnapshot {
+            revision: 2,
+            last_refresh_attempt_unix: Some(20),
+            status: UpdateStatus::Ready(CatalogAvailability::Fresh(current.clone())),
+        };
+        state.observe_official_verification(&checked, Some((2, false)));
+        state.publish_with_supply(&checked, Some(([0; 32], false)));
+        assert_eq!(state.snapshot.source_material_epoch, 1);
+        assert_eq!(state.snapshot.package_stale, Some(false));
+        assert!(!state.snapshot.source_refresh_due);
+        assert_eq!(
+            state.snapshot.package_provenance,
+            Some(BlockerCatalogProvenance::OfficialHttps)
+        );
+        assert_eq!(
+            state.snapshot.package_expires_unix,
+            Some(current.expires_unix)
+        );
+        let signed = snapshot_from_update(&checked, Some(&current), None, false);
+        assert_eq!(signed.package_stale, Some(true));
     }
 }

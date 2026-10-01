@@ -1,17 +1,16 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
 mod blocker;
+mod blocker_sites;
+mod blocker_statistics;
 mod bootstrap;
 mod effects;
 mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
-mod extension_compatibility_broker;
-mod extension_distribution;
-mod extension_management;
-mod extension_repository_maintenance;
-mod extension_runtime_grants;
+mod extension_store;
+mod favicon_probe;
 mod favicons;
 mod history;
 mod operations;
@@ -25,14 +24,15 @@ mod search;
 mod tabs;
 mod user_content_status;
 mod view_lifecycle;
+mod webext;
+pub use webext::{WebExtensionStatus, WebExtensionTarget};
 mod window_layout;
+mod work_authoring;
 mod zoom;
 
 use effects::{mutation_result, operation_result, NativeWork};
 use extension_actions::ExtensionActionState;
 use extension_browser_surface::ExtensionBrowserSurfaceState;
-use extension_management::ExtensionManagementState;
-use extension_runtime_grants::ExtensionRuntimeGrantPromptState;
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
@@ -65,8 +65,8 @@ use crate::api::AgentLifecycle;
 use crate::api::PagePermissionPromptDecision;
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
-    EmitFn, ExtensionLifecycle, ExtensionManagementCompletion, SharedBlocker, SharedChrome,
-    SharedEngine, SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
+    EmitFn, SharedBlocker, SharedChrome, SharedEngine, SharedStore, ShellTerminalFailure,
+    ShellTerminalFailureCallback, ShutdownOutcome,
 };
 #[cfg(test)]
 use crate::api::{ChromePresentationCallback, PresentationChrome};
@@ -87,7 +87,6 @@ use zephium_core::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
     ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
     ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
-    ExtensionNativeNamespaceScope,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
@@ -103,13 +102,6 @@ use zephium_core::ports::engine::Engine;
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, EngineEvent, NativeAction, NativeDispatch,
     NavigationPresentationId, Partition, ProfileDataErasureOutcome, StageMotion, ZoomRequestId,
-};
-use zephium_core::ports::extensions::{
-    ExtensionDistributionState, ExtensionDistributionStatus, ExtensionManagementCompatibility,
-    ExtensionManagementGrantState, ExtensionManagementLimitation, ExtensionManagementProvenance,
-    ExtensionManagementRuntimeState, ExtensionManagementSource,
-    ExtensionProfileRetirementDisposition, ExtensionServiceShutdownOutcome,
-    ExtensionServiceStartupOutcome,
 };
 #[cfg(test)]
 use zephium_core::ports::store::Store;
@@ -128,16 +120,7 @@ use zephium_ipc::{
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
     BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
     ExtensionActionFailure, ExtensionActionRuntimeView, ExtensionActionShortcutView,
-    ExtensionActionsView, ExtensionDistributionFailureReasonView,
-    ExtensionDistributionFailureStageView, ExtensionDistributionStateView,
-    ExtensionDistributionView, ExtensionInstallCandidateView,
-    ExtensionManagementAvailabilityChangedView, ExtensionManagementAvailabilityView,
-    ExtensionManagementCompatibilityView, ExtensionManagementEntryView,
-    ExtensionManagementGrantView, ExtensionManagementLimitationView, ExtensionManagementPhase,
-    ExtensionManagementProvenanceView, ExtensionManagementRuntimeView,
-    ExtensionManagementSourceView, ExtensionManagementView, ExtensionProfilePolicyView,
-    ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView,
-    ExtensionUpdateConsentView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
+    ExtensionActionsView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
     OperationReason, PagePermissionKindView, PagePermissionPromptEntryView,
     PagePermissionPromptView, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
     RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
@@ -151,16 +134,8 @@ const MAX_VISIBLE_PANES: usize = 8;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(not(test))]
-const EXTENSION_STARTUP_SETTLEMENT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(200);
-#[cfg(test)]
-const EXTENSION_STARTUP_SETTLEMENT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(5);
-const EXTENSION_STARTUP_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
-const EXTENSION_STARTUP_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
-// extension-service settlement, native teardown, and thread joins consume
+// native teardown, and thread joins consume
 // this one caller-owned deadline.
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
@@ -184,6 +159,22 @@ impl AgentLifecycleOwner {
 
 mod browser_pages;
 mod kept_sites;
+mod work_pane;
+
+/// Pages a run may queue for a seat in its page group at once.
+#[cfg(feature = "work-execution")]
+const MAX_QUEUED_PAGES: usize = 8;
+
+#[cfg(feature = "work-execution")]
+fn trace_refusal(
+    cause: crate::work_resources::product::RetainedRefusal,
+    lane: crate::work_resources::product::RetainedLaneFacts,
+) {
+    crate::work_trace::record(format_args!(
+        "work: phase=page_lane event=refused cause={cause:?} live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
+        lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+    ));
+}
 
 struct NativeOpener {
     source: ItemId,
@@ -193,6 +184,19 @@ struct NativeOpener {
 pub struct Shell {
     #[cfg(feature = "work-execution")]
     work: Option<Box<crate::work::ApplicationWork>>,
+    #[cfg(feature = "work-execution")]
+    retained_work: Option<Box<crate::work_resources::product::ProductWork>>,
+    #[cfg(feature = "work-execution")]
+    retained_pages: Vec<crate::work_resources::product::ProductWork>,
+    /// Pages waiting for a seat in their run's page group, in arrival order.
+    #[cfg(feature = "work-execution")]
+    queued_pages: std::collections::VecDeque<crate::work_resources::product::ProductWork>,
+    #[cfg(feature = "work-execution")]
+    retained_page_runtime: Option<crate::work_resources::product::RetainedWorkGroup>,
+    /// Retained works the runtime gave up on before they could close; they
+    /// keep polling and shut down with the shell, out of the live slot.
+    #[cfg(feature = "work-execution")]
+    retained_graveyard: Vec<crate::work_resources::product::ProductWork>,
     profiles: Profiles,
     spaces: Spaces,
     items: Items,
@@ -209,14 +213,20 @@ pub struct Shell {
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     window_visible: bool,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
+    browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
+    browser_return_ready: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
+    work_pane: Option<work_pane::WorkPane>,
+    work_pane_generation: u32,
     runtime_restart_required: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
     native_openers: std::collections::HashMap<ItemId, NativeOpener>,
+    #[cfg(debug_assertions)]
+    bootstrap_started: Option<std::time::Instant>,
     persistence: PersistenceState,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
@@ -226,26 +236,13 @@ pub struct Shell {
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
     blocker: blocker::BlockerCoordinator,
+    blocker_statistics: std::collections::HashMap<ProfileId, blocker_statistics::Statistics>,
     #[cfg(feature = "agentic-browser")]
     agent_lifecycle: AgentLifecycleOwner,
-    extension_service: Option<ExtensionLifecycle>,
-    extension_startup_ready: bool,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
+    web_extensions: webext::WebExtensionState,
     extension_actions: ExtensionActionState,
-    extension_management: ExtensionManagementState,
-    extension_runtime_grants: ExtensionRuntimeGrantPromptState,
-    extension_distribution_status: Option<ExtensionDistributionStatus>,
     page_permissions: PagePermissionPromptState,
-    /// A terminal maintenance settlement disables further periodic repository
-    /// work until process restart; transient refusals retain the ordinary
-    /// heartbeat retry path.
-    extension_repository_maintenance_failed_closed: bool,
-    /// Any terminal extension lifecycle failure permanently closes bootstrap
-    /// and profile-deletion progress for this process while the desktop
-    /// composition root converges on orderly shutdown.
-    extension_lifecycle_terminal: bool,
-    extension_startup_retry_exponent: u8,
-    extension_startup_not_before: Option<std::time::Instant>,
     terminal_failure: Option<ShellTerminalFailureCallback>,
     terminal_failure_handoff_panicked: bool,
     engine: SharedEngine,
@@ -264,7 +261,6 @@ pub(super) struct ShellPorts {
     blocker: SharedBlocker,
     #[cfg(feature = "agentic-browser")]
     agent_lifecycle: Option<AgentLifecycle>,
-    extension_service: ExtensionLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
@@ -275,7 +271,6 @@ impl ShellPorts {
         engine: SharedEngine,
         store: SharedStore,
         blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
         terminal_failure: ShellTerminalFailureCallback,
         chrome: SharedChrome,
         emit: EmitFn,
@@ -286,7 +281,6 @@ impl ShellPorts {
             blocker,
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle: None,
-            extension_service,
             terminal_failure,
             chrome,
             emit,
@@ -313,7 +307,6 @@ impl Shell {
                 engine,
                 store,
                 Arc::new(tests::ImmediateAllowAllCompiler),
-                tests::clean_extension_lifecycle(),
                 Box::new(|_| {}),
                 chrome,
                 emit,
@@ -332,60 +325,23 @@ impl Shell {
         emit: EmitFn,
     ) -> Self {
         Self::with_store_reads(
-            ShellPorts::new(
-                engine,
-                store,
-                blocker,
-                tests::clean_extension_lifecycle(),
-                Box::new(|_| {}),
-                chrome,
-                emit,
-            ),
+            ShellPorts::new(engine, store, blocker, Box::new(|_| {}), chrome, emit),
             None,
             false,
         )
     }
 
     #[cfg(test)]
-    pub(super) fn new_with_extension_lifecycle(
+    pub(super) fn new_with_failure(
         engine: SharedEngine,
         store: SharedStore,
         blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
-        chrome: SharedChrome,
-        emit: EmitFn,
-    ) -> Self {
-        Self::new_with_extension_lifecycle_and_failure(
-            engine,
-            store,
-            blocker,
-            extension_service,
-            Box::new(|_| {}),
-            chrome,
-            emit,
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_with_extension_lifecycle_and_failure(
-        engine: SharedEngine,
-        store: SharedStore,
-        blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
         terminal_failure: ShellTerminalFailureCallback,
         chrome: SharedChrome,
         emit: EmitFn,
     ) -> Self {
         Self::with_store_reads(
-            ShellPorts::new(
-                engine,
-                store,
-                blocker,
-                extension_service,
-                terminal_failure,
-                chrome,
-                emit,
-            ),
+            ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit),
             None,
             true,
         )
@@ -396,22 +352,13 @@ impl Shell {
         engine: SharedEngine,
         store: SharedStore,
         blocker: SharedBlocker,
-        extension_service: ExtensionLifecycle,
         agent_lifecycle: AgentLifecycle,
         chrome: SharedChrome,
         emit: EmitFn,
     ) -> Self {
         Self::with_store_reads(
-            ShellPorts::new(
-                engine,
-                store,
-                blocker,
-                extension_service,
-                Box::new(|_| {}),
-                chrome,
-                emit,
-            )
-            .with_agent_lifecycle(Some(agent_lifecycle)),
+            ShellPorts::new(engine, store, blocker, Box::new(|_| {}), chrome, emit)
+                .with_agent_lifecycle(Some(agent_lifecycle)),
             None,
             true,
         )
@@ -435,8 +382,8 @@ impl Shell {
 
     /// Builds only actor-owned state and does not enter any external port.
     /// The actor installs `ShellExitGuard` before completing catalog admission,
-    /// so a panic cannot drop the move-only extension lifecycle or strand the
-    /// Store/native/blocker cleanup graph outside an observable terminal path.
+    /// so a panic cannot strand the Store/native/blocker cleanup graph outside
+    /// an observable terminal path.
     pub(super) fn with_store_reads_deferred_blocker_catalog(
         ports: ShellPorts,
         store_reads: impl Into<Option<StoreReadQueue>>,
@@ -448,7 +395,6 @@ impl Shell {
             blocker,
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle,
-            extension_service,
             terminal_failure,
             chrome,
             emit,
@@ -478,36 +424,45 @@ impl Shell {
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
             browser_page: None,
+            browser_page_projected: None,
             browser_return_revision: 0,
             browser_after_return: None,
+            browser_return_ready: false,
             browser_return: None,
+            work_pane: None,
+            work_pane_generation: 0,
             runtime_restart_required: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,
             native_openers: std::collections::HashMap::new(),
+            #[cfg(debug_assertions)]
+            bootstrap_started: None,
             persistence: PersistenceState::default(),
             shutdown_result: None,
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
+            blocker_statistics: std::collections::HashMap::new(),
             #[cfg(feature = "agentic-browser")]
             agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
             #[cfg(feature = "work-execution")]
             work: None,
-            extension_service: Some(extension_service),
-            extension_startup_ready: false,
+            #[cfg(feature = "work-execution")]
+            retained_work: None,
+            #[cfg(feature = "work-execution")]
+            retained_pages: Vec::new(),
+            #[cfg(feature = "work-execution")]
+            queued_pages: std::collections::VecDeque::new(),
+            #[cfg(feature = "work-execution")]
+            retained_page_runtime: None,
+            #[cfg(feature = "work-execution")]
+            retained_graveyard: Vec::new(),
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
+            web_extensions: webext::WebExtensionState::default(),
             extension_actions: ExtensionActionState::default(),
-            extension_management: ExtensionManagementState::default(),
-            extension_runtime_grants: ExtensionRuntimeGrantPromptState::default(),
-            extension_distribution_status: None,
             page_permissions: PagePermissionPromptState::default(),
-            extension_repository_maintenance_failed_closed: false,
-            extension_lifecycle_terminal: false,
-            extension_startup_retry_exponent: 0,
-            extension_startup_not_before: None,
             terminal_failure: Some(terminal_failure),
             terminal_failure_handoff_panicked: false,
             engine,
@@ -555,10 +510,46 @@ impl Shell {
             return;
         }
         match cmd {
+            Command::WorkDocument(submission) => self.work_document(submission),
+            Command::WorkEnvironmentChanged(change) => {
+                if self.windows.focused().is_some_and(|window| {
+                    window.profile.to_string() == change.profile
+                        && !self.profile_deletion_quarantines(window.profile)
+                }) {
+                    (self.emit)(Projection::WorkEnvironmentChanged(change));
+                }
+            }
+            Command::WorkChanged(change) => {
+                if self.windows.focused().is_some_and(|window| {
+                    window.profile.to_string() == change.profile
+                        && !self.profile_deletion_quarantines(window.profile)
+                }) {
+                    (self.emit)(Projection::WorkChanged(change));
+                }
+            }
+            #[cfg(feature = "work-execution")]
+            Command::AttachRetainedWork(attachment) => {
+                if let Some(work) = crate::work_resources::product::ProductWork::take(&attachment) {
+                    self.retire_settled_pages();
+                    if self
+                        .retained_work
+                        .as_ref()
+                        .is_some_and(|work| work.is_stuck())
+                    {
+                        if let Some(mut stuck) = self.retained_work.take() {
+                            stuck.begin_shutdown();
+                            self.retained_graveyard.push(*stuck);
+                        }
+                    }
+                    self.attach_retained(work);
+                }
+            }
             #[cfg(feature = "work-execution")]
             Command::AttachWork(attachment) => {
                 if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
                     if !work.belongs_to_store(&self.store)
+                        || self.retained_work.is_some()
+                        || self.retained_page_runtime.is_some()
                         || !work.belongs_to_engine(&self.engine)
                         || !work.accepts_predecessor(self.work.as_deref())
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
@@ -575,8 +566,9 @@ impl Shell {
             }
             #[cfg(feature = "work-execution")]
             Command::AdmitWork(submission) => {
+                let profile = self.work_profile_binding();
                 if let Some(work) = &mut self.work {
-                    work.admit(submission);
+                    work.admit(submission, Some(profile));
                 }
             }
             #[cfg(feature = "work-execution")]
@@ -601,41 +593,6 @@ impl Shell {
                     return;
                 }
                 let command = *command;
-                if matches!(
-                    &command,
-                    Command::InstallFocusedExtension { .. }
-                        | Command::ApproveFocusedExtensionUpdate { .. }
-                        | Command::EditFocusedExtensionOptionalGrant { .. }
-                        | Command::SetFocusedProfileExtensionsPaused { .. }
-                        | Command::SetFocusedSiteExtensionsEnabled { .. }
-                        | Command::SetFocusedExtensionEnabled { .. }
-                        | Command::UninstallFocusedExtension { .. }
-                ) {
-                    if let Some(mut completion) =
-                        self.begin_extension_management(operation_id.clone(), command)
-                    {
-                        completion.operation_id = operation_id;
-                        (self.emit)(Projection::OperationProcessed(completion));
-                    }
-                    return;
-                }
-                if let Command::RespondToExtensionRuntimeGrantPrompt {
-                    runtime,
-                    request,
-                    allow,
-                } = &command
-                {
-                    if let Some(mut completion) = self.begin_extension_runtime_grant_response(
-                        operation_id.clone(),
-                        *runtime,
-                        *request,
-                        *allow,
-                    ) {
-                        completion.operation_id = operation_id;
-                        (self.emit)(Projection::OperationProcessed(completion));
-                    }
-                    return;
-                }
                 if let Command::RespondToPagePermissionPrompt {
                     profile,
                     item,
@@ -681,6 +638,15 @@ impl Shell {
                     }
                     return;
                 }
+                if let Command::ChangeBlockerSite { context, action } = &command {
+                    if let Some(mut completion) =
+                        self.begin_blocker_site_mutation(operation_id.clone(), context, action)
+                    {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if matches!(&command, Command::RefreshContentBlockerSources) {
                     if let Some(mut completion) =
                         self.begin_blocker_catalog_refresh(operation_id.clone())
@@ -695,6 +661,36 @@ impl Shell {
                 (self.emit)(Projection::OperationProcessed(completion));
             }
             Command::Bootstrap => self.bootstrap(),
+            Command::SetWebExtensions {
+                profile,
+                extensions,
+            } => self.set_web_extensions(profile, extensions),
+            Command::OpenWebExtensionOptions {
+                profile,
+                extension_id,
+            } => {
+                let _ = self
+                    .engine
+                    .open_web_extension_options(profile, extension_id);
+            }
+            Command::AnswerWebExtensionAccess {
+                profile,
+                request,
+                allowed,
+            } => {
+                let _ = self
+                    .engine
+                    .answer_web_extension_access(profile, request, allowed);
+            }
+            Command::RemoveWebExtension { profile, extension } => {
+                self.remove_web_extension(profile, *extension)
+            }
+            Command::ResolveWebExtensionTarget { tab, reply } => {
+                let _ = reply.try_send(self.web_extension_target(tab));
+            }
+            Command::WebExtensionStatus { profile, reply } => {
+                let _ = reply.try_send(self.web_extension_status(profile));
+            }
             Command::Open => {
                 let _ = self.operation_open();
             }
@@ -823,6 +819,13 @@ impl Shell {
                 call,
                 done,
             } => self.history_call(expected_profile, *call, done),
+            Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment.0),
+            Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
+            Command::FaviconProbed {
+                profile,
+                origin,
+                rgba,
+            } => self.favicon_probed(profile, origin, rgba),
             Command::AttachNotes(attachment) => {
                 self.notes.get_or_insert(attachment.0);
             }
@@ -862,6 +865,15 @@ impl Shell {
                     }),
                 }
             }
+            Command::WorkPaneSetRect { rect, generation } => {
+                self.work_pane_set_rect(rect, generation);
+            }
+            Command::WorkPaneShow { target, rect } => {
+                let _ = self.operation_work_pane_show(target, rect);
+            }
+            Command::WorkPaneHide => {
+                let _ = self.operation_work_pane_hide();
+            }
             Command::ResourceCall {
                 expected_profile,
                 call,
@@ -877,6 +889,37 @@ impl Shell {
                     self.store.resource_call(
                         profile,
                         Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(ResourceReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    );
+                } else {
+                    done.finish(ResourceReply {
+                        profile: None,
+                        response: ResourceResponse::Error {
+                            error: ResourceError::Unavailable,
+                        },
+                    });
+                }
+            }
+            Command::ImportMedia {
+                expected_profile,
+                import,
+                done,
+            } => {
+                use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+                if let Some(profile) = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                {
+                    self.store.import_media(
+                        profile,
+                        *import,
                         Box::new(move |response| {
                             done.finish(ResourceReply {
                                 profile: Some(profile.to_string()),
@@ -912,21 +955,8 @@ impl Shell {
             Command::Run(id) => {
                 let _ = self.operation_run_command(&id);
             }
-            Command::OpenFocusedExtensionOptions {
-                install,
-                expected_catalog,
-                expected_install,
-            } => self.open_focused_extension_options(install, expected_catalog, expected_install),
             // This privileged mutation must carry a desktop operation id.
-            Command::InvokeExtensionAction { .. }
-            | Command::InstallFocusedExtension { .. }
-            | Command::ApproveFocusedExtensionUpdate { .. }
-            | Command::EditFocusedExtensionOptionalGrant { .. }
-            | Command::SetFocusedProfileExtensionsPaused { .. }
-            | Command::SetFocusedSiteExtensionsEnabled { .. }
-            | Command::SetFocusedExtensionEnabled { .. }
-            | Command::UninstallFocusedExtension { .. } => {}
-            Command::RespondToExtensionRuntimeGrantPrompt { .. } => {}
+            Command::InvokeExtensionAction { .. } => {}
             Command::RespondToPagePermissionPrompt { .. } => {}
             Command::PagePermissionCatalogLoaded {
                 profile,
@@ -945,35 +975,6 @@ impl Shell {
                 item,
                 request,
             } => self.on_page_permission_timeout(profile, item, request),
-            Command::SetExtensionManagementVisible(visible) => {
-                self.set_extension_management_visible(visible)
-            }
-            Command::ExtensionManagementSettled {
-                request,
-                completion,
-            } => self.settle_extension_management(request, completion),
-            Command::ExtensionManagementCatalogSettled {
-                request,
-                profile,
-                outcome,
-            } => self.settle_extension_management_catalog(request, profile, outcome),
-            Command::ExtensionRuntimeGrantSettled {
-                runtime,
-                request,
-                settlement,
-            } => self.settle_extension_runtime_grant(runtime, request, *settlement),
-            Command::ExtensionRepositoryMaintenanceSettled(outcome) => {
-                self.settle_extension_repository_maintenance(outcome)
-            }
-            Command::ProvisionAcquiredExtensionPackage(submission) => {
-                self.provision_acquired_extension_package(submission)
-            }
-            Command::ActivateAcquiredExtensionCatalog(submission) => {
-                self.activate_acquired_extension_catalog(submission)
-            }
-            Command::ExtensionDistributionStatusChanged(status) => {
-                self.observe_extension_distribution_status(status)
-            }
             Command::Search(query) => {
                 self.search.context = None;
                 self.search(&query);
@@ -1006,6 +1007,7 @@ impl Shell {
             Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }
             | Command::SetFocusedContentBlockerEnabled(_)
+            | Command::ChangeBlockerSite { .. }
             | Command::RetryFocusedContentPolicy { .. }
             | Command::RefreshContentBlockerSources => {}
             Command::ContentPolicyStatus { profile, reply } => {
@@ -1016,9 +1018,31 @@ impl Shell {
                     .unwrap_or(ContentPolicyStatusQueryOutcome::UnknownProfile);
                 let _ = reply.send(outcome);
             }
+            Command::ElementPicker {
+                context,
+                action,
+                reply,
+            } => self.element_picker(&context, action, reply),
+            Command::BlockerStatistics { profile, reply } => {
+                self.query_blocker_statistics(profile, reply)
+            }
             Command::FocusedContentPolicyStatus { reply } => {
                 self.maintain_blocker_catalog();
                 let _ = reply.send(self.focused_blocker_status_view());
+            }
+            #[cfg(feature = "work-execution")]
+            Command::WorkProfileBinding { reply } => {
+                let _ = reply.send(self.work_profile_binding());
+            }
+            Command::TabMetadata {
+                profile,
+                ids,
+                reply,
+            } => {
+                let _ = reply.send(self.tab_metadata(profile, &ids));
+            }
+            Command::WindowTabs { profile, reply } => {
+                let _ = reply.send(self.window_tabs(profile));
             }
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {
@@ -1046,7 +1070,10 @@ impl Shell {
                 self.consume_profile_deletion_outcome(profile)
             }
             Command::BlockerReady(profile) => self.consume_blocker_compile_result(profile),
-            Command::BlockerStoreReady(profile) => self.consume_blocker_store_result(profile),
+            Command::BlockerStoreReady(profile) => {
+                self.consume_blocker_store_result(profile);
+                self.consume_blocker_site_result(profile);
+            }
             Command::BlockerPreferenceRetry { profile, token } => {
                 self.on_blocker_preference_reconciliation_retry(profile, token)
             }
@@ -1075,6 +1102,7 @@ impl Shell {
                         return;
                     }
                 }
+                self.maintain_blocker_statistics();
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
                 self.drive_blocker_preference_reconciliations();
@@ -1090,7 +1118,6 @@ impl Shell {
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
-                self.maintain_extension_repository();
                 if self.maintain_views() {
                     self.project_items();
                 }
@@ -1102,8 +1129,250 @@ impl Shell {
         self.poll_work();
     }
 
+    /// Admits a retained work now, or, for a page that waits only for a
+    /// seat in the run's page group, keeps it queued in order until one frees.
+    /// A settled page whose native audit ended holds no browser any more: it
+    /// keeps its recorded debt, but neither a seat nor its run's group, so a
+    /// lost page never holds the pages after it, in its run or another.
+    #[cfg(feature = "work-execution")]
+    fn attach_retained(&mut self, mut work: crate::work_resources::product::ProductWork) {
+        use crate::work_resources::product::RetainedRefusal as Refusal;
+        let lane = self.page_lane();
+        let refusal = if self.work.is_some()
+            || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
+        {
+            Some(Refusal::Busy)
+        } else if work.given_up() {
+            Some(Refusal::GivenUp)
+        } else if !work.admits(&self.engine, &self.store, self.work_profile_binding()) {
+            Some(Refusal::Stale)
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            trace_refusal(refusal, lane);
+            work.refuse(refusal, lane);
+            return;
+        }
+        if !work.is_page() {
+            if self
+                .retained_work
+                .as_ref()
+                .is_some_and(|work| !work.is_closed())
+                || self.retained_page_runtime.is_some()
+            {
+                trace_refusal(Refusal::Busy, lane);
+                work.refuse(Refusal::Busy, lane);
+            } else {
+                // Install original ownership before native construction.
+                self.retained_work = Some(Box::new(work));
+                self.retained_work.as_mut().unwrap().initialize();
+            }
+            return;
+        }
+        let seated = self
+            .retained_work
+            .as_ref()
+            .is_none_or(|work| work.is_closed())
+            && work.admits_peers(
+                &self.retained_pages,
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.holds_seat()),
+            )
+            && !self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_failed() || group.is_sealed());
+        // A page without a seat waits for one, in order, within its own
+        // bounded wait: a full or sealed group of its run, or another run's
+        // pages still closing, give way once their members have closed.
+        if !seated {
+            if self.queued_pages.len() < MAX_QUEUED_PAGES {
+                if work.begin_wait() {
+                    crate::work_trace::record(format_args!(
+                        "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
+                        lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+                    ));
+                }
+                self.queued_pages.push_back(work);
+            } else {
+                trace_refusal(Refusal::QueueFull, lane);
+                work.refuse(Refusal::QueueFull, lane);
+            }
+            return;
+        }
+        if self.retained_page_runtime.is_none() {
+            self.retained_page_runtime = work.new_runtime_group().ok();
+        }
+        if let Some(waited) = work.waited() {
+            crate::work_trace::record(format_args!(
+                "work: phase=page_lane event=seated waited_ms={}",
+                waited.as_millis()
+            ));
+        }
+        if let Some(group) = &self.retained_page_runtime {
+            work.set_runtime_group(group.clone());
+            self.retained_pages.push(work);
+            self.retained_pages.last_mut().unwrap().initialize();
+        } else {
+            trace_refusal(Refusal::GroupStart, lane);
+            work.refuse(Refusal::GroupStart, lane);
+        }
+    }
+
+    /// The page lane as it stands, in closed counts.
+    #[cfg(feature = "work-execution")]
+    fn page_lane(&self) -> crate::work_resources::product::RetainedLaneFacts {
+        let count = |n: usize| u8::try_from(n).unwrap_or(u8::MAX);
+        crate::work_resources::product::RetainedLaneFacts {
+            live: count(self.retained_pages.len()),
+            settled: count(
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.holds_seat())
+                    .count(),
+            ),
+            lost: count(
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.beyond_closing())
+                    .count(),
+            ),
+            queued: count(self.queued_pages.len()),
+            group_failed: self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_failed()),
+            group_sealed: self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_sealed()),
+        }
+    }
+
+    /// Queued pages take seats in order as they free; a page that can sit
+    /// now does not wait behind one that cannot (another run's page waiting
+    /// for this run's group to close). One whose run ended or ran out of
+    /// time while it waited is refused.
+    #[cfg(feature = "work-execution")]
+    fn admit_queued_pages(&mut self) {
+        for work in std::mem::take(&mut self.queued_pages) {
+            self.attach_retained(work);
+        }
+    }
+
+    /// A settled page that cannot close with its group moves to the graveyard
+    /// and stops holding admission; the group no longer waits on it.
+    #[cfg(feature = "work-execution")]
+    fn retire_settled_pages(&mut self) {
+        self.retained_pages.retain(|page| !page.is_closed());
+        let mut index = 0;
+        while index < self.retained_pages.len() {
+            if self.retained_pages[index].leaves_group() {
+                let mut page = self.retained_pages.remove(index);
+                crate::work_trace::record(format_args!(
+                    "work: phase=page_lane event=left_group lost={} live={}",
+                    page.beyond_closing(),
+                    self.retained_pages.len()
+                ));
+                page.leave_group();
+                page.begin_shutdown();
+                self.retained_graveyard.push(page);
+            } else {
+                index += 1;
+            }
+        }
+        // The group, and the native group it stands for, ends with its last
+        // member, live or graveyarded, not with its last live page: a
+        // graveyarded page still owns a native seat and an audit, and a fresh
+        // group cannot start natively until every member has closed.
+        // A graveyarded member whose own native audit has ended holds no
+        // seat any more: nothing further can close it, and the next group's
+        // native admission still requires every member's proof.
+        if self.retained_pages.is_empty()
+            && !self.retained_graveyard.iter().any(|work| work.holds_seat())
+            && self.retained_page_runtime.take().is_some()
+        {
+            crate::work_trace::record(format_args!(
+                "work: phase=page_lane event=group_closed lost={}",
+                self.retained_graveyard.len()
+            ));
+        }
+    }
+
+    /// One native audit at a time across live and graveyarded pages. The
+    /// audit counts the whole native browser, so it starts only once no
+    /// member holds a resource. Live pages take the turn first; the first turn
+    /// seals the group against new pages.
+    #[cfg(feature = "work-execution")]
+    fn grant_native_audit(&mut self) {
+        self.retire_settled_pages();
+        if self
+            .retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .any(|work| work.holds_native_audit())
+            || !self
+                .retained_pages
+                .iter()
+                .chain(
+                    self.retained_graveyard
+                        .iter()
+                        .filter(|work| work.native_member()),
+                )
+                .all(|page| page.ready_for_group_shutdown())
+        {
+            return;
+        }
+        let granted = if let Some(page) = self
+            .retained_pages
+            .iter_mut()
+            .find(|page| !page.is_closed())
+        {
+            page.allow_group_shutdown();
+            true
+        } else if let Some(work) = self
+            .retained_graveyard
+            .iter_mut()
+            .find(|work| work.awaits_group_audit())
+        {
+            work.allow_group_shutdown();
+            true
+        } else {
+            false
+        };
+        if granted {
+            if let Some(group) = &self.retained_page_runtime {
+                group.seal();
+            }
+        }
+    }
+
     #[cfg(feature = "work-execution")]
     fn poll_work(&mut self) {
+        self.grant_native_audit();
+        self.admit_queued_pages();
+        for page in &mut self.retained_pages {
+            page.poll();
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_work(page.next_deadline());
+            }
+        }
+        self.retire_settled_pages();
+        if let Some(work) = &mut self.retained_work {
+            work.poll();
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_work(work.next_deadline());
+            }
+        }
+        self.retained_graveyard.retain(|work| !work.is_closed());
+        for work in &mut self.retained_graveyard {
+            work.poll();
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_work(work.next_deadline());
+            }
+        }
         if let Some(work) = &mut self.work {
             work.poll();
             if let Some(queue) = &self.self_queue {
@@ -1113,6 +1382,28 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        #[cfg(feature = "work-runtime")]
+        crate::work_commands::shutdown();
+        #[cfg(feature = "work-execution")]
+        let lane = self.page_lane();
+        for mut page in std::mem::take(&mut self.queued_pages) {
+            page.refuse(
+                crate::work_resources::product::RetainedRefusal::Discarded,
+                lane,
+            );
+        }
+        #[cfg(feature = "work-execution")]
+        for page in &mut self.retained_pages {
+            page.begin_shutdown();
+        }
+        #[cfg(feature = "work-execution")]
+        if let Some(work) = &mut self.retained_work {
+            work.begin_shutdown();
+        }
+        #[cfg(feature = "work-execution")]
+        for work in &mut self.retained_graveyard {
+            work.begin_shutdown();
+        }
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.work {
             work.begin_shutdown();
@@ -1148,7 +1439,7 @@ impl Shell {
         }
 
         // Preserve retryability only while every earlier boundary is still
-        // known-good and before the unique extension owner is consumed.
+        // known-good.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.flush_until(deadline)
         })) {
@@ -1171,31 +1462,34 @@ impl Shell {
         let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
         #[cfg(not(feature = "agentic-browser"))]
         let agent_lifecycle_clean = true;
-        let extension_service_clean = self.shutdown_extension_service_until(deadline);
         // Fold every result already published before Store's terminal
         // barrier while ordinary Store/native admission is still valid. Any
         // follow-up reconciliation is then ordered ahead of Store shutdown.
         // A projection or adapter panic is terminal, but cannot skip the
         // independent Store/native/blocker barriers below.
         let pre_store_coordination_clean = if std::time::Instant::now() >= deadline {
+            crate::diagnostic!("shutdown: pre-Store blocker result folding deadline passed");
+            false
+        } else if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.drain_blocker_inbox();
+        }))
+        .is_err()
+        {
+            crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
             false
         } else {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.drain_blocker_inbox();
-            }))
-            .is_ok()
+            true
         };
         if !pre_store_coordination_clean {
             crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
         }
+        terminal_clean &= self.flush_blocker_statistics_until(deadline);
         let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.shutdown_until(deadline)
         })) {
             Ok(StoreShutdownOutcome::Clean) => true,
             Ok(StoreShutdownOutcome::RetryableFailure) => {
-                crate::diagnostic!(
-                    "shutdown: storage rejected terminal teardown after extension-service shutdown"
-                );
+                crate::diagnostic!("shutdown: storage rejected terminal teardown");
                 false
             }
             Ok(StoreShutdownOutcome::Unclean) => {
@@ -1235,7 +1529,6 @@ impl Shell {
 
         let clean = terminal_clean
             && agent_lifecycle_clean
-            && extension_service_clean
             && storage_clean
             && coordination_clean
             && reads_stopped
@@ -1312,7 +1605,6 @@ impl Shell {
         let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
         #[cfg(not(feature = "agentic-browser"))]
         let agent_lifecycle_clean = true;
-        let extension_clean = self.shutdown_extension_service_until(deadline);
         let storage_clean = matches!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.store.shutdown_until(deadline)
@@ -1328,7 +1620,6 @@ impl Shell {
         reads_quiesced
             && reads_stopped
             && agent_lifecycle_clean
-            && extension_clean
             && storage_clean
             && native_clean
             && blocker_clean
@@ -1349,6 +1640,54 @@ impl Shell {
     /// proof; the proof is deliberately consumed inside the actor barrier.
     #[cfg(feature = "agentic-browser")]
     fn shutdown_agent_lifecycle_until(&mut self, deadline: std::time::Instant) -> bool {
+        #[cfg(feature = "work-execution")]
+        let mut buried = true;
+        #[cfg(feature = "work-execution")]
+        if self.retained_page_runtime.is_some() {
+            for page in &mut self.retained_pages {
+                page.begin_shutdown();
+            }
+            let open = |shell: &Self| {
+                shell.retained_pages.iter().any(|page| !page.is_closed())
+                    || shell
+                        .retained_graveyard
+                        .iter()
+                        .any(|work| work.awaits_native_close())
+            };
+            while std::time::Instant::now() < deadline && open(self) {
+                self.grant_native_audit();
+                for work in self
+                    .retained_pages
+                    .iter_mut()
+                    .chain(&mut self.retained_graveyard)
+                {
+                    work.poll();
+                }
+                if open(self) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+            buried &= self.retained_pages.iter().all(|page| page.is_closed());
+        }
+        #[cfg(feature = "work-execution")]
+        let retained_clean = self
+            .retained_work
+            .as_mut()
+            .map(|work| work.shutdown_until(deadline));
+        // What the group could not close audits last, one at a time.
+        #[cfg(feature = "work-execution")]
+        for work in &mut self.retained_graveyard {
+            work.allow_group_shutdown();
+            buried &= work.shutdown_until(deadline);
+        }
+        #[cfg(feature = "work-execution")]
+        if let Some(clean) = retained_clean {
+            return clean && buried;
+        }
+        #[cfg(feature = "work-execution")]
+        if !buried {
+            return false;
+        }
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.work {
             return work.shutdown_until(deadline);
@@ -1382,155 +1721,6 @@ impl Shell {
         }
     }
 
-    /// Consumes the unique extension-service owner exactly once.
-    ///
-    /// Returning `false` is terminal: there is no truthful in-process
-    /// reconstruction path for the consumed Store/native authority.
-    pub(super) fn shutdown_extension_service_until(
-        &mut self,
-        deadline: std::time::Instant,
-    ) -> bool {
-        let Some(service) = self.extension_service.take() else {
-            crate::diagnostic!("shutdown: extension-service lifecycle owner is missing");
-            return false;
-        };
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            service.shutdown_until(deadline)
-        })) {
-            Ok(ExtensionServiceShutdownOutcome::Clean) => true,
-            Ok(ExtensionServiceShutdownOutcome::Unclean) => {
-                crate::diagnostic!(
-                    "shutdown: extension-service worker termination was not proven before the deadline"
-                );
-                false
-            }
-            Err(_) => {
-                crate::diagnostic!("shutdown: extension-service shutdown panicked");
-                false
-            }
-        }
-    }
-
-    /// Settles extension startup away from the native event-loop thread before
-    /// any recovered deletion or raw content view can be admitted.
-    pub(super) fn extension_service_ready_for_bootstrap(&mut self) -> bool {
-        if self.extension_lifecycle_terminal {
-            return false;
-        }
-        if self.extension_startup_ready {
-            return true;
-        }
-        let now = std::time::Instant::now();
-        if let Some(not_before) = self
-            .extension_startup_not_before
-            .filter(|not_before| now < *not_before)
-        {
-            // Bootstrap is callable by privileged chrome and by the periodic
-            // maintenance path. Neither may bypass the actor-owned retry
-            // schedule and turn a transient service outage into a hot loop.
-            // Re-arm the exact opportunity as well: a stale timer wake can be
-            // consumed before this command reaches the actor, and queue
-            // saturation can transiently publish an earlier replacement.
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_extension_startup(not_before);
-            }
-            return false;
-        }
-        // Consume this exact due opportunity before entering the lifecycle
-        // port. A transient outcome installs the next one; Ready and terminal
-        // outcomes leave no stale retry authority behind.
-        self.extension_startup_not_before = None;
-        let Some(service) = self.extension_service.as_mut() else {
-            crate::diagnostic!("bootstrap: extension-service lifecycle owner is missing");
-            self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupLifecycleMissing);
-            return false;
-        };
-        let deadline = now
-            .checked_add(EXTENSION_STARTUP_SETTLEMENT_TIMEOUT)
-            .unwrap_or(now);
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            service.settle_startup_until(deadline)
-        }));
-        match outcome {
-            Ok(ExtensionServiceStartupOutcome::Ready(active_profiles)) => {
-                if !self.extension_browser_surfaces.activate(active_profiles) {
-                    crate::diagnostic!(
-                        "bootstrap: extension-service active profile projection changed after settlement"
-                    );
-                    self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupFailedClosed);
-                    return false;
-                }
-                self.extension_startup_ready = true;
-                self.extension_startup_retry_exponent = 0;
-                self.extension_startup_not_before = None;
-                if let Some(queue) = &self.self_queue {
-                    queue.cancel_extension_startup();
-                }
-                true
-            }
-            Ok(
-                ExtensionServiceStartupOutcome::Unavailable
-                | ExtensionServiceStartupOutcome::TimedOut
-                | ExtensionServiceStartupOutcome::RetryableNotAdmitted,
-            ) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service startup is temporarily unsettled; retaining all extension-sensitive work"
-                );
-                self.schedule_extension_startup_retry();
-                false
-            }
-            Ok(ExtensionServiceStartupOutcome::CleanupRequired) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service cleanup remains required; refusing extension-sensitive initialization"
-                );
-                self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupCleanupRequired);
-                false
-            }
-            Ok(ExtensionServiceStartupOutcome::FailedClosed) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service startup failed closed; refusing extension-sensitive initialization"
-                );
-                self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupFailedClosed);
-                false
-            }
-            Err(_) => {
-                crate::diagnostic!(
-                    "bootstrap: extension-service startup lifecycle panicked; refusing extension-sensitive initialization"
-                );
-                self.fail_extension_startup(
-                    ShellTerminalFailure::ExtensionStartupLifecyclePanicked,
-                );
-                false
-            }
-        }
-    }
-
-    fn fail_extension_startup(&mut self, failure: ShellTerminalFailure) {
-        self.extension_lifecycle_terminal = true;
-        self.extension_startup_not_before = None;
-        if let Some(queue) = &self.self_queue {
-            queue.cancel_extension_startup();
-        }
-        self.report_terminal_failure(failure);
-    }
-
-    fn schedule_extension_startup_retry(&mut self) {
-        let shift = self.extension_startup_retry_exponent.min(4);
-        let factor = 1_u32 << shift;
-        let delay = EXTENSION_STARTUP_RETRY_BASE
-            .checked_mul(factor)
-            .unwrap_or(EXTENSION_STARTUP_RETRY_MAX)
-            .min(EXTENSION_STARTUP_RETRY_MAX);
-        self.extension_startup_retry_exponent =
-            self.extension_startup_retry_exponent.saturating_add(1);
-        let now = std::time::Instant::now();
-        let deadline = now.checked_add(delay).unwrap_or(now);
-        self.extension_startup_not_before = Some(deadline);
-        if let Some(queue) = &self.self_queue {
-            queue.schedule_extension_startup(deadline);
-        }
-    }
-
     fn retryable_shutdown_failure(&mut self, ack: SyncSender<ShutdownOutcome>) {
         let recovered = self
             .self_queue
@@ -1544,31 +1734,13 @@ impl Shell {
         for command in recovered {
             self.handle(command);
         }
-        let restore_extension_startup =
-            !self.extension_startup_ready && !self.extension_lifecycle_terminal;
         let now = std::time::Instant::now();
-        let extension_retry_deadline = restore_extension_startup.then(|| {
-            // Preserve the actor's exact outstanding opportunity. The timer
-            // may still hold it, or may have consumed it immediately before
-            // its Bootstrap command was rejected by the sealed queue. A
-            // missing opportunity means startup had not yet been attempted,
-            // so it is eligible immediately after reopening.
-            let deadline = self.extension_startup_not_before.unwrap_or(now);
-            self.extension_startup_not_before = Some(deadline);
-            deadline
-        });
         if let Some(queue) = &self.self_queue {
             // A timer wake removes its entry before trying to enter the actor.
             // If it raced the shutdown barrier it was truthfully rejected as
             // sealed, so explicitly restore every still-live exact reveal
             // obligation when the retryable barrier reopens. Both maps remain
             // bounded to one entry per logical item.
-            if let Some(deadline) = extension_retry_deadline {
-                // Extension timer wakes consume their exact entry before
-                // queue admission. A wake rejected by the sealed shutdown
-                // barrier must be restored when that retryable barrier opens.
-                queue.schedule_extension_startup(deadline);
-            }
             for (id, pending) in &self.presentation.pending_presentations {
                 queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
             }
@@ -1596,6 +1768,7 @@ impl Shell {
     }
 
     fn clear_pending_store_reads(&mut self) {
+        self.clear_pending_favicon_probe_lookups();
         self.search.pending = None;
         self.favicons.pending_batch = None;
         self.favicons.store_reads.clear();
@@ -1609,11 +1782,6 @@ impl Shell {
                 query,
                 hits,
             } => self.on_history_read(generation, profile, query, hits),
-            StoreReadResult::ExtensionRecentHistory {
-                runtime,
-                request,
-                hits,
-            } => self.on_extension_recent_history_read(runtime, request, hits),
             StoreReadResult::Favicon {
                 generation,
                 id,
@@ -1629,6 +1797,12 @@ impl Shell {
                 origins,
                 rasters,
             } => self.on_favicon_batch_read(generation, profile, space, origins, rasters),
+            StoreReadResult::FaviconProbe {
+                generation,
+                profile,
+                origins,
+                rasters,
+            } => self.on_favicon_probe_read(generation, profile, origins, rasters),
             StoreReadResult::HistorySurface {
                 token,
                 profile,
@@ -1642,3 +1816,18 @@ impl Shell {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(all(test, feature = "work-planning"))]
+mod work_context_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_coordination_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_lead_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_personal_tests;
+#[cfg(all(test, feature = "work-planning"))]
+mod work_planning_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_product_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_runtime_tests;

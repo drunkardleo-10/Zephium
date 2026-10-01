@@ -1,4 +1,9 @@
 import type {
+  WorkEnvironmentChanged,
+  WorkChanged,
+  WorkHumanChanged,
+  WorkDecisionPreferenceChanged,
+  WorkModelsChanged,
   PanelState,
   FaviconsView,
   NoteOpenRequested,
@@ -10,10 +15,6 @@ import type {
   ExtensionActionFailed,
   ExtensionActionShortcut,
   ExtensionActionsChanged,
-  ExtensionManagementAvailabilityChanged,
-  ExtensionManagementChanged,
-  ExtensionDistributionChanged,
-  ExtensionRuntimeGrantPromptChanged,
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
@@ -22,6 +23,7 @@ import type {
   SearchChanged,
   TabChanged,
   UiCommand,
+  WebExtensionAccessRequested,
 } from "./bindings";
 
 type PayloadEvent<T> = { payload: T };
@@ -42,6 +44,11 @@ function scopedEvent<T>(name: string) {
 // with @tauri-apps/api/event: its listen command accepts a caller-selected
 // target, which would let the launcher panel subscribe to main-window state.
 export const nativeEventNames = {
+  workEnvironmentChanged: "zephium:work-environment-changed",
+  workChanged: "zephium:work-changed",
+  workHumanChanged: "zephium:work-human-changed",
+  workDecisionPreferenceChanged: "zephium:work-decision-preference-changed",
+  workModelsChanged: "zephium:work-models-changed",
   panelState: "zephium:panel-state",
   favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
@@ -56,11 +63,9 @@ export const nativeEventNames = {
   extensionActionsChanged: "zephium:extension-actions",
   extensionActionFailed: "zephium:extension-action-failed",
   extensionActionShortcut: "zephium:extension-action-shortcut",
-  extensionManagementAvailabilityChanged: "zephium:extension-management-availability",
-  extensionManagementChanged: "zephium:extension-management",
-  extensionDistributionChanged: "zephium:extension-distribution",
-  extensionRuntimeGrantPromptChanged: "zephium:extension-runtime-grant-prompt",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
+  webExtensionAccessRequested: "zephium:web-extension-access",
+  webExtensionDropped: "zephium:web-extension-dropped",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
   uiCommand: "zephium:ui-command",
@@ -72,6 +77,15 @@ export const nativeEventNames = {
 } as const;
 
 export const events = {
+  workEnvironmentChanged: scopedEvent<WorkEnvironmentChanged>(
+    nativeEventNames.workEnvironmentChanged,
+  ),
+  workChanged: scopedEvent<WorkChanged>(nativeEventNames.workChanged),
+  workHumanChanged: scopedEvent<WorkHumanChanged>(nativeEventNames.workHumanChanged),
+  workDecisionPreferenceChanged: scopedEvent<WorkDecisionPreferenceChanged>(
+    nativeEventNames.workDecisionPreferenceChanged,
+  ),
+  workModelsChanged: scopedEvent<WorkModelsChanged>(nativeEventNames.workModelsChanged),
   favicons: scopedEvent<FaviconsView>(nativeEventNames.favicons),
   noteOpenRequested: scopedEvent<NoteOpenRequested>(nativeEventNames.noteOpenRequested),
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
@@ -92,21 +106,14 @@ export const events = {
   extensionActionShortcut: scopedEvent<ExtensionActionShortcut>(
     nativeEventNames.extensionActionShortcut,
   ),
-  extensionManagementAvailabilityChanged: scopedEvent<ExtensionManagementAvailabilityChanged>(
-    nativeEventNames.extensionManagementAvailabilityChanged,
-  ),
-  extensionManagementChanged: scopedEvent<ExtensionManagementChanged>(
-    nativeEventNames.extensionManagementChanged,
-  ),
-  extensionDistributionChanged: scopedEvent<ExtensionDistributionChanged>(
-    nativeEventNames.extensionDistributionChanged,
-  ),
-  extensionRuntimeGrantPromptChanged: scopedEvent<ExtensionRuntimeGrantPromptChanged>(
-    nativeEventNames.extensionRuntimeGrantPromptChanged,
-  ),
   pagePermissionPromptChanged: scopedEvent<PagePermissionPromptChanged>(
     nativeEventNames.pagePermissionPromptChanged,
   ),
+  webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
+    nativeEventNames.webExtensionAccessRequested,
+  ),
+  /** The path of an extension package dropped on the browser. */
+  webExtensionDropped: scopedEvent<string>(nativeEventNames.webExtensionDropped),
   browserReturn: scopedEvent<ItemsChanged>(nativeEventNames.browserReturn),
   presentationTab: scopedEvent<PresentationTab>(nativeEventNames.presentationTab),
   uiCommand: scopedEvent<UiCommand>(nativeEventNames.uiCommand),

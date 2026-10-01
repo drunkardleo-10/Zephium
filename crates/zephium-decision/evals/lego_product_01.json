@@ -1,0 +1,817 @@
+{
+  "id": "lego_product_01",
+  "source_sha256": "1648879974dda014ba72bc17b5e9d5a47d718513e2db3106c061b651cd96c472",
+  "request": {
+    "state": "ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=128\nF f1 origin=\"https://www.lego.com/\" trust=same snapshot=1 complete=truncated_nodes\nN @a1 p=- r=document q=public src=page ops=scroll\nN @a2 p=@a1 r=image q=public src=page image_source_available=true name=\"Page image\"\nN @a3 p=@a1 r=landmark q=public src=page landmark=banner\nN @a4 p=@a3 r=link q=public src=page destination=\"https://kids.lego.com/\" ops=click,press name=\"PLAY ZONE\"\nN @a5 p=@a3 r=button q=public src=page ops=click,press name=\"Previous\"\nN @a6 p=@a3 r=paragraph q=public src=page text=\"Get the Batman™: Bruce Wayne™ and the Batsuit™ with qualifying purchases of $40 or more* Learn more\"\nN @a7 p=@a6 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/batman-bruce-wayne-and-the-batsuit-30726?icmp=SW-SHB-Standard-BM_SWB_GWP_30726_Batman_Bruce_Wayne_and_the_Batsuit_HP-PR-LBM-PAY3C2Y7LI\" ops=click,press name=\"Learn more\"\nN @a8 p=@a3 r=button q=public src=page ops=click,press name=\"Next\"\nN @a9 p=@a3 r=button q=public src=page ops=click,press name=\"Sign In\"\nN @a10 p=@a3 r=link q=public src=page destination=\"https://www.lego.com/en-us/insiders\" ops=click,press name=\"Join LEGO® Insiders\"\nN @a11 p=@a3 r=landmark q=public src=page landmark=navigation name=\"Main Navigation\"\nN @a12 p=@a11 r=link q=public src=page destination=\"https://www.lego.com/en-us\" ops=click,press name=\"Lego\"\nN @a13 p=@a12 r=image q=public src=page image_source_available=true name=\"LEGO\"\nN @a14 p=@a11 r=list q=public src=page\nN @a15 p=@a14 r=list_item q=public src=page text=\"Shop\"\nN @a16 p=@a15 r=button q=public src=page disclosure=collapsed ops=click,press name=\"Shop\"\nN @a17 p=@a14 r=list_item q=public src=page text=\"Discover\"\nN @a18 p=@a17 r=button q=public src=page disclosure=collapsed ops=click,press name=\"Discover\"\nN @a19 p=@a14 r=list_item q=public src=page text=\"Help\"\nN @a20 p=@a19 r=button q=public src=page disclosure=collapsed ops=click,press name=\"Help\"\nN @a21 p=@a14 r=list_item q=public src=page text=\"New\"\nN @a22 p=@a21 r=link q=public src=page destination=\"https://www.lego.com/en-us/categories/new-sets-and-products\" ops=click,press name=\"New\"\nN @a23 p=@a3 r=paragraph q=public src=page text=\"Search\"\nN @a24 p=@a3 r=searchbox q=public src=page ops=click,fill,press name=\"Search\" value=\"\" source_bytes=0 truncated=false\nN @a25 p=@a3 r=button q=public src=page disclosure=collapsed ops=click,press name=\"My Wishlist\"\nN @a26 p=@a3 r=link q=public src=page destination=\"https://www.lego.com/en-us/cart\" ops=click,press name=\"(0)\"\nN @a27 p=@a1 r=landmark q=public src=page landmark=main\nN @a28 p=@a27 r=landmark q=public src=page landmark=navigation name=\"Breadcrumbs\"\nN @a29 p=@a28 r=list q=public src=page\nN @a30 p=@a29 r=list_item q=public src=page text=\"Home\"\nN @a31 p=@a30 r=link q=public src=page destination=\"https://www.lego.com/en-us\" ops=click,press name=\"Home\"\nN @a32 p=@a29 r=list_item q=public src=page text=\"Architecture\"\nN @a33 p=@a32 r=link q=public src=page destination=\"https://www.lego.com/en-us/themes/architecture\" ops=click,press name=\"Architecture\"\nN @a34 p=@a29 r=list_item q=public src=page text=\"Tower Bridge\"\nN @a35 p=@a27 r=list q=public src=page ops=scroll\nN @a36 p=@a35 r=list_item q=public src=page\nN @a37 p=@a36 r=button q=public src=page ops=click,press name=\"Gallery Thumbnail 1\"\nN @a38 p=@a37 r=image q=public src=page image_source_available=true name=\"LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway.\"\nN @a39 p=@a35 r=list_item q=public src=page\nN @a40 p=@a39 r=button q=public src=page ops=click,press name=\"Gallery Thumbnail 2\"\nN @a41 p=@a40 r=image q=public src=page image_source_available=true name=\"LEGO® Architecture Tower Bridge box shown top left, with built scene with vehicles and suspension walkway shown below.\"\nN @a42 p=@a35 r=list_item q=public src=page\nN @a43 p=@a42 r=button q=public src=page ops=click,press name=\"Gallery Thumbnail 3\"\nN @a44 p=@a43 r=image q=public src=page image_source_available=true name=\"LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway.\"\nN @a45 p=@a35 r=list_item q=public src=page\nN @a46 p=@a45 r=button q=public src=page ops=click,press name=\"Gallery Thumbnail 4\"\nN @a47 p=@a46 r=image q=public src=page image_source_available=true name=\"Side view of the LEGO® Architecture Tower Bridge set, focusing on one tower.\"\nN @a48 p=@a35 r=list_item q=public src=page\nN @a49 p=@a48 r=button q=public src=page ops=click,press name=\"Gallery Thumbnail 5\"\nN @a50 p=@a49 r=image q=public src=page image_source_available=true name=\"Close-up of the LEGO® Architecture Tower Bridge set, focusing on the blue suspension walkway.\"\nN @a51 p=@a35 r=list_item q=public src=page\nN @a52 p=@a51 r=button q=public src=page ops=click,press name=\"Gallery Thumbnail 6\"\nN @a53 p=@a52 r=image q=public src=page image_source_available=true name=\"LEGO® Architecture Tower Bridge set, with central bascules raised.\"\nN @a54 p=@a35 r=list_item q=public src=page\nN @a55 p=@a54 r=button q=public src=page ops=click,press name=\"Gallery Thumbnail 7\"\nN @a56 p=@a55 r=image q=public src=page image_source_available=true name=\"Close-up of the road on the LEGO® Architecture Tower Bridge set, showing microscale vehicles.\"\nN @a57 p=@a27 r=paragraph q=public src=page text=\"1\"\nN @a58 p=@a27 r=paragraph q=public src=page text=\"/\"\nN @a59 p=@a27 r=paragraph q=public src=page text=\"20\"\nN @a60 p=@a27 r=button q=public src=page ops=click,press name=\"View all\"\nN @a61 p=@a27 r=button q=public src=page states=disabled name=\"Previous\"\nN @a62 p=@a27 r=button q=public src=page ops=click,press name=\"Next\"\nN @a63 p=@a27 r=list q=public src=page\nN @a64 p=@a63 r=list_item q=public src=page\nN @a65 p=@a64 r=button q=public src=page ops=click,press name=\"View all\"\nN @a66 p=@a65 r=image q=public src=page image_source_available=true name=\"LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway.\"\nN @a67 p=@a63 r=list_item q=public src=page\nN @a68 p=@a67 r=button q=public src=page ops=click,press name=\"View all\"\nN @a69 p=@a68 r=image q=public src=page image_source_available=true name=\"LEGO® Architecture Tower Bridge box shown top left, with built scene with vehicles and suspension walkway shown below.\"\nN @a70 p=@a27 r=link q=public src=page destination=\"https://www.lego.com/en-us/themes/architecture\" ops=click,press\nN @a71 p=@a70 r=image q=public src=page image_source_available=true name=\"Architecture\"\nN @a72 p=@a27 r=group q=public src=page name=\"Ages:18+\"\nN @a73 p=@a72 r=paragraph q=public src=page text=\"18+\"\nN @a74 p=@a27 r=group q=public src=page name=\"Pieces:3745\"\nN @a75 p=@a74 r=paragraph q=public src=page text=\"3745\"\nN @a76 p=@a27 r=link q=public src=page destination=\"https://www.lego.com/en-us/service/building-instructions/21067\" ops=click,press name=\"Building Instructions\"\nN @a77 p=@a27 r=paragraph q=public src=page text=\"New\"\nN @a78 p=@a27 r=link q=public src=page destination=\"https://www.lego.com/en-us/themes/architecture\" ops=click,press name=\"Architecture\"\nN @a79 p=@a27 r=paragraph q=public src=page text=\"#21067\"\nN @a80 p=@a27 r=heading q=public src=page level=1 name=\"Tower Bridge\"\nN @a81 p=@a27 r=button q=public src=page ops=click,press name=\"Average rating 4.1 out of 5 stars (5)\"\nN @a82 p=@a27 r=paragraph q=public src=page text=\"$349.99\"\nN @a83 p=@a27 r=paragraph q=public src=page text=\"Available now\"\nN @a84 p=@a27 r=button q=public src=page states=disabled name=\"decrease value to 0\"\nN @a85 p=@a27 r=spinbutton q=public src=page ops=click,fill,press name=\"Quantity\" value=\"1\" source_bytes=1 truncated=false\nN @a86 p=@a27 r=button q=public src=page ops=click,press name=\"increase value to 2\"\nN @a87 p=@a27 r=paragraph q=public src=page text=\"Limit 3\"\nN @a88 p=@a27 r=button q=public src=page ops=click,press name=\"Limit We restrict the limit a household can buy in order to be fair to all of our fans. If you’ve already reached that limit through previous orders your entire order may be cancelled.\"\nN @a89 p=@a27 r=button q=public src=page ops=click,press name=\"Add to Bag\"\nN @a90 p=@a27 r=button q=public src=page disclosure=collapsed ops=click,press name=\"Tower Bridge Add to Wishlist\"\nN @a91 p=@a27 r=paragraph q=public src=page text=\"Gifts with Purchase (2)\"\nN @a92 p=@a27 r=paragraph q=public src=page text=\"Gifts with Purchase (2)\"\nN @a93 p=@a27 r=list q=public src=page ops=scroll\nN @a94 p=@a93 r=document q=public src=page text=\"Unlock when purchasing The Ministry of Magic™ – Collectors' Edition\"\nN @a95 p=@a94 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/ministry-of-magic-phone-booth-5011072\" ops=click,press name=\"Ministry of Magic™ Phone Booth Unlock when purchasing The Ministry of Magic™ – Collectors' Edition LEGO® Insiders only\"\nN @a96 p=@a95 r=paragraph q=public src=page text=\"Ministry of Magic™ Phone Booth\"\nN @a97 p=@a95 r=paragraph q=public src=page text=\"LEGO® Insiders only\"\nN @a98 p=@a94 r=paragraph q=public src=page text=\"Ends 09/30/2026\"\nN @a99 p=@a93 r=document q=public src=page text=\"Spend over $40 on Batman™ to unlock this gift\"\nN @a100 p=@a99 r=link q=public src=page destination=\"https://www.lego.com/en-us/product/batman-bruce-wayne-and-the-batsuit-30726\" ops=click,press name=\"Batman™: Bruce Wayne™ and the Batsuit™ Spend over $40 on Batman™ to unlock this gift\"\nN @a101 p=@a100 r=paragraph q=public src=page text=\"Batman™: Bruce Wayne™ and the Batsuit™\"\nN @a102 p=@a99 r=paragraph q=public src=page text=\"Ends 09/19/2026\"\nN @a103 p=@a27 r=landmark q=public src=page landmark=navigation\nN @a104 p=@a103 r=list q=public src=page\nN @a105 p=@a104 r=list_item q=public src=page text=\"Overview\"\nN @a106 p=@a105 r=button q=public src=page ops=click,press name=\"Overview\"\nN @a107 p=@a104 r=list_item q=public src=page text=\"Features\"\nN @a108 p=@a107 r=button q=public src=page ops=click,press name=\"Features\"\nN @a109 p=@a104 r=list_item q=public src=page text=\"Specifications\"\nN @a110 p=@a109 r=button q=public src=page ops=click,press name=\"Specifications\"\nN @a111 p=@a104 r=list_item q=public src=page text=\"Customer Reviews\"\nN @a112 p=@a111 r=button q=public src=page ops=click,press name=\"Customer Reviews\"\nN @a113 p=@a27 r=paragraph q=public src=page text=\"Tower Bridge\"\nN @a114 p=@a27 r=button q=public src=page ops=click,press name=\"Add to Bag\"\nN @a115 p=@a27 r=landmark q=public src=page landmark=region name=\"Features\"\nN @a116 p=@a1 r=landmark q=public src=page landmark=contentinfo\nN @a117 p=@a27 r=button q=public src=page disclosure=collapsed ops=scroll name=\"Specifications\"\nN @a118 p=@a27 r=button q=public src=page disclosure=collapsed ops=scroll name=\"Customer Reviews Average rating 4.1 out of 5 stars (5)\"\nN @a119 p=@a27 r=button q=public src=page disclosure=expanded states=expanded ops=scroll name=\"Features\"\nN @a120 p=@a115 r=heading q=public src=page level=2 name=\"Become a member and unlock perks right away!\"\nN @a121 p=@a115 r=heading q=public src=page level=2 name=\"Collectible architectural model kit for adults\"\nN @a122 p=@a115 r=heading q=public src=page level=2 name=\"Showcase a love of travel and London history\"\nN @a123 p=@a115 r=heading q=public src=page level=2 name=\"LEGO® Architecture Tower Bridge\"\nN @a124 p=@a115 r=heading q=public src=page level=3 name=\"London architectural history\"\nN @a125 p=@a115 r=heading q=public src=page level=3 name=\"Raising road section\"\nN @a126 p=@a115 r=heading q=public src=page level=3 name=\"Dynamic bridge life\"\nN @a127 p=@a115 r=heading q=public src=page level=2 name=\"Includes interactive 3D building instructions\"\nN @a128 p=@a115 r=heading q=public src=page level=2 name=\"Creative collectible gift to expand a collection\"\n",
+    "model": "jev-1.13.0",
+    "questions": {
+      "challenge": {
+        "type": "noul",
+        "instructions": "Is this page a bot check, human verification, CAPTCHA or access-denied interstitial rather than real content?",
+        "criteria": {
+          "true": "a verification or block page",
+          "false": "an ordinary content page"
+        }
+      },
+      "relevant": {
+        "type": "noul",
+        "instructions": {
+          "goal": "Collect three distinct LEGO Architecture sets with price, piece count and a picture, then compare them",
+          "question": "Does this page contain content useful for the goal?"
+        }
+      },
+      "operation": {
+        "type": "choice",
+        "criteria": {
+          "click": "click a control or link",
+          "type": "type into a field",
+          "scroll": "the useful content is further down",
+          "done": "everything needed is visible",
+          "blocked": "cannot proceed on this page",
+          "none": "None of these answers the question."
+        },
+        "instructions": {
+          "goal": "Collect three distinct LEGO Architecture sets with price, piece count and a picture, then compare them"
+        }
+      },
+      "click_target": {
+        "type": "choice",
+        "criteria": {
+          "@a1": {
+            "role": "document",
+            "name": ""
+          },
+          "@a4": {
+            "role": "link",
+            "name": "PLAY ZONE"
+          },
+          "@a5": {
+            "role": "button",
+            "name": "Previous"
+          },
+          "@a7": {
+            "role": "link",
+            "name": "Learn more"
+          },
+          "@a8": {
+            "role": "button",
+            "name": "Next"
+          },
+          "@a9": {
+            "role": "button",
+            "name": "Sign In"
+          },
+          "@a10": {
+            "role": "link",
+            "name": "Join LEGO® Insiders"
+          },
+          "@a12": {
+            "role": "link",
+            "name": "Lego"
+          },
+          "@a16": {
+            "role": "button",
+            "name": "Shop"
+          },
+          "@a18": {
+            "role": "button",
+            "name": "Discover"
+          },
+          "@a20": {
+            "role": "button",
+            "name": "Help"
+          },
+          "@a22": {
+            "role": "link",
+            "name": "New"
+          },
+          "@a24": {
+            "role": "searchbox",
+            "name": "Search"
+          },
+          "@a25": {
+            "role": "button",
+            "name": "My Wishlist"
+          },
+          "@a26": {
+            "role": "link",
+            "name": "(0)"
+          },
+          "@a31": {
+            "role": "link",
+            "name": "Home"
+          },
+          "@a33": {
+            "role": "link",
+            "name": "Architecture"
+          },
+          "@a35": {
+            "role": "list",
+            "name": ""
+          },
+          "@a37": {
+            "role": "button",
+            "name": "Gallery Thumbnail 1"
+          },
+          "@a40": {
+            "role": "button",
+            "name": "Gallery Thumbnail 2"
+          },
+          "@a43": {
+            "role": "button",
+            "name": "Gallery Thumbnail 3"
+          },
+          "@a46": {
+            "role": "button",
+            "name": "Gallery Thumbnail 4"
+          },
+          "@a49": {
+            "role": "button",
+            "name": "Gallery Thumbnail 5"
+          },
+          "@a52": {
+            "role": "button",
+            "name": "Gallery Thumbnail 6"
+          },
+          "@a55": {
+            "role": "button",
+            "name": "Gallery Thumbnail 7"
+          },
+          "@a60": {
+            "role": "button",
+            "name": "View all"
+          },
+          "@a62": {
+            "role": "button",
+            "name": "Next"
+          },
+          "@a65": {
+            "role": "button",
+            "name": "View all"
+          },
+          "@a68": {
+            "role": "button",
+            "name": "View all"
+          },
+          "@a70": {
+            "role": "link",
+            "name": ""
+          },
+          "@a76": {
+            "role": "link",
+            "name": "Building Instructions"
+          },
+          "@a78": {
+            "role": "link",
+            "name": "Architecture"
+          },
+          "@a81": {
+            "role": "button",
+            "name": "Average rating 4.1 out of 5 stars (5)"
+          },
+          "@a85": {
+            "role": "spinbutton",
+            "name": "Quantity"
+          },
+          "@a86": {
+            "role": "button",
+            "name": "increase value to 2"
+          },
+          "@a88": {
+            "role": "button",
+            "name": "Limit We restrict the limit a household can buy in order to be fair to all of our fans. If you’ve al"
+          },
+          "@a89": {
+            "role": "button",
+            "name": "Add to Bag"
+          },
+          "@a90": {
+            "role": "button",
+            "name": "Tower Bridge Add to Wishlist"
+          },
+          "@a93": {
+            "role": "list",
+            "name": ""
+          },
+          "@a95": {
+            "role": "link",
+            "name": "Ministry of Magic™ Phone Booth Unlock when purchasing The Ministry of Magic™ – Collectors' Edition L"
+          },
+          "@a100": {
+            "role": "link",
+            "name": "Batman™: Bruce Wayne™ and the Batsuit™ Spend over $40 on Batman™ to unlock this gift"
+          },
+          "@a106": {
+            "role": "button",
+            "name": "Overview"
+          },
+          "@a108": {
+            "role": "button",
+            "name": "Features"
+          },
+          "@a110": {
+            "role": "button",
+            "name": "Specifications"
+          },
+          "@a112": {
+            "role": "button",
+            "name": "Customer Reviews"
+          },
+          "@a114": {
+            "role": "button",
+            "name": "Add to Bag"
+          },
+          "@a117": {
+            "role": "button",
+            "name": "Specifications"
+          },
+          "@a118": {
+            "role": "button",
+            "name": "Customer Reviews Average rating 4.1 out of 5 stars (5)"
+          },
+          "@a119": {
+            "role": "button",
+            "name": "Features"
+          },
+          "none": "None of these answers the question."
+        },
+        "instructions": {
+          "goal": "Collect three distinct LEGO Architecture sets with price, piece count and a picture, then compare them",
+          "operation": "click",
+          "rules": "pick the control that best advances the goal"
+        }
+      },
+      "tower_bridge_link": {
+        "type": "choice",
+        "criteria": {
+          "@a4": {
+            "link": "PLAY ZONE",
+            "destination": "https://kids.lego.com/"
+          },
+          "@a7": {
+            "link": "Learn more",
+            "destination": "https://www.lego.com/en-us/product/batman-bruce-wayne-and-the-batsuit-30726?icmp=SW-SHB-Standard-BM_SWB_GWP_30726_Batman"
+          },
+          "@a10": {
+            "link": "Join LEGO® Insiders",
+            "destination": "https://www.lego.com/en-us/insiders"
+          },
+          "@a12": {
+            "link": "Lego",
+            "destination": "https://www.lego.com/en-us"
+          },
+          "@a22": {
+            "link": "New",
+            "destination": "https://www.lego.com/en-us/categories/new-sets-and-products"
+          },
+          "@a26": {
+            "link": "(0)",
+            "destination": "https://www.lego.com/en-us/cart"
+          },
+          "@a31": {
+            "link": "Home",
+            "destination": "https://www.lego.com/en-us"
+          },
+          "@a33": {
+            "link": "Architecture",
+            "destination": "https://www.lego.com/en-us/themes/architecture"
+          },
+          "@a70": {
+            "link": "",
+            "destination": "https://www.lego.com/en-us/themes/architecture"
+          },
+          "@a76": {
+            "link": "Building Instructions",
+            "destination": "https://www.lego.com/en-us/service/building-instructions/21067"
+          },
+          "@a78": {
+            "link": "Architecture",
+            "destination": "https://www.lego.com/en-us/themes/architecture"
+          },
+          "@a95": {
+            "link": "Ministry of Magic™ Phone Booth Unlock when purchasing The Ministry of Magic™ – Collectors' Edition LEGO® Insiders only",
+            "destination": "https://www.lego.com/en-us/product/ministry-of-magic-phone-booth-5011072"
+          },
+          "@a100": {
+            "link": "Batman™: Bruce Wayne™ and the Batsuit™ Spend over $40 on Batman™ to unlock this gift",
+            "destination": "https://www.lego.com/en-us/product/batman-bruce-wayne-and-the-batsuit-30726"
+          },
+          "none": "None of these answers the question."
+        },
+        "instructions": "Which link opens the product page of the LEGO Architecture Tower Bridge set?"
+      },
+      "tower_bridge_price": {
+        "type": "choice",
+        "criteria": {
+          "@a2": {
+            "role": "image",
+            "text": "Page image"
+          },
+          "@a4": {
+            "role": "link",
+            "text": "PLAY ZONE"
+          },
+          "@a5": {
+            "role": "button",
+            "text": "Previous"
+          },
+          "@a6": {
+            "role": "paragraph",
+            "text": "Get the Batman™: Bruce Wayne™ and the Batsuit™ with qualifying purchases of $40 or more* Learn more"
+          },
+          "@a7": {
+            "role": "link",
+            "text": "Learn more"
+          },
+          "@a8": {
+            "role": "button",
+            "text": "Next"
+          },
+          "@a9": {
+            "role": "button",
+            "text": "Sign In"
+          },
+          "@a10": {
+            "role": "link",
+            "text": "Join LEGO® Insiders"
+          },
+          "@a11": {
+            "role": "landmark",
+            "text": "Main Navigation"
+          },
+          "@a12": {
+            "role": "link",
+            "text": "Lego"
+          },
+          "@a13": {
+            "role": "image",
+            "text": "LEGO"
+          },
+          "@a15": {
+            "role": "list_item",
+            "text": "Shop"
+          },
+          "@a16": {
+            "role": "button",
+            "text": "Shop"
+          },
+          "@a17": {
+            "role": "list_item",
+            "text": "Discover"
+          },
+          "@a18": {
+            "role": "button",
+            "text": "Discover"
+          },
+          "@a19": {
+            "role": "list_item",
+            "text": "Help"
+          },
+          "@a20": {
+            "role": "button",
+            "text": "Help"
+          },
+          "@a21": {
+            "role": "list_item",
+            "text": "New"
+          },
+          "@a22": {
+            "role": "link",
+            "text": "New"
+          },
+          "@a23": {
+            "role": "paragraph",
+            "text": "Search"
+          },
+          "@a24": {
+            "role": "searchbox",
+            "text": "Search"
+          },
+          "@a25": {
+            "role": "button",
+            "text": "My Wishlist"
+          },
+          "@a26": {
+            "role": "link",
+            "text": "(0)"
+          },
+          "@a28": {
+            "role": "landmark",
+            "text": "Breadcrumbs"
+          },
+          "@a30": {
+            "role": "list_item",
+            "text": "Home"
+          },
+          "@a31": {
+            "role": "link",
+            "text": "Home"
+          },
+          "@a32": {
+            "role": "list_item",
+            "text": "Architecture"
+          },
+          "@a33": {
+            "role": "link",
+            "text": "Architecture"
+          },
+          "@a34": {
+            "role": "list_item",
+            "text": "Tower Bridge"
+          },
+          "@a37": {
+            "role": "button",
+            "text": "Gallery Thumbnail 1"
+          },
+          "@a38": {
+            "role": "image",
+            "text": "LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway."
+          },
+          "@a40": {
+            "role": "button",
+            "text": "Gallery Thumbnail 2"
+          },
+          "@a41": {
+            "role": "image",
+            "text": "LEGO® Architecture Tower Bridge box shown top left, with built scene with vehicles and suspension walkway shown below."
+          },
+          "@a43": {
+            "role": "button",
+            "text": "Gallery Thumbnail 3"
+          },
+          "@a44": {
+            "role": "image",
+            "text": "LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway."
+          },
+          "@a46": {
+            "role": "button",
+            "text": "Gallery Thumbnail 4"
+          },
+          "@a47": {
+            "role": "image",
+            "text": "Side view of the LEGO® Architecture Tower Bridge set, focusing on one tower."
+          },
+          "@a49": {
+            "role": "button",
+            "text": "Gallery Thumbnail 5"
+          },
+          "@a50": {
+            "role": "image",
+            "text": "Close-up of the LEGO® Architecture Tower Bridge set, focusing on the blue suspension walkway."
+          },
+          "@a52": {
+            "role": "button",
+            "text": "Gallery Thumbnail 6"
+          },
+          "@a53": {
+            "role": "image",
+            "text": "LEGO® Architecture Tower Bridge set, with central bascules raised."
+          },
+          "@a55": {
+            "role": "button",
+            "text": "Gallery Thumbnail 7"
+          },
+          "@a56": {
+            "role": "image",
+            "text": "Close-up of the road on the LEGO® Architecture Tower Bridge set, showing microscale vehicles."
+          },
+          "@a57": {
+            "role": "paragraph",
+            "text": "1"
+          },
+          "@a58": {
+            "role": "paragraph",
+            "text": "/"
+          },
+          "@a59": {
+            "role": "paragraph",
+            "text": "20"
+          },
+          "@a60": {
+            "role": "button",
+            "text": "View all"
+          },
+          "@a61": {
+            "role": "button",
+            "text": "Previous"
+          },
+          "@a62": {
+            "role": "button",
+            "text": "Next"
+          },
+          "@a65": {
+            "role": "button",
+            "text": "View all"
+          },
+          "@a66": {
+            "role": "image",
+            "text": "LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway."
+          },
+          "@a68": {
+            "role": "button",
+            "text": "View all"
+          },
+          "@a69": {
+            "role": "image",
+            "text": "LEGO® Architecture Tower Bridge box shown top left, with built scene with vehicles and suspension walkway shown below."
+          },
+          "@a71": {
+            "role": "image",
+            "text": "Architecture"
+          },
+          "@a72": {
+            "role": "group",
+            "text": "Ages:18+"
+          },
+          "@a73": {
+            "role": "paragraph",
+            "text": "18+"
+          },
+          "@a74": {
+            "role": "group",
+            "text": "Pieces:3745"
+          },
+          "@a75": {
+            "role": "paragraph",
+            "text": "3745"
+          },
+          "@a76": {
+            "role": "link",
+            "text": "Building Instructions"
+          },
+          "@a77": {
+            "role": "paragraph",
+            "text": "New"
+          },
+          "@a78": {
+            "role": "link",
+            "text": "Architecture"
+          },
+          "@a79": {
+            "role": "paragraph",
+            "text": "#21067"
+          },
+          "@a80": {
+            "role": "heading",
+            "text": "Tower Bridge"
+          },
+          "@a81": {
+            "role": "button",
+            "text": "Average rating 4.1 out of 5 stars (5)"
+          },
+          "@a82": {
+            "role": "paragraph",
+            "text": "$349.99"
+          },
+          "@a83": {
+            "role": "paragraph",
+            "text": "Available now"
+          },
+          "@a84": {
+            "role": "button",
+            "text": "decrease value to 0"
+          },
+          "@a85": {
+            "role": "spinbutton",
+            "text": "Quantity"
+          },
+          "@a86": {
+            "role": "button",
+            "text": "increase value to 2"
+          },
+          "@a87": {
+            "role": "paragraph",
+            "text": "Limit 3"
+          },
+          "@a88": {
+            "role": "button",
+            "text": "Limit We restrict the limit a household can buy in order to be fair to all of our fans. If you’ve already reached that limit through previous orders your entire"
+          },
+          "@a89": {
+            "role": "button",
+            "text": "Add to Bag"
+          },
+          "@a90": {
+            "role": "button",
+            "text": "Tower Bridge Add to Wishlist"
+          },
+          "@a91": {
+            "role": "paragraph",
+            "text": "Gifts with Purchase (2)"
+          },
+          "@a92": {
+            "role": "paragraph",
+            "text": "Gifts with Purchase (2)"
+          },
+          "@a94": {
+            "role": "document",
+            "text": "Unlock when purchasing The Ministry of Magic™ – Collectors' Edition"
+          },
+          "@a95": {
+            "role": "link",
+            "text": "Ministry of Magic™ Phone Booth Unlock when purchasing The Ministry of Magic™ – Collectors' Edition LEGO® Insiders only"
+          },
+          "@a96": {
+            "role": "paragraph",
+            "text": "Ministry of Magic™ Phone Booth"
+          },
+          "@a97": {
+            "role": "paragraph",
+            "text": "LEGO® Insiders only"
+          },
+          "@a98": {
+            "role": "paragraph",
+            "text": "Ends 09/30/2026"
+          },
+          "@a99": {
+            "role": "document",
+            "text": "Spend over $40 on Batman™ to unlock this gift"
+          },
+          "@a100": {
+            "role": "link",
+            "text": "Batman™: Bruce Wayne™ and the Batsuit™ Spend over $40 on Batman™ to unlock this gift"
+          },
+          "@a101": {
+            "role": "paragraph",
+            "text": "Batman™: Bruce Wayne™ and the Batsuit™"
+          },
+          "@a102": {
+            "role": "paragraph",
+            "text": "Ends 09/19/2026"
+          },
+          "@a105": {
+            "role": "list_item",
+            "text": "Overview"
+          },
+          "@a106": {
+            "role": "button",
+            "text": "Overview"
+          },
+          "@a107": {
+            "role": "list_item",
+            "text": "Features"
+          },
+          "@a108": {
+            "role": "button",
+            "text": "Features"
+          },
+          "@a109": {
+            "role": "list_item",
+            "text": "Specifications"
+          },
+          "@a110": {
+            "role": "button",
+            "text": "Specifications"
+          },
+          "@a111": {
+            "role": "list_item",
+            "text": "Customer Reviews"
+          },
+          "@a112": {
+            "role": "button",
+            "text": "Customer Reviews"
+          },
+          "@a113": {
+            "role": "paragraph",
+            "text": "Tower Bridge"
+          },
+          "@a114": {
+            "role": "button",
+            "text": "Add to Bag"
+          },
+          "@a115": {
+            "role": "landmark",
+            "text": "Features"
+          },
+          "@a117": {
+            "role": "button",
+            "text": "Specifications"
+          },
+          "@a118": {
+            "role": "button",
+            "text": "Customer Reviews Average rating 4.1 out of 5 stars (5)"
+          },
+          "@a119": {
+            "role": "button",
+            "text": "Features"
+          },
+          "@a120": {
+            "role": "heading",
+            "text": "Become a member and unlock perks right away!"
+          },
+          "@a121": {
+            "role": "heading",
+            "text": "Collectible architectural model kit for adults"
+          },
+          "@a122": {
+            "role": "heading",
+            "text": "Showcase a love of travel and London history"
+          },
+          "@a123": {
+            "role": "heading",
+            "text": "LEGO® Architecture Tower Bridge"
+          },
+          "@a124": {
+            "role": "heading",
+            "text": "London architectural history"
+          },
+          "@a125": {
+            "role": "heading",
+            "text": "Raising road section"
+          },
+          "@a126": {
+            "role": "heading",
+            "text": "Dynamic bridge life"
+          },
+          "@a127": {
+            "role": "heading",
+            "text": "Includes interactive 3D building instructions"
+          },
+          "@a128": {
+            "role": "heading",
+            "text": "Creative collectible gift to expand a collection"
+          },
+          "none": "None of these answers the question."
+        },
+        "instructions": "Which node holds the price of the LEGO Architecture Tower Bridge set?"
+      },
+      "tower_bridge_picture": {
+        "type": "choice",
+        "criteria": {
+          "@a2": {
+            "image": "Page image"
+          },
+          "@a13": {
+            "image": "LEGO"
+          },
+          "@a38": {
+            "image": "LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway."
+          },
+          "@a41": {
+            "image": "LEGO® Architecture Tower Bridge box shown top left, with built scene with vehicles and suspension walkway shown below."
+          },
+          "@a44": {
+            "image": "LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway."
+          },
+          "@a47": {
+            "image": "Side view of the LEGO® Architecture Tower Bridge set, focusing on one tower."
+          },
+          "@a50": {
+            "image": "Close-up of the LEGO® Architecture Tower Bridge set, focusing on the blue suspension walkway."
+          },
+          "@a53": {
+            "image": "LEGO® Architecture Tower Bridge set, with central bascules raised."
+          },
+          "@a56": {
+            "image": "Close-up of the road on the LEGO® Architecture Tower Bridge set, showing microscale vehicles."
+          },
+          "@a66": {
+            "image": "LEGO® Architecture Tower Bridge showing microscale vehicles, a River Thames base and a suspension walkway."
+          },
+          "@a69": {
+            "image": "LEGO® Architecture Tower Bridge box shown top left, with built scene with vehicles and suspension walkway shown below."
+          },
+          "@a71": {
+            "image": "Architecture"
+          },
+          "none": "None of these answers the question."
+        },
+        "instructions": "Which image is the picture of the LEGO Architecture Tower Bridge set?"
+      }
+    }
+  },
+  "expected": {
+    "challenge": {
+      "kind": "noul",
+      "positive": false
+    },
+    "relevant": {
+      "kind": "noul",
+      "positive": true
+    },
+    "tower_bridge_link": {
+      "kind": "choice",
+      "accepted": [
+        "none"
+      ]
+    },
+    "tower_bridge_price": {
+      "kind": "choice",
+      "accepted": [
+        "@a82"
+      ]
+    },
+    "tower_bridge_picture": {
+      "kind": "choice",
+      "accepted": [
+        "@a38",
+        "@a44",
+        "@a66"
+      ]
+    }
+  },
+  "unscored": [
+    "operation",
+    "click_target"
+  ]
+}

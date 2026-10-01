@@ -49,11 +49,12 @@ impl fmt::Debug for AgentEffectId {
     }
 }
 
-/// Trusted fixed-classifier result for one exact prepared semantic action.
+/// Trusted host assessment for one exact prepared semantic action.
 ///
 /// Construction is deliberately separate from the model's declared effect.
-/// The selected native/service adapter must derive the actual effect and
-/// canonical destination independently before policy sees this value.
+/// The host classifies the effect and canonical destination from task authority
+/// and native evidence. This is admission, not proof about arbitrary page scripts;
+/// execution still requires independent outcome verification.
 #[derive(Clone, Eq, PartialEq)]
 pub struct AgentEffectAssessment {
     action_guard: [u8; 32],
@@ -1429,6 +1430,18 @@ struct EffectDestination<'a> {
     effect: SemanticEffectClass,
 }
 
+/// A named origin, or any origin on the site of a site-session node.
+fn scoped_origin(
+    manifest: &AgentRunManifest,
+    node: &crate::AgentPlanNodeScope,
+    origin: &SemanticOrigin,
+) -> bool {
+    node.navigation_discovery()
+        .is_some_and(|scope| scope.is_site_session() && scope.admits_origin(origin))
+        || (manifest.scope().origins().binary_search(origin).is_ok()
+            && node.origins().binary_search(origin).is_ok())
+}
+
 fn effect_scope_contains(
     manifest: &AgentRunManifest,
     node: &crate::AgentPlanNodeScope,
@@ -1447,21 +1460,8 @@ fn effect_scope_contains(
             .binary_search(&destination.account)
             .is_ok()
         && node.accounts().binary_search(&destination.account).is_ok()
-        && manifest
-            .scope()
-            .origins()
-            .binary_search(action.frame().origin())
-            .is_ok()
-        && node
-            .origins()
-            .binary_search(action.frame().origin())
-            .is_ok()
-        && manifest
-            .scope()
-            .origins()
-            .binary_search(destination.origin)
-            .is_ok()
-        && node.origins().binary_search(destination.origin).is_ok()
+        && scoped_origin(manifest, node, action.frame().origin())
+        && scoped_origin(manifest, node, destination.origin)
         && manifest.scope().effects().contains(destination.effect)
         && node.effects().contains(destination.effect)
         && action.target_sensitivity() != SemanticSensitivity::Secret
@@ -1484,13 +1484,19 @@ fn data_flow_decision(
         }
         if node.profiles().binary_search(&taint.profile()).is_err()
             || node.accounts().binary_search(&taint.account()).is_err()
-            || node.origins().binary_search(taint.origin()).is_err()
+            || !scoped_origin(manifest, node, taint.origin())
             || taint.sensitivity() > node.max_sensitivity()
         {
             return Ok(Some(AgentNeedsHumanReason::ScopeExpansion));
         }
         if destination.effect == SemanticEffectClass::Read
-            || (taint.account() == destination.account && taint.origin() == destination.origin)
+            || (taint.account() == destination.account
+                && (taint.origin() == destination.origin
+                    || node.navigation_discovery().is_some_and(|scope| {
+                        scope.is_site_session()
+                            && scope.admits_origin(taint.origin())
+                            && scope.admits_origin(destination.origin)
+                    })))
         {
             continue;
         }

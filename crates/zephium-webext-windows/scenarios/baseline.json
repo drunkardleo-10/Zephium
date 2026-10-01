@@ -1,0 +1,6 @@
+[
+  {"extensions_enabled":false},
+  {"navigate":"$ORIGIN/first"},
+  {"sleep":3000},
+  {"label":"baseline renderer", "eval":"return {url:location.href,title:document.title,body:document.body.innerText}"}
+]

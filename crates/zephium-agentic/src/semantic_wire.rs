@@ -196,16 +196,89 @@ pub fn decode_semantic_snapshot(
             }
             (_, None) => None,
         };
+        let landmark_kind = match (role, raw_node.landmark_kind) {
+            (SemanticRole::Landmark, kind) => kind,
+            (_, None) => None,
+            _ => return Err(SemanticDecodeError::NodeContract),
+        };
         let states = SemanticStates::from_bits(raw_node.states)
             .map_err(|_| SemanticDecodeError::NodeContract)?;
         let operations = SemanticOperations::from_bits(raw_node.operations)
             .map_err(|_| SemanticDecodeError::NodeContract)?;
         validate_operations(role, states, operations)?;
+        if role == SemanticRole::Button
+            && operations.contains(SemanticOperationClass::Scroll)
+            && raw_node.activation != Some(6)
+        {
+            return Err(SemanticDecodeError::NodeContract);
+        }
+        let fill_support = raw_node.fill_support.map(decode_fill_support).transpose()?;
+        let editable_structure = raw_node
+            .editable_structure
+            .map(|(child_count, child_kinds, editable_parent)| {
+                if child_count > 129
+                    || child_kinds > 7
+                    || (child_count == 0) != (child_kinds == 0)
+                    || child_kinds.count_ones() > u32::from(child_count.min(128))
+                    || !matches!(
+                        role,
+                        SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
+                    )
+                {
+                    return Err(SemanticDecodeError::NodeContract);
+                }
+                use crate::SemanticFillSupport::*;
+                let consistent = match fill_support {
+                    // A rich editor's paragraphs are element children.
+                    Some(Supported) => child_count <= 128 && child_kinds & 4 == 0,
+                    Some(EditableAncestor) => editable_parent,
+                    Some(ChildLimit) => child_count == 129,
+                    Some(ElementChild) => child_kinds & 2 != 0,
+                    Some(OtherChild) => child_kinds & 4 != 0,
+                    Some(ReadOnly | Disabled) => true,
+                    _ => false,
+                };
+                if !consistent {
+                    return Err(SemanticDecodeError::NodeContract);
+                }
+                Ok(crate::SemanticEditableStructure {
+                    child_count,
+                    child_kinds,
+                    editable_parent,
+                })
+            })
+            .transpose()?;
+        if let Some(support) = fill_support {
+            if !matches!(
+                role,
+                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
+            ) || (support == crate::SemanticFillSupport::Supported)
+                != operations.contains(SemanticOperationClass::Fill)
+            {
+                return Err(SemanticDecodeError::NodeContract);
+            }
+        }
 
         let mut raw_name =
             validate_optional_text(raw_node.name, MAX_SEMANTIC_NAME_BYTES, &mut wire_text_bytes)?;
         let mut raw_text =
             validate_optional_text(raw_node.text, MAX_SEMANTIC_TEXT_BYTES, &mut wire_text_bytes)?;
+        let raw_destination = validate_optional_text(
+            raw_node.link_destination,
+            crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES,
+            &mut wire_text_bytes,
+        )?;
+        if raw_destination.is_some() && role != SemanticRole::Link {
+            return Err(SemanticDecodeError::NodeContract);
+        }
+        let raw_image = validate_optional_text(
+            raw_node.image_source,
+            crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES,
+            &mut wire_text_bytes,
+        )?;
+        if raw_image.is_some() && role != SemanticRole::Image {
+            return Err(SemanticDecodeError::NodeContract);
+        }
         let (mut value, value_was_secret) =
             decode_value(role, raw_node.value, &mut wire_text_bytes)?;
 
@@ -246,6 +319,39 @@ pub fn decode_semantic_snapshot(
             }
         }
 
+        // Only public, credential-free, canonical document links enter model
+        // context. Rejected destinations are omitted, not repaired or truncated.
+        let link_destination = raw_destination
+            .filter(|value| {
+                sensitivity == SemanticSensitivity::Public
+                    && !looks_like_secret_value(value.as_str())
+            })
+            .and_then(|value| {
+                let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
+                (target.as_url().as_str() == value.as_str() && model_safe_public_url(&target))
+                    .then_some(target)
+            });
+        let image_source = raw_image
+            .filter(|_| sensitivity == SemanticSensitivity::Public)
+            .and_then(|value| {
+                let target = crate::ContextNavigationTarget::parse(value.as_str()).ok()?;
+                (target.as_url().as_str() == value.as_str() && model_safe_public_url(&target))
+                    .then_some(target)
+            });
+        retained_text_bytes = retained_text_bytes
+            .checked_add(
+                image_source
+                    .as_ref()
+                    .map_or(0, |target| target.as_url().as_str().len()),
+            )
+            .ok_or(SemanticDecodeError::TextLimit)?;
+        retained_text_bytes = retained_text_bytes
+            .checked_add(
+                link_destination
+                    .as_ref()
+                    .map_or(0, |target| target.as_url().as_str().len()),
+            )
+            .ok_or(SemanticDecodeError::TextLimit)?;
         retained_text_bytes = retained_text_bytes
             .checked_add(if retain_name_bytes {
                 raw_name.as_ref().map_or(0, SemanticText::len)
@@ -279,18 +385,57 @@ pub fn decode_semantic_snapshot(
             depth,
             role,
             heading_level,
+            landmark_kind,
+            link_destination,
+            image_source,
             name: raw_name,
             text: raw_text,
             value,
             states,
             operations,
+            activation: raw_node
+                .activation
+                .map(|code| match code {
+                    1 => Ok(crate::SemanticActivation::Ordinary),
+                    2 => Ok(crate::SemanticActivation::Submit),
+                    3 => Ok(crate::SemanticActivation::Reset),
+                    4 => Ok(crate::SemanticActivation::Navigation),
+                    5 => Ok(crate::SemanticActivation::Form),
+                    6 => Ok(crate::SemanticActivation::Disclosure),
+                    _ => Err(SemanticDecodeError::NodeContract),
+                })
+                .transpose()?,
+            form: raw_node
+                .form
+                .map(|bits| {
+                    crate::SemanticFormFacts::decode(bits).ok_or(SemanticDecodeError::NodeContract)
+                })
+                .transpose()?,
+            fill_support,
+            editable_structure,
+            fields_complete: raw_node.fields_complete,
             sensitivity,
             trust: SemanticTrust::UntrustedPage,
             geometry,
         });
     }
 
-    SemanticSnapshot::try_new(
+    let page_dialog_sample = raw.page_dialog_sample;
+    if matches!(raw.completeness, RawCompleteness::Complete)
+        && nodes.iter().any(|node| node.fields_complete == Some(false))
+    {
+        return Err(SemanticDecodeError::NodeContract);
+    }
+    if matches!(raw.completeness, RawCompleteness::FieldLimit)
+        && nodes.iter().any(|node| node.fields_complete == Some(true))
+        && !nodes.iter().any(|node| node.fields_complete == Some(false))
+    {
+        return Err(SemanticDecodeError::NodeContract);
+    }
+    if let Some(sample) = &page_dialog_sample {
+        sample.validate()?;
+    }
+    let mut snapshot = SemanticSnapshot::try_new(
         context.invocation,
         context.frame,
         context.generation,
@@ -298,7 +443,13 @@ pub fn decode_semantic_snapshot(
         nodes,
         retained_text_bytes,
     )
-    .map_err(|_| SemanticDecodeError::Contract)
+    .map_err(|_| SemanticDecodeError::Contract)?;
+    if let Some(sample) = &raw.scroll_sample {
+        sample.validate()?;
+    }
+    snapshot.scroll_sample = raw.scroll_sample;
+    snapshot.page_dialog_sample = page_dialog_sample;
+    Ok(snapshot)
 }
 
 fn validate_optional_text(
@@ -395,8 +546,8 @@ fn validate_operations(
 fn allowed_operations(role: SemanticRole) -> Result<SemanticOperations, SemanticDecodeError> {
     use SemanticOperationClass::{Click, Fill, Press, Scroll, Select};
     let operations: &[SemanticOperationClass] = match role {
+        SemanticRole::Button => &[Click, Press, Scroll],
         SemanticRole::Link
-        | SemanticRole::Button
         | SemanticRole::Checkbox
         | SemanticRole::Radio
         | SemanticRole::Option
@@ -407,7 +558,7 @@ fn allowed_operations(role: SemanticRole) -> Result<SemanticOperations, Semantic
         | SemanticRole::Password
         | SemanticRole::Searchbox
         | SemanticRole::Spinbutton => &[Click, Fill, Press],
-        SemanticRole::Combobox => &[Click, Select, Press],
+        SemanticRole::Combobox => &[Click, Fill, Select, Press],
         SemanticRole::Listbox => &[Select, Press, Scroll],
         SemanticRole::Group
         | SemanticRole::Document
@@ -445,6 +596,147 @@ fn has_credential_label(value: &str) -> bool {
     CREDENTIAL_LABELS
         .iter()
         .any(|label| normalized.contains(label))
+}
+
+fn is_sensitive_url_parameter_name(value: &str) -> bool {
+    let normalized: String = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "token"
+            | "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "authtoken"
+            | "auth"
+            | "authorization"
+            | "authcode"
+            | "oauthcode"
+            | "code"
+            | "state"
+            | "apikey"
+            | "key"
+            | "secret"
+            | "secretkey"
+            | "clientsecret"
+            | "signature"
+            | "sig"
+            | "session"
+            | "sessionid"
+            | "sessiontoken"
+            | "jwt"
+            | "assertion"
+            | "credential"
+            | "credentials"
+            | "password"
+            | "passcode"
+            | "onetimecode"
+            | "verificationcode"
+            | "ticket"
+    )
+}
+
+fn fragment_contains_sensitive_data(value: &str) -> bool {
+    let Some(decoded) = percent_decode_url_component(value) else {
+        return true;
+    };
+    if decoded.contains('%') || has_credential_label(&decoded) || looks_like_secret_value(&decoded)
+    {
+        return true;
+    }
+    contains_sensitive_embedded_url_state(&decoded)
+}
+
+fn contains_sensitive_embedded_url_state(value: &str) -> bool {
+    contains_sensitive_embedded_url_state_at_depth(value, 0)
+}
+
+fn contains_sensitive_embedded_url_state_at_depth(value: &str, depth: u8) -> bool {
+    const MAX_NESTED_URL_STATE_DEPTH: u8 = 3;
+
+    let decoded = match percent_decode_url_component(value) {
+        Some(decoded) => decoded,
+        None => return true,
+    };
+    if depth == MAX_NESTED_URL_STATE_DEPTH {
+        // Reaching the fixed parsing budget with either another encoded layer
+        // or another assignment is ambiguous URL state. Fail closed instead of
+        // treating a credential label one level deeper as public.
+        return decoded != value
+            || decoded
+                .split(['?', '#', '&', ';'])
+                .any(|component| component.contains('='));
+    }
+    decoded.split(['?', '#', '&', ';']).any(|component| {
+        component.split_once('=').is_some_and(|(key, nested)| {
+            is_sensitive_url_parameter_name(key)
+                || has_credential_label(key)
+                || looks_like_secret_value(key)
+                || looks_like_secret_value(nested)
+                || (depth < MAX_NESTED_URL_STATE_DEPTH
+                    && (contains_sensitive_embedded_url_state_at_depth(key, depth + 1)
+                        || contains_sensitive_embedded_url_state_at_depth(nested, depth + 1)))
+        })
+    })
+}
+
+/// Shared final disclosure boundary for page-derived or trusted-checkpoint URLs.
+pub(crate) fn model_safe_public_url(target: &crate::ContextNavigationTarget) -> bool {
+    let url = target.as_url();
+    matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && !looks_like_secret_value(url.as_str())
+        && !url.query().is_some_and(contains_encoded_percent)
+        && !url.query_pairs().any(|(key, value)| {
+            is_sensitive_url_parameter_name(key.as_ref())
+                || has_credential_label(key.as_ref())
+                || looks_like_secret_value(key.as_ref())
+                || looks_like_secret_value(value.as_ref())
+                || value.contains('%')
+                || contains_sensitive_embedded_url_state(key.as_ref())
+                || contains_sensitive_embedded_url_state(value.as_ref())
+        })
+        && !url.fragment().is_some_and(fragment_contains_sensitive_data)
+}
+
+fn contains_encoded_percent(value: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(3)
+        .any(|window| window[0] == b'%' && window[1] == b'2' && matches!(window[2], b'5'))
+}
+
+fn percent_decode_url_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let pair = bytes.get(index + 1..index + 3)?;
+            let byte = hex_digit(pair[0])?
+                .checked_mul(16)?
+                .checked_add(hex_digit(pair[1])?)?;
+            decoded.push(byte);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+const fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(crate) fn looks_like_secret_value(value: &str) -> bool {
@@ -514,6 +806,10 @@ fn looks_like_secret_token(token: &str) -> bool {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshot {
+    #[serde(rename = "j", default)]
+    scroll_sample: Option<ScrollSample>,
+    #[serde(rename = "u", default)]
+    page_dialog_sample: Option<PageDialogSample>,
     #[serde(rename = "v")]
     version: u16,
     #[serde(rename = "i")]
@@ -526,12 +822,78 @@ struct RawSnapshot {
     nodes: Vec<RawNode>,
 }
 
+/// Content-free independently sampled dialog identities, never model context.
+#[derive(Clone, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PageDialogSample {
+    pub a: u64,
+    pub i: u64,
+    pub g: u64,
+    pub before: Vec<u64>,
+    pub after: Vec<u64>,
+}
+impl PageDialogSample {
+    fn validate(&self) -> Result<(), SemanticDecodeError> {
+        if self.a == 0 || self.i == 0 || self.g == 0 {
+            return Err(SemanticDecodeError::NodeIdentity);
+        }
+        for keys in [&self.before, &self.after] {
+            if keys.len() > 16
+                || keys.contains(&0)
+                || keys.iter().copied().collect::<BTreeSet<_>>().len() != keys.len()
+            {
+                return Err(SemanticDecodeError::NodeIdentity);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod page_dialog_sample_tests {
+    use super::*;
+    #[test]
+    fn samples_reject_ambiguous_or_unbounded_identities() {
+        for (before, after) in [
+            (vec![0], vec![1]),
+            (vec![1, 1], vec![2]),
+            (vec![1], vec![2, 2]),
+            ((1..=17).collect(), vec![]),
+            (vec![], (1..=17).collect()),
+        ] {
+            assert!(PageDialogSample {
+                a: 1,
+                i: 1,
+                g: 1,
+                before,
+                after
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(PageDialogSample {
+            a: 1,
+            i: 1,
+            g: 1,
+            before: vec![],
+            after: vec![1]
+        }
+        .validate()
+        .is_ok());
+        assert!(serde_json::from_str::<PageDialogSample>(
+            r#"{"a":1,"i":1,"g":1,"before":[],"after":[1],"success":true}"#
+        )
+        .is_err());
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RawCompleteness {
     Complete,
     NodeLimit,
     TextLimit,
+    FieldLimit,
     DepthLimit,
     InspectionLimit,
     WireLimit,
@@ -545,6 +907,7 @@ impl From<RawCompleteness> for SemanticCompleteness {
             RawCompleteness::Complete => Self::Complete,
             RawCompleteness::NodeLimit => Self::Truncated(SemanticTruncation::NodeLimit),
             RawCompleteness::TextLimit => Self::Truncated(SemanticTruncation::TextLimit),
+            RawCompleteness::FieldLimit => Self::Truncated(SemanticTruncation::FieldLimit),
             RawCompleteness::DepthLimit => Self::Truncated(SemanticTruncation::DepthLimit),
             RawCompleteness::InspectionLimit => {
                 Self::Truncated(SemanticTruncation::InspectionLimit)
@@ -569,6 +932,12 @@ struct RawNode {
     role: RawRole,
     #[serde(rename = "l", default)]
     heading_level: Option<u8>,
+    #[serde(rename = "lm", default)]
+    landmark_kind: Option<crate::SemanticLandmarkKind>,
+    #[serde(rename = "u", default)]
+    link_destination: Option<String>,
+    #[serde(rename = "m", default)]
+    image_source: Option<String>,
     #[serde(rename = "n", default)]
     name: Option<String>,
     #[serde(rename = "t", default)]
@@ -579,10 +948,39 @@ struct RawNode {
     states: u8,
     #[serde(rename = "o", default)]
     operations: u8,
+    #[serde(rename = "ak", default)]
+    activation: Option<u8>,
+    #[serde(rename = "ff", default)]
+    form: Option<u8>,
+    #[serde(rename = "fs", default)]
+    fill_support: Option<u8>,
+    #[serde(rename = "es", default)]
+    editable_structure: Option<(u16, u8, bool)>,
+    #[serde(rename = "fc", default)]
+    fields_complete: Option<bool>,
     #[serde(rename = "q", default)]
     sensitivity: RawSensitivity,
     #[serde(rename = "b", default)]
     rect: Option<RawRect>,
+}
+
+fn decode_fill_support(code: u8) -> Result<crate::SemanticFillSupport, SemanticDecodeError> {
+    use crate::SemanticFillSupport::*;
+    Ok(match code {
+        1 => Supported,
+        2 => MissingExplicitEditable,
+        3 => NativeNotEditable,
+        4 => UnsupportedTag,
+        5 => EditableAncestor,
+        6 => ChildLimit,
+        7 => ElementChild,
+        8 => OtherChild,
+        9 => NativeReadFailed,
+        10 => ReadOnly,
+        11 => Disabled,
+        12 => UnsupportedControl,
+        _ => return Err(SemanticDecodeError::NodeContract),
+    })
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -758,6 +1156,138 @@ mod tests {
     }
 
     #[test]
+    fn local_field_completeness_is_explicit_consistent_and_not_inferred() {
+        for (status, fields, succeeds) in [
+            ("complete", json!([true, true]), true),
+            ("complete", json!([true, false]), false),
+            ("field_limit", json!([true, false]), true),
+            ("field_limit", json!([true, true]), false),
+            ("field_limit", json!([true, null]), false),
+            ("field_limit", json!([null, null]), true),
+            ("field_limit", json!([false, false]), true),
+            ("field_limit", json!(["true", false]), false),
+        ] {
+            let mut nodes = json!([{"k":1,"r":"button","n":"short","o":1},
+                {"k":2,"r":"button","n":"x".repeat(512),"o":1}]);
+            for index in 0..2 {
+                if !fields[index].is_null() {
+                    nodes[index]["fc"] = fields[index].clone();
+                }
+            }
+            let raw = serde_json::to_vec(&json!({"v":1,"i":7,"g":9,"c":status,"n":nodes})).unwrap();
+            let decoded = decode_semantic_snapshot(decode_context(), &raw);
+            assert_eq!(decoded.is_ok(), succeeds, "{status}/{fields}");
+            if status == "field_limit" && succeeds {
+                let snapshot = decoded.unwrap();
+                assert_eq!(
+                    snapshot.has_complete_node_fields(snapshot.nodes()[0].key()),
+                    fields[0] == true
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn editable_structure_is_bounded_closed_and_not_private_fill_authority() {
+        for (shape, support, operations) in [
+            (json!([1, 1, false]), 1, 2),
+            (json!([0, 0, false]), 1, 2),
+            (json!([1, 1, true]), 5, 0),
+            (json!([1, 1, true]), 1, 2),
+            (json!([1, 2, true]), 5, 0),
+            (json!([2, 3, true]), 5, 0),
+            (json!([129, 1, false]), 6, 0),
+            // A rich editor's paragraphs: element children the fill replaces
+            // through the browser's editing.
+            (json!([1, 2, false]), 1, 2),
+            (json!([3, 3, true]), 1, 2),
+        ] {
+            let snapshot = decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([{"k":1,"r":"textbox","fs":support,"o":operations,"es":shape}])),
+            )
+            .unwrap();
+            let structure = snapshot.nodes()[0].editable_structure().unwrap();
+            assert_eq!(structure.child_count(), shape[0].as_u64().unwrap() as u16);
+            assert_eq!(structure.editable_parent(), shape[2].as_bool().unwrap());
+            assert_eq!(structure.truncated(), structure.child_count() == 129);
+        }
+        for shape in [
+            json!([130, 1, true]),
+            json!([1, 8, true]),
+            json!([0, 1, true]),
+            json!([1, 3, true]),
+            json!([1, 0, true]),
+            json!([1, 1]),
+            json!([1, 1, true, "text"]),
+        ] {
+            assert!(decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([{"k":1,"r":"textbox","fs":5,"es":shape}]))
+            )
+            .is_err());
+        }
+        for shape in [
+            json!([1, 4, false]),
+            json!([1, 6, false]),
+            json!([129, 1, false]),
+        ] {
+            assert!(
+                decode_semantic_snapshot(
+                    decode_context(),
+                    &payload(json!([{"k":1,"r":"textbox","fs":1,"o":2,"es":shape}]))
+                )
+                .is_err(),
+                "structure cannot promote other children or an unbounded host to Fill"
+            );
+        }
+    }
+
+    #[test]
+    fn editable_combobox_capabilities_and_diagnostics_decode_without_changing_role() {
+        for node in [
+            json!({"k":1,"r":"combobox","fs":1,"o":11,"v":{"k":"text","value":"query"}}),
+            json!({"k":1,"r":"combobox","fs":1,"o":11,"es":[1,1,false]}),
+            json!({"k":1,"r":"combobox","fs":10,"o":9,"v":{"k":"text","value":"readonly"}}),
+            json!({"k":1,"r":"combobox","fs":2,"o":13,"v":{"k":"ordinal","value":0}}),
+        ] {
+            let snapshot = decode_semantic_snapshot(decode_context(), &payload(json!([node])))
+                .expect("combobox capabilities");
+            assert_eq!(snapshot.nodes()[0].role(), SemanticRole::Combobox);
+        }
+        for node in [
+            json!({"k":1,"r":"combobox","fs":2,"o":11}),
+            json!({"k":1,"r":"combobox","fs":1,"o":13}),
+            json!({"k":1,"r":"combobox","fs":1,"o":11,"es":[1,4,false]}),
+        ] {
+            assert!(decode_semantic_snapshot(decode_context(), &payload(json!([node]))).is_err());
+        }
+    }
+
+    #[test]
+    fn fill_support_is_closed_consistent_and_not_action_authority() {
+        for code in 1..=12 {
+            let bytes =
+                payload(json!([{"k":1,"r":"textbox","fs":code,"o":if code == 1 {2} else {0}}]));
+            let snapshot = decode_semantic_snapshot(decode_context(), &bytes).unwrap();
+            assert_eq!(
+                snapshot.nodes()[0].fill_support(),
+                Some(decode_fill_support(code).unwrap())
+            );
+        }
+        for node in [
+            json!({"k":1,"r":"textbox","fs":0}),
+            json!({"k":1,"r":"textbox","fs":13}),
+            json!({"k":1,"r":"textbox","fs":"page-authored reason"}),
+            json!({"k":1,"r":"textbox","fs":1,"o":0}),
+            json!({"k":1,"r":"textbox","fs":7,"o":2}),
+            json!({"k":1,"r":"button","fs":7}),
+        ] {
+            assert!(decode_semantic_snapshot(decode_context(), &payload(json!([node]))).is_err());
+        }
+    }
+
+    #[test]
     fn valid_payload_decodes_deterministically_with_opaque_reference() {
         let bytes = payload(json!([
             {"k": 1, "r": "document", "o": 16},
@@ -788,8 +1318,182 @@ mod tests {
     }
 
     #[test]
-    fn inspection_and_wire_truncation_are_preserved() {
+    fn landmark_subtypes_are_optional_closed_descriptions_not_names_or_roles() {
+        let bytes = payload(serde_json::json!([
+            {"k":1,"r":"document"},
+            {"k":2,"p":0,"r":"landmark","lm":"main"},
+            {"k":3,"p":0,"r":"landmark","lm":"navigation"},
+            {"k":4,"p":0,"r":"landmark"}
+        ]));
+        let snapshot = decode_semantic_snapshot(decode_context(), &bytes).unwrap();
+        assert_eq!(
+            snapshot.nodes()[1].landmark_kind(),
+            Some(crate::SemanticLandmarkKind::Main)
+        );
+        assert_eq!(
+            snapshot.nodes()[2].landmark_kind(),
+            Some(crate::SemanticLandmarkKind::Navigation)
+        );
+        assert_eq!(snapshot.nodes()[3].landmark_kind(), None);
+        assert!(snapshot
+            .nodes()
+            .iter()
+            .all(|node| node.name().is_none() && node.operations().is_empty()));
+        for (role, kind) in [
+            ("button", "main"),
+            ("landmark", "arbitrary page label"),
+            ("landmark", ""),
+        ] {
+            let bytes = payload(serde_json::json!([{"k":1,"r":role,"lm":kind}]));
+            assert!(decode_semantic_snapshot(decode_context(), &bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn link_destinations_are_exact_public_bounded_data_not_arbitrary_urls() {
+        let good = "https://example.test/docs/next";
+        let query = "https://example.test/docs?q=public";
+        let fragment = "https://example.test/docs#section";
+        let public_fragment_state = "https://example.test/docs#q=public&section=1";
+        for (destination, sensitivity, retained) in [
+            (good, "public", true),
+            (query, "public", true),
+            (fragment, "public", true),
+            (public_fragment_state, "public", true),
+            (good, "sensitive", false),
+            (good, "secret", false),
+            ("https://example.test/docs?token=secret", "public", false),
+            (
+                "https://example.test/docs?access%5Ftoken=short",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?code=Qm9VT3F2cW1ROGxobTVoQ2c",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?state=c2lnbmVkLW9hdXRoLXN0YXRl",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q=sk%2Dlive%2Dcredentialvalue",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#access%5Ftoken=short",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=ghp%5Fabcdefghijklmnop",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#access_token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?access_token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=a=b=c=token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q=a=b=c=d=token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?return=https%3A%2F%2Fother.test%2F%23token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs#q=public&access_token=shortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q=public%26access_token%3Dshortsecret",
+                "public",
+                false,
+            ),
+            (
+                "https://example.test/docs?q%253Daccess_token%253Dshortsecret",
+                "public",
+                false,
+            ),
+            ("https://user:secret@example.test/docs", "public", false),
+            ("javascript:alert(1)", "public", false),
+            ("about:blank", "public", false),
+            ("/docs/next", "public", false),
+            ("https://EXAMPLE.test/docs/next", "public", false),
+            ("https://example.test/sk-secret-key-value", "public", false),
+        ] {
+            let snapshot = decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([
+                    {"k":1,"r":"link","u":destination,"q":sensitivity}
+                ])),
+            )
+            .unwrap();
+            assert_eq!(
+                snapshot.nodes()[0].link_destination().is_some(),
+                retained,
+                "{destination}"
+            );
+            assert_eq!(
+                snapshot.total_text_bytes(),
+                if retained {
+                    destination.len() as u32
+                } else {
+                    0
+                }
+            );
+            assert!(!format!("{snapshot:?}").contains("example.test"));
+        }
+        assert_eq!(
+            decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([
+                    {"k":1,"r":"paragraph","u":good}
+                ]))
+            ),
+            Err(SemanticDecodeError::NodeContract)
+        );
+        assert_eq!(
+            decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([
+                    {"k":1,"r":"link","u":"x".repeat(crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES + 1)}
+                ]))
+            ),
+            Err(SemanticDecodeError::TextLimit)
+        );
+    }
+
+    #[test]
+    fn field_inspection_and_wire_truncation_are_preserved() {
         for (wire, expected) in [
+            (
+                "field_limit",
+                SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit),
+            ),
             (
                 "inspection_limit",
                 SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit),
@@ -1010,6 +1714,8 @@ mod tests {
             json!([{"k": 1, "r": "heading", "l": 7}]),
             json!([{"k": 1, "r": "button", "l": 2}]),
             json!([{"k": 1, "r": "button", "o": 128}]),
+            json!([{"k": 1, "r": "button", "o": 16}]),
+            json!([{"k": 1, "r": "button", "o": 25, "ak": 2}]),
             json!([{"k": 1, "r": "button", "s": 128}]),
         ] {
             assert_eq!(
@@ -1017,6 +1723,50 @@ mod tests {
                 Err(SemanticDecodeError::NodeContract)
             );
         }
+    }
+
+    #[test]
+    fn form_facts_decode_closed_bits_only() {
+        let snapshot = decode_semantic_snapshot(
+            decode_context(),
+            &payload(json!([{"k": 1, "r": "button", "n": "Search", "o": 1, "ak": 2, "ff": 13}])),
+        )
+        .expect("snapshot");
+        let form = snapshot.nodes()[0].form().expect("form facts");
+        assert_eq!(form.method(), crate::SemanticFormMethod::Get);
+        assert!(form.same_origin() && form.search());
+        for bits in [0, 16, 64] {
+            assert_eq!(
+                decode_semantic_snapshot(
+                    decode_context(),
+                    &payload(json!([{"k": 1, "r": "button", "o": 1, "ak": 2, "ff": bits}])),
+                ),
+                Err(SemanticDecodeError::NodeContract)
+            );
+        }
+    }
+
+    #[test]
+    fn page_content_digest_ignores_keys_and_focus_but_not_text() {
+        let digest = |nodes| {
+            crate::semantic_action::page_digest(
+                &decode_semantic_snapshot(decode_context(), &payload(nodes)).expect("snapshot"),
+            )
+        };
+        let before = digest(json!([
+            {"k": 1, "r": "document"},
+            {"k": 2, "p": 0, "r": "paragraph", "t": "3 results"}
+        ]));
+        let rekeyed = digest(json!([
+            {"k": 7, "r": "document"},
+            {"k": 9, "p": 0, "r": "paragraph", "t": "3 results"}
+        ]));
+        let changed = digest(json!([
+            {"k": 1, "r": "document"},
+            {"k": 2, "p": 0, "r": "paragraph", "t": "12 results"}
+        ]));
+        assert_eq!(before, rekeyed);
+        assert_ne!(before, changed);
     }
 
     #[test]
@@ -1099,5 +1849,31 @@ mod tests {
         assert!(!debug.contains("private-user-content"));
         assert!(!debug.contains("example.test"));
         assert!(!debug.contains("ProfileId"));
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScrollSample {
+    pub a: u64,
+    pub i: u64,
+    pub g: u64,
+    pub t: u64,
+    pub before: [i64; 2],
+    pub after: [i64; 2],
+    pub visible: Option<bool>,
+}
+impl ScrollSample {
+    fn validate(&self) -> Result<(), SemanticDecodeError> {
+        if [self.a, self.i, self.g, self.t].contains(&0)
+            || self
+                .before
+                .iter()
+                .chain(&self.after)
+                .any(|n| n.unsigned_abs() > crate::MAX_SEMANTIC_SCROLL_COORDINATE)
+        {
+            return Err(SemanticDecodeError::NodeIdentity);
+        }
+        Ok(())
     }
 }

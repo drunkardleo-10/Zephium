@@ -333,6 +333,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
             &read(repository.join(ENGINE_MACOS_SEMANTIC_ACTION))?,
         ),
     )?;
+    validate_snapshot_action_kinds(&read(repository.join(AGENTIC_PROVIDER_ROOT))?)?;
     validate_semantic_settle_wake(&read(repository.join(AGENTIC_SEMANTIC_SETTLE))?)?;
     validate_semantic_settlement_coordinator(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -421,7 +422,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     )?;
     validate_provider_transport_response_header_boundary(&provider_transport_root)?;
     validate_provider_transport_http2_ingress_boundary(&provider_transport_root)?;
-    validate_provider_transport_shutdown_contract(&provider_transport_root)?;
+    validate_provider_transport_shutdown_contract(
+        &provider_transport_root,
+        &read(repository.join("crates/zephium-agentic/src/provider_transport/lead/keys.rs"))?,
+    )?;
     validate_agentic_no_direct_logging_attribute(
         PROVIDER_TRANSPORT_ROOT,
         &provider_transport_root,
@@ -1800,10 +1804,9 @@ fn validate_engine_windows_agent_context_boundary(
         "with_permission_handler(|_|wry::PermissionResponse::Deny)",
         "with_download_policy(DownloadPolicy::DenyWithoutMetadata)",
         "with_environment(environment.clone())",
-        "with_browser_extension_startup_gate(gate)",
-        "builder.with_profile_name(name)",
+        "builder.with_profile_name(name.clone())",
         "builder.with_incognito(true)",
-        "profile_inventory_is_empty(&profile,deadline)",
+        "attest_profile(&profile,&view.environment(),&view.webview(),",
         "super::attest_environment(environment,expected_user_data_folder)",
         "controller_environment_matches(environment,core)",
         "profile_is_private(&profile)",
@@ -1821,13 +1824,19 @@ fn validate_engine_windows_agent_context_boundary(
         "pub(crate)fncookie_destination(",
         "matches!(self.profile,AgentOwnedProfile::Automation{..})",
         "super::same_environment(&self.view.environment(),expected_environment)",
-        "self.attest(deadline)?",
+        "self.attest()?",
         "ifself.attest_suspension_state()?",
         "core.CookieManager()",
         "profile.cast::<ICoreWebView2Profile2>()",
         "pub(crate)fnclose(&mutself)->Result<(),wry::WebView2CleanupDebt>",
         "ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory",
         "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
+        "ifextensions_enabled{if!matches!(&profile,AgentOwnedProfile::Automation{..}){returnErr(AgentOwnedViewConstructionError::ExtensionIsolation);}",
+        "builder.with_browser_extension_startup_gate(move|environment,core|{",
+        "if!super::same_environment(&expected_environment,environment){returnErr(windows::Win32::Foundation::E_ACCESSDENIED.into());}",
+        "attest_profile(&expected_profile,environment,core,storage_class,&expected_path,)",
+        "letitems=super::extensions::list(&profile)",
+        "if!super::extensions::is_runtime_component(&id){returnErr(windows::Win32::Foundation::E_ACCESSDENIED.into());}",
     ] {
         if !adapter.contains(required) {
             return Err(format!(
@@ -1879,7 +1888,7 @@ fn validate_engine_windows_agent_context_boundary(
 
     let host = compact(host);
     for required in [
-        "ensure_windows_extension_profile_at_path",
+        "ensure_windows_profile_environment_at_path",
         "browser_process(view.view())",
         "install_content_policy_on_view(view.view(),&content_policy)",
         "resource.reclassify(NativeResourceClass::AgentContext)",
@@ -1899,7 +1908,7 @@ fn validate_engine_windows_agent_context_boundary(
         "self.agent_cookie_transfers.len()>=MAX_PENDING_COOKIE_TRANSFERS",
         "pending.destination_profile==destination_profile",
         "self.selected_profile_cookie_source(",
-        ".cookie_destination(&expected_environment,terminal_deadline)",
+        ".cookie_destination(&expected_environment)",
         "map_cookie_transfer_deadline(request.window(),admitted_at,Instant::now(),)",
         "schedule_content_policy_timeout(watchdog_duration",
         "fnfinish_windows_agent_cookie_transfer",
@@ -1941,6 +1950,19 @@ fn validate_engine_windows_agent_context_boundary(
         ("navigation gate", navigation.as_str()),
         ("host", host.as_str()),
     ] {
+        // Extension-enabled environments require Wry's pre-navigation gate even
+        // for Work's separate, extension-free automation subprofile. Admit only
+        // this adapter's one attestation hook; never extension loading or enablement.
+        let expected_gates = usize::from(label == "adapter");
+        if source
+            .matches("with_browser_extension_startup_gate")
+            .count()
+            != expected_gates
+        {
+            return Err(format!(
+                "production Windows agent-context {label} changed its startup gate authority"
+            ));
+        }
         for forbidden in [
             "with_ipc_handler",
             "with_initialization_script",
@@ -1952,6 +1974,11 @@ fn validate_engine_windows_agent_context_boundary(
             "keybd_event",
             "CGEvent",
             "native-agentic-input-probe",
+            "with_browser_extensions_enabled",
+            "extensions::add(",
+            "extensions::enable(",
+            "extensions::remove(",
+            "AddBrowserExtension",
         ] {
             if source.contains(forbidden) {
                 return Err(format!(
@@ -2262,7 +2289,8 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
         "Runtime.disable",
         "Runtime.callFunctionOn",
         "install_runtime_in_context_command",
-        "SEMANTIC_RUNTIME_PROGRAM.source()",
+        // 812c53c4: CDP installs the hash-pinned whitespace-compacted twin.
+        "SEMANTIC_RUNTIME_PROGRAM.cdp_source()",
         "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES",
         "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES",
         "MAX_SEMANTIC_WIRE_BYTES",
@@ -2490,6 +2518,42 @@ fn validate_owned_context_viewport_contract(
 
 fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String> {
     let source = compact(source);
+    if source.contains("program_probe") {
+        for required in [
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]#[path=\"agentic_semantic_program_probe.rs\"]modprogram_probe;",
+            "#[cfg(any(not(feature=\"native-agentic-semantic-probe\"),test))]usezephium_agentic::SEMANTIC_RUNTIME_PROGRAM;",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource=NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource=NSString::from_str(&program_probe::source());",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource_mismatch=source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source();",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource_mismatch=source.to_string()!=program_probe::source();",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]letbytes=program_probe::normalize_diagnostic(bytes);",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]prepared_fill:Option<program_probe::PreparedFill>,",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]prepared_fill:None,",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifletSome(mutprepared)=self.prepared_fill.take(){ifletSome(reply)=prepared.stop(){actions.push_reply(reply);}}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifbody==program_probe::PREPARE_MESSAGE&&program_probe::preparation_selected(){returnself.on_fill_preparation(reply);}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifself.prepared_fill.as_ref().is_some_and(program_probe::PreparedFill::waiting){returnself.fail_transport(Some(reply));}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]{self.prepared_fill=None;}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)fnpoll_prepared_fill(&self){letactions=self.transition(SemanticRuntimeChannelState::poll_fill_preparation);self.execute(actions);}",
+            "#[cfg(feature=\"native-agentic-semantic-probe\")]ifletErr(AgentSemanticActionRuntimeFailure::Result(SemanticActionRuntimeResultError::Runtime(fault),))=&outcome{program_probe::record_fault(fault);}",
+        ] {
+            if !source.contains(required) {
+                return Err(format!("fixed semantic qualification source escaped its exact gate: {required}"));
+            }
+        }
+        if source.matches("program_probe::source()").count() != 2 {
+            return Err("fixed semantic qualification acquired another source call".to_owned());
+        }
+    }
+    let expected_probe_gates = if source.contains("program_probe") {
+        // Includes stopping the existing preparation reply on authority loss
+        // and the regression proving late preparation cannot reopen it.
+        17
+    } else {
+        0
+    };
+    if source.matches("native-agentic-semantic-probe").count() != expected_probe_gates {
+        return Err("semantic runtime acquired an unreviewed diagnostic gate".to_owned());
+    }
     for required in [
         "addScriptMessageHandlerWithReply_contentWorld_name",
         "WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld",
@@ -2506,17 +2570,10 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES",
         "MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS",
         "SEMANTIC_RUNTIME_PROGRAM.source()",
-        "PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
-        "Document.prototype.getElementById",
-        "getOwnDescriptor(inputPrototype,'labels')",
-        "getOwnDescriptor(textareaPrototype,'labels')",
-        "attr(target,'aria-labelledby')",
-        "credentialLike(target,isInput)!==false",
-        "WKContentWorld::pageWorld",
-        "scripts.count()!=2",
-        "scripts.objectAtIndex(1)",
-        "Retained::as_ptr(&active.page_relay_world)!=Retained::as_ptr(&actual_page_world)",
-        "source.to_string()!=PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
+        "scripts.count()!=1",
+        "scripts.objectAtIndex(0)",
+        "Retained::as_ptr(&script)!=Retained::as_ptr(&active.script)",
+        "source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source()",
         "removeScriptMessageHandlerForName_contentWorld",
         "controller.removeAllScriptMessageHandlers()",
         "controller.removeAllUserScripts()",
@@ -2525,6 +2582,14 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "fndocument_committed",
         "fnrenderer_lost",
         "fncancel",
+        "fnrevoke_document_authority",
+        "fndraining_action",
+        "fnrevoked_settling_action",
+        "self.phase==DocumentPhase::AuthorityRevoked&&self.settling_action(attempt)",
+        "self.settling_action==Some(attempt)",
+        "super::semantic_action::map_runtime_fault(*fault)==zephium_agentic::SemanticActionNativeFailure::AppliedUnverified",
+        "DocumentPhase::AuthorityRevoked",
+        "self.awaiting_result&&matches!(self.pending,Some(PendingInvocation::Action{..}))",
         "fnretire",
         "fnadmission_failure(&mutself)->Option<AgentSemanticRuntimeDispatchError>",
         "DocumentPhase::Loading=>{returnSome(AgentSemanticRuntimeDispatchError::NotReady);}",
@@ -2542,9 +2607,11 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "evaluate_script",
         "with_ipc_handler",
         "std::env",
+        "PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
+        "WKContentWorld::pageWorld",
+        "page_relay",
         "ZEPHIUM_PAGE_WORLD_FILL_RELAY_PROBE",
         "native-agentic-input-probe",
-        "native-agentic-semantic-probe",
         "unreachable!",
     ] {
         if source.contains(forbidden) {
@@ -2552,12 +2619,6 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
                 "production macOS semantic runtime acquired forbidden surface {forbidden}"
             ));
         }
-    }
-    if source.matches("WKContentWorld::pageWorld").count() != 2 {
-        return Err(
-            "production macOS semantic runtime must install and attest one exact page world"
-                .to_owned(),
-        );
     }
     Ok(())
 }
@@ -2646,8 +2707,11 @@ fn validate_macos_rendering_presented_probe(
             ));
         }
     }
-    if source.matches(".orderFrontRegardless()").count() != 1
-        || source.matches(".setHidden(false)").count() != 1
+    // The release-excluded module owns two fixed presentation cohorts: the
+    // rendering witness and the AX-only witness. Each may present once; event
+    // dispatch remains owned solely by the rendering witness.
+    if source.matches(".orderFrontRegardless()").count() != 2
+        || source.matches(".setHidden(false)").count() != 2
         || source
             .matches(".nextEventMatchingMask_untilDate_inMode_dequeue(")
             .count()
@@ -2700,7 +2764,7 @@ fn validate_macos_rendering_presented_probe(
         "letnative_guard=ProbeNativeState::Hidden(NativeStateGuard{",
         "Self::Hidden(guard)=>guard.sample()",
         "ifletProbeNativeState::Presented(guard)=self.native_guard{guard.pump_appkit_event();}",
-        "ifmatches!(&mode,ProbeMode::RenderingPresented(_)){rendering_presented::initialize_inactive(&app)?;}",
+        "ifmatches!(&mode,ProbeMode::RenderingPresented(_))||ax_fill_probe||responder_case.is_some()||trusted_case.is_some()||surface_case.is_some(){rendering_presented::initialize_inactive(&app)?;}",
         "Self::Presented(guard)=>guard.sample()",
         "rendering_presented::measure(&view,context,operation,&url,&runtime,&host.view)",
     ] {
@@ -2998,6 +3062,36 @@ fn validate_macos_semantic_probe(
             ));
         }
     }
+    // Admits one evaluation (d006e649): the history witness arms and reads a
+    // pageshow counter through two fixed scripts; no page script is chosen at runtime.
+    const HISTORY_EVALUATION: &str =
+        "unsafe{page.evaluateJavaScript_completionHandler(&source,Some(&completion))};";
+    let scanned = if source.matches("evaluate_history_probe(").count() == 3
+        && source
+            .matches("evaluate_history_probe(page,\"(()=>{")
+            .count()
+            == 2
+        && source.matches(HISTORY_EVALUATION).count() == 1
+    {
+        source.replacen(HISTORY_EVALUATION, "", 1)
+    } else {
+        source.clone()
+    };
+    // Admits one activation (fd2d43d4): the Work qualifier host brings its own
+    // window forward only when it runs the shipping foreground presentation.
+    const FOREGROUND_HOST: &str = "app.activate();#[allow(deprecated)]app.activateIgnoringOtherApps(true);window.makeKeyAndOrderFront(None);window.makeMainWindow();";
+    let scanned = match scanned.split_once("fnrun_work_host(") {
+        Some((head, host))
+            if host.contains("letwindow=ifforeground{")
+                && scanned.matches(FOREGROUND_HOST).count() == 1 =>
+        {
+            format!(
+                "{head}fnrun_work_host({}",
+                host.replacen(FOREGROUND_HOST, "", 1)
+            )
+        }
+        _ => scanned,
+    };
     for forbidden in [
         "evaluateJavaScript",
         "callAsyncJavaScript",
@@ -3012,7 +3106,7 @@ fn validate_macos_semantic_probe(
         "activateIgnoringOtherApps",
         "activateWithOptions",
     ] {
-        if source.contains(forbidden) {
+        if scanned.contains(forbidden) {
             return Err(format!(
                 "macOS semantic probe acquired forbidden authority {forbidden}"
             ));
@@ -3026,13 +3120,15 @@ fn validate_macos_semantic_probe(
         "profile=ephemeral",
         "viewport=1280x800-logical",
         "fixture=loopback-only",
-        "snapshots=10",
-        "snapshots=14",
+        "snapshots=18",
+        "snapshots=22",
         "world_epochs=4",
         "fixed_click=verified",
         "click_postcondition=expanded",
-        "page_world_compatibility_fill=verified",
-        "controls=text-input,search-input,textarea",
+        "isolated_fixed_fill=verified",
+        "controls=text-input,search-input,textarea,contenteditable,nested-leaf",
+        "nested_delegated_model=retained",
+        "nested_context_attacks=6-refused-nonretryable",
         "fill_postcondition=exact-value",
         "event_trust=untrusted",
         "user_activation=0",
@@ -3043,7 +3139,7 @@ fn validate_macos_semantic_probe(
         "epoch_rotation_fill=verified",
         "focus_theft=0",
         "retained_views=0",
-        "hostile_terminal_spoof=refused",
+        "hostile_terminal_spoof=ignored",
         "hostile_cross_node_terminal=refused",
         "hostile_reparent_type_repurpose=applied-unverified",
         "hostile_reparent_recovery=verified",
@@ -3080,8 +3176,8 @@ fn validate_macos_semantic_probe(
         "connect-src'none'",
         "form-action'none'",
         "frame-src'self'",
-        "aria-expanded=\"false\"",
-        "primaryAction.setAttribute('aria-expanded','true')",
+        // 697c56d0: the primary action is a native disclosure, expanded by the page.
+        "<details><summaryid=\"primary-semantic-action\"><span>Primarysemanticaction</span></summary><p>Nativedisclosurecontent</p></details>",
         "Semantichostilefill",
         "Semantichostilerecovery",
         "Semantichostilecredentialfill",
@@ -3466,10 +3562,15 @@ fn validate_macos_probe_source(source: &str) -> Result<(), String> {
             .matches("window.makeFirstResponder(Some(page))")
             .count()
             != 2
+        // c8b75eba: the presentation responder may be owned native chrome, still preflighted.
         || source
             .matches("control.check()?;if!window.makeFirstResponder(Some(page))")
             .count()
-            != 2
+            != 1
+        || source
+            .matches("control.check()?;if!matchowned_surface{Some(surface)=>surface.focus_chrome(),None=>window.makeFirstResponder(Some(page)),}")
+            .count()
+            != 1
         || source.matches("page.accessibilityHitTest(screen)").count() != 1
         || source.matches("accessibilityPerformPress").count() != 2
     {
@@ -3802,7 +3903,6 @@ fn validate_windows_semantic_probe(
         ".with_incognito(true)",
         ".with_visible(false)",
         ".with_focused(false)",
-        ".with_browser_extensions_enabled(true)",
         "ContextProfileStorageClass::Ephemeral",
         "ContextOwnedViewport::STANDARD",
         "AgentOwnedProfile::automation(profile_id)",
@@ -4011,7 +4111,12 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         .and_then(|features| features.get("probe-harness"))
         .and_then(toml::Value::as_array)
         .ok_or_else(|| "zephium-agentic probe-harness feature is missing".to_owned())?;
-    if !harness.is_empty() {
+    // The harness may switch on the decision layer's eval corpus and nothing else.
+    let harness = harness
+        .iter()
+        .map(|entry| entry.as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    if harness != ["zephium-decision?/evals"] {
         return Err(
             "probe-harness must not activate an implicit dependency or shipping feature".to_owned(),
         );
@@ -4036,7 +4141,14 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "base64",
         "crc32fast",
         "futures-util",
+        // Pure pinned suffix data for same-site takeover checks (68a07141).
+        "psl",
         "reqwest",
+        // Optional provider-transport clients: structured requests (1783cf12),
+        // typed decisions and their Retry-After parsing (77e1dbcf).
+        "rig-core",
+        "httpdate",
+        "zephium-decision",
         "serde",
         "serde_json",
         "sha2",
@@ -4065,12 +4177,16 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         .filter_map(toml::Value::as_str)
         .collect::<BTreeSet<_>>();
     let expected_provider_transport = [
+        "dep:dirs",
         "dep:futures-util",
+        "dep:httpdate",
         "dep:reqwest",
+        "dep:rig-core",
         "dep:security-framework",
         "dep:security-framework-sys",
         "dep:tokio",
         "dep:zeroize",
+        "dep:zephium-decision",
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
@@ -4079,7 +4195,33 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     {
         return Err("zephium-agentic provider-transport feature graph drifted".to_owned());
     }
-    for runtime in ["futures-util", "reqwest", "tokio", "zeroize"] {
+    if dependencies
+        .get("psl")
+        .and_then(toml::Value::as_str)
+        .is_none_or(|version| version != "=2.1.220")
+    {
+        return Err("zephium-agentic suffix data must remain an exact plain pin".to_owned());
+    }
+    let macos = manifest
+        .get("target")
+        .and_then(|targets| targets.get("cfg(target_os = \"macos\")"))
+        .and_then(|target| target.get("dependencies"))
+        .and_then(toml::Value::as_table);
+    if macos
+        .and_then(|macos| macos.get("dirs"))
+        .is_some_and(|dirs| dirs.get("optional").and_then(toml::Value::as_bool) != Some(true))
+    {
+        return Err("zephium-agentic runtime dependency dirs must remain optional".to_owned());
+    }
+    for runtime in [
+        "futures-util",
+        "reqwest",
+        "tokio",
+        "zeroize",
+        "rig-core",
+        "httpdate",
+        "zephium-decision",
+    ] {
         if dependencies
             .get(runtime)
             .and_then(toml::Value::as_table)
@@ -4485,7 +4627,8 @@ fn validate_agent_input_metrics_contract(
         "pubstructAgentRunProviderInputSnapshot",
         "size_of::<AgentRunProviderInputSnapshot>()<=MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES",
         "pubstructAgentRunProviderInputMetrics",
-        "kinds:[AgentProviderInputKindMetrics;6]",
+        // 6e9aafba adds the Decision kind for typed decision inputs.
+        "kinds:[AgentProviderInputKindMetrics;7]",
         "receipts:Vec<AgentModelCallId>",
         "pubfntry_new(manifest:&AgentRunManifest,supervisor:&AgentRunSupervisor",
         "ifmanifest.plan_nodes().len()>MAX_AGENT_PLAN_NODES",
@@ -4826,7 +4969,12 @@ fn validate_agentic_default_core_panic_boundary(
         }
     }
 
-    let request = compact(request);
+    // Counted in production only; e351769d added a test encoder with the same signature.
+    let request = compact(
+        request
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(request, |(production, _)| production),
+    );
     if request
         .matches("transcript:&AgentProviderBoundTranscript")
         .count()
@@ -5064,7 +5212,9 @@ fn validate_agent_policy_settlement_contract(
     for required in [
         "pubconstMAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES:usize=256;",
         "size_of::<AgentRunPolicySettlement>()<=MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES",
-        "pubstructAgentRunPolicySettlement{closure:AgentRunMetricClosure,accounting:AgentPolicyAccounting,}",
+        // 1783cf12 adds one derived fact: every settled model call had exact usage.
+        "pubstructAgentRunPolicySettlement{closure:AgentRunMetricClosure,accounting:AgentPolicyAccounting,model_usage_exact:bool,}",
+        "model_usage_exact:metrics.snapshot().model().exact()==metrics.snapshot().model().calls(),",
         "pubstructAgentRunPolicySettlementRefusal{error:AgentRunPolicySettlementError,policy:AgentRunPolicy,audit:AgentAuditLedger,}",
         "pubconstfnaudit(&self)->&AgentAuditLedger{&self.audit}",
         "pubfninto_parts(self)->(AgentRunPolicy,AgentAuditLedger){(self.policy,self.audit)}",
@@ -5647,9 +5797,16 @@ fn validate_abortable_provider_operation_contract(source: &str) -> Result<(), St
     let count_disclosure = count
         .find("self.mark_input_count_disclosed()")
         .ok_or_else(|| "count drive no longer publishes disclosure before send".to_owned())?;
+    // 697c56d0: the free count call retries once on overload with a cloned request.
     let count_send = count
-        .find("response=request.send()=>response")
+        .find("response=send.send()=>response")
         .ok_or_else(|| "count drive send boundary is missing".to_owned())?;
+    if !count.contains("letSome(send)=request.try_clone()else{")
+        || !count
+            .contains("letretry=retries==0&&failure.class()==AgentProviderFailureClass::Overloaded")
+    {
+        return Err("count drive retry is no longer single and overload-only".to_owned());
+    }
     if !(count_driving < count_disclosure && count_disclosure < count_send) {
         return Err(
             "count drive must publish phase then disclosure before its first send poll".to_owned(),
@@ -5855,8 +6012,9 @@ fn validate_provider_transport_response_header_boundary(source: &str) -> Result<
     let count_content_length = count
         .find("!response_content_length_admitted(response.headers(),MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTESasu32,)")
         .ok_or_else(|| "provider count response content-length admission is missing".to_owned())?;
+    // 697c56d0: only an admitted OK leaves the bounded retry loop.
     let count_status = count
-        .find("ifresponse.status()!=StatusCode::OK")
+        .find("ifresponse.status()==StatusCode::OK{breakresponse;}")
         .ok_or_else(|| "provider count response status handling is missing".to_owned())?;
     let count_body = count
         .find("letmutstream=response.bytes_stream()")
@@ -5921,7 +6079,46 @@ fn validate_provider_transport_http2_ingress_boundary(source: &str) -> Result<()
     Ok(())
 }
 
-fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), String> {
+// These two synchronous login-Keychain loaders each retry Inaccessible once,
+// under the existing process-wide lock. No other thread or sleep is exempted.
+const KEYCHAIN_RETRY_SLEEP: &str = "std::thread::sleep(std::time::Duration::from_millis(40));";
+const KEYCHAIN_LOGIN_LOADER: &str = r#"fn load_keychain_login_credential<P: AgentCredentialBinding>(
+    provider: P,
+    service: &'static str,
+    account: &'static str,
+) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
+    let _turn = keychain_turn();
+    match read_keychain_login_credential(provider, service, account) {
+        Err(MacosAgentProviderCredentialError::Inaccessible) => {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            read_keychain_login_credential(provider, service, account)
+        }
+        loaded => loaded,
+    }
+}"#;
+const LEAD_KEYCHAIN_LOADER: &str = r#"pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
+        let _turn = turn();
+        match read_once(service) {
+            Err(LeadKeyError::Inaccessible) => {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                read_once(service)
+            }
+            read => read,
+        }
+    }"#;
+
+fn without_exact_keychain_retry(source: &str, loader: &str) -> Result<String, String> {
+    let loader = compact(loader);
+    if source.matches(&loader).count() != 1 {
+        return Err("Keychain loader changed its exact single 40 ms retry".to_owned());
+    }
+    Ok(source.replacen(&loader, &loader.replace(KEYCHAIN_RETRY_SLEEP, ""), 1))
+}
+
+fn validate_provider_transport_shutdown_contract(
+    source: &str,
+    lead_keys: &str,
+) -> Result<(), String> {
     let production = source
         .split_once("\n#[cfg(test)]\nmod tests")
         .map_or(source, |(production, _)| production);
@@ -5983,6 +6180,15 @@ fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), Str
             ));
         }
     }
+    let source = without_exact_keychain_retry(&source, KEYCHAIN_LOGIN_LOADER)?;
+    let lead_keys = without_exact_keychain_retry(&compact(lead_keys), LEAD_KEYCHAIN_LOADER)?;
+    for forbidden in ["std::thread", "thread::sleep("] {
+        if lead_keys.contains(forbidden) {
+            return Err(format!(
+                "lead Keychain loader acquired forbidden surface {forbidden}"
+            ));
+        }
+    }
     for forbidden in [
         "implAgentProviderTransportShutdownProof{pubfnnew(",
         "implAgentProviderTransportShutdownProof{pubconstfnnew(",
@@ -6036,7 +6242,10 @@ fn validate_provider_secret_diagnostic_contract(source: &str) -> Result<(), Stri
 
     let source = compact(source);
     for owner in [
-        "pubstructAgentProviderCredential{provider:AgentProviderKind,secret:Zeroizing<Vec<u8>>,}",
+        // 77e1dbcf: one owner, generic over a sealed closed set of two identities.
+        "pubstructAgentProviderCredential<P:AgentCredentialBinding=AgentProviderKind>{provider:P,secret:Zeroizing<Vec<u8>>,}",
+        "modcredential_binding{pubtraitSealed{}implSealedforcrate::AgentProviderKind{}implSealedforsuper::DecisionCredentialProvider{}}",
+        "pubtraitAgentCredentialBinding:credential_binding::Sealed+Copy+fmt::Debug{}",
         "structAgentProviderAttemptCredential{secret:Zeroizing<Vec<u8>>,}",
     ] {
         if !source.contains(owner) {
@@ -6280,7 +6489,11 @@ fn validate_semantic_locate_contract(
     let locate = compact(locate);
     for required in [
         "pubconstMAX_SEMANTIC_LOCATE_QUERY_BYTES:usize=1_024;",
-        "pubconstMAX_SEMANTIC_LOCATE_QUERY_TERMS:usize=16;",
+        // Capacity now derives from the unchanged public byte ceiling, with
+        // fixed bit storage and bounded per-frame ancestry caching. Match the
+        // current implementation rather than reinstating its old hidden limit.
+        "pubconstMAX_SEMANTIC_LOCATE_QUERY_TERMS:usize=MAX_SEMANTIC_LOCATE_QUERY_BYTES.div_ceil(2);",
+        "structQueryTermBits([u64;MAX_SEMANTIC_LOCATE_QUERY_TERMS.div_ceil(64)]);",
         "pubconstMAX_SEMANTIC_LOCATE_MATCHES:u8=32;",
         "||looks_like_secret_value(&source)",
         "ifterms.iter().all(|term|is_query_stopword(term))",
@@ -6292,9 +6505,11 @@ fn validate_semantic_locate_contract(
         "SemanticFrameBoundaryStatus::Observed{frame,..}=>Some(frame)",
         "Vec::<RankedMatch>::with_capacity(usize::from(request.budget.max_matches))",
         "ifnode.sensitivity()==SemanticSensitivity::Secret",
-        "letSome(candidate)=match_node(frame.nodes(),node_index,&request.query,&mutscratch)",
-        "ancestor_term_bits(nodes,node_index,&query.terms,scratch)",
-        "content_bits&required!=0&&(matched_terms>=2||exact_name_term)",
+        "letcandidate=match_node(node,&request.query,&mutscratch,inherited,&mutancestor_contributions[node_index],);",
+        "ancestor_term_bits(frame.nodes(),node_index,&ancestor_contributions)",
+        "letmutancestor_contributions=vec![QueryTermBits::default();frame.nodes().len()];",
+        "elseifcontent_anchor{",
+        "contains_normalized_phrase(&query.normalized,anchor)",
         "for_in0..MAX_SEMANTIC_DEPTH",
         "truncated:usize::from(matched_nodes)>matches.len()",
     ] {
@@ -6308,7 +6523,7 @@ fn validate_semantic_locate_contract(
         .find("ifnode.sensitivity()==SemanticSensitivity::Secret")
         .ok_or_else(|| "semantic locate secret exclusion is missing".to_owned())?;
     let matching = locate
-        .find("letSome(candidate)=match_node(frame.nodes(),node_index,&request.query,&mutscratch)")
+        .find("letcandidate=match_node(")
         .ok_or_else(|| "semantic locate matcher is missing".to_owned())?;
     if secret_check >= matching {
         return Err("semantic locate must exclude secret nodes before matching".to_owned());
@@ -6338,7 +6553,7 @@ fn validate_semantic_locate_contract(
         "SemanticLocateQuery::try_new(value)",
         "pubfninto_locate_query(self)->SemanticLocateQuery",
         "pubfntry_into_locate_scope(self,)->Result<SemanticLocateScope,AgentBrowserToolContractError>",
-        "Self::SurroundingText{..}=>Err(AgentBrowserToolContractError::Scope)",
+        "Self::SurroundingText{..}|Self::TextSearch{..}=>{Err(AgentBrowserToolContractError::Scope)}",
     ] {
         if !provider_tool.contains(required) {
             return Err(format!(
@@ -6501,7 +6716,7 @@ fn validate_semantic_read_continuation_contract(
     for required in [
         "pubfnbind_read_request(",
         "self.correlation.kind()!=AgentBrowserToolKind::Read",
-        "self.correlation.read_scope.as_ref(),read.scope()",
+        "self.correlation.read_scope.as_ref(),Some(super::AgentBrowserScopeProposal::Initial)",
         "Some(super::AgentBrowserScopeProposal::Initial)",
         "returnErr(AgentProviderContinuationError::Scope)",
         "if!read.matches_acknowledgement(&self.baseline)",
@@ -6640,7 +6855,7 @@ fn validate_semantic_extraction_provider_contract(
     for required in [
         "AgentBrowserToolProposal::Extract{schema,..}=>Some(*schema)",
         "extraction_schema:Option<SemanticExtractionSchemaId>",
-        "extraction_schema,extraction_scope,read_scope,navigation_target,provider_item_id:self.provider_item_id",
+        "extraction_schema,extraction_scope,read_scope,snapshot_scope,navigation_target,provider_item_id:self.provider_item_id",
         "AgentBrowserToolProposal::Read(scope)=>Some(scope.clone())",
     ] {
         if !provider_tool.contains(required) {
@@ -6656,7 +6871,8 @@ fn validate_semantic_extraction_provider_contract(
         "self.correlation.kind()!=AgentBrowserToolKind::Extract||self.correlation.extraction_schema!=Some(schema.id())",
         "if!read.matches_acknowledgement(&self.baseline)",
         "if!payload.matches(schema,read)",
-        "output_schema:super::request::bound_extraction_output_schema(schema)",
+        // 697c56d0 narrows the provider schema with the already-joined read.
+        "output_schema:super::request::bound_extraction_output_schema(schema,Some(read))",
         "pubstructAgentProviderBoundExtractionContinuation",
         "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
         "AgentProviderInputEvidence::Extraction(_)|AgentProviderInputEvidence::Screenshot(_)=>{returnNone;}",
@@ -6681,7 +6897,7 @@ fn validate_semantic_extraction_provider_contract(
         "continuation_transcript:None",
         "staticEXTRACTION_OUTPUT_SCHEMA:LazyLock<Value>",
         "project_anthropic_schema(output_schema)",
-        "pub(super)fnbound_extraction_output_schema(schema:&SemanticExtractionSchema)",
+        "pub(super)fnbound_extraction_output_schema(schema:&SemanticExtractionSchema,read:Option<&crate::SemanticReadResult<'_>>,)->Value",
         "AgentProviderInputEvidence::Extraction(receipt)",
     ] {
         if !provider_request.contains(required) {
@@ -6759,9 +6975,9 @@ fn validate_semantic_extraction_provider_contract(
         "pub(crate)fnprepare_provider_extraction_input(",
         "!input.delivery.matches(input.schema,input.read)",
         "matchinput.subtree_target",
-        "None=>{provider_read_taints(",
+        "None=>provider_extraction_read_taints(",
         "Some(target)=>provider_subtree_read_taints(",
-        "provider_read_taints(input.read,input.baseline,request.account(),&self.taints)?",
+        "provider_extraction_read_taints(input.read,input.baseline,request.account(),&self.taints,)?",
         "ModelInputKind::Extraction",
         "pubfncommit_extraction_input(",
     ] {
@@ -7021,9 +7237,13 @@ fn validate_semantic_execution_contract(
 
     let macos_action = compact(macos_action);
     for required in [
-        "!matches!(request.kind(),SemanticActionKind::Click|SemanticActionKind::Fill|SemanticActionKind::Select)",
+        "dispatch_guarded(_view,semantic,request,admitted_at,None,completion);",
+        "pub(super)fndispatch_guarded(",
+        "authority:Option<Box<dynFn()->bool>>",
+        // a246faf4: the adapter admits the shared closed set, pinned below.
+        "if!zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.kind())",
         "encode_semantic_action_runtime_invocation(&request)",
-        "semantic.dispatch_action(invocation,move|outcome|",
+        "semantic.dispatch_action_guarded(invocation,authority,move|outcome|",
         "Ok(evidence)=>complete_runtime_recipe(request,evidence,admitted_at)",
         "request.complete(evidence.backend(),evidence.readiness(),evidence.viewport(),evidence.geometry(),completed_at,completed_at,)",
     ] {
@@ -7055,6 +7275,19 @@ fn validate_semantic_execution_contract(
                 "macOS semantic action adapter acquired forbidden authority {forbidden}"
             ));
         }
+    }
+    Ok(())
+}
+
+// The macOS adapter's closed action set: Click, Fill, Select, Press and Scroll.
+fn validate_snapshot_action_kinds(provider: &str) -> Result<(), String> {
+    if !compact(provider).contains(concat!(
+        "pubconstAGENT_BROWSER_SNAPSHOT_ACTION_KINDS:[crate::SemanticActionKind;5]=[",
+        "crate::SemanticActionKind::Click,crate::SemanticActionKind::Fill,",
+        "crate::SemanticActionKind::Select,crate::SemanticActionKind::Press,",
+        "crate::SemanticActionKind::Scroll,];",
+    )) {
+        return Err("snapshot action kinds widened beyond the closed native set".to_owned());
     }
     Ok(())
 }
@@ -8368,6 +8601,14 @@ fn validate_agent_app_lifecycle(
         }
     }
     let desktop_manifest = compact_without_line_comments(desktop_manifest);
+    // Admits only the debug QA inspection lane (17dc25ff); that engine feature
+    // refuses optimized builds and stays out of the ordinary graph.
+    const QA_LANE: &str = "work-integration-qa=[\"work-development-traces\",\"tauri/custom-protocol\",\"zephium-engine/agentic-browser-qa\"]";
+    let desktop_manifest = if desktop_manifest.matches("agentic-browser-qa").count() == 1 {
+        desktop_manifest.replacen(QA_LANE, "", 1)
+    } else {
+        desktop_manifest
+    };
     for forbidden in [
         "zephium-app/agentic-browser",
         "zephium-engine/agentic-browser",
@@ -8381,7 +8622,7 @@ fn validate_agent_app_lifecycle(
 
     let root = compact_without_line_comments(root);
     for required in [
-        "#[cfg(feature=\"agentic-browser\")]pubuseactor::{spawn_agentic,spawn_agentic_suspended,AgenticLifecycles,AgenticSpawnFailure};",
+        "#[cfg(feature=\"agentic-browser\")]pubuseactor::{spawn_agentic,spawn_agentic_suspended,AgenticSpawnFailure};",
         "#[cfg(feature=\"agentic-browser\")]pubuseapi::AgentLifecycle;",
     ] {
         if !root.contains(required) {
@@ -8408,14 +8649,12 @@ fn validate_agent_app_lifecycle(
         "typeFailure=AgenticSpawnFailure;",
         "structShellHandoff<Agent=NoAgentLifecycle>",
         "agent_lifecycle:Agent,",
-        "pubstructAgenticLifecycles{extension:ExtensionLifecycle,agent:AgentLifecycle,}",
-        "pubfninto_parts(self)->(ExtensionLifecycle,AgentLifecycle)",
-        "pubstructAgenticSpawnFailure{error:SpawnError,extension_lifecycle:ExtensionLifecycle,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
-        "pubfninto_parts(self)->(SpawnError,ExtensionLifecycle,AgentLifecycle)",
+        "pubstructAgenticSpawnFailure{error:SpawnError,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
+        "pubfninto_parts(self)->(SpawnError,AgentLifecycle)",
         "pubfnspawn_agentic_suspended(",
         "agent_lifecycle:PendingAgentBrowserLifecycle(agent_lifecycle),",
         "#[cfg_attr(not(test),deny(clippy::panic,clippy::unreachable,clippy::unwrap_used))]fnspawn_suspended_with_worker_spawner",
-        "lethandoff=ShellHandoff{engine,store,blocker,extension_service,agent_lifecycle,terminal_failure,chrome,emit,};",
+        "lethandoff=ShellHandoff{engine,store,blocker,agent_lifecycle,terminal_failure,chrome,emit,};",
         "ShellHandoff<Agent>",
         "ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle())",
     ] {
@@ -8431,9 +8670,7 @@ fn validate_agent_app_lifecycle(
         );
     }
     for forbidden in [
-        "letmutextension_service=Some(extension_service)",
         "letmutagent_lifecycle=Some(agent_lifecycle)",
-        "expect(\"pendingextension-serviceownerisunique\")",
         "expect(\"pendingagentlifecycleownerisunique\")",
     ] {
         if actor.contains(forbidden) {
@@ -8478,18 +8715,15 @@ fn validate_agent_app_lifecycle(
     let agent = ordered
         .find("self.shutdown_agent_lifecycle_until(deadline)")
         .ok_or_else(|| "application agent lifecycle shutdown is missing".to_owned())?;
-    let extension = ordered
-        .find("self.shutdown_extension_service_until(deadline)")
-        .ok_or_else(|| "application extension lifecycle shutdown is missing".to_owned())?;
     let store = ordered
         .find("self.store.shutdown_until(deadline)")
         .ok_or_else(|| "application terminal Store shutdown is missing".to_owned())?;
     let engine = ordered
         .rfind("self.shutdown_native_and_blocker_until(deadline)")
         .ok_or_else(|| "application terminal engine shutdown is missing".to_owned())?;
-    if !(flush < agent && agent < extension && extension < store && store < engine) {
+    if !(flush < agent && agent < store && store < engine) {
         return Err(
-            "agent lifecycle must follow retryable durability preflight and precede extension, Store, and engine teardown"
+            "agent lifecycle must follow retryable durability preflight and precede Store and engine teardown"
                 .to_owned(),
         );
     }
@@ -8504,7 +8738,6 @@ fn validate_agent_app_lifecycle(
     let unexpected = &shell[unexpected_start..unexpected_end];
     for required in [
         "self.shutdown_agent_lifecycle_until(deadline)",
-        "self.shutdown_extension_service_until(deadline)",
         "self.store.shutdown_until(deadline)",
         "self.shutdown_native_and_blocker_until(deadline)",
     ] {
@@ -8578,7 +8811,8 @@ fn validate_store_agent_audit_boundary(
         "pending.checked_sub(1)",
         "self.admission.store(usize::MAX,Ordering::Release)",
         "implAgentAuditPortforSqliteStore",
-        "self.lifecycle.try_lock()",
+        // ca429d28: shared non-blocking read admission; shutdown holds the write side.
+        "self.lifecycle.try_read()",
         "Err(TryLockError::WouldBlock)=>",
         "lifecycle.terminal_admitted||self.shutdown_clean.load(Ordering::Acquire)",
         "AgentAuditDeliveryPermit::acquire(&self.agent_audit_delivery_admission)",
@@ -8746,6 +8980,14 @@ fn validate_agent_context_shutdown_barrier_contract(
 
 fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
     let source_directory = repository.join(AGENTIC_SOURCE_DIRECTORY);
+    // The provider-transport module now spans a directory (1783cf12, 77e1dbcf),
+    // and public_asset.rs (376918e4) is its cookie-free fetch; both stay behind
+    // the optional feature, so they sit outside the zero-idle core.
+    let root = compact(&read(repository.join(AGENTIC_ROOT))?);
+    if !root.contains("#[cfg(feature=\"provider-transport\")]pubmodpublic_asset;") {
+        return Err("zephium-agentic public asset fetch escaped provider-transport".to_owned());
+    }
+    let transport = source_directory.join("provider_transport");
     let mut files = Vec::new();
     collect_files(&source_directory, &mut files)?;
     for path in files {
@@ -8760,14 +9002,19 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
             continue;
         }
         let source = read(&path)?;
-        validate_agentic_zero_idle_source(
-            &path
-                .strip_prefix(repository)
-                .unwrap_or(&path)
-                .display()
-                .to_string(),
-            &source,
-        )?;
+        let transport_owned = path.starts_with(&transport)
+            || path.parent() == Some(source_directory.as_path())
+                && path.file_name().and_then(|name| name.to_str()) == Some("public_asset.rs");
+        if !transport_owned {
+            validate_agentic_zero_idle_source(
+                &path
+                    .strip_prefix(repository)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+                &source,
+            )?;
+        }
         validate_agentic_no_direct_logging_calls(
             &path
                 .strip_prefix(repository)
@@ -8829,7 +9076,13 @@ fn validate_shipping_sources(repository: &Path) -> Result<(), String> {
         // by the Work composition boundary. No other shipping diagnostic edge
         // is exempted from this scan.
         let source = if path == repository.join(APP_MANIFEST) {
-            source.replace("work-execution-probe = [\"work-execution\", \"zephium-agent-controller/probe-harness\"]", "")
+            source
+                .replace("work-execution-probe = [\"work-execution\", \"zephium-agent-controller/probe-harness\"]", "")
+                // 68d28d51: the synthesis diagnostic lane, refused in optimized builds.
+                .replacen("# Explicit public synthesis diagnostics; agentic refuses probe-harness in optimized builds.\nwork-synthesis-probe = [\"work-runtime\", \"zephium-agentic/probe-harness\"]", "", 1)
+        } else if path == repository.join(DESKTOP_MANIFEST) {
+            // a119435e: the debug Work trace lane; probe-harness refuses optimized builds.
+            source.replacen("work-development-traces = [\"work-product\", \"zephium-work-composition/public-qualification\", \"zephium-work-composition/retained-lifetime-diagnostic\", \"zephium-agentic/probe-harness\"]", "", 1)
         } else {
             source
         };
@@ -8878,6 +9131,9 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
     let provider_transport = package_names
         .get("zephium-agent-provider-transport")
         .ok_or_else(|| "cargo metadata is missing zephium-agent-provider-transport".to_owned())?;
+    let controller = package_names
+        .get("zephium-agent-controller")
+        .ok_or_else(|| "cargo metadata is missing zephium-agent-controller".to_owned())?;
     let resolve = metadata
         .resolve
         .as_ref()
@@ -8887,10 +9143,65 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect::<BTreeMap<_, _>>();
+    // a119435e ships Work by default: desktop's `work-product` links the
+    // provider-transport runtime and the app/engine agent lifecycle. Only those
+    // product features are admitted; every probe/harness feature stays refused.
+    let work_product = graph.get(*desktop).is_some_and(|node| {
+        node.features
+            .iter()
+            .any(|feature| feature == "work-product")
+    });
     let mut pending = vec![*desktop];
     let mut visited = BTreeSet::new();
     while let Some(package) = pending.pop() {
         if !visited.insert(package) {
+            continue;
+        }
+        if let Some(node) = graph.get(package).filter(|_| work_product) {
+            let admitted: &[&str] = if package == *agentic {
+                &["default", "provider-transport"]
+            } else if package == *app {
+                &[
+                    "agentic-browser",
+                    "work-execution",
+                    "work-planning",
+                    "work-runtime",
+                ]
+            } else if package == *provider_transport || package == *controller {
+                &["default", "provider-transport"]
+            } else {
+                &[]
+            };
+            if (package == *agentic
+                || package == *app
+                || package == *provider_transport
+                || package == *controller)
+                && node
+                    .features
+                    .iter()
+                    .any(|feature| !admitted.contains(&feature.as_str()))
+            {
+                return Err(
+                    "ordinary zephium-desktop Work product graph activates an unreviewed agentic feature"
+                        .to_owned(),
+                );
+            }
+            if package == *engine
+                && node.features.iter().any(|feature| {
+                    matches!(
+                        feature.as_str(),
+                        "agentic-browser-qa"
+                            | "native-agentic-input-probe"
+                            | "native-agentic-semantic-probe"
+                    )
+                })
+            {
+                return Err(
+                    "ordinary zephium-desktop Work product graph activates a native agentic probe"
+                        .to_owned(),
+                );
+            }
+            pending.extend(node.dependencies.iter().map(String::as_str));
             continue;
         }
         if package == *provider_transport {
@@ -9156,10 +9467,18 @@ mod tests {
         let valid = r#"
             /// Credential owner.
             #[must_use]
-            pub struct AgentProviderCredential {
-                provider: AgentProviderKind,
+            pub struct AgentProviderCredential<P: AgentCredentialBinding = AgentProviderKind> {
+                provider: P,
                 secret: Zeroizing<Vec<u8>>,
             }
+
+            mod credential_binding {
+                pub trait Sealed {}
+                impl Sealed for crate::AgentProviderKind {}
+                impl Sealed for super::DecisionCredentialProvider {}
+            }
+
+            pub trait AgentCredentialBinding: credential_binding::Sealed + Copy + fmt::Debug {}
 
             struct AgentProviderAttemptCredential {
                 secret: Zeroizing<Vec<u8>>,
@@ -9196,6 +9515,10 @@ mod tests {
             .expect("zeroizing, redacted credential diagnostic boundary");
         for invalid in [
             valid.replacen("Zeroizing<Vec<u8>>", "Vec<u8>", 1),
+            valid.replace(
+                "impl Sealed for super::DecisionCredentialProvider {}",
+                "impl Sealed for super::DecisionCredentialProvider {}\n impl Sealed for String {}",
+            ),
             valid.replace("value.set_sensitive(true);", ""),
             valid.replace(
                 "formatter.field(\"secret\", &\"[redacted]\");",
@@ -9510,16 +9833,16 @@ mod tests {
                 .is_err()
         );
         let invalid_actor = actor.replace(
-            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle, AgentLifecycle)",
-            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle)",
+            "pub fn into_parts(self) -> (SpawnError, AgentLifecycle)",
+            "pub fn into_parts(self) -> SpawnError",
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
                 .is_err()
         );
         let invalid_actor = actor.replace(
-            "        extension_service,\n        agent_lifecycle,\n        terminal_failure,",
-            "        extension_service: Some(extension_service)\n            .take()\n            .expect(\"pending extension-service owner is unique\"),\n        agent_lifecycle,\n        terminal_failure,",
+            "        blocker,\n        agent_lifecycle,\n        terminal_failure,",
+            "        blocker,\n        agent_lifecycle: Some(agent_lifecycle)\n            .take()\n            .expect(\"pending agent lifecycle owner is unique\"),\n        terminal_failure,",
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
@@ -9535,8 +9858,8 @@ mod tests {
                 .is_err()
         );
         let invalid_shell = shell.replacen(
-            "let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let extension_service_clean = self.shutdown_extension_service_until(deadline);",
-            "let extension_service_clean = self.shutdown_extension_service_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);",
+            "self.shutdown_agent_lifecycle_until(deadline)",
+            "self.shutdown_agent_lifecycle_after_store(deadline)",
             1,
         );
         assert!(
@@ -9552,6 +9875,26 @@ mod tests {
             validate_agent_app_lifecycle(manifest, root, api, actor, shell, &invalid_desktop)
                 .is_err()
         );
+        for invalid_desktop in [
+            desktop.replace(
+                "work-product = [",
+                "work-product = [\n    \"zephium-engine/agentic-browser-qa\",",
+            ),
+            desktop.replace(
+                "\"zephium-engine/agentic-browser-qa\"]",
+                "\"zephium-engine/agentic-browser\"]",
+            ),
+        ] {
+            assert!(validate_agent_app_lifecycle(
+                manifest,
+                root,
+                api,
+                actor,
+                shell,
+                &invalid_desktop
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -9567,7 +9910,7 @@ mod tests {
                 "MAX_PENDING_AGENT_AUDIT_DELIVERIES: usize = 8",
                 "MAX_PENDING_AGENT_AUDIT_DELIVERIES: usize = 9",
             ),
-            actor.replace("self.lifecycle.try_lock()", "self.lifecycle.lock()"),
+            actor.replace("self.lifecycle.try_read()", "self.lifecycle.read()"),
             actor.replace(
                 ".try_send(Cmd::AppendAgentAudit",
                 ".send(Cmd::AppendAgentAudit",
@@ -9779,6 +10122,10 @@ mod tests {
                     id: "transport".to_owned(),
                     name: "zephium-agent-provider-transport".to_owned(),
                 },
+                CargoPackage {
+                    id: "controller".to_owned(),
+                    name: "zephium-agent-controller".to_owned(),
+                },
             ],
             resolve: Some(CargoResolve {
                 nodes: vec![
@@ -9807,8 +10154,104 @@ mod tests {
                         dependencies: Vec::new(),
                         features: Vec::new(),
                     },
+                    CargoNode {
+                        id: "controller".to_owned(),
+                        dependencies: vec!["transport".to_owned()],
+                        features: Vec::new(),
+                    },
                 ],
             }),
+        }
+    }
+
+    fn with_features(mut graph: CargoMetadata, id: &str, features: &[&str]) -> CargoMetadata {
+        graph
+            .resolve
+            .as_mut()
+            .expect("resolve")
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == id)
+            .expect("node")
+            .features
+            .extend(features.iter().map(|feature| (*feature).to_owned()));
+        graph
+    }
+
+    #[test]
+    fn snapshot_action_kinds_remain_the_closed_native_set() {
+        let provider = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
+        validate_snapshot_action_kinds(provider).expect("closed snapshot action kinds");
+        assert!(validate_snapshot_action_kinds(&provider.replace(
+            "crate::SemanticActionKind::Scroll,\n];",
+            "crate::SemanticActionKind::Scroll,\n    crate::SemanticActionKind::Navigate,\n];"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn snapshot_press_does_not_admit_a_sixth_or_substitute_action() {
+        let provider = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
+        validate_snapshot_action_kinds(provider).expect("five reviewed native actions");
+        for invalid in [
+            provider.replacen(
+                "crate::SemanticActionKind::Press,",
+                "crate::SemanticActionKind::Navigate,",
+                1,
+            ),
+            provider.replacen("crate::SemanticActionKind::Press,", "", 1),
+            provider
+                .replacen(
+                    "crate::SemanticActionKind::Press,",
+                    "crate::SemanticActionKind::Press, crate::SemanticActionKind::Navigate,",
+                    1,
+                )
+                .replacen(
+                    "[crate::SemanticActionKind; 5]",
+                    "[crate::SemanticActionKind; 6]",
+                    1,
+                ),
+        ] {
+            assert_ne!(invalid, provider);
+            assert!(validate_snapshot_action_kinds(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn work_product_graph_admits_only_its_reviewed_runtime_features() {
+        let product = || {
+            let graph = metadata(vec![
+                "app".to_owned(),
+                "engine".to_owned(),
+                "controller".to_owned(),
+                "agentic".to_owned(),
+            ]);
+            let graph = with_features(graph, "desktop", &["default", "work-product"]);
+            let graph = with_features(graph, "agentic", &["default", "provider-transport"]);
+            let graph = with_features(graph, "transport", &["default", "provider-transport"]);
+            let graph = with_features(graph, "controller", &["default", "provider-transport"]);
+            let graph = with_features(
+                graph,
+                "app",
+                &[
+                    "agentic-browser",
+                    "work-execution",
+                    "work-planning",
+                    "work-runtime",
+                ],
+            );
+            with_features(graph, "engine", &["agentic-browser"])
+        };
+        validate_release_graph(&product()).expect("reviewed Work product graph");
+        for (id, feature) in [
+            ("agentic", "probe-harness"),
+            ("controller", "probe-harness"),
+            ("transport", "probe-harness"),
+            ("app", "work-execution-probe"),
+            ("engine", "agentic-browser-qa"),
+            ("engine", "native-agentic-semantic-probe"),
+        ] {
+            assert!(validate_release_graph(&with_features(product(), id, &[feature])).is_err());
         }
     }
 
@@ -9991,6 +10434,32 @@ mod tests {
             policy,
         )
         .expect("bounded semantic locate");
+        // The advertised byte bound must govern fixed term storage. Restoring
+        // an unrelated term ceiling or an unbounded cache is checker-visible.
+        for changed in [
+            locate.replace("MAX_SEMANTIC_LOCATE_QUERY_BYTES.div_ceil(2)", "usize::MAX"),
+            locate.replace(
+                "[u64; MAX_SEMANTIC_LOCATE_QUERY_TERMS.div_ceil(64)]",
+                "Vec<u64>",
+            ),
+            locate.replace(
+                "vec![QueryTermBits::default(); frame.nodes().len()]",
+                "Vec::new()",
+            ),
+        ] {
+            assert_ne!(changed, locate);
+            assert!(validate_semantic_locate_contract(
+                root,
+                &changed,
+                locate_model,
+                provider_root,
+                provider_tool,
+                continuation,
+                provider_request,
+                policy
+            )
+            .is_err());
+        }
         assert!(validate_semantic_locate_contract(
             root,
             &locate.replace("|| looks_like_secret_value(&source)", ""),
@@ -10019,7 +10488,7 @@ mod tests {
             locate_model,
             provider_root,
             &provider_tool.replace(
-                "Self::SurroundingText { .. } => Err(AgentBrowserToolContractError::Scope)",
+                "Self::SurroundingText { .. } | Self::TextSearch { .. } => {\n                Err(AgentBrowserToolContractError::Scope)\n            }",
                 "Self::SurroundingText { target, .. } => Ok(SemanticLocateScope::Subtree(target))",
             ),
             continuation,
@@ -10446,12 +10915,13 @@ mod tests {
             fn capture_semantic_screenshot(&self) {}
         "#;
         let macos_action = r#"
-            if !matches!(
-                request.kind(),
-                SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
-            ) {}
+            dispatch_guarded(_view, semantic, request, admitted_at, None, completion);
+            pub(super) fn dispatch_guarded(
+                authority: Option<Box<dyn Fn() -> bool>>,
+            ) {
+            if !zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.kind()) {}
             encode_semantic_action_runtime_invocation(&request);
-            semantic.dispatch_action(invocation, move |outcome| {
+            semantic.dispatch_action_guarded(invocation, authority, move |outcome| {
                 match outcome {
                     Ok(evidence) => complete_runtime_recipe(request, evidence, admitted_at),
                     Err(_) => unreachable!(),
@@ -10465,6 +10935,7 @@ mod tests {
                 completed_at,
                 completed_at,
             );
+            }
         "#;
         validate_semantic_execution_contract(
             root,
@@ -11648,7 +12119,7 @@ mod tests {
                     <= MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES
             );
             pub struct AgentRunProviderInputMetrics {
-                kinds: [AgentProviderInputKindMetrics; 6],
+                kinds: [AgentProviderInputKindMetrics; 7],
                 receipts: Vec<AgentModelCallId>,
             }
             pub fn try_new(
@@ -12099,8 +12570,8 @@ mod tests {
             publish = false
             [features]
             default = []
-            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys"]
-            probe-harness = []
+            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:rig-core", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys", "dep:dirs", "dep:zephium-decision", "dep:httpdate"]
+            probe-harness = ["zephium-decision?/evals"]
             [[bin]]
             name = "windows-agentic-input-evidence-review"
             path = "src/bin/windows_agentic_input_evidence_review.rs"
@@ -12113,7 +12584,9 @@ mod tests {
             base64 = "0.22"
             crc32fast = "1"
             futures-util = { version = "1", optional = true }
+            psl = "=2.1.220"
             reqwest = { version = "1", optional = true }
+            rig-core = { version = "1", optional = true }
             serde = "1"
             serde_json = "1"
             sha2 = "1"
@@ -12122,12 +12595,47 @@ mod tests {
             ulid = "1"
             url = "2"
             zeroize = { version = "1", optional = true }
+            zephium-decision = { workspace = true, optional = true }
+            httpdate = { version = "1", optional = true }
             zephium-core = "1"
             [target.'cfg(target_os = "macos")'.dependencies]
             security-framework = { version = "1", optional = true }
             security-framework-sys = { version = "1", optional = true }
+            dirs = { version = "1", optional = true }
         "#;
         validate_manifest(manifest).expect("closed functional-core manifest");
+        for (optional, eager) in [
+            (
+                "zephium-decision = { workspace = true, optional = true }",
+                "zephium-decision.workspace = true",
+            ),
+            (
+                "rig-core = { version = \"1\", optional = true }",
+                "rig-core = \"1\"",
+            ),
+            (
+                "httpdate = { version = \"1\", optional = true }",
+                "httpdate = \"1\"",
+            ),
+            (
+                "dirs = { version = \"1\", optional = true }",
+                "dirs = \"1\"",
+            ),
+            ("psl = \"=2.1.220\"", "psl = \"2\""),
+        ] {
+            assert!(validate_manifest(&manifest.replace(optional, eager)).is_err());
+        }
+        for harness in [
+            "[\"zephium-decision/evals\"]",
+            "[\"dep:zephium-decision\"]",
+            "[]",
+        ] {
+            assert!(validate_manifest(&manifest.replace(
+                "probe-harness = [\"zephium-decision?/evals\"]",
+                &format!("probe-harness = {harness}")
+            ))
+            .is_err());
+        }
         assert!(validate_manifest(&manifest.replace(
             "tokio = { version = \"1\", optional = true }",
             "tokio = \"1\""
@@ -12583,7 +13091,9 @@ mod tests {
     #[test]
     fn provider_transport_shutdown_proof_requires_sticky_seal_and_exact_idle() {
         let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
-        validate_provider_transport_shutdown_contract(root)
+        let lead_keys =
+            include_str!("../../crates/zephium-agentic/src/provider_transport/lead/keys.rs");
+        validate_provider_transport_shutdown_contract(root, lead_keys)
             .expect("provider transport shutdown proof boundary");
 
         for (index, invalid) in [
@@ -12627,9 +13137,53 @@ mod tests {
         .enumerate()
         {
             assert!(
-                validate_provider_transport_shutdown_contract(&invalid).is_err(),
+                validate_provider_transport_shutdown_contract(&invalid, lead_keys).is_err(),
                 "provider shutdown proof mutation {index} was not rejected"
             );
+        }
+    }
+
+    #[test]
+    fn keychain_retry_exceptions_are_single_exact_and_loader_local() {
+        let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
+        let keys = include_str!("../../crates/zephium-agentic/src/provider_transport/lead/keys.rs");
+        validate_provider_transport_shutdown_contract(root, keys).expect("reviewed retries");
+        for (source, loader, is_lead) in [
+            (root, KEYCHAIN_LOGIN_LOADER, false),
+            (keys, LEAD_KEYCHAIN_LOADER, true),
+        ] {
+            for changed in [
+                loader.replace("from_millis(40)", "from_millis(41)"),
+                loader.replace(
+                    KEYCHAIN_RETRY_SLEEP,
+                    &format!("{KEYCHAIN_RETRY_SLEEP}{KEYCHAIN_RETRY_SLEEP}"),
+                ),
+                loader.replace(
+                    KEYCHAIN_RETRY_SLEEP,
+                    &format!("loop {{ {KEYCHAIN_RETRY_SLEEP} }}"),
+                ),
+                loader.replace("::Inaccessible)", "::Missing)"),
+                loader
+                    .replace("let _turn = keychain_turn();", "")
+                    .replace("let _turn = turn();", ""),
+            ] {
+                assert_ne!(changed, loader);
+                let invalid = source.replacen(loader, &changed, 1);
+                let result = if is_lead {
+                    validate_provider_transport_shutdown_contract(root, &invalid)
+                } else {
+                    validate_provider_transport_shutdown_contract(&invalid, keys)
+                };
+                assert!(result.is_err());
+            }
+            // The identical sleep outside its approved loader is still forbidden.
+            let invalid = format!("fn outside_loader() {{ {KEYCHAIN_RETRY_SLEEP} }}\n{source}");
+            let result = if is_lead {
+                validate_provider_transport_shutdown_contract(root, &invalid)
+            } else {
+                validate_provider_transport_shutdown_contract(&invalid, keys)
+            };
+            assert!(result.is_err());
         }
     }
 
@@ -13177,7 +13731,7 @@ mod tests {
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
             run_macos_agentic_semantic_probe();
-            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=10 snapshots=14 world_epochs=4 fixed_click=verified click_postcondition=expanded page_world_compatibility_fill=verified controls=text-input,search-input,textarea fill_postcondition=exact-value event_trust=untrusted user_activation=0 popup_admitted=0 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified epoch_rotation_fill=verified focus_theft=0 retained_views=0 hostile_terminal_spoof=refused hostile_cross_node_terminal=refused hostile_reparent_type_repurpose=applied-unverified hostile_reparent_recovery=verified hostile_credential_relabel=applied-unverified hostile_credential_recovery=verified";
+            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=18 snapshots=22 world_epochs=4 fixed_click=verified click_postcondition=expanded isolated_fixed_fill=verified controls=text-input,search-input,textarea,contenteditable,nested-leaf nested_delegated_model=retained nested_context_attacks=6-refused-nonretryable fill_postcondition=exact-value event_trust=untrusted user_activation=0 popup_admitted=0 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified epoch_rotation_fill=verified focus_theft=0 retained_views=0 hostile_terminal_spoof=ignored hostile_cross_node_terminal=refused hostile_reparent_type_repurpose=applied-unverified hostile_reparent_recovery=verified hostile_credential_relabel=applied-unverified hostile_credential_recovery=verified";
         "#;
         let semantic_fixture = r#"
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
@@ -13198,8 +13752,7 @@ mod tests {
             "<script defer src="/semantic-runtime-mutation-trigger-v1.js"></script>";
             FixtureScriptPolicy::SameOrigin;
             "connect-src 'none'; form-action 'none'; frame-src 'self'";
-            aria-expanded="false";
-            primaryAction.setAttribute('aria-expanded', 'true');
+            <details><summary id="primary-semantic-action"><span>Primary semantic action</span></summary><p>Native disclosure content</p></details>
             "Semantic hostile fill";
             "Semantic hostile recovery";
             "Semantic hostile credential fill";
@@ -13404,25 +13957,27 @@ mod tests {
             MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES;
             MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS;
             SEMANTIC_RUNTIME_PROGRAM.source();
-            PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
-            Document.prototype.getElementById;
-            getOwnDescriptor(inputPrototype, 'labels');
-            getOwnDescriptor(textareaPrototype, 'labels');
-            attr(target, 'aria-labelledby');
-            credentialLike(target, isInput) !== false;
-            WKContentWorld::pageWorld();
-            if scripts.count() != 2 {}
-            scripts.objectAtIndex(1);
-            let actual_page_world = WKContentWorld::pageWorld();
-            Retained::as_ptr(&active.page_relay_world)
-                != Retained::as_ptr(&actual_page_world);
-            source.to_string() != PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
+            if scripts.count() != 1 {}
+            let script = scripts.objectAtIndex(0);
+            Retained::as_ptr(&script) != Retained::as_ptr(&active.script);
+            source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source();
             removeScriptMessageHandlerForName_contentWorld();
             controller.removeAllScriptMessageHandlers();
             controller.removeAllUserScripts();
             fn begin_document_load() {}
             fn prepare_document_load() {}
             fn document_committed() {}
+            fn revoke_document_authority() {}
+            fn draining_action() {
+                self.phase == DocumentPhase::AuthorityRevoked && self.settling_action(attempt);
+                self.settling_action == Some(attempt);
+                super::semantic_action::map_runtime_fault(*fault) ==
+                    zephium_agentic::SemanticActionNativeFailure::AppliedUnverified;
+                DocumentPhase::AuthorityRevoked;
+                self.awaiting_result &&
+                    matches!(self.pending, Some(PendingInvocation::Action { .. }));
+            }
+            fn revoked_settling_action() {}
             fn renderer_lost() {}
             fn cancel() {}
             fn retire() {}
@@ -13444,6 +13999,10 @@ mod tests {
             "{runtime}\nevaluateJavaScript();"
         ))
         .is_err());
+        assert!(validate_engine_semantic_runtime_boundary(&format!(
+            "{runtime}\nWKContentWorld::pageWorld();"
+        ))
+        .is_err());
         assert!(validate_engine_semantic_runtime_boundary(
             &runtime.replace("message.frameInfo();", "")
         )
@@ -13453,6 +14012,58 @@ mod tests {
             "unreachable!();",
         ))
         .is_err());
+    }
+
+    #[test]
+    fn isolated_command_program_cannot_escape_diagnostic_install_or_attestation_gate() {
+        let runtime =
+            include_str!("../../crates/zephium-engine/src/platform/macos/semantic_runtime.rs");
+        validate_engine_semantic_runtime_boundary(runtime).expect("closed diagnostic gate");
+        for call in [
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n    let source =",
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n        let source_mismatch =",
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n#[path = \"agentic_semantic_program_probe.rs\"]",
+            "#[cfg(feature = \"native-agentic-semantic-probe\")]\n                let bytes = program_probe::normalize_diagnostic(bytes);",
+        ] {
+            assert!(runtime.contains(call), "gate witness drifted");
+            let unguarded = runtime.replace(call, &call.replace("#[cfg(feature = \"native-agentic-semantic-probe\")]", ""));
+            assert!(validate_engine_semantic_runtime_boundary(&unguarded).is_err());
+        }
+    }
+
+    #[test]
+    fn preparation_only_control_stops_after_revalidation_inside_diagnostic_gate() {
+        let candidate = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_isolated_fill_candidate.js"
+        );
+        let probe = include_str!(
+            "../../crates/zephium-engine/src/platform/macos/agentic_semantic_program_probe.rs"
+        );
+        let shipping = include_str!("../../crates/zephium-agentic/assets/semantic-runtime-v1.js");
+        assert!(!shipping.contains("commandPreparationOnly"));
+        assert!(!shipping.contains("applied_unverified_preparation_only"));
+        let engine = include_str!("../../crates/zephium-engine/src/lib.rs");
+        assert!(engine.contains("#[cfg(all(feature = \"native-agentic-semantic-probe\", not(debug_assertions)))]\ncompile_error!(\"the native agentic semantic probe is forbidden in optimized builds\");"));
+        assert!(candidate.contains("return commandPreparationOnly ? \"unsupported_interaction\" : runSyntheticFill(target, descriptor, request);"));
+        let revalidation = candidate.find("if (!preparedCurrent()) return \"applied_unverified_beforeinput_revalidation\";\n      // The consumed").unwrap();
+        let stop = candidate
+            .find("if (commandPreparationOnly) return \"applied_unverified_preparation_only\";")
+            .unwrap();
+        let insertion = candidate
+            .find("apply(commandInsertText, document,")
+            .unwrap();
+        assert!(revalidation < stop && stop < insertion);
+        assert!(candidate.contains("const commandPreparationOnly = false;"));
+        assert!(probe.contains("|| preparation_only_selected()"));
+        assert!(probe.contains(
+            "preparation_only_selected() && bytes == b\"E2:applied_unverified_preparation_only\""
+        ));
+        assert!(probe
+            .contains("phase=revalidated command_entered=false result=uncertain content=redacted"));
+        assert!(probe.contains("return b\"E2:applied_unverified\";"));
+        assert!(probe.contains("source.replacen("));
+        assert!(probe.contains("\"const commandPreparationOnly = false;\""));
+        assert!(probe.contains("\"const commandPreparationOnly = true;\""));
     }
 
     #[test]
@@ -13828,6 +14439,23 @@ mod tests {
             include_str!("../../crates/zephium-engine/src/host/agent_cookie_source.rs");
         validate_engine_windows_agent_context_boundary(module, adapter, timeout, navigation, host)
             .expect("closed Windows production owner");
+        for mutation in [
+            adapter.replace(
+                "if !super::extensions::is_runtime_component(&id)",
+                "if false",
+            ),
+            adapter.replace(
+                "if !matches!(&profile, AgentOwnedProfile::Automation { .. })",
+                "if false",
+            ),
+            format!("{adapter}\nsuper::extensions::add();"),
+            format!("{adapter}\nwith_browser_extension_startup_gate();"),
+        ] {
+            assert!(validate_engine_windows_agent_context_boundary(
+                module, &mutation, timeout, navigation, host,
+            )
+            .is_err());
+        }
         validate_engine_windows_agent_suspension_boundary(
             platform_module,
             adapter,

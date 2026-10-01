@@ -3,7 +3,28 @@ use zephium_agentic::{
     ContextRunId, WorkBrowserResourceEvent, WorkBrowserResourceId, WorkBrowserResources, WorkId,
 };
 
-fn tick(value: u64) -> AgentPolicyInstant {
+#[test]
+fn work_deadline_projection_preserves_epoch_and_only_rounds_fractional_milliseconds() {
+    use std::time::Duration;
+    let origin = Instant::now();
+    for (nanos, millis) in [
+        (0, 0),
+        (1, 1),
+        (999_999, 1),
+        (1_000_000, 1),
+        (1_000_001, 2),
+        (400_150_000_001, 400_151),
+    ] {
+        let deadline = origin.checked_add(Duration::from_nanos(nanos)).unwrap();
+        assert_eq!(project_work_deadline(origin, deadline), Some(tick(millis)));
+    }
+    assert!(
+        project_work_deadline(origin, origin.checked_sub(Duration::from_nanos(1)).unwrap())
+            .is_none()
+    );
+}
+
+pub(super) fn tick(value: u64) -> AgentPolicyInstant {
     AgentPolicyInstant::from_millis(value)
 }
 fn admission() -> Arc<AgentPortAdmission> {
@@ -23,7 +44,223 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
         .unwrap();
     (rows, request)
 }
-fn setup() -> (
+
+#[test]
+fn work_group_audit_requires_the_exact_union_of_owned_resource_guards() {
+    let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+    let mut factory = slot.take_factory().unwrap();
+    let work = WorkId::generate();
+    let _ports: Vec<_> = (0..3)
+        .map(|_| factory.begin_work_page(work, 3, |_| {}).unwrap())
+        .collect();
+    let group = factory.inner.state.lock().unwrap().group.clone().unwrap();
+    let members = group.members.lock().unwrap().clone();
+    let guards: Vec<_> = members
+        .iter()
+        .map(|member| {
+            let (_, request) = source();
+            let guard = Arc::new(WorkResourceGuard::new(&request, member));
+            member
+                .work
+                .lock()
+                .unwrap()
+                .rows
+                .insert(request.resource().identity().context(), guard.clone());
+            guard
+        })
+        .collect();
+    let task = AgentContextTask::new(
+        AgentPendingRequest::Audit(ContextResourceAuditId::new(1).unwrap()),
+        members[0].reserve_audit().unwrap(),
+        Arc::new(|_| {}),
+    );
+    assert!(task.work_ingress_matches(guards.clone()));
+    assert!(!task.work_ingress_matches(guards[..2].to_vec()));
+    assert!(!task.work_ingress_matches(vec![
+        guards[0].clone(),
+        guards[0].clone(),
+        guards[1].clone()
+    ]));
+    let (_, request) = source();
+    let foreign = Arc::new(WorkResourceGuard::new(&request, &members[0]));
+    assert!(!task.work_ingress_matches(vec![guards[0].clone(), guards[1].clone(), foreign]));
+    task.refuse(ContextPortFailure::NativeRefused);
+}
+
+#[test]
+fn human_native_delivery_seals_continue_and_acquire_until_physical_callback_return() {
+    let admission = admission();
+    let (mut rows, construct) = source();
+    let resource = construct.resource().clone();
+    let guard = WorkResourceGuard::new(&construct, &admission);
+    guard.outcome(&construct, Outcome::Constructed);
+    let _ = rows
+        .settle_at(construct.complete(Outcome::Constructed), tick(1))
+        .unwrap();
+    let region = zephium_agentic::WorkBrowserHumanRegion::try_new(0, 0, 600, 400).unwrap();
+    let present = rows
+        .present_human(&resource, region, tick(2), tick(100_000))
+        .unwrap();
+    guard.admit_lifecycle(&present, tick(2)).unwrap();
+    assert!(guard.human_current(Operation::PresentHuman, tick(3)));
+    guard.outcome(&present, Outcome::HumanPresented);
+    let _ = rows
+        .settle_at(present.complete(Outcome::HumanPresented), tick(3))
+        .unwrap();
+    let hide = rows.continue_after_human(&resource, tick(4)).unwrap();
+    assert!(guard.admit_lifecycle(&hide, tick(4)).is_err());
+    assert!(!guard.callbacks_drained());
+    guard.finish_human_delivery(Operation::PresentHuman, true, true);
+    guard.admit_lifecycle(&hide, tick(5)).unwrap();
+    assert!(guard.human_current(Operation::ContinueAfterHuman, tick(5)));
+    guard.outcome(&hide, Outcome::HumanContinued);
+    let _ = rows
+        .settle_at(
+            hide.complete_human_document(
+                ContextNavigationTarget::parse("https://example.test/verified").unwrap(),
+            ),
+            tick(6),
+        )
+        .unwrap();
+    let acquire = rows
+        .acquire(&resource, ContextRunId::generate(), tick(7), tick(90_000))
+        .unwrap();
+    assert!(guard.admit_lifecycle(&acquire, tick(7)).is_err());
+    guard.finish_human_delivery(Operation::ContinueAfterHuman, true, true);
+    guard.admit_lifecycle(&acquire, tick(8)).unwrap();
+    assert_eq!(guard.state.lock().unwrap().document_epoch, 2);
+}
+
+#[test]
+fn unreturned_human_callback_keeps_native_actor_admission_closed() {
+    let admission = admission();
+    let (mut rows, construct) = source();
+    let resource = construct.resource().clone();
+    let guard = WorkResourceGuard::new(&construct, &admission);
+    guard.outcome(&construct, Outcome::Constructed);
+    let _ = rows
+        .settle_at(construct.complete(Outcome::Constructed), tick(1))
+        .unwrap();
+    let region = zephium_agentic::WorkBrowserHumanRegion::try_new(0, 0, 600, 400).unwrap();
+    let present = rows
+        .present_human(&resource, region, tick(2), tick(100_000))
+        .unwrap();
+    guard.admit_lifecycle(&present, tick(2)).unwrap();
+    guard.outcome(&present, Outcome::HumanPresented);
+    guard.finish_human_delivery(Operation::PresentHuman, false, true);
+    assert!(!guard.is_healthy());
+    assert!(!guard.human_current(Operation::PresentHuman, tick(3)));
+    assert!(guard.callbacks_drained());
+}
+
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+#[test]
+fn unclassified_guard_failure_records_original_caller_before_cleanup() {
+    use crate::{WorkNativeGuardFailureSource, WorkResourceFailureCause};
+    let (_, request) = source();
+    let guard = WorkResourceGuard::new(&request, &admission());
+    let first_line = line!() + 1;
+    guard.fail();
+    guard.fail();
+    guard.record_failure_cause(WorkResourceFailureCause::UnattributedResourceFailure);
+    assert_eq!(
+        *guard.failure_cause.lock().unwrap(),
+        Some(WorkResourceFailureCause::NativeGuardFailure {
+            source: WorkNativeGuardFailureSource::Other,
+            line: first_line,
+        })
+    );
+    let guard = WorkResourceGuard::new(&request, &admission());
+    guard.report_uncertainty();
+    assert_eq!(*guard.failure_cause.lock().unwrap(), None);
+    guard.state.lock().unwrap().uncertain = true;
+    let first_line = line!() + 1;
+    guard.report_uncertainty();
+    guard.fail();
+    assert_eq!(
+        *guard.failure_cause.lock().unwrap(),
+        Some(WorkResourceFailureCause::NativeGuardFailure {
+            source: WorkNativeGuardFailureSource::Other,
+            line: first_line,
+        })
+    );
+}
+
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+#[test]
+fn resource_failure_cause_is_exact_first_wins_and_survives_retention_and_factory_seal() {
+    use crate::{
+        WorkObservationPresentationFailure as PresentationFailure,
+        WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure,
+        WorkSuccessorNavigationFailure as NavigationFailure,
+        WorkUrlObservationFailure as UrlFailure,
+    };
+    for cause in [
+        Failure::NavigationEventRefused,
+        Failure::UrlObservationRefused(UrlFailure::NativeValueUnavailable),
+        Failure::DocumentFinalizationRefused,
+        Failure::SuccessorNavigation(NavigationFailure::PostTerminalReadback {
+            gate_failed: false,
+            relation: UrlFailure::NativeValueUnavailable,
+        }),
+        Failure::RendererLost,
+        Failure::SemanticNativeInvariant,
+        Failure::LifecycleDeadline(Stage::ConstructionTargetProvisional),
+        Failure::ObservationPresentation(PresentationFailure::PollSurfaceNotVisible),
+        Failure::NativeAdmission(ContextPortFailure::NativeRefused),
+        Failure::UnattributedResourceFailure,
+    ] {
+        let (_, request) = source();
+        let resource = request.resource().clone();
+        let slot = AgentContextPortSlot::new(Arc::new(|_| true), Arc::new(|_| {}));
+        let mut factory = slot.take_factory().unwrap();
+        let _port = factory.begin(|_| {}).unwrap();
+        let admission = factory.inner.state.lock().unwrap().active.clone().unwrap();
+        let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+        admission
+            .work
+            .lock()
+            .unwrap()
+            .rows
+            .insert(resource.identity().context(), guard.clone());
+        assert!(guard.construction_current());
+        assert_eq!(slot.work_resource_failure_cause(&resource), None);
+        guard.record_failure_cause(cause);
+        // Observation is not a failure/reporting owner and cannot poison state.
+        assert!(guard.construction_current());
+        guard.fail();
+        guard.record_failure_cause(Failure::LifecycleDeadline(Stage::DestructionDrain));
+        guard.outcome(&request, Outcome::Refused);
+        guard.record_failure_cause(Failure::SemanticNativeInvariant);
+        assert_eq!(slot.work_resource_failure_cause(&resource), Some(cause));
+        assert_eq!(
+            slot.work_resource_failure_cause(source().1.resource()),
+            None
+        );
+        let mut foreign_rows =
+            WorkBrowserResources::new(WorkId::generate(), resource.identity().profile());
+        let foreign = foreign_rows
+            .construct(
+                WorkBrowserResourceId::generate(),
+                resource.identity().context(),
+                ContextProfileStorageClass::Ephemeral,
+                tick(0),
+            )
+            .unwrap();
+        assert_eq!(slot.work_resource_failure_cause(foreign.resource()), None);
+        slot.seal();
+        assert_eq!(slot.work_resource_failure_cause(&resource), Some(cause));
+    }
+    let (_, admission, retained) = setup();
+    assert!(!retained.construction_current());
+    retained.record_failure_cause(Failure::RendererLost);
+    retained.record_failure_cause(Failure::LifecycleDeadline(Stage::RevocationDrain));
+    assert_eq!(
+        admission.resource_failure_cause(retained.resource()),
+        Some(Failure::RendererLost)
+    );
+}
+pub(super) fn setup() -> (
     WorkBrowserResources,
     Arc<AgentPortAdmission>,
     Arc<WorkResourceGuard>,
@@ -43,7 +280,7 @@ fn setup() -> (
         .unwrap();
     (rows, admission, guard)
 }
-fn leased(
+pub(super) fn leased(
     rows: &mut WorkBrowserResources,
     guard: &Arc<WorkResourceGuard>,
 ) -> WorkBrowserExecutionLease {
@@ -69,7 +306,7 @@ fn drained() -> Outcome {
         resource_retained: true,
     }
 }
-fn port(
+pub(super) fn port(
     admission: Arc<AgentPortAdmission>,
     dispatch: MainThreadDispatch,
 ) -> EngineAgentBrowserPort {
@@ -1627,4 +1864,107 @@ impl WorkResourceGuard {
             }
         );
     }
+}
+
+#[test]
+fn closed_anonymous_session_refuses_execution_but_preserves_native_drain() {
+    for close_before_acquire in [true, false] {
+        let profile = zephium_core::ids::ProfileId::generate();
+        let work = WorkId::generate();
+        let session = zephium_agentic::WorkBrowserSession::new(
+            profile,
+            work,
+            Instant::now() + std::time::Duration::from_secs(60),
+        );
+        let mut rows = WorkBrowserResources::new(work, profile);
+        let request = rows
+            .construct_document_with_isolation(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Durable,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+                true,
+                tick(0),
+            )
+            .unwrap()
+            .with_anonymous_session(session.clone())
+            .unwrap();
+        let admission = admission();
+        let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+        guard.outcome(&request, Outcome::Constructed);
+        let _settled = rows
+            .settle_at(request.complete(Outcome::Constructed), tick(0))
+            .unwrap();
+        if close_before_acquire {
+            session.close();
+            let request = rows
+                .acquire(
+                    guard.resource(),
+                    ContextRunId::generate(),
+                    tick(1),
+                    tick(100),
+                )
+                .unwrap();
+            assert!(guard.admit_lifecycle(&request, tick(1)).is_err());
+        } else {
+            let lease = leased(&mut rows, &guard);
+            assert!(guard.admits(&lease, tick(2)));
+            session.close();
+            assert!(!guard.admits(&lease, tick(2)));
+            let request = rows.revoke(&lease).unwrap();
+            guard.admit_lifecycle(&request, tick(2)).unwrap();
+            assert!(guard.lease_drained(&lease));
+        }
+    }
+}
+
+#[test]
+fn work_construction_retry_is_closed_and_preserves_the_original_deadline() {
+    use std::time::Duration;
+    use zephium_agentic::{WorkBrowserConstructionAttempt as Attempt, WorkBrowserDocumentPolicy};
+    let now = Instant::now();
+    let admission = admission();
+    let (_, ordinary) = source();
+    assert_eq!(
+        WorkResourceGuard::new(&ordinary, &admission).construction_deadline(now),
+        Some(now + Duration::from_secs(30))
+    );
+    assert!(ordinary
+        .with_construction_window(Attempt::SlowPageRetry, now + Duration::from_secs(120))
+        .is_err());
+    for (attempt, remaining, expected) in [
+        (Attempt::Initial, 120, 30),
+        (Attempt::SlowPageRetry, 120, 60),
+        (Attempt::Initial, 12, 12),
+        (Attempt::SlowPageRetry, 12, 12),
+    ] {
+        let mut rows =
+            WorkBrowserResources::new(WorkId::generate(), zephium_core::ids::ProfileId::generate());
+        let request = rows
+            .construct_document_with_isolation(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                WorkBrowserDocumentPolicy::Exact,
+                true,
+                tick(0),
+            )
+            .unwrap()
+            .with_construction_window(attempt, now + Duration::from_secs(remaining))
+            .unwrap();
+        let guard = WorkResourceGuard::new(&request, &admission);
+        assert_eq!(
+            guard.construction_deadline(now),
+            Some(now + Duration::from_secs(expected))
+        );
+        assert!(request
+            .with_construction_window(attempt, now + Duration::from_secs(120))
+            .is_err());
+    }
+    let (_, expired) = source();
+    assert!(expired
+        .with_construction_window(Attempt::Initial, now)
+        .is_err());
 }

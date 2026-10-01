@@ -620,7 +620,11 @@ impl SemanticActionBatchExecution {
                 SemanticEffectProofKind::Navigation => {
                     Some(SemanticActionBatchStopReason::Navigation)
                 }
-                SemanticEffectProofKind::Dialog => Some(SemanticActionBatchStopReason::Dialog),
+                SemanticEffectProofKind::Dialog
+                | SemanticEffectProofKind::PageDialogOpened
+                | SemanticEffectProofKind::PageDialogClosed => {
+                    Some(SemanticActionBatchStopReason::Dialog)
+                }
                 _ if completion.current_context != self.context
                     || completion.next_state
                         == SemanticActionNextState::FreshSnapshot(

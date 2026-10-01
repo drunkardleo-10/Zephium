@@ -246,6 +246,8 @@ fn validate_terminal_records(source: &str) -> Result<(), String> {
 }
 
 fn validate_content_free(source: &str) -> Result<(), String> {
+    // 8755115b: a handoff keeps the run-local observation ordinal, never content.
+    let source = source.replace("SemanticObservationId", "");
     for forbidden in [
         "println!",
         "eprintln!",
@@ -319,6 +321,7 @@ mod tests {
                 "serde_json::to_string(page)",
                 "execute_semantic_action(action)",
                 "thread::spawn(worker)",
+                "fn page(_: &SemanticObservation) {}",
             ] {
                 assert!(validate_content_free(&format!("{source}\n{mutation}")).is_err());
             }

@@ -36,6 +36,17 @@ impl AgentWorkTask for PublicPreparedResultTask {
     fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
         self.extraction.extraction_schema()
     }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if self.ready.is_some() {
+            Ok(SemanticOperations::NONE)
+        } else {
+            self.actions.model_action_operations(node, observation)
+        }
+    }
     fn evaluate(
         &mut self,
         observation: &SemanticObservation,
@@ -519,7 +530,7 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
                 while let Some(event) = handle.take_event() {
                     let mut output = std::io::stdout().lock();
                     let result = match event.kind() {
-                    AgentWorkEventKind::ModelSettled { call, input_tokens, output_tokens, request_bytes, semantic_bytes, cost_micro_usd, accounting, elapsed_millis } => writeln!(output, "work-actor-turn: call={}; input_tokens={input_tokens}; output_tokens={output_tokens}; request_bytes={request_bytes}; semantic_bytes={semantic_bytes}; cost_micro_usd={cost_micro_usd}; accounting={accounting:?}; turn_ms={elapsed_millis}; wall_ms={}; content=redacted", call.get(), event.elapsed_millis()),
+                    AgentWorkEventKind::ModelSettled { call, input_tokens, output_tokens, request_bytes, semantic_bytes, cost_micro_usd, accounting, elapsed_millis, .. } => writeln!(output, "work-actor-turn: call={}; input_tokens={input_tokens}; output_tokens={output_tokens}; request_bytes={request_bytes}; semantic_bytes={semantic_bytes}; cost_micro_usd={cost_micro_usd}; accounting={accounting:?}; turn_ms={elapsed_millis}; wall_ms={}; content=redacted", call.get(), event.elapsed_millis()),
                     kind => writeln!(output, "work-actor-event: sequence={}; phase={kind:?}; wall_ms={}; content=redacted", event.sequence(), event.elapsed_millis()),
                 };
                     if result.is_err() {

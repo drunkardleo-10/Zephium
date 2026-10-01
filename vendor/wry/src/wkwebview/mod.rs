@@ -16,6 +16,7 @@ mod util;
 mod ios;
 
 mod class;
+pub(crate) use class::wry_navigation_delegate::BlockedLoadCounter;
 pub use class::wry_web_view::WryWebView;
 #[cfg(target_os = "macos")]
 use class::wry_web_view_parent::WryWebViewParent;
@@ -40,7 +41,9 @@ use objc2::{
   AllocAnyThread, DeclaredClass, MainThreadOnly, Message,
 };
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSTitlebarSeparatorStyle, NSView};
+use objc2_app_kit::{
+  NSApplication, NSAutoresizingMaskOptions, NSResponder, NSTitlebarSeparatorStyle, NSView,
+};
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::CGSize;
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -179,6 +182,157 @@ impl RetainedHostWindow {
   }
 }
 
+#[cfg(target_os = "macos")]
+struct UnfocusedChildFocusSnapshot {
+  app_active: bool,
+  // Retain both authority owners across callback-capable AppKit operations.
+  // Pointer-only snapshots could ABA-match if a window closed synchronously
+  // and a replacement reused its address during `addSubview:`.
+  key_window: Option<Retained<NSWindow>>,
+  main_window: Option<Retained<NSWindow>>,
+  responder: Option<Retained<NSResponder>>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnfocusedChildFocusDecision {
+  Preserved,
+  RestoreOwned,
+  Refuse,
+}
+
+#[cfg(target_os = "macos")]
+const fn unfocused_child_focus_decision(
+  authority_preserved: bool,
+  responder_preserved: bool,
+  current_responder_owned: bool,
+) -> UnfocusedChildFocusDecision {
+  if !authority_preserved {
+    UnfocusedChildFocusDecision::Refuse
+  } else if responder_preserved {
+    UnfocusedChildFocusDecision::Preserved
+  } else if current_responder_owned {
+    UnfocusedChildFocusDecision::RestoreOwned
+  } else {
+    UnfocusedChildFocusDecision::Refuse
+  }
+}
+
+#[cfg(target_os = "macos")]
+fn window_identity(window: Option<&Retained<NSWindow>>) -> Option<usize> {
+  window.map(|window| Retained::as_ptr(window) as usize)
+}
+
+#[cfg(target_os = "macos")]
+fn responder_identity(responder: Option<&Retained<NSResponder>>) -> Option<usize> {
+  responder.map(|responder| Retained::as_ptr(responder) as usize)
+}
+
+#[cfg(target_os = "macos")]
+fn capture_unfocused_child_focus(
+  app: &NSApplication,
+  host_window: &NSWindow,
+) -> UnfocusedChildFocusSnapshot {
+  let key_window = app.keyWindow();
+  let main_window = app.mainWindow();
+  UnfocusedChildFocusSnapshot {
+    app_active: app.isActive(),
+    key_window,
+    main_window,
+    responder: host_window.firstResponder(),
+  }
+}
+
+#[cfg(target_os = "macos")]
+fn focus_authority_preserved(snapshot: &UnfocusedChildFocusSnapshot, app: &NSApplication) -> bool {
+  let key_window = app.keyWindow();
+  let main_window = app.mainWindow();
+  app.isActive() == snapshot.app_active
+    && window_identity(key_window.as_ref()) == window_identity(snapshot.key_window.as_ref())
+    && window_identity(main_window.as_ref()) == window_identity(snapshot.main_window.as_ref())
+}
+
+#[cfg(target_os = "macos")]
+fn responder_is_owned_by_webview(
+  current: Option<&Retained<NSResponder>>,
+  webview: &WryWebView,
+) -> bool {
+  let exact_webview = current.as_ref().is_some_and(|responder| {
+    std::ptr::eq(
+      Retained::as_ptr(responder).cast::<std::ffi::c_void>(),
+      std::ptr::from_ref(webview).cast::<std::ffi::c_void>(),
+    )
+  });
+  let owned_descendant = current
+    .cloned()
+    .and_then(|responder| responder.downcast::<NSView>().ok())
+    .is_some_and(|view| view.isDescendantOf(webview));
+  exact_webview || owned_descendant
+}
+
+#[cfg(target_os = "macos")]
+fn preserve_unfocused_child_focus(
+  snapshot: &UnfocusedChildFocusSnapshot,
+  app: &NSApplication,
+  host_window: &NSWindow,
+  webview: &WryWebView,
+) -> Result<()> {
+  let current = host_window.firstResponder();
+  let responder_preserved =
+    responder_identity(current.as_ref()) == responder_identity(snapshot.responder.as_ref());
+  let authority_preserved = focus_authority_preserved(snapshot, app);
+
+  match unfocused_child_focus_decision(
+    authority_preserved,
+    responder_preserved,
+    responder_is_owned_by_webview(current.as_ref(), webview),
+  ) {
+    UnfocusedChildFocusDecision::Preserved => Ok(()),
+    UnfocusedChildFocusDecision::RestoreOwned => {
+      if !host_window.makeFirstResponder(snapshot.responder.as_deref())
+        || !focus_authority_preserved(snapshot, app)
+        || responder_identity(host_window.firstResponder().as_ref())
+          != responder_identity(snapshot.responder.as_ref())
+      {
+        return Err(Error::MacosFocusPreservationFailed);
+      }
+      Ok(())
+    }
+    UnfocusedChildFocusDecision::Refuse => Err(Error::MacosFocusPreservationFailed),
+  }
+}
+
+#[cfg(target_os = "macos")]
+fn rollback_unfocused_child_attachment(
+  snapshot: &UnfocusedChildFocusSnapshot,
+  app: &NSApplication,
+  host_window: &NSWindow,
+  webview: &WryWebView,
+) {
+  // Detach before the constructor starts dropping its retained WK subtree.
+  // AppKit callbacks may change authority or install a foreign responder, so
+  // restoration is attempted only from the exact authority we captured and
+  // only while the failed child still owns first-responder state.
+  webview.removeFromSuperview();
+  if !focus_authority_preserved(snapshot, app) {
+    return;
+  }
+  let current = host_window.firstResponder();
+  if responder_identity(current.as_ref()) == responder_identity(snapshot.responder.as_ref()) {
+    return;
+  }
+  if !responder_is_owned_by_webview(current.as_ref(), webview) {
+    return;
+  }
+  if host_window.makeFirstResponder(snapshot.responder.as_deref()) {
+    // Validation is intentionally value-only: the original constructor error
+    // remains authoritative, and rollback must never attempt another mutation.
+    let _restored = focus_authority_preserved(snapshot, app)
+      && responder_identity(host_window.firstResponder().as_ref())
+        == responder_identity(snapshot.responder.as_ref());
+  }
+}
+
 pub(crate) struct InnerWebView {
   id: String,
   mtm: MainThreadMarker,
@@ -202,7 +356,7 @@ pub(crate) struct InnerWebView {
   document_title_changed_observer: Option<Retained<DocumentTitleChangedObserver>>,
   #[allow(dead_code)]
   // We need this the keep the reference count
-  navigation_policy_delegate: Retained<WryNavigationDelegate>,
+  pub(crate) navigation_policy_delegate: Retained<WryNavigationDelegate>,
   #[allow(dead_code)]
   // We need this the keep the reference count
   download_delegate: Option<Retained<WryDownloadDelegate>>,
@@ -266,6 +420,11 @@ impl InnerWebView {
   ) -> Result<Self> {
     let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
 
+    #[cfg(target_os = "macos")]
+    let focuses_during_initial_construction = attributes.focuses_during_initial_construction();
+    #[cfg(target_os = "macos")]
+    let app = NSApplication::sharedApplication(mtm);
+
     let webview_id = attributes
       .id
       .map(|id| id.to_string())
@@ -277,6 +436,9 @@ impl InnerWebView {
       let host_window = ns_view
         .window()
         .ok_or(Error::NativeObjectUnavailable("host NSWindow"))?;
+      #[cfg(target_os = "macos")]
+      let unfocused_child_focus = (is_child && !focuses_during_initial_construction)
+        .then(|| capture_unfocused_child_focus(&app, &host_window));
 
       #[cfg(target_os = "macos")]
       let using_existing_config = pl_attrs.webview_configuration.is_some();
@@ -368,6 +530,7 @@ impl InnerWebView {
         }
       }
 
+      let protocol_count = protocol_ptrs.len();
       WEBVIEW_STATE
         .write()
         .map_err(|_| Error::WebKitStatePoisoned("custom protocol registry"))?
@@ -387,9 +550,13 @@ impl InnerWebView {
         #[cfg(target_os = "ios")]
         input_accessory_view_builder: pl_attrs.input_accessory_view_builder,
         custom_protocol_task_ids: Default::default(),
-        custom_protocol_admission: crate::native_admission::InFlightAdmission::new(
-          crate::native_admission::CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
-        ),
+        custom_protocol_admission: (0..protocol_count)
+          .map(|_| {
+            crate::native_admission::InFlightAdmission::new(
+              crate::native_admission::CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
+            )
+          })
+          .collect(),
       });
 
       let _preference = config.preferences();
@@ -692,6 +859,9 @@ impl InnerWebView {
         #[cfg(target_os = "macos")]
         new_window_req_handler.clone(),
         attributes.navigation_handler,
+        attributes.apple_navigation_action_handler,
+        #[cfg(target_os = "macos")]
+        attributes.main_frame_navigation_attempt_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,
@@ -788,6 +958,14 @@ impl InnerWebView {
       {
         if is_child {
           ns_view.addSubview(&webview);
+          if let Some(snapshot) = &unfocused_child_focus {
+            if let Err(error) =
+              preserve_unfocused_child_focus(snapshot, &app, &host_window, &webview)
+            {
+              rollback_unfocused_child_attachment(snapshot, &app, &host_window, &webview);
+              return Err(error);
+            }
+          }
         } else {
           let parent_view = WryWebViewParent::new(mtm);
 
@@ -809,15 +987,18 @@ impl InnerWebView {
           w.parent_view = Some(parent_view);
         }
 
-        // make sure the window is always on top when we create a new webview
-        let app = NSApplication::sharedApplication(mtm);
-        if os_major_version >= 14 {
-          // <https://developer.apple.com/documentation/appkit/nsapplication/activate()>
-          // Available: macOS 14+
-          NSApplication::activate(&app);
-        } else {
-          #[allow(deprecated)]
-          NSApplication::activateIgnoringOtherApps(&app, true);
+        // Construction declared as unfocused must not activate the app. In
+        // particular, a hidden/background child cannot request global focus as
+        // a constructor side effect.
+        if focuses_during_initial_construction {
+          if os_major_version >= 14 {
+            // <https://developer.apple.com/documentation/appkit/nsapplication/activate()>
+            // Available: macOS 14+
+            NSApplication::activate(&app);
+          } else {
+            #[allow(deprecated)]
+            NSApplication::activateIgnoringOtherApps(&app, true);
+          }
         }
       }
 
@@ -1615,11 +1796,9 @@ pub fn platform_webview_version() -> Result<String> {
 impl Drop for InnerWebView {
   fn drop(&mut self) {
     url_scheme_handler::cancel_pending_for_webview(&self.id);
-    self
-      .webview
-      .ivars()
-      .custom_protocol_admission
-      .seal_and_drain();
+    for admission in &self.webview.ivars().custom_protocol_admission {
+      admission.seal_and_drain();
+    }
     if let Ok(mut state) = WEBVIEW_STATE.write() {
       state.remove(&self.id);
     }
@@ -1700,6 +1879,37 @@ unsafe fn wait_for_blocking_operation<T>(rx: std::sync::mpsc::Receiver<T>) -> Re
 
 #[cfg(test)]
 mod security_policy_tests {
+  #[cfg(target_os = "macos")]
+  use super::{unfocused_child_focus_decision, UnfocusedChildFocusDecision as Decision};
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn unfocused_child_focus_transaction_restores_only_an_owned_responder() {
+    for authority_preserved in [false, true] {
+      for responder_preserved in [false, true] {
+        for current_responder_owned in [false, true] {
+          let expected = if !authority_preserved {
+            Decision::Refuse
+          } else if responder_preserved {
+            Decision::Preserved
+          } else if current_responder_owned {
+            Decision::RestoreOwned
+          } else {
+            Decision::Refuse
+          };
+          assert_eq!(
+            unfocused_child_focus_decision(
+              authority_preserved,
+              responder_preserved,
+              current_responder_owned,
+            ),
+            expected
+          );
+        }
+      }
+    }
+  }
+
   #[test]
   fn navigation_identity_gate_brackets_load_request() {
     let source = include_str!("mod.rs");

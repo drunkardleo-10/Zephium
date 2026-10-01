@@ -4,6 +4,8 @@ src/vite-env.d.ts
 
 src/shared/i18n
 project.inlang/cache
+project.inlang/.meta.json
+project.inlang/README.md
 
 dist-work-preview/
 

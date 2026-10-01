@@ -6,6 +6,228 @@ use std::sync::atomic::AtomicBool;
 #[path = "work_route_tests.rs"]
 pub(super) mod route_tests;
 
+const REDIRECT_LINK: &str = "https://work-fixture.invalid/arrival?u=a1aHR0cHM6Ly9naXRodWIuY29tL3N2ZWx0ZWpzL3N2ZWx0ZS9pc3N1ZXMvMTIz&ntb=1";
+
+pub(super) fn discovery_scope() -> AgentNavigationDiscovery {
+    AgentNavigationDiscovery::try_new(
+        ContextNavigationTarget::parse("https://work-fixture.invalid/").unwrap(),
+        "/".into(),
+        2,
+    )
+    .unwrap()
+}
+
+pub(super) fn query_discovery_scope() -> AgentNavigationDiscovery {
+    AgentNavigationDiscovery::try_new_production(
+        ContextNavigationTarget::parse("https://work-fixture.invalid/").unwrap(),
+        vec![zephium_agentic::AgentNavigationOriginRule::try_new(
+            SemanticOrigin::parse("https://work-fixture.invalid/").unwrap(),
+            "/".into(),
+            true,
+            false,
+        )
+        .unwrap()],
+        2,
+        1,
+    )
+    .unwrap()
+}
+
+#[test]
+fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls() {
+    let _serial = lock(&SERIAL);
+    for fault in [
+        NavigationFault::Discovery,
+        NavigationFault::DiscoveryMissingLink,
+    ] {
+        provider_fixture(ProviderFault::Navigation(fault));
+    }
+}
+
+pub(super) struct LocalActionPolicy;
+impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
+    fn model_action_effect(&self) -> Option<SemanticEffectClass> {
+        Some(SemanticEffectClass::LocalWrite)
+    }
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        _: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if node.name().is_some_and(|name| name.as_str() == "Field") {
+            SemanticOperations::try_new(&[SemanticOperationClass::Fill])
+                .map_err(|_| AgentWorkFailure::Contract)
+        } else {
+            Ok(SemanticOperations::NONE)
+        }
+    }
+
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        // This adapter knows the synthetic field has no remote effects. Its
+        // approved intent is one exact fill; the model selects the fresh ref.
+        assert_eq!(action.source_observation(), observation.request().id());
+        if action.kind() != SemanticActionKind::Fill
+            || action.fill_text().map(SemanticActionText::as_str) != Some("fixture value")
+            || action.verification() != SemanticVerification::TargetValueMatchesInput
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        Ok(AgentEffectAssessment::new(
+            action,
+            SemanticOrigin::parse("https://work-fixture.invalid/").unwrap(),
+            SemanticEffectClass::LocalWrite,
+        ))
+    }
+}
+
+#[test]
+fn open_objective_interleaves_verified_local_actions_and_navigation_in_both_orders() {
+    let _serial = lock(&SERIAL);
+    for action_first in [true, false] {
+        provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryAction(
+            action_first,
+        )));
+    }
+}
+
+#[test]
+fn open_objective_corrects_unissued_action_and_bounds_repeated_invalid_proposals() {
+    let _serial = lock(&SERIAL);
+    for repeat in [false, true] {
+        for refusal in [
+            ActionRefusal::OperationDenied,
+            ActionRefusal::EffectMismatch,
+            ActionRefusal::UnsupportedWait,
+        ] {
+            provider_fixture(ProviderFault::Navigation(
+                NavigationFault::DiscoveryActionRefusal(repeat, refusal),
+            ));
+        }
+    }
+}
+
+#[test]
+fn two_discovered_hops_settle_original_progress_accounting_and_extract() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryTwoHops));
+}
+
+#[test]
+fn authenticated_discovery_uses_fresh_host_account_samples_across_two_documents() {
+    let _serial = lock(&SERIAL);
+    provider_fixture_with_discovery_account(
+        ProviderFault::Navigation(NavigationFault::DiscoveryTwoHops),
+        None,
+        None,
+        Some(AgentAccountScope::Authenticated(AgentAccountId::generate())),
+    );
+}
+
+#[test]
+fn discovery_budget_reserves_mapping_and_rejects_last_decision_inspection() {
+    let _serial = lock(&SERIAL);
+    for (limit, refusal) in [(8, false), (4, false), (8, true)] {
+        provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+            limit, refusal, 24,
+        )));
+    }
+}
+
+#[test]
+fn extended_run_budget_crosses_eight_turns_and_preserves_terminal_reservation() {
+    let _serial = lock(&SERIAL);
+    for refusal in [false, true] {
+        provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+            12, refusal, 24,
+        )));
+    }
+    // This exceeds the original 64-record pending audit capacity and must
+    // stream committed batches without dropping events or reusing delivery IDs.
+    provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+        40, false, 64,
+    )));
+}
+
+#[test]
+fn discovery_operation_budget_preserves_the_mapping_call_after_navigation() {
+    let _serial = lock(&SERIAL);
+    for refusal in [false, true] {
+        provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryBudget(
+            8, refusal, 8,
+        )));
+    }
+}
+
+#[test]
+fn discovery_merges_accounted_documents_after_empty_inspection_and_rejects_unknown_sources() {
+    let _serial = lock(&SERIAL);
+    for foreign in [false, true] {
+        provider_fixture(ProviderFault::Navigation(
+            NavigationFault::DiscoveryEvidence(foreign),
+        ));
+    }
+}
+
+#[test]
+fn discovery_returns_invalid_search_scope_without_capture_and_preserves_budgets() {
+    let _serial = lock(&SERIAL);
+    for case in 0..4 {
+        provider_fixture(ProviderFault::Navigation(
+            NavigationFault::DiscoveryScopeRefusal(case),
+        ));
+    }
+}
+
+#[test]
+fn oversized_inspection_projects_before_continuation_and_evidence_joins() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Navigation(
+        NavigationFault::DiscoveryScopeRefusal(4),
+    ));
+}
+
+#[test]
+fn per_run_model_call_allowance_cannot_widen_product_limits() {
+    for limit in [0, 1, 65, u8::MAX] {
+        assert!(input().settings.with_max_model_calls(limit).is_err());
+    }
+    for limit in [2, 4, 8, 24, 64] {
+        assert_eq!(
+            input()
+                .settings
+                .with_max_model_calls(limit)
+                .unwrap()
+                .max_model_calls,
+            limit
+        );
+    }
+    for limit in [65, u64::MAX] {
+        assert!(input().settings.with_max_actions(limit).is_err());
+    }
+    for limit in [0, 1, 8, 24, 64] {
+        assert_eq!(
+            input()
+                .settings
+                .with_max_actions(limit)
+                .unwrap()
+                .max_actions,
+            limit
+        );
+    }
+}
+
+#[test]
+fn two_discovered_hops_preserve_policy_blocked_final_page_frames() {
+    let _serial = lock(&SERIAL);
+    provider_fixture(ProviderFault::Navigation(
+        NavigationFault::DiscoveryTwoHopsBlockedFrame,
+    ));
+}
+
 pub(super) struct NavigationSchedule {
     pub(super) events: Mutex<Option<Arc<Mutex<WorkEvents>>>>,
     native_started: AtomicBool,
@@ -77,8 +299,26 @@ impl TerraControllerClock for NavigationClock {
     }
 }
 
+/// How the fixture's first action proposal gets refused before dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ActionRefusal {
+    OperationDenied,
+    EffectMismatch,
+    /// A wait this host cannot evidence; the model is told and continues.
+    UnsupportedWait,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
+    Discovery,
+    DiscoveryAction(bool),
+    DiscoveryActionRefusal(bool, ActionRefusal),
+    DiscoveryBudget(u8, bool, u32),
+    DiscoveryEvidence(bool),
+    DiscoveryScopeRefusal(u8),
+    DiscoveryTwoHops,
+    DiscoveryTwoHopsBlockedFrame,
+    DiscoveryMissingLink,
+    DiscoveryNavigationRefusal(u8),
     Route(route_tests::RouteFault),
     None,
     PriorLocate,
@@ -118,13 +358,46 @@ pub(super) enum NavigationFault {
 }
 
 impl NavigationFault {
+    pub(super) fn two_discovery_hops(self) -> bool {
+        matches!(
+            self,
+            Self::DiscoveryTwoHops | Self::DiscoveryTwoHopsBlockedFrame
+        )
+    }
     pub(super) fn requests(self) -> u8 {
         match self {
+            Self::DiscoveryNavigationRefusal(case) => {
+                if case == 0 || case == 4 {
+                    8
+                } else if case == 2 {
+                    10
+                } else {
+                    6
+                }
+            }
+            Self::DiscoveryMissingLink => 6,
+            Self::DiscoveryAction(_) => 8,
+            Self::DiscoveryActionRefusal(repeat, _) => {
+                if repeat {
+                    4
+                } else {
+                    10
+                }
+            }
+            Self::DiscoveryScopeRefusal(_) => 10,
+            Self::DiscoveryEvidence(_) => 8,
+            Self::DiscoveryBudget(limit, refusal, operations) => {
+                2 * (limit.min((operations - 1) as u8) - u8::from(refusal))
+            }
+            Self::DiscoveryTwoHops | Self::DiscoveryTwoHopsBlockedFrame => {
+                route_tests::RouteFault::None.requests()
+            }
             Self::Route(fault) => fault.requests(),
             Self::PriorLocate => 8,
             Self::Ceiling => 14,
             Self::DepartureMissing | Self::TargetMutation | Self::AccountMutation => 0,
             Self::None
+            | Self::Discovery
             | Self::ForeignSource
             | Self::OldCitation
             | Self::ResultMutation
@@ -141,6 +414,180 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
+        {
+            let case = match self {
+                Self::DiscoveryNavigationRefusal(case) => case,
+                _ => 1,
+            };
+            if turn == 1 || matches!(case, 2 | 3) {
+                return named_tool_stream(
+                    turn,
+                    "navigate",
+                    &format!(
+                        r#"{{\"url\":\"{}\"}}"#,
+                        if case == 4 {
+                            "https://work-fixture.invalid/arrival"
+                        } else {
+                            "https://work-fixture.invalid/unobserved"
+                        }
+                    ),
+                );
+            }
+            if case == 0 || case == 4 {
+                let phase = turn - 1;
+                return Self::Discovery
+                    .stream(phase)
+                    .replace(&format!("resp_{phase}"), &format!("resp_{turn}"))
+                    .replace(&format!("msg_{phase}"), &format!("msg_{turn}"))
+                    .replace(&format!("fc_{phase}"), &format!("fc_{turn}"))
+                    .replace(&format!("call_{phase}"), &format!("call_{turn}"))
+                    .replace(
+                        "https://work-fixture.invalid/arrival",
+                        if case == 4 {
+                            REDIRECT_LINK
+                        } else {
+                            "https://work-fixture.invalid/arrival"
+                        },
+                    );
+            }
+            return Self::Discovery
+                .stream(turn)
+                .replace("Arrival certificate", "Departure certificate");
+        }
+
+        if let Self::DiscoveryActionRefusal(repeat, refusal) = self {
+            if turn == 1 || repeat {
+                return match refusal {
+                    ActionRefusal::EffectMismatch => tool_stream(turn, true)
+                        .replace("@a2", "@a3")
+                        .replace("local_write", "read"),
+                    ActionRefusal::OperationDenied => tool_stream(turn, true).replace("@a2", "@a1"),
+                    ActionRefusal::UnsupportedWait => tool_stream(turn, true)
+                        .replace("@a2", "@a3")
+                        .replace(
+                            r#"\"wait\":{\"kind\":\"immediate\"}"#,
+                            r#"\"wait\":{\"kind\":\"target_state\",\"state\":\"focused\",\"present\":true}"#,
+                        ),
+                };
+            }
+            let phase = turn - 1;
+            return Self::DiscoveryAction(true)
+                .stream(phase)
+                .replace(&format!("resp_{phase}"), &format!("resp_{turn}"))
+                .replace(&format!("msg_{phase}"), &format!("msg_{turn}"))
+                .replace(&format!("fc_{phase}"), &format!("fc_{turn}"))
+                .replace(&format!("call_{phase}"), &format!("call_{turn}"));
+        }
+        if let Self::DiscoveryAction(action_first) = self {
+            return if turn == if action_first { 1 } else { 2 } {
+                tool_stream(turn, true).replace("@a2", "@a3")
+            } else {
+                let phase = if turn < 3 { 1 } else { turn - 1 };
+                Self::Discovery
+                    .stream(phase)
+                    .replace(&format!("resp_{phase}"), &format!("resp_{turn}"))
+                    .replace(&format!("msg_{phase}"), &format!("msg_{turn}"))
+                    .replace(&format!("fc_{phase}"), &format!("fc_{turn}"))
+                    .replace(&format!("call_{phase}"), &format!("call_{turn}"))
+            };
+        }
+        if let Self::DiscoveryScopeRefusal(case) = self {
+            return match turn {
+                1 => Self::Discovery.stream(1),
+                2 if case == 4 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    r#"{\"scope\":{\"kind\":\"subtree\",\"target\":\"@a2\"}}"#,
+                ),
+                2 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    r#"{\"scope\":{\"kind\":\"surrounding_text\",\"target\":\"@a2\",\"before_bytes\":0,\"after_bytes\":1024}}"#,
+                ),
+                3 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    &format!(
+                        r#"{{\"scope\":{{\"kind\":\"text_search\",\"target\":\"{}\",\"query\":\"$\"}}}}"#,
+                        if case == 1 { "@a99" } else { "@a1" }
+                    ),
+                ),
+                4 | 5 if case == 2 => named_tool_stream(
+                    turn,
+                    "snapshot",
+                    r#"{\"scope\":{\"kind\":\"text_search\",\"target\":\"@a1\",\"query\":\"$\"}}"#,
+                ),
+                4 => named_tool_stream(
+                    turn,
+                    "extract",
+                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                ),
+                _ => Self::Discovery
+                    .stream(3)
+                    .replace("resp_3", "resp_5")
+                    .replace("msg_3", "msg_5"),
+            };
+        }
+        if let Self::DiscoveryEvidence(foreign) = self {
+            return match turn {
+                1 => Self::Discovery.stream(1),
+                2 => named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#),
+                3 => named_tool_stream(
+                    turn,
+                    "extract",
+                    r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                ),
+                _ => Self::Discovery
+                    .stream(3)
+                    .replace("resp_3", "resp_4")
+                    .replace("msg_3", "msg_4")
+                    .replace("Arrival certificate", "Arrival and departure certificates")
+                    .replace("@r1", if foreign { "@r99" } else { r#"@r1\",\"@r2"# }),
+            };
+        }
+        if let Self::DiscoveryBudget(limit, refusal, operations) = self {
+            let limit = limit.min((operations - 1) as u8);
+            if turn == 1 {
+                return Self::Discovery.stream(turn);
+            }
+            if turn == 2 {
+                return named_tool_stream(turn, "read", r#"{\"scope\":{\"kind\":\"initial\"}}"#);
+            }
+            if turn < limit - 1 {
+                return named_tool_stream(
+                    turn,
+                    "locate",
+                    r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                );
+            }
+            if turn == limit - 1 {
+                return if refusal {
+                    if operations <= u32::from(limit) + 1 {
+                        named_tool_stream(
+                            turn,
+                            "locate",
+                            r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                        )
+                    } else {
+                        named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#)
+                    }
+                } else {
+                    named_tool_stream(
+                        turn,
+                        "extract",
+                        r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                    )
+                };
+            }
+            return Self::Discovery
+                .stream(3)
+                .replace("resp_3", &format!("resp_{turn}"))
+                .replace("msg_3", &format!("msg_{turn}"));
+        }
+        if self.two_discovery_hops() {
+            return route_tests::RouteFault::None.stream(turn);
+        }
         if let Self::Route(fault) = self {
             return fault.stream(turn);
         }
@@ -194,10 +641,266 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
+        {
+            let case = match self {
+                Self::DiscoveryNavigationRefusal(case) => case,
+                _ => 1,
+            };
+            if turns == 1 || (matches!(case, 2 | 3) && turns > 0) {
+                let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                let items = body["input"].as_array().unwrap();
+                let result = items
+                    .iter()
+                    .rfind(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                assert_eq!(result["call_id"], format!("call_{turns}"));
+                let proposal = items
+                    .iter()
+                    .find(|item| {
+                        item["type"] == "function_call" && item["call_id"] == result["call_id"]
+                    })
+                    .unwrap();
+                assert_eq!(proposal["name"], "navigate");
+                let operands: serde_json::Value =
+                    serde_json::from_str(proposal["arguments"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    operands["url"],
+                    if case == 4 {
+                        "https://work-fixture.invalid/arrival"
+                    } else {
+                        "https://work-fixture.invalid/unobserved"
+                    }
+                );
+                if case == 4 {
+                    assert!(
+                        std::str::from_utf8(bytes).unwrap().contains(REDIRECT_LINK),
+                        "exact opaque query survives refusal"
+                    );
+                }
+                let error: serde_json::Value =
+                    serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+                assert_eq!(error["code"], "unobserved_navigation_target");
+                assert_eq!(error["status"], "refused");
+                assert_eq!(error["executed"], false);
+                assert_eq!(error["observation_unchanged"], true);
+                let text = std::str::from_utf8(bytes).unwrap();
+                assert_eq!(text.matches("ZSEM3").count(), 1);
+                assert!(text.contains("Departure certificate"));
+                assert!(!text.contains("Arrival certificate"));
+                assert!(text.contains(&format!(
+                    "decision_calls_remaining_including_this={}",
+                    if case == 3 { 3 - turns } else { 5 - turns }
+                )));
+            }
+            return;
+        }
+
+        if let Self::DiscoveryActionRefusal(repeat, refusal) = self {
+            if turns == 1 || (repeat && turns > 0) {
+                let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                let result = body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rfind(|item| item["type"] == "function_call_output")
+                    .unwrap();
+                assert_eq!(result["call_id"], format!("call_{turns}"));
+                let error: serde_json::Value =
+                    serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    error["code"],
+                    match refusal {
+                        ActionRefusal::EffectMismatch => "task_effect_mismatch",
+                        ActionRefusal::OperationDenied => "operation_not_supported",
+                        ActionRefusal::UnsupportedWait => "verification_not_supported",
+                    }
+                );
+                if refusal == ActionRefusal::EffectMismatch {
+                    assert_eq!(error["required_effect"], "local_write");
+                    assert_eq!(error["rejected"]["target"], "@a3");
+                }
+                assert_eq!(error["executed"], false);
+                assert_eq!(error["observation_unchanged"], true);
+                let text = std::str::from_utf8(bytes).unwrap();
+                assert_eq!(text.matches("ZSEM3").count(), 1);
+                assert!(text.contains(&format!(
+                    "decision_calls_remaining_including_this={}",
+                    5 - turns
+                )));
+            }
+            return;
+        }
+        if let Self::DiscoveryAction(action_first) = self {
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
+            if turns < 3 {
+                assert!(text.contains(r#""name":"act""#));
+                assert!(text.contains(r#""name":"navigate""#));
+                assert!(text.contains(r#""name":"extract""#));
+            }
+            if turns == 2 && action_first {
+                assert!(
+                    !text.contains("call_1"),
+                    "navigation retires action refs and correlation"
+                );
+            }
+            return;
+        }
+        if let Self::DiscoveryScopeRefusal(case) = self {
+            if turns == 3 || (case == 2 && turns == 4) {
+                let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                let results: Vec<_> = body["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect();
+                let result = results.last().unwrap();
+                assert_eq!(result["call_id"], format!("call_{turns}"));
+                let error: serde_json::Value =
+                    serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+                assert_eq!(error["code"], "invalid_snapshot_scope");
+                assert_eq!(error["executed"], false);
+                assert_eq!(error["observation_unchanged"], true);
+                assert!(error.get("observation").is_none());
+                let observation = body["input"][1]["content"][0]["text"].as_str().unwrap();
+                assert!(observation.contains(if case == 4 {
+                    "scope=subtree"
+                } else {
+                    "scope=surrounding_text"
+                }));
+                assert!(observation.contains("r=heading"));
+                assert!(observation.contains("Arrival certificate"));
+                if case == 4 {
+                    assert!(observation.contains("truncated_model_projection"));
+                    assert!(observation.len() <= 16 * 1024);
+                    assert!(!observation.contains("public.example.test/71/"));
+                }
+                assert_eq!(
+                    std::str::from_utf8(bytes).unwrap().matches("ZSEM3").count(),
+                    1,
+                    "refusal replays the current observation exactly once"
+                );
+                assert!(std::str::from_utf8(bytes).unwrap().contains(&format!(
+                    "decision_calls_remaining_including_this={}",
+                    if case == 3 { 1 } else { 5 - turns }
+                )));
+                if case == 3 {
+                    let tools = body["tools"].as_array().unwrap();
+                    assert_eq!(
+                        tools.len(),
+                        1,
+                        "operation budget still reserves terminal mapping"
+                    );
+                    assert_eq!(tools[0]["name"], "extract");
+                }
+            }
+            return;
+        }
+        if let Self::DiscoveryEvidence(_) = self {
+            let text = std::str::from_utf8(bytes).unwrap();
+            if turns == 2 {
+                assert!(
+                    !text.contains("Arrival certificate"),
+                    "fresh empty decision has no old actionable baseline"
+                );
+            }
+            if turns == 3 {
+                assert!(
+                    text.contains("Arrival certificate"),
+                    "terminal mapping receives retained evidence"
+                );
+                assert!(text.contains("historical_observation="));
+                assert!(
+                    text.contains("Departure certificate"),
+                    "accounted navigation retains historical read evidence for extraction"
+                );
+            }
+            return;
+        }
+        if let Self::DiscoveryBudget(configured_limit, _, operations) = self {
+            let limit = configured_limit.min((operations - 1) as u8);
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
+            assert_eq!(
+                text.matches("ZEPHIUM_HOST_DECISION_BUDGET_V1").count(),
+                usize::from(turns < limit - 1)
+            );
+            if turns < limit - 1 {
+                assert!(text.contains(&format!(
+                    "decision_calls_remaining_including_this={}",
+                    u32::from(configured_limit - turns - 1)
+                        .min(operations - u32::from(turns) - u32::from(turns > 0) - 1)
+                )));
+                assert!(text.contains("terminal_mapping_calls_reserved=1"));
+                let tools = text.split("\"tools\":").nth(1).unwrap();
+                if turns == limit - 2 {
+                    assert_eq!(tools.matches("\"name\":").count(), 1);
+                    assert!(tools.contains("\"name\":\"extract\""));
+                } else {
+                    assert!(tools.contains("\"name\":\"locate\""));
+                }
+            }
+            if turns == 2 {
+                assert!(text.contains("ZREAD3 content=untrusted"));
+            }
+            if turns > 2 && turns < limit - 1 {
+                assert!(text.contains("matches=0 matched=0"));
+            }
+            return;
+        }
+        if self.two_discovery_hops() {
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert!(
+                text.contains("frames=1") || text.contains("ZEXTRACT1 schema_content=trusted"),
+                "the main-frame observation or its terminal mapping inventory is disclosed"
+            );
+            if self == Self::DiscoveryTwoHopsBlockedFrame
+                && turns >= 2
+                && !text.contains("ZEXTRACT1 schema_content=trusted")
+            {
+                assert!(text.contains("unsupported:policy_blocked"));
+                assert!(text.contains("frame_boundary"));
+            }
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
+            assert!(!text.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
+            if !text.contains("ZEXTRACT1 schema_content=trusted") {
+                assert!(text.contains(&format!(
+                    r#"\"completed_hops\":{},\"total_hops\":2,\"next_navigation_target\":null"#,
+                    turns.min(2)
+                )));
+            }
+            for prior in 1..=turns.min(2) {
+                assert!(!text.contains(&format!("call_{prior}")));
+                assert!(!text.contains(&format!("resp_{prior}")));
+            }
+            return;
+        }
         if let Self::Route(fault) = self {
             return fault.check_request(bytes, turns);
         }
         let text = std::str::from_utf8(bytes).unwrap();
+        if matches!(self, Self::Discovery | Self::DiscoveryMissingLink) {
+            assert_eq!(
+                text.contains("ZEPHIUM_HOST_LINK_DISCOVERY_V1"),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
+            assert!(!text.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
+            assert_eq!(
+                text.contains(r#"\"next_navigation_target\":null"#),
+                !text.contains("ZEXTRACT1 schema_content=trusted")
+            );
+        }
         assert!(
             text.contains("Verify a deterministic fixture."),
             "admitted objective survives"
@@ -207,8 +910,8 @@ impl NavigationFault {
             assert!(!text.contains("Arrival certificate"));
         } else {
             assert!(
-                !text.contains("Departure certificate"),
-                "old page transcript is retired"
+                (self == Self::Discovery && turns == 2) || !text.contains("Departure certificate"),
+                "only terminal discovery extraction may include prior document evidence"
             );
             assert!(!text.contains("call_1"), "old tool correlation is retired");
             assert!(!text.contains("resp_1"));
@@ -364,6 +1067,9 @@ pub(super) fn navigate(
     request: ContextNavigationRequest,
     fault: NavigationFault,
 ) -> ContextDispatch {
+    if fault.two_discovery_hops() {
+        return route_tests::navigate(port, request, route_tests::RouteFault::None);
+    }
     if let NavigationFault::Route(fault) = fault {
         return route_tests::navigate(port, request, fault);
     }
@@ -375,7 +1081,11 @@ pub(super) fn navigate(
         .store(true, Ordering::Relaxed);
     assert_eq!(
         request.target().as_url().as_str(),
-        "https://work-fixture.invalid/arrival"
+        if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+            REDIRECT_LINK
+        } else {
+            "https://work-fixture.invalid/arrival"
+        }
     );
     assert!(request.redirect_policy().is_none());
     if matches!(
@@ -421,16 +1131,27 @@ pub(super) fn capture(
     invocation: SemanticRuntimeInvocation,
     fault: NavigationFault,
 ) -> ContextDispatch {
+    if fault.two_discovery_hops() {
+        return route_tests::capture(port, invocation, route_tests::RouteFault::None);
+    }
     if let NavigationFault::Route(fault) = fault {
         return route_tests::capture(port, invocation, fault);
     }
     let arrived = lock(&port.calls).contains(&9);
     let correlation = invocation.correlation();
-    assert_eq!(
-        correlation.snapshot_generation().get(),
-        1,
-        "new document rotates the semantic world"
-    );
+    if !matches!(
+        fault,
+        NavigationFault::DiscoveryEvidence(_)
+            | NavigationFault::DiscoveryScopeRefusal(_)
+            | NavigationFault::DiscoveryAction(_)
+            | NavigationFault::DiscoveryActionRefusal(_, _)
+    ) {
+        assert_eq!(
+            correlation.snapshot_generation().get(),
+            1,
+            "new document rotates the semantic world"
+        );
+    }
     if arrived
         && matches!(
             fault,
@@ -455,6 +1176,82 @@ pub(super) fn capture(
         correlation.invocation().get(),
         correlation.snapshot_generation().get()
     );
+    let wire = if matches!(
+        fault,
+        NavigationFault::DiscoveryAction(_) | NavigationFault::DiscoveryActionRefusal(_, _)
+    ) {
+        let value = if lock(&port.calls).contains(&7) {
+            "fixture value"
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document","o":16}},{{"k":2,"p":0,"r":"heading","l":1,"n":"{heading}"}},{{"k":4,"p":0,"r":"textbox","n":"Field","s":64,"o":3,"v":{{"k":"text","value":"{value}"}},"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#,
+            correlation.invocation().get(),
+            correlation.snapshot_generation().get()
+        )
+    } else {
+        wire
+    };
+    let wire = if !arrived
+        && matches!(
+            fault,
+            NavigationFault::Discovery
+                | NavigationFault::DiscoveryNavigationRefusal(_)
+                | NavigationFault::DiscoveryAction(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
+                | NavigationFault::DiscoveryBudget(..)
+                | NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
+        ) {
+        wire.replace("]}", r#",{"k":3,"p":0,"r":"link","n":"A relevant source","u":"https://work-fixture.invalid/arrival"}]}"#)
+    } else {
+        wire
+    };
+    let wire = if fault == NavigationFault::DiscoveryNavigationRefusal(4) {
+        wire.replace("https://work-fixture.invalid/arrival", REDIRECT_LINK)
+    } else {
+        wire
+    };
+    let wire = if matches!(fault, NavigationFault::DiscoveryEvidence(_))
+        && correlation.snapshot_generation().get() > 1
+    {
+        format!(
+            r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document","o":16}}]}}"#,
+            correlation.invocation().get(),
+            correlation.snapshot_generation().get()
+        )
+    } else {
+        wire
+    };
+    let wire = if matches!(fault, NavigationFault::DiscoveryScopeRefusal(_))
+        && correlation.snapshot_generation().get() > 1
+    {
+        format!(
+            r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":2,"r":"heading","l":1,"n":"Arrival certificate"}},{{"k":4,"r":"paragraph","t":"Visible product detail"}}]}}"#,
+            correlation.invocation().get(),
+            correlation.snapshot_generation().get()
+        )
+    } else {
+        wire
+    };
+    let wire = if fault == NavigationFault::DiscoveryScopeRefusal(4)
+        && correlation.snapshot_generation().get() > 1
+    {
+        let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        let nodes = value["n"].as_array_mut().unwrap();
+        nodes[1]["p"] = serde_json::json!(0);
+        for index in 0..72 {
+            nodes.push(serde_json::json!({
+                "k": 100 + index, "p": 0, "r": "link",
+                "n": format!("Result {index}"),
+                "u": format!("https://public.example.test/{index}/{}", "a".repeat(170))
+            }));
+        }
+        serde_json::to_string(&value).unwrap()
+    } else {
+        wire
+    };
     let snapshot = decode_semantic_snapshot(
         SemanticDecodeContext::new(
             correlation.invocation(),
@@ -529,6 +1326,239 @@ pub(super) fn assert_outcome(
     calls: &[u8],
     events: &[AgentWorkEvent],
 ) {
+    if fault == NavigationFault::DiscoveryMissingLink
+        || matches!(fault, NavigationFault::DiscoveryNavigationRefusal(_))
+    {
+        let case = match fault {
+            NavigationFault::DiscoveryNavigationRefusal(case) => case,
+            _ => 1,
+        };
+        let expected_calls = if case == 0 || case == 4 {
+            4
+        } else if case == 2 {
+            5
+        } else {
+            3
+        };
+        if matches!(case, 2 | 3) {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(
+                closed.policy_settlement().closure().model_calls(),
+                expected_calls
+            );
+            assert!(
+                closed.policy_settlement().closure().operations() <= if case == 3 { 4 } else { 24 }
+            );
+            assert_eq!(closed.policy_settlement().closure().navigations(), 0);
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(success.closure().model_calls(), expected_calls);
+            assert_eq!(
+                success.closure().navigations(),
+                if case == 0 || case == 4 { 1 } else { 0 }
+            );
+            assert!(success.take_extraction().is_some());
+        }
+        assert_eq!(
+            calls.iter().filter(|call| **call == 9).count(),
+            if case == 0 || case == 4 { 1 } else { 0 },
+            "only the corrected observed URL can navigate"
+        );
+        assert!(!calls.contains(&7));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind(), AgentWorkEventKind::NavigationRefused(_)))
+                .count(),
+            if matches!(case, 2 | 3) {
+                expected_calls as usize - 1
+            } else {
+                1
+            }
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
+    if let NavigationFault::DiscoveryActionRefusal(repeat, _) = fault {
+        if repeat {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::ActionProposalLoop)
+            );
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
+            assert_eq!(closed.policy_settlement().closure().effects(), 0);
+            assert!(!calls.contains(&7), "invalid actions never dispatch");
+            assert!(!calls.contains(&9), "invalid actions never navigate");
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().model_calls(), 5);
+            assert_eq!(success.closure().effects(), 1);
+            assert_eq!(success.closure().navigations(), 1);
+            assert_eq!(success.closure().operations(), 7);
+            assert!(success.take_extraction().is_some());
+            assert_eq!(calls.iter().filter(|call| **call == 7).count(), 1);
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.kind(),
+                    AgentWorkEventKind::ActionProposalRefused(_)
+                ))
+                .count(),
+            if repeat { 2 } else { 1 }
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
+    if let NavigationFault::DiscoveryAction(action_first) = fault {
+        let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+            panic!("interleaved objective: {outcome:?}");
+        };
+        assert_eq!(success.closure().model_calls(), 4);
+        assert_eq!(success.closure().effects(), 1);
+        assert_eq!(success.closure().navigations(), 1);
+        assert_eq!(success.closure().operations(), 6);
+        assert!(success.take_extraction().is_some());
+        assert!(success.take_extraction().is_none());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind() == AgentWorkEventKind::Verified)
+                .count(),
+            1
+        );
+        let action = calls.iter().position(|call| *call == 7).unwrap();
+        let navigation = calls.iter().position(|call| *call == 9).unwrap();
+        assert_eq!(action < navigation, action_first);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
+    if let NavigationFault::DiscoveryScopeRefusal(case) = fault {
+        if case == 2 {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+            );
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 5);
+            assert_eq!(closed.policy_settlement().closure().operations(), 6);
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().model_calls(), 5);
+            assert_eq!(success.closure().operations(), 6);
+            assert!(success.take_extraction().is_some());
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind() == AgentWorkEventKind::InspectionRefused)
+                .count(),
+            if case == 2 { 2 } else { 1 }
+        );
+        assert_eq!(
+            calls,
+            [1, 2, 3, 2, 9, 3, 3, 4, 5, 6],
+            "invalid target never dispatches a native capture"
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
+    if let NavigationFault::DiscoveryEvidence(foreign) = fault {
+        if foreign {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(matches!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::Extraction(_))
+            ));
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().model_calls(), 4);
+            let result = success.take_extraction().unwrap();
+            let SemanticExtractedValue::Text(value) = result.fields()[0].value() else {
+                panic!();
+            };
+            let sources = result
+                .sources(value.source_span())
+                .unwrap()
+                .collect::<Vec<_>>();
+            assert_eq!(sources.len(), 2);
+            let source = sources[0];
+            assert!(source.observation < result.observation());
+            assert!(source.captured_at.millis() < result.captured_at().millis());
+            assert!(
+                matches!(&source.content, SemanticOwnedReadContent::Text(text) if text == "Arrival certificate")
+            );
+            assert!(
+                matches!(&sources[1].content, SemanticOwnedReadContent::Text(text) if text == "Departure certificate")
+            );
+            assert_ne!(sources[0].frame.context(), sources[1].frame.context());
+            assert_eq!(
+                sources[0].frame.context().identity(),
+                sources[1].frame.context().identity()
+            );
+        }
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert!(!calls.contains(&7));
+        return;
+    }
+    if let NavigationFault::DiscoveryBudget(limit, refusal, operations) = fault {
+        let limit = limit.min((operations - 1) as u8);
+        let calls_used = if refusal {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+            );
+            assert_eq!(
+                closed.policy_settlement().closure().operations(),
+                u32::from(limit)
+            );
+            assert!(closed.policy_settlement().closure().operations() < operations);
+            closed.policy_settlement().closure().model_calls()
+        } else {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(success.closure().navigations(), 1);
+            assert_eq!(success.closure().operations(), u32::from(limit) + 1);
+            assert!(success.closure().operations() <= operations);
+            assert!(success.take_extraction().is_some());
+            success.closure().model_calls()
+        };
+        assert_eq!(calls_used, u32::from(limit - u8::from(refusal)));
+        assert_eq!(calls, [1, 2, 3, 2, 9, 3, 4, 5, 6]);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
+    if fault.two_discovery_hops() {
+        return route_tests::assert_outcome(
+            route_tests::RouteFault::None,
+            outcome,
+            shutdown,
+            calls,
+            events,
+        );
+    }
     if let NavigationFault::Route(fault) = fault {
         return route_tests::assert_outcome(fault, outcome, shutdown, calls, events);
     }
@@ -536,7 +1566,10 @@ pub(super) fn assert_outcome(
     assert!(!events
         .iter()
         .any(|event| event.kind() == AgentWorkEventKind::Verified));
-    if matches!(fault, NavigationFault::None | NavigationFault::PriorLocate) {
+    if matches!(
+        fault,
+        NavigationFault::None | NavigationFault::PriorLocate | NavigationFault::Discovery
+    ) {
         let AgentWorkOutcome::Succeeded(mut success) = outcome else {
             panic!("navigation success: {outcome:?}");
         };
@@ -678,5 +1711,15 @@ pub(super) fn assert_outcome(
             closure.operations(),
             closure.model_calls() + closure.navigations()
         );
+    }
+}
+
+#[test]
+fn unobserved_navigation_feedback_corrects_or_extracts_and_preserves_original_budgets() {
+    let _serial = lock(&SERIAL);
+    for case in 0..5 {
+        provider_fixture(ProviderFault::Navigation(
+            NavigationFault::DiscoveryNavigationRefusal(case),
+        ));
     }
 }

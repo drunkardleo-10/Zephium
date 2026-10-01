@@ -310,7 +310,7 @@ struct CatalogReplacement {
 struct CatalogPreparation {
     identity: [u8; 32],
     catalog: PolicyCatalog,
-    done: Box<dyn FnOnce(CatalogPreparationOutcome) + Send>,
+    done: Box<dyn FnOnce(Result<Arc<ContentRules>, BlockerCompileFailure>) + Send>,
 }
 
 struct CatalogActivation {
@@ -529,6 +529,26 @@ impl WorkerBlocker {
         catalog: PolicyCatalog,
         done: Box<dyn FnOnce(CatalogPreparationOutcome) + Send>,
     ) -> CatalogReplacementDispatch {
+        self.prepare_catalog_rules(
+            identity,
+            catalog,
+            Box::new(move |result| {
+                done(match result {
+                    Ok(_) => CatalogPreparationOutcome::Prepared,
+                    Err(failure) => CatalogPreparationOutcome::Failed(failure),
+                });
+            }),
+        )
+    }
+
+    /// Prepares the exact candidate and transfers bounded artifact ownership
+    /// for native preflight, without changing the current source authority.
+    pub fn prepare_catalog_rules(
+        &self,
+        identity: [u8; 32],
+        catalog: PolicyCatalog,
+        done: Box<dyn FnOnce(Result<Arc<ContentRules>, BlockerCompileFailure>) + Send>,
+    ) -> CatalogReplacementDispatch {
         let mut state = self
             .admission
             .state
@@ -680,6 +700,15 @@ pub enum CatalogReplacementDispatch {
 }
 
 impl BlockerCompiler for WorkerBlocker {
+    fn prepare_site_preferences(
+        &self,
+        preferences: &zephium_core::blocker::BlockerSitePreferences,
+    ) -> Option<Arc<zephium_core::blocker::PreparedBlockerSites>> {
+        crate::prepare_site_preferences(preferences)
+    }
+    fn validate_personal_selector(&self, selector: &str) -> Option<String> {
+        crate::validate_personal_selector(selector)
+    }
     fn compile(
         &self,
         profile: ProfileId,
@@ -979,14 +1008,12 @@ fn run_worker(
                 let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     candidate.resolve(compiler, &mut persistent)
                 })) {
-                    Ok(BlockerCompileOutcome::Compiled(_)) => {
+                    Ok(BlockerCompileOutcome::Compiled(rules)) => {
                         prepared = Some((preparation.identity, candidate));
-                        CatalogPreparationOutcome::Prepared
+                        Ok(rules)
                     }
-                    Ok(BlockerCompileOutcome::Failed(failure)) => {
-                        CatalogPreparationOutcome::Failed(failure)
-                    }
-                    Err(_) => CatalogPreparationOutcome::Failed(BlockerCompileFailure::Internal),
+                    Ok(BlockerCompileOutcome::Failed(failure)) => Err(failure),
+                    Err(_) => Err(BlockerCompileFailure::Internal),
                 };
                 admission
                     .state
@@ -1279,6 +1306,7 @@ const fn native_target() -> CompileTarget {
 pub(crate) fn adapt_rules(
     rules: CompiledRules,
 ) -> Result<Arc<ContentRules>, BlockerCompileFailure> {
+    let cosmetics = rules.cosmetics().cloned();
     let report = rules.report();
     let (
         platform_omitted_rules,
@@ -1340,7 +1368,7 @@ pub(crate) fn adapt_rules(
         blocking_rule_entries: u64::try_from(report.native_blocking_rule_entries())
             .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
     };
-    match rules.target() {
+    let result = match rules.target() {
         CompileTarget::Runtime => {
             let digest = ContentRuleDigest::from_bytes(*rules.digest().as_bytes());
             ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::compiled(rules)))
@@ -1367,6 +1395,17 @@ pub(crate) fn adapt_rules(
             }
             Ok(content_rules)
         }
+    }?;
+    Ok(attach_cosmetics(result, cosmetics))
+}
+
+fn attach_cosmetics(
+    rules: Arc<ContentRules>,
+    cosmetics: Option<crate::cosmetics::PreparedCosmetics>,
+) -> Arc<ContentRules> {
+    match cosmetics {
+        Some(cosmetics) => rules.with_cosmetics(cosmetics.policy),
+        None => rules,
     }
 }
 
@@ -1377,13 +1416,16 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             digest,
             coverage,
             rules,
-        } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules))),
+            cosmetics,
+        } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules)))
+            .map(|rules| attach_cosmetics(rules, cosmetics)),
         #[cfg(feature = "webkit")]
         LoadedArtifact::WebKit {
             digest,
             coverage,
             artifact_digest,
             encoded,
+            cosmetics,
         } => {
             let rules = ContentRules::declarative(
                 digest,
@@ -1398,7 +1440,7 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             else {
                 return None;
             };
-            (observed.as_bytes() == &artifact_digest).then_some(rules)
+            (observed.as_bytes() == &artifact_digest).then(|| attach_cosmetics(rules, cosmetics))
         }
     }
 }
@@ -1536,9 +1578,9 @@ impl NetworkRequestPolicy for RuntimePolicy {
                     }
                     #[cfg(not(feature = "runtime-exact"))]
                     {
-                        // The shipped WebView2 graph intentionally has neither an
-                        // exact initiating-frame URL nor the public-suffix
-                        // resolver required to classify one. Treat an unexpected
+                        // The shipped WebView2 callback has no exact initiating-frame
+                        // URL. The resolver is used for document cosmetics only;
+                        // it does not grant request attribution. Treat an unexpected
                         // exact request as a capability mismatch and fail open.
                         self.counters.record_attribution_unavailable();
                         return CoreDecision::Allow;
@@ -1613,6 +1655,10 @@ fn allow_all_digest() -> ContentRuleDigest {
 
 fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
     match error {
+        CompileError::Cosmetics(crate::CosmeticError::ResourceLimit) => {
+            BlockerCompileFailure::ResourceLimit
+        }
+        CompileError::Cosmetics(_) => BlockerCompileFailure::InvalidSource,
         CompileError::TargetUnavailable => BlockerCompileFailure::Internal,
         CompileError::NoSources => BlockerCompileFailure::SourceUnavailable,
         CompileError::NoUsableRules
@@ -2642,7 +2688,7 @@ mod tests {
         let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("maintained").unwrap(),
             SourceFormat::Standard,
-            Arc::from("||ads.zephium.invalid^$script"),
+            Arc::from("||ads.zephium.invalid^"),
         )])
         .unwrap();
 
@@ -2912,7 +2958,7 @@ mod tests {
         let source = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("candidate").unwrap(),
             SourceFormat::Standard,
-            Arc::from("||ads.zephium.invalid^$script"),
+            Arc::from("||ads.zephium.invalid^$script\n##.candidate-ad"),
         )])
         .unwrap();
         let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2928,17 +2974,23 @@ mod tests {
         let identity = [12; 32];
         let (prepared_tx, prepared_rx) = mpsc::sync_channel(1);
         assert_eq!(
-            worker.prepare_catalog(
+            worker.prepare_catalog_rules(
                 identity,
                 candidate,
                 Box::new(move |outcome| prepared_tx.send(outcome).unwrap()),
             ),
             CatalogReplacementDispatch::Scheduled
         );
-        assert_eq!(
-            prepared_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
-            CatalogPreparationOutcome::Prepared
+        let preflight = prepared_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(preflight.payload(), zephium_core::blocker::ContentRulesPayload::Declarative { encoded, .. } if !encoded.is_empty())
         );
+        assert!(preflight.cosmetics().is_some());
+        drop(preflight);
+
         assert_eq!(loads.load(Ordering::Relaxed), 1);
 
         let (stale_tx, stale_rx) = mpsc::sync_channel(1);

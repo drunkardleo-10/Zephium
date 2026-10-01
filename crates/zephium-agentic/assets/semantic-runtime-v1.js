@@ -4,7 +4,7 @@
   const GLOBAL_NAME = "__zephiumSemanticRuntimeV1";
   const PROTOCOL_VERSION = 1;
   const WIRE_VERSION = 1;
-  const MAX_REQUEST_BYTES = 17701;
+  const MAX_REQUEST_BYTES = 17707;
   const MAX_SAFE_INTEGER = 9007199254740991;
   const MAX_NODES = 512;
   const MAX_TEXT_BYTES = 131072;
@@ -23,17 +23,15 @@
   const MAX_ACTION_DESCRIPTOR_WIRE_BYTES = 16384;
   const MAX_ACTION_DESCRIPTOR_VISITED_NODES = 2048;
   const MAX_ACTION_TEXT_BYTES = 4096;
-  // Independently bounded page-world transport: fixed command grammar plus
-  // worst-case two-byte JSON expansion of one legal 4-KiB replacement.
-  const MAX_PAGE_RELAY_COMMAND_BYTES = 8320;
+  const MAX_DIALOG_SAMPLE_NODES = 16384;
+  const MAX_DIALOG_SAMPLE_DIALOGS = 16;
   const CHANNEL_PULL = "P1";
   const CHANNEL_RESULT_PREFIX = "R1:";
   const CHANNEL_ACK = "A1";
   const CHANNEL_STOP = "S1";
+  const CHANNEL_PARK = "K1";
+  const CHANNEL_PARKED = "K1:A";
   const CHANNEL_EXHAUSTED = "X1";
-  const PAGE_RELAY_READY = "data-zephium-fill-relay-ready-v1";
-  const PAGE_RELAY_COMMAND = "data-zephium-fill-relay-command-v1";
-  const PAGE_RELAY_TERMINAL = "data-zephium-fill-relay-terminal-v1";
 
   const objectDefineProperty = Object.defineProperty;
   const objectFreeze = Object.freeze;
@@ -44,6 +42,9 @@
   const jsonParse = JSON.parse;
   const jsonStringify = JSON.stringify;
   const reflectApply = Reflect.apply;
+  const eventTargetAddEventListener = EventTarget.prototype.addEventListener;
+  const eventTargetRemoveEventListener = EventTarget.prototype.removeEventListener;
+  const eventPreventDefault = Event.prototype.preventDefault;
   const numberIsFinite = Number.isFinite;
   const numberIsSafeInteger = Number.isSafeInteger;
   const mathRound = Math.round;
@@ -55,6 +56,8 @@
   const stringSlice = String.prototype.slice;
   const stringSplit = String.prototype.split;
   const stringTrim = String.prototype.trim;
+  const stringStartsWith = String.prototype.startsWith;
+  const stringIncludes = String.prototype.includes;
 
   if (objectHasOwn(globalThis, GLOBAL_NAME)) {
     return;
@@ -81,12 +84,22 @@
   const nodeParentGetter = getter(Node.prototype, "parentNode");
   const nodeOwnerDocumentGetter = getter(Node.prototype, "ownerDocument");
   const nodeConnectedGetter = getter(Node.prototype, "isConnected");
+  const nodeGetRoot = Node.prototype.getRootNode;
   const nodeChildNodesGetter = getter(Node.prototype, "childNodes");
   const nodeContains = Node.prototype.contains;
   const characterDataGetter = getter(CharacterData.prototype, "data");
   const elementTagGetter = getter(Element.prototype, "tagName");
   const elementShadowGetter = getter(Element.prototype, "shadowRoot");
   const documentElementGetter = getter(Document.prototype, "documentElement");
+  const scrollingElementGetter = getter(Document.prototype, "scrollingElement");
+  const scrollLeftGetter = getter(Element.prototype, "scrollLeft");
+  const scrollTopGetter = getter(Element.prototype, "scrollTop");
+  const clientWidthGetter = getter(Element.prototype, "clientWidth");
+  const clientHeightGetter = getter(Element.prototype, "clientHeight");
+  const scrollWidthGetter = getter(Element.prototype, "scrollWidth");
+  const scrollHeightGetter = getter(Element.prototype, "scrollHeight");
+  const fixedScrollBy = Element.prototype.scrollBy;
+  const fixedScrollIntoView = Element.prototype.scrollIntoView;
   const documentActiveGetter = getter(Document.prototype, "activeElement");
   const documentReadyStateGetter = getter(Document.prototype, "readyState");
   const shadowActiveGetter =
@@ -103,7 +116,33 @@
   const getComputedStyleFixed = globalThis.getComputedStyle;
   const htmlElementClick =
     typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
+  const htmlElementFocus =
+    typeof HTMLElement === "function" ? HTMLElement.prototype.focus : null;
+  const documentExecCommand = Document.prototype.execCommand;
+  const documentGetSelection = Document.prototype.getSelection;
+  const documentCreateRange = Document.prototype.createRange;
+  const rangeSelectNodeContents = typeof Range === "function" ? Range.prototype.selectNodeContents : null;
+  const rangeSetStart = typeof Range === "function" ? Range.prototype.setStart : null;
+  const rangeSetEnd = typeof Range === "function" ? Range.prototype.setEnd : null;
+  const selectionRemoveAllRanges = typeof Selection === "function" ? Selection.prototype.removeAllRanges : null;
+  const selectionAddRange = typeof Selection === "function" ? Selection.prototype.addRange : null;
+  const nativeKeyboardEvent = globalThis.KeyboardEvent;
+  const formRequestSubmit =
+    typeof HTMLFormElement === "function" ? HTMLFormElement.prototype.requestSubmit : null;
+  const nativeMouseEvent = globalThis.MouseEvent;
+  const nativePointerEvent = globalThis.PointerEvent;
   const nativePromise = Promise;
+  const fixedAnimationFrame = globalThis.requestAnimationFrame;
+  const fixedCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  const fixedTimeout = globalThis.setTimeout;
+  const fixedClearTimeout = globalThis.clearTimeout;
+  const nativeInputEvent = globalThis.InputEvent;
+  const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
+  const inputValueSetter = setter(HTMLInputElement.prototype, "value");
+  const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
+  const nodeTextSetter = setter(Node.prototype, "textContent");
+  const nodeTextGetter = getter(Node.prototype, "textContent");
+  const editableGetter = getter(HTMLElement.prototype, "isContentEditable");
   const promiseResolve = Promise.resolve;
   const promiseThen = Promise.prototype.then;
   const weakMapGet = WeakMap.prototype.get;
@@ -111,6 +150,30 @@
 
   const inputValueGetter =
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "value") : null;
+  const anchorHrefGetter =
+    typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
+  const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
+  const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
+  const titleTextGetter = typeof HTMLTitleElement === "function" ? getter(HTMLTitleElement.prototype, "text") : null;
+  const scriptTextGetter = typeof HTMLScriptElement === "function" ? getter(HTMLScriptElement.prototype, "text") : null;
+  const detailsOpenGetter = typeof HTMLDetailsElement === "function" ? getter(HTMLDetailsElement.prototype, "open") : null;
+  const buttonTypeGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "type") : null;
+  const buttonFormGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "form") : null;
+  const inputTypeGetter = getter(HTMLInputElement.prototype, "type");
+  const inputFormGetter = getter(HTMLInputElement.prototype, "form");
+  const textareaFormGetter = typeof HTMLTextAreaElement === "function" ? getter(HTMLTextAreaElement.prototype, "form") : null;
+  const formProto = typeof HTMLFormElement === "function" ? HTMLFormElement.prototype : null;
+  const formMethodGetter = getter(formProto, "method");
+  const formActionGetter = getter(formProto, "action");
+  const formElementsGetter = getter(formProto, "elements");
+  const buttonProto = typeof HTMLButtonElement === "function" ? HTMLButtonElement.prototype : null;
+  const formOverrides = [getter(buttonProto, "formMethod"), getter(buttonProto, "formAction"),
+    getter(HTMLInputElement.prototype, "formMethod"), getter(HTMLInputElement.prototype, "formAction")];
+  const collectionProto = typeof HTMLCollection === "function" ? HTMLCollection.prototype : null;
+  const collectionLengthGetter = getter(collectionProto, "length");
+  const collectionItem = collectionProto && collectionProto.item;
+  const workLocation = globalThis.location;
+  const locationOriginGetter = getter(workLocation, "origin");
   const inputCheckedGetter =
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "checked") : null;
   const inputLabelsGetter =
@@ -144,12 +207,32 @@
   const shadowHostGetter =
     typeof ShadowRoot === "function" ? getter(ShadowRoot.prototype, "host") : null;
 
-  const nodeKeys = new WeakMap();
+  let nodeKeys = new WeakMap();
   const keyNodes = new Map();
   let nextNodeKey = 1;
   let busy = false;
   let lastObservationInvocation = 0;
   let lastObservationGeneration = 0;
+  // Only a requested UI-transition action pays for these bounded samples.
+  // Weak identities do not retain DOM nodes or enter the model projection.
+  let dialogKeys = new WeakMap();
+  let nextDialogKey = 1;
+  let pendingDialogSample = null;
+  let pendingScrollSample = null;
+  let transportActive = false;
+
+  function clearDocumentState() {
+    nodeKeys = new WeakMap();
+    keyNodes.clear();
+    nextNodeKey = 1;
+    busy = false;
+    lastObservationInvocation = 0;
+    lastObservationGeneration = 0;
+    dialogKeys = new WeakMap();
+    nextDialogKey = 1;
+    pendingDialogSample = null;
+    pendingScrollSample = null;
+  }
 
   const IDENTITY_EXHAUSTED = objectFreeze({});
 
@@ -199,7 +282,7 @@
     }
 
     const budget = request.b;
-    if (!hasExactKeys(budget, ["n", "t", "w", "x", "geo"])) return null;
+    if (!hasExactKeys(budget, budget.lu === true ? ["n", "t", "w", "x", "geo", "lu"] : ["n", "t", "w", "x", "geo"])) return null;
     if (
       !numberIsSafeInteger(budget.n) ||
       budget.n < 1 ||
@@ -213,7 +296,8 @@
       !numberIsSafeInteger(budget.x) ||
       budget.x < budget.n ||
       budget.x > MAX_VISITED_NODES ||
-      typeof budget.geo !== "boolean"
+      typeof budget.geo !== "boolean" ||
+      (budget.lu !== undefined && budget.lu !== true)
     ) {
       return null;
     }
@@ -229,6 +313,12 @@
       scope.k === "frame"
     ) {
       if (!hasExactKeys(scope, ["k", "a"]) || !isPositiveSafeInteger(scope.a)) return null;
+    } else if (scope.k === "text_search") {
+      if (!hasExactKeys(scope, ["k", "a", "q"]) || !isPositiveSafeInteger(scope.a) ||
+          typeof scope.q !== "string" || utf8Length(scope.q, 257) > 256 ||
+          /[\u0000-\u001f\u007f-\u009f]/u.test(scope.q) || apply(stringTrim, scope.q, []) === "") return null;
+      for (const character of scope.q) if (isForbiddenTextPoint(character.codePointAt(0))) return null;
+      if (looksLikeSecret(scope.q)) return null;
     } else if (scope.k === "surrounding_text") {
       if (
         !hasExactKeys(scope, ["k", "a", "p", "n"]) ||
@@ -251,7 +341,20 @@
   }
 
   function parseActionRequest(request) {
-    if (!hasExactKeys(request, ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"])) {
+    const actionKeys = ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"];
+    if (objectHasOwn(request, "sc")) actionKeys.push("sc");
+    if (request.k === "scroll") {
+      if (!arrayIsArray(request.sc) || request.sc.length !== 2 ||
+          !["up", "down", "left", "right"].includes(request.sc[0]) ||
+          !["line", "half_page", "page", "into_view"].includes(request.sc[1])) return null;
+    } else if (objectHasOwn(request, "sc")) return null;
+    if (objectHasOwn(request, "u")) actionKeys.push("u");
+    if (request.k === "press") {
+      if (typeof request.pk !== "string" || PRESS_KEYS[request.pk] === undefined) return null;
+      actionKeys.push("pk");
+    } else if (objectHasOwn(request, "pk")) return null;
+    if (!hasExactKeys(request, actionKeys) ||
+        (objectHasOwn(request, "u") && (request.u !== true || request.k !== "click"))) {
       return null;
     }
     if (
@@ -334,7 +437,11 @@
   }
 
   function validRuntimeDescriptor(value) {
-    if (!hasExactKeys(value, ["r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"])) return false;
+    if (!isPlainObject(value)) return false;
+    if (!hasExactKeys(value, objectHasOwn(value, "a")
+      ? ["a", "r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"]
+      : ["r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"])) return false;
+    if (objectHasOwn(value, "a") && (!numberIsSafeInteger(value.a) || value.a < 1 || value.a > 6)) return false;
     if (
       !numberIsSafeInteger(value.r) || value.r < 1 || value.r > 30 ||
       !numberIsSafeInteger(value.o) || value.o < 0 || value.o > 31 ||
@@ -404,14 +511,15 @@
     );
   }
 
-  function normalizeText(raw, byteLimit) {
+  function normalizeText(raw, byteLimit, scanBytesLimit = Infinity) {
     if (typeof raw !== "string" || byteLimit <= 0) {
-      return { value: "", bytes: 0, truncated: typeof raw === "string" && raw.length > 0 };
+      return { value: "", bytes: 0, scannedBytes: 0, truncated: typeof raw === "string" && raw.length > 0 };
     }
     let value = "";
     let bytes = 0;
     let pendingSpace = false;
     let inspected = 0;
+    let scannedBytes = 0;
     let truncated = false;
     const scanLimit = byteLimit * 8 + 256;
     for (const character of raw) {
@@ -421,12 +529,14 @@
         break;
       }
       const point = character.codePointAt(0);
+      const characterBytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      if (scannedBytes + characterBytes > scanBytesLimit) { truncated = true; break; }
+      scannedBytes += characterBytes;
       if (isWhitespace(point)) {
         if (value.length !== 0) pendingSpace = true;
         continue;
       }
       if (isForbiddenTextPoint(point)) continue;
-      const characterBytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
       const separatorBytes = pendingSpace && value.length !== 0 ? 1 : 0;
       if (bytes + separatorBytes + characterBytes > byteLimit) {
         truncated = true;
@@ -440,7 +550,7 @@
       bytes += characterBytes;
       pendingSpace = false;
     }
-    return { value, bytes, truncated };
+    return { value, bytes, scannedBytes, truncated };
   }
 
   function exactValueText(raw, byteLimit) {
@@ -556,9 +666,10 @@
     return apply(stringToLowerCase, value, []);
   }
 
-  function attribute(element, name, limit = 1024) {
+  function attribute(element, name, limit = 1024, state = null) {
     const value = apply(getAttribute, element, [name]);
     if (typeof value !== "string") return null;
+    if (state !== null && value.length > limit) mark(state, "field_limit", false);
     return value.length > limit ? apply(stringSlice, value, [0, limit]) : value;
   }
 
@@ -576,7 +687,11 @@
   }
 
   function mark(state, completeness, stop = true) {
-    if (state.completeness === "complete") state.completeness = completeness;
+    if (completeness === "field_limit") state.fieldTruncations = (state.fieldTruncations || 0) + 1;
+    if (state.completeness === "complete" || completeness === "text_limit" ||
+        (state.completeness === "field_limit" && completeness !== "field_limit")) {
+      state.completeness = completeness;
+    }
     if (stop) state.stopped = true;
   }
 
@@ -650,6 +765,7 @@
 
   const ariaRoles = objectFreeze({
     group: "group",
+    figure: "group",
     document: "document",
     article: "document",
     region: "landmark",
@@ -677,6 +793,12 @@
     menuitem: "menu_item",
     menuitemcheckbox: "menu_item",
     menuitemradio: "menu_item",
+    // An app's sidebar tree (Slack's channels, a file tree) is a list of
+    // selectable items, and a feed is a list of articles.
+    tree: "list",
+    treeitem: "option",
+    feed: "list",
+    article: "document",
     dialog: "dialog",
     alertdialog: "dialog",
     list: "list",
@@ -703,7 +825,7 @@
     const tokens = apply(stringSplit, lower(raw), [/\s+/]);
     for (const token of tokens) {
       if (token === "none" || token === "presentation") return { suppressed: true };
-      if (objectHasOwn(ariaRoles, token)) return { role: ariaRoles[token] };
+      if (objectHasOwn(ariaRoles, token)) return { role: ariaRoles[token], landmark: ariaRoles[token] === "landmark" ? token : undefined };
     }
     return null;
   }
@@ -714,6 +836,21 @@
       attribute(element, "aria-label", 2) !== null ||
       attribute(element, "title", 2) !== null
     );
+  }
+
+  function genericTextDescriptor(node, tag, inputType) {
+    if (tag !== "div" && tag !== "span") return null;
+    const children = read(nodeChildNodesGetter, node);
+    for (let index = 0; index < mathMin(listLength(children), 8); index += 1) {
+      const child = listItem(children, index);
+      if (child !== null && nodeType(child) === 3) {
+        const raw = read(characterDataGetter, child);
+        if (typeof raw === "string" && apply(stringTrim, apply(stringSlice, raw, [0, 128]), []) !== "") {
+          return { role: "paragraph", tag, inputType, genericText: true };
+        }
+      }
+    }
+    return null;
   }
 
   function classify(node) {
@@ -729,23 +866,37 @@
       return { role: "password", tag, inputType };
     }
 
+    const editableAttribute = attribute(node, "contenteditable", 16);
+    const editable = editableAttribute !== null &&
+      ["", "true", "plaintext-only"].includes(lower(editableAttribute));
+    const editableStructure = editable ? [] : null;
+    const editableWitness = editable ? { context: null, empty: true } : null;
+    const editableSupport = editable ? editableHostSupport(node, editableStructure, editableWitness) : 2;
+    const plainTextEditable = editableSupport === 1;
+    // A rich editor (Slack's composer, ProseMirror, Notion's blocks) keeps
+    // its text in paragraphs; it is filled through the browser's own editing.
+    const richText = editable && editableSupport === 7 && richTextShape(node);
     const explicit = explicitRole(node);
     if (explicit !== null) {
       if (explicit.suppressed === true) return null;
-      return { role: explicit.role, tag, inputType };
+      return { role: explicit.role, landmark: explicit.landmark, tag, inputType, contentEditable: editable, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
     }
+
+    if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
 
     if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
       return tag === "fieldset" || tag === "details"
         ? { role: "group", tag, inputType }
-        : null;
+        : genericTextDescriptor(node, tag, inputType);
     }
+    if (tag === "figure") return { role: "group", tag, inputType };
     if (tag === "article") return { role: "document", tag, inputType };
     if (tag === "main" || tag === "nav" || tag === "header" || tag === "footer" || tag === "aside") {
-      return { role: "landmark", tag, inputType };
+      const landmark = { main: "main", nav: "navigation", header: "banner", footer: "contentinfo", aside: "complementary" }[tag];
+      return { role: "landmark", landmark, tag, inputType };
     }
     if ((tag === "section" || tag === "form") && hasAuthorName(node)) {
-      return { role: "landmark", tag, inputType };
+      return { role: "landmark", landmark: tag === "form" ? "form" : "region", tag, inputType };
     }
     if (/^h[1-6]$/.test(tag)) {
       return { role: "heading", tag, inputType, level: Number(tag[1]) };
@@ -786,31 +937,181 @@
     if (tag === "img" && attribute(node, "alt", 1) !== null) {
       return { role: "image", tag, inputType };
     }
+    if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true, headMeta: true };
+    if (isPageAddressMeta(node, tag)) return { role: "link", tag, inputType, pageAddress: true, headMeta: true, noOperations: true };
+    if (pageTitleText(node, tag) !== null) return { role: "paragraph", tag, inputType, pageTitle: true, headMeta: true, noOperations: true };
+    if (tag === "script") {
+      const facts = structuredFacts(node);
+      if (facts !== null) return { role: "paragraph", tag, inputType, pageFacts: facts, headMeta: true, noOperations: true };
+    }
     if (tag === "progress" || tag === "meter") return { role: "progress", tag, inputType };
     if (tag === "output") return { role: "status", tag, inputType };
-    const editable = lower(attribute(node, "contenteditable", 16) || "");
-    if (editable === "" || editable === "true" || editable === "plaintext-only") {
-      if (attribute(node, "contenteditable", 16) !== null) {
-        return { role: "textbox", tag, inputType, contentEditable: true };
-      }
-    }
-    return null;
+    return genericTextDescriptor(node, tag, inputType);
   }
 
   function shouldSkipSubtree(element) {
     const tag = tagName(element);
     return (
-      tag === "script" ||
+      (tag === "script" && !isStructuredData(element)) ||
       tag === "style" ||
       tag === "template" ||
       tag === "noscript" ||
-      tag === "head" ||
-      tag === "meta" ||
-      tag === "link" ||
+      (tag === "title" && pageTitleText(element, tag) === null) ||
+      (tag === "meta" && !isPageImageMeta(element, tag) && !isPageAddressMeta(element, tag) &&
+        pageTitleText(element, tag) === null) ||
+      (tag === "link" && !isPageAddressMeta(element, tag)) ||
       has(element, "hidden") ||
       has(element, "inert") ||
-      lower(attribute(element, "aria-hidden", 16) || "") === "true"
+      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag))
     );
+  }
+
+  // The page's own picture (og:image) is the one image every product or
+  // listing page names for itself; it is projected as a document-level image.
+  function isPageImageMeta(element, tag) {
+    return tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:image";
+  }
+
+  // The page's canonical address (rel=canonical or og:url), projected as one
+  // document-level link without operations; it names the page, not a target.
+  function isPageAddressMeta(element, tag) {
+    return (tag === "link" && lower(attribute(element, "rel", 32) || "") === "canonical") ||
+      (tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:url");
+  }
+
+  // schema.org JSON-LD items as one document-level text of facts.
+  function isStructuredData(element) {
+    return lower(attribute(element, "type", 64) || "") === "application/ld+json";
+  }
+  const FACT_TYPES = ["product", "productgroup", "hotel", "lodgingbusiness", "vacationrental", "event", "flight",
+    "softwareapplication", "webapplication", "course", "book", "restaurant", "localbusiness", "touristattraction"];
+  const FACT_SKIP = ["@context", "@type", "@id", "name", "url", "image", "offers", "aggregaterating", "description",
+    "brand", "review", "mainentityofpage", "sameas", "potentialaction", "isrelatedto", "hasvariant"];
+  const MAX_FACT_BYTES = 3600;
+  function fact(value, limit) {
+    if (arrayIsArray(value)) value = value[0];
+    if (value !== null && typeof value === "object") value = value.url || value.contentUrl || value.name || value.value;
+    return typeof value === "number" ? "" + value : typeof value === "string" ? apply(stringSlice, apply(stringTrim, value, []), [0, limit]) : "";
+  }
+  // One item as "type: name | key: value ...", items joined by " ;; ": its offer, rating, brand and
+  // the plain properties it states (piece count, age range, sku), then its
+  // picture and address when there is room.
+  function factPairs(item, type) {
+    const offer = (arrayIsArray(item.offers) ? item.offers[0] : item.offers) || {};
+    const rating = item.aggregateRating || {};
+    const pairs = [];
+    const add = (key, value) => { if (value !== "" && value !== "N/A" && pairs.length < 14) pairs.push(key + ": " + value); };
+    const price = fact(offer.price || offer.lowPrice, 24);
+    if (price !== "") add("price", apply(stringTrim, price + " " + fact(offer.priceCurrency, 8), []));
+    if (fact(rating.ratingValue, 8) !== "") add("rating", fact(rating.ratingValue, 8) + (fact(rating.reviewCount || rating.ratingCount, 12) !== "" ? " (" + fact(rating.reviewCount || rating.ratingCount, 12) + ")" : ""));
+    add("brand", fact(item.brand, 60));
+    const availability = fact(offer.availability, 80);
+    if (availability !== "") add("availability", apply(stringSplit, availability, ["/"]).pop());
+    for (const key of objectKeys(item).slice(0, 40)) {
+      if (FACT_SKIP.includes(lower(key))) continue;
+      const value = item[key];
+      const text = typeof value === "string" || typeof value === "number" ? fact(value, 60)
+        : value !== null && typeof value === "object" && !arrayIsArray(value) && value.value !== undefined ? fact(value.value, 60) : "";
+      if (text !== "" && !apply(stringIncludes, text, ["http"])) add(key, text);
+    }
+    const extra = arrayIsArray(item.additionalProperty) ? item.additionalProperty.slice(0, 8) : [];
+    for (const property of extra) {
+      if (property !== null && typeof property === "object") add(fact(property.name, 32), fact(property.value, 60));
+    }
+    return { head: type + ": " + fact(item.name, 160), pairs, image: fact(item.image, 600), url: fact(item.url || offer.url, 600) };
+  }
+  function structuredFacts(element) {
+    if (!isStructuredData(element) || scriptTextGetter === null) return null;
+    const items = [], pending = [];
+    try {
+      const text = read(scriptTextGetter, element);
+      if (text.length > 262144) return null;
+      pending.push(apply(jsonParse, JSON, [text]));
+    } catch (_) { return null; }
+    for (let seen = 0; pending.length !== 0 && seen < 400 && items.length < 24; seen += 1) {
+      const item = pending.shift();
+      if (item === null || typeof item !== "object") continue;
+      if (arrayIsArray(item)) { pending.push(...item.slice(0, 48)); continue; }
+      const type = lower(fact(item["@type"], 40));
+      if (!FACT_TYPES.includes(type)) {
+        for (const key of ["@graph", "itemListElement", "item", "mainEntity", "hasVariant"]) if (item[key] !== undefined) pending.push(item[key]);
+        continue;
+      }
+      if (fact(item.name, 160) !== "") items.push(factPairs(item, type));
+    }
+    const render = (pictures) => items.map(item => [item.head, ...item.pairs,
+      ...(pictures && item.image !== "" ? ["image: " + item.image] : []),
+      ...(item.url !== "" ? ["url: " + item.url] : [])].join(" | "));
+    // Items stay apart as " ;; ": node text folds line breaks into spaces.
+    let lines = render(true);
+    if (lines.join(" ;; ").length > MAX_FACT_BYTES) lines = render(false);
+    while (lines.length > 1 && lines.join(" ;; ").length > MAX_FACT_BYTES) lines.pop();
+    return lines.length === 0 || lines[0].length > MAX_FACT_BYTES ? null : lines.join(" ;; ");
+  }
+
+  // The page's own title (og:title, or the document <title>), projected as a
+  // document-level text node; null for anything else, including SVG titles.
+  function pageTitleText(element, tag) {
+    let text = null;
+    try {
+      if (tag === "title") text = read(titleTextGetter, element);
+      else if (tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:title") {
+        text = attribute(element, "content", 1024);
+      }
+    } catch (_) { text = null; }
+    return typeof text === "string" && apply(stringTrim, text, []) !== "" ? text : null;
+  }
+
+  // An aria-hidden wrapper around a gallery photo hides it from assistive
+  // tech only because its button carries the label. The photos inside stay
+  // image nodes; everything else in the wrapper stays hidden.
+  function pushHiddenPhotos(stack, item, state) {
+    const node = item.node;
+    if (tagName(node) === "img" || has(node, "hidden") || has(node, "inert")) return;
+    if (lower(attribute(node, "aria-hidden", 16) || "") !== "true") return;
+    const photos = [];
+    const pending = [{ node, depth: 0 }];
+    let visited = 0;
+    while (pending.length !== 0 && visited < 64 && photos.length < 8) {
+      const current = pending.pop();
+      visited += 1;
+      const list = childNodes(current.node);
+      const count = listLength(list);
+      for (let index = 0; index < count && visited + pending.length < 64; index += 1) {
+        const child = listItem(list, index);
+        if (child === null || nodeType(child) !== 1) continue;
+        const tag = tagName(child);
+        if (tag === "img") {
+          if (isRenderedPhoto(child, tag)) photos.push(child);
+        } else if (current.depth < 5 && !has(child, "hidden")) {
+          pending.push({ node: child, depth: current.depth + 1 });
+        }
+      }
+    }
+    for (let index = photos.length - 1; index >= 0; index -= 1) {
+      stack.push({ node: photos[index], parent: item.parent, sink: null, depth: item.depth + 1, disabled: item.disabled, nameAncestors: item.nameAncestors });
+    }
+  }
+
+  // A gallery photo is often aria-hidden because the button around it
+  // carries the label; a photo drawn at a real size stays an image node,
+  // while hidden icons and spacers still drop out.
+  function isRenderedPhoto(element, tag) {
+    if (tag !== "img") return false;
+    const rect = elementRect(element);
+    return rect !== null && rect.width >= 64 && rect.height >= 64;
+  }
+
+  // The label of the button or link an unnamed photo sits in.
+  function ancestorLabel(element, state) {
+    let current = element;
+    for (let depth = 0; depth < 3; depth += 1) {
+      current = read(nodeParentGetter, current);
+      if (current === null || nodeType(current) !== 1) return null;
+      const label = attribute(current, "aria-label", MAX_NAME_BYTES * 4, state);
+      if (label !== null && label !== "") return label;
+    }
+    return null;
   }
 
   function styleIsVisible(element) {
@@ -887,6 +1188,18 @@
     return inherited || has(element, "disabled") || lower(attribute(element, "aria-disabled", 16) || "") === "true";
   }
 
+  function summaryDetails(element) {
+    if (detailsOpenGetter === null || tagName(element) !== "summary") return null;
+    const parent = read(nodeParentGetter, element);
+    if (!parent || nodeType(parent) !== 1 || tagName(parent) !== "details") return null;
+    const children = read(nodeChildNodesGetter, parent);
+    for (let i = 0, n = mathMin(listLength(children), 128); i < n; i += 1) {
+      const child = listItem(children, i);
+      if (nodeType(child) === 1 && tagName(child) === "summary") return child === element ? parent : null;
+    }
+    return null;
+  }
+
   function stateBits(element, descriptor, disabled, focused) {
     let bits = 0;
     if (
@@ -901,7 +1214,8 @@
     ) {
       bits |= 2;
     }
-    if (lower(attribute(element, "aria-expanded", 16) || "") === "true") bits |= 4;
+    const details = summaryDetails(element);
+    if (details ? read(detailsOpenGetter, details) === true : lower(attribute(element, "aria-expanded", 16) || "") === "true") bits |= 4;
     if (disabled) bits |= 8;
     if (has(element, "required") || lower(attribute(element, "aria-required", 16) || "") === "true") {
       bits |= 16;
@@ -912,11 +1226,63 @@
     return bits;
   }
 
-  function operationBits(descriptor, disabled, readonly) {
+  function scrollElement(target) {
+    try {
+      const element = target === document ? read(scrollingElementGetter, document) : target;
+      if (!element || nodeType(element) !== 1) return null;
+      const width = read(clientWidthGetter, element), height = read(clientHeightGetter, element);
+      if (!(width > 0 && height > 0)) return null;
+      const style = apply(getComputedStyleFixed, globalThis, [element]);
+      const root = element === read(scrollingElementGetter, document);
+      const x = (root ? style.overflowX !== "hidden" && style.overflowX !== "clip" : ["auto", "scroll"].includes(style.overflowX)) && read(scrollWidthGetter, element) > width;
+      const y = (root ? style.overflowY !== "hidden" && style.overflowY !== "clip" : ["auto", "scroll"].includes(style.overflowY)) && read(scrollHeightGetter, element) > height;
+      return x || y ? element : null;
+    } catch (_) { return null; }
+  }
+
+  function scrollPosition(element) {
+    try {
+      const x = mathRound(read(scrollLeftGetter, element)), y = mathRound(read(scrollTopGetter, element));
+      return numberIsSafeInteger(x) && numberIsSafeInteger(y) && mathAbs(x) <= 1000000000 && mathAbs(y) <= 1000000000 ? [x, y] : null;
+    } catch (_) { return null; }
+  }
+
+  function scrollAncestors(target) {
+    const result = [];
+    let current = read(nodeParentGetter, target);
+    for (let depth = 0; current && depth < MAX_TREE_DEPTH; depth += 1) {
+      if (current === document || nodeType(current) === 1) {
+        const element = scrollElement(current);
+        if (element && !result.some(entry => entry.element === element)) {
+          const before = scrollPosition(element);
+          if (before === null) return null;
+          result.push({element, before});
+        }
+      }
+      if (current === document) return result;
+      current = nodeType(current) === 11 && shadowHostGetter !== null
+        ? read(shadowHostGetter, current) : read(nodeParentGetter, current);
+    }
+    return null;
+  }
+
+  function documentRect() {
+    const viewport = boundedViewport();
+    return viewport === null ? null : {x: 0, y: 0, width: viewport.width, height: viewport.height};
+  }
+
+  function operationBits(descriptor, disabled, readonly, element) {
     if (disabled || descriptor.noOperations === true) return 0;
     switch (descriptor.role) {
+      case "button": {
+        const rect = elementRect(element);
+        if (nativeActivation(element, descriptor) === 6 && rect !== null && !inViewport(rect)) {
+          const ancestors = scrollAncestors(element);
+          return ancestors !== null && ancestors.length > 0 ? 16 : 0;
+        }
+        return 1 | 8;
+      }
       case "link":
-      case "button":
       case "checkbox":
       case "radio":
       case "option":
@@ -925,20 +1291,23 @@
       case "menu_item":
         return 1 | 8;
       case "textbox":
-      case "password":
       case "searchbox":
+        return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
+      case "password":
       case "spinbutton":
         return readonly ? 1 | 8 : 1 | 2 | 8;
       case "combobox":
-        return readonly ? 1 | 8 : 1 | 4 | 8;
+        // Role alone grants neither Fill nor Select.
+        return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
+          fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
-        return 4 | 8 | 16;
+        return 4 | 8 | (scrollElement(element) === null ? 0 : 16);
       case "group":
       case "document":
       case "landmark":
       case "list":
       case "table":
-        return 16;
+        return scrollElement(element) === null ? 0 : 16;
       default:
         return 0;
     }
@@ -985,7 +1354,11 @@
     const lightLength = listLength(lightList);
     const lightTake = mathMin(lightLength, remaining);
     if (shadowTake < shadowLength || lightTake < lightLength) {
-      mark(state, "inspection_limit", false);
+      // Later queued siblings must not be joined to an earlier source across
+      // children that were never inspected (which may contain a negation).
+      // Retain the proven prefix and end this traversal at the first gap.
+      mark(state, "inspection_limit");
+      return;
     }
     for (let index = lightTake - 1; index >= 0; index -= 1) {
       const child = listItem(lightList, index);
@@ -1017,26 +1390,29 @@
             const clipped = normalizeText(normalized.value, limit - bytes);
             chunks.push(clipped.value);
             bytes += clipped.bytes;
-            if (clipped.truncated) mark(state, "text_limit");
-          }
+            if (clipped.truncated) mark(state, "field_limit", false);
+          } else mark(state, "field_limit", false);
         }
-        if (normalized.truncated) mark(state, "text_limit");
+        if (normalized.truncated) mark(state, "field_limit", false);
         continue;
       }
       if (type === 1 && shouldSkipSubtree(current)) continue;
       if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, {}, state);
     }
+    if (stack.length !== 0 && bytes >= limit) mark(state, "field_limit", false);
     return chunks.join("");
   }
 
   function labelledText(element, descriptor, state) {
-    const labelledBy = attribute(element, "aria-labelledby", 1024);
+    const labelledBy = attribute(element, "aria-labelledby", 1024, state);
     if (labelledBy !== null) {
       const identifiers = apply(stringSplit, labelledBy, [/\s+/]);
+      if (identifiers.length > 8) mark(state, "field_limit", false);
       const labels = [];
       for (let index = 0; index < identifiers.length && index < 8 && !state.stopped; index += 1) {
         const identifier = identifiers[index];
-        if (identifier.length === 0 || identifier.length > 128) continue;
+        if (identifier.length === 0) continue;
+        if (identifier.length > 128) { mark(state, "field_limit", false); continue; }
         const target = apply(documentGetElementById, document, [identifier]);
         if (target !== null) {
           const text = flatText(target, state, MAX_NAME_BYTES);
@@ -1046,7 +1422,7 @@
       if (labels.length !== 0) return labels.join(" ");
     }
 
-    const ariaLabel = attribute(element, "aria-label", MAX_NAME_BYTES * 4);
+    const ariaLabel = attribute(element, "aria-label", MAX_NAME_BYTES * 4, state);
     if (ariaLabel !== null && ariaLabel !== "") return ariaLabel;
 
     if (descriptor.tag === "option" && optionLabelGetter !== null) {
@@ -1071,6 +1447,7 @@
         labels = null;
       }
       if (labels !== null && labels !== undefined) {
+        if (listLength(labels) > 4) mark(state, "field_limit", false);
         const length = mathMin(listLength(labels), 4);
         const values = [];
         for (let index = 0; index < length && !state.stopped; index += 1) {
@@ -1085,19 +1462,19 @@
     }
 
     if (descriptor.role === "image" || descriptor.inputType === "image") {
-      const alt = attribute(element, "alt", MAX_NAME_BYTES * 4);
+      const alt = attribute(element, "alt", MAX_NAME_BYTES * 4, state);
       if (alt !== null && alt !== "") return alt;
     }
     if (
       descriptor.tag === "input" &&
       ["button", "submit", "reset"].includes(descriptor.inputType)
     ) {
-      const value = attribute(element, "value", MAX_NAME_BYTES * 4);
+      const value = attribute(element, "value", MAX_NAME_BYTES * 4, state);
       if (value !== null && value !== "") return value;
     }
-    const placeholder = attribute(element, "placeholder", MAX_NAME_BYTES * 4);
+    const placeholder = attribute(element, "placeholder", MAX_NAME_BYTES * 4, state);
     if (placeholder !== null && placeholder !== "") return placeholder;
-    const title = attribute(element, "title", MAX_NAME_BYTES * 4);
+    const title = attribute(element, "title", MAX_NAME_BYTES * 4, state);
     return title !== null && title !== "" ? title : null;
   }
 
@@ -1272,8 +1649,8 @@
     return chunks.join("");
   }
 
-  function consumeField(raw, fieldLimit, state) {
-    const remaining = mathMax(0, state.request.b.t - state.textBytes);
+  function consumeField(raw, fieldLimit, state, reserved = 0) {
+    const remaining = mathMax(0, state.request.b.t - state.textBytes - reserved);
     const normalized = normalizeText(raw, mathMin(fieldLimit, remaining));
     let value = normalized.value;
     let bytes = normalized.bytes;
@@ -1289,15 +1666,17 @@
       }
     }
     state.textBytes += bytes;
-    if (normalized.truncated || (raw.length !== 0 && remaining === 0)) mark(state, "text_limit");
-    return { value, bytes, secret };
+    if (normalized.truncated || (raw.length !== 0 && remaining === 0)) {
+      // Field clipping preserves siblings; global exhaustion stops traversal.
+      const aggregate = remaining <= fieldLimit;
+      mark(state, aggregate ? "text_limit" : "field_limit", aggregate);
+    }
+    return { value, bytes, secret, truncated: normalized.truncated };
   }
 
-  function consumeValueField(raw, state) {
+  function consumeValueField(raw, state, fieldLimit = MAX_VALUE_BYTES) {
     const remaining = mathMax(0, state.request.b.t - state.textBytes);
-    // Bound hostile-page work before trim/lower/split can allocate. Oversized
-    // live values are conservatively redacted; only a complete <=4-KiB value
-    // reaches secret classification and the exact verification projection.
+    // Bound allocation; only complete <=4-KiB values reach classification.
     const valueClass = classifyLiveValue(raw);
     if (valueClass !== 2 || (raw !== "" && looksLikeSecret(raw))) {
       const redactedBytes = 10;
@@ -1308,16 +1687,20 @@
       state.textBytes += redactedBytes;
       return { value: "[redacted]", bytes: redactedBytes, secret: true };
     }
-    const exact = exactValueText(raw, mathMin(MAX_VALUE_BYTES, remaining));
+    const exact = exactValueText(raw, mathMin(fieldLimit, remaining));
     state.textBytes += exact.bytes;
-    if (exact.truncated || (raw.length !== 0 && remaining === 0)) mark(state, "text_limit");
-    return { value: exact.value, bytes: exact.bytes, secret: false };
+    if (exact.truncated || (raw.length !== 0 && remaining === 0)) {
+      const aggregate = remaining <= fieldLimit;
+      mark(state, aggregate ? "text_limit" : "field_limit", aggregate);
+    }
+    return { value: exact.value, bytes: exact.bytes, secret: false, truncated: exact.truncated };
   }
 
   function setSensitivity(record, sensitivity) {
     if (sensitivity === "secret" || (sensitivity === "sensitive" && record.sensitivity === "public")) {
       record.sensitivity = sensitivity;
       record.wire.q = sensitivity;
+      delete record.wire.u;
     }
   }
 
@@ -1330,7 +1713,9 @@
 
   function addValue(record, raw, state) {
     const field = consumeValueField(raw, state);
-    if (field.value !== "") record.wire.v = { k: field.secret ? "redacted" : "text", value: field.value };
+    // Preserve proven public emptiness, never infer it from missing/clipped data.
+    const observedEmpty = raw === "" && record.sensitivity === "public" && (record.wire.o & 2) !== 0;
+    if (field.value !== "" || observedEmpty) record.wire.v = { k: field.secret ? "redacted" : "text", value: field.value };
     if (field.secret) {
       record.wire.v = { k: "redacted" };
       setSensitivity(record, "secret");
@@ -1338,7 +1723,7 @@
   }
 
   function appendSink(record, raw, state) {
-    if (record.sink === null || state.stopped) return;
+    if (record.sink === null || record.saturated || state.stopped || record.sensitivity === "secret") return;
     let current = "";
     if (record.sink === "name") current = record.wire.n || "";
     if (record.sink === "text") current = record.wire.t || "";
@@ -1347,11 +1732,17 @@
     }
     if (current === "[redacted]") return;
     const fieldLimit = record.sink === "name" ? MAX_NAME_BYTES : record.sink === "value" ? MAX_VALUE_BYTES : MAX_NODE_TEXT_BYTES;
-    const separator = current === "" ? "" : " ";
+    // Editable values preserve exact whitespace and inline adjacency.
+    const separator = current === "" || record.sink === "value" ? "" : " ";
     const remainingField = mathMax(0, fieldLimit - record.sinkBytes - (separator === "" ? 0 : 1));
     const separatorBytes = separator === "" ? 0 : 1;
-    const remainingGlobal = mathMax(0, state.request.b.t - state.textBytes - separatorBytes);
-    const field = consumeField(raw, mathMin(remainingField, remainingGlobal), state);
+    const field = record.sink === "value"
+      ? consumeValueField(raw, state, remainingField)
+      : consumeField(raw, remainingField, state, separatorBytes);
+    if (field.truncated) {
+      record.saturated = true;
+      record.wire.fc = false;
+    }
     if (field.value === "") return;
     const combined = `${current}${separator}${field.value}`;
     if (separator !== "") {
@@ -1381,11 +1772,9 @@
   function appendVisibleText(records, item, raw, state) {
     if (item.sink !== null) appendSink(records[item.sink], raw, state);
     if (item.nameAncestors === false) return;
-    // A link/button/heading may contain semantic children (for example a
-    // product heading and price paragraph). Their own text must not erase the
-    // enclosing control's content-derived name. Walk only the already bounded
-    // retained ancestry: no second DOM traversal, selector, or unbounded text
-    // getter. Every copy remains charged to the same field/global text budget.
+    let proseSeen = item.sink !== null && records[item.sink].sink === "text";
+    // Preserve control names and nearest prose across inline semantic children.
+    // Walk bounded retained ancestry, charging copies to existing text limits.
     for (let index = item.parent, depth = 0;
       index !== null && depth <= MAX_TREE_DEPTH && !state.stopped;
       index = records[index].wire.p === undefined ? null : records[index].wire.p, depth += 1) {
@@ -1397,6 +1786,10 @@
         role === "textbox" || role === "password" || role === "searchbox" ||
         role === "spinbutton" || role === "combobox" || role === "listbox" || role === "option") break;
       if (index !== item.sink && record.sink === "name") appendSink(record, raw, state);
+      if (!proseSeen && record.sink === "text") {
+        proseSeen = true;
+        if (index !== item.sink) appendSink(record, raw, state);
+      }
     }
   }
 
@@ -1414,9 +1807,10 @@
     ) {
       return hasName ? null : "name";
     }
-    if (descriptor.contentEditable === true) return "value";
+    if (descriptor.contentEditable === true && textFillRole(descriptor.role)) return "value";
     if (
       descriptor.role === "paragraph" ||
+      (descriptor.role === "document" && descriptor.tag === "article") ||
       descriptor.role === "list_item" ||
       descriptor.role === "cell_header" ||
       descriptor.role === "cell" ||
@@ -1433,10 +1827,81 @@
     return mathMax(0, mathMin(65535, mathRound(number)));
   }
 
+  function nativeActivation(element, descriptor) {
+    if (descriptor.role !== "button" && descriptor.role !== "tab") return null;
+    let boundary = 1;
+    try {
+      if (descriptor.tag === "button" || descriptor.tag === "input") {
+        const button = descriptor.tag === "button";
+        const typeGetter = button ? buttonTypeGetter : inputTypeGetter;
+        const formGetter = button ? buttonFormGetter : inputFormGetter;
+        if (typeGetter === null || formGetter === null) return null;
+        const type = read(typeGetter, element);
+        if (read(formGetter, element) !== null) {
+          boundary = type === "submit" || type === "image" ? 2 : type === "reset" ? 3 : 5;
+        }
+      }
+      let current = element;
+      for (let depth = 0; depth < MAX_TREE_DEPTH; depth += 1) {
+        if (current === document) {
+          const expanded = attribute(element, "aria-expanded", 16);
+          return boundary === 1 && (expanded === "true" || expanded === "false" || summaryDetails(element) !== null) ? 6 : boundary;
+        }
+        if (current === null) return null;
+        if (nodeType(current) === 1) {
+          const tag = tagName(current);
+          if ((tag === "a" || tag === "area") && has(current, "href")) return 4;
+          if (tag === "form" && boundary === 1) boundary = 5;
+        }
+        current = nodeType(current) === 11 && shadowHostGetter !== null
+          ? read(shadowHostGetter, current) : read(nodeParentGetter, current);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // Form facts: 1 get, 2 post, 3 dialog; 4 same-origin action; 8 search.
+  function formFacts(element, descriptor) {
+    const tag = descriptor.tag;
+    if (tag !== "button" && tag !== "input" && tag !== "textarea") return null;
+    try {
+      const form = read(tag === "button" ? buttonFormGetter : tag === "input" ? inputFormGetter : textareaFormGetter, element);
+      if (form === null || form === undefined || formMethodGetter === null || formActionGetter === null) return null;
+      const at = tag === "button" ? 0 : 2;
+      let method = read(formMethodGetter, form);
+      let action = read(formActionGetter, form);
+      if (tag !== "textarea" && has(element, "formmethod")) method = read(formOverrides[at], element);
+      if (tag !== "textarea" && has(element, "formaction")) action = read(formOverrides[at + 1], element);
+      let facts = method === "post" ? 2 : method === "dialog" ? 3 : 1;
+      const origin = read(locationOriginGetter, workLocation);
+      if (typeof origin === "string" && origin !== "null" && typeof action === "string" &&
+          (action === origin || apply(stringStartsWith, action, [origin + "/"]))) facts |= 4;
+      let search = lower(attribute(form, "role", 16) || "") === "search";
+      for (let node = read(nodeParentGetter, form), depth = 0; !search && node && node !== document && depth < MAX_TREE_DEPTH; depth += 1) {
+        search = nodeType(node) === 1 && (tagName(node) === "search" || lower(attribute(node, "role", 16) || "") === "search");
+        node = nodeType(node) === 11 ? read(shadowHostGetter, node) : read(nodeParentGetter, node);
+      }
+      const controls = search || !collectionItem ? null : read(formElementsGetter, form);
+      for (let index = 0, count = controls ? mathMin(64, read(collectionLengthGetter, controls)) : 0; !search && index < count; index += 1) {
+        const control = apply(collectionItem, controls, [index]);
+        search = control !== null && tagName(control) === "input" && lower(attribute(control, "type", 16) || "") === "search";
+      }
+      return search ? facts | 8 : facts;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function buildRecord(element, descriptor, parent, rect, disabled, focused, state) {
-    const wire = { k: keyFor(element, state.request.g) };
+    const beforeFieldTruncations = state.fieldTruncations || 0;
+    const wire = { k: keyFor(element, state.request.g), fc: true };
+    if (state.recordEditingWitness === true) {
+      keyNodes.get(wire.k).editingContext = descriptor.contentEditable === true && descriptor.plainTextEditable === true
+        ? descriptor.editingContext || null : undefined;
+    }
     if (parent !== null) wire.p = parent;
     wire.r = descriptor.role;
+    if (descriptor.role === "landmark" && descriptor.landmark !== undefined) wire.lm = descriptor.landmark;
     if (descriptor.role === "heading") {
       const ariaLevel = Number(attribute(element, "aria-level", 8) || "0");
       const level = descriptor.level || ariaLevel;
@@ -1449,7 +1914,20 @@
       !isDocument &&
       (has(element, "readonly") || lower(attribute(element, "aria-readonly", 16) || "") === "true");
     const states = isDocument ? 0 : stateBits(element, descriptor, disabled, focused);
-    const operations = operationBits(descriptor, disabled, readonly);
+    const operations = operationBits(descriptor, disabled, readonly, element);
+    // Closed host diagnostics, omitted from model context.
+    if (textFillRole(descriptor.role)) {
+      wire.fs = disabled ? 11 : readonly ? 10 :
+        fillControlKind(descriptor, "") !== 0 ? 1 :
+        descriptor.tag === "input" || descriptor.tag === "textarea" ? 12 :
+        descriptor.editableSupport || 2;
+      if (descriptor.editableStructure !== null && descriptor.editableStructure !== undefined &&
+          descriptor.editableStructure.length === 3) wire.es = descriptor.editableStructure;
+    }
+    const activation = nativeActivation(element, descriptor);
+    if (activation !== null) wire.ak = activation;
+    const form = formFacts(element, descriptor);
+    if (form !== null) wire.ff = form;
     if (states !== 0) wire.s = states;
     if (operations !== 0) wire.o = operations;
     if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);
@@ -1458,16 +1936,47 @@
     if (!isDocument) {
       const sensitivity = sensitivityFor(element);
       if (sensitivity !== "public") setSensitivity(record, sensitivity);
-      const name = labelledText(element, descriptor, state);
+      let name = descriptor.pageImage === true ? "Page image" :
+        descriptor.pageAddress === true ? "Page address" :
+        descriptor.pageTitle === true ? "Page title" :
+        typeof descriptor.pageFacts === "string" ? "Page facts" : labelledText(element, descriptor, state);
+      if ((name === null || name === "") && descriptor.role === "image") name = ancestorLabel(element, state);
       if (name !== null && name !== "") addName(record, name, state);
       record.sink = recordSink(descriptor, wire.n !== undefined);
+      if (record.sink === "value") record.sinkBytes = 0;
+      if (descriptor.pageTitle === true || typeof descriptor.pageFacts === "string") {
+        record.sinkBytes = 0;
+        appendSink(record, descriptor.pageTitle === true ? pageTitleText(element, descriptor.tag) || "" : descriptor.pageFacts, state);
+        record.sink = null;
+      }
+      const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
+      if (((descriptor.role === "link" && (descriptor.tag === "a" || descriptor.pageAddress === true)) || imageSource) &&
+          record.sensitivity === "public") {
+        let destination;
+        try {
+          if (descriptor.headMeta === true) {
+            destination = attribute(element, descriptor.tag === "link" ? "href" : "content", 2048) || undefined;
+          }
+          else destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
+          if (imageSource && !destination && descriptor.headMeta !== true) destination = read(imageSrcGetter, element);
+        } catch (_) { destination = undefined; }
+        if (typeof destination === "string" && destination !== "" &&
+            utf8Length(destination, 2049) <= 2048 &&
+            (apply(stringStartsWith, destination, ["https://"]) || apply(stringStartsWith, destination, ["http://"])) &&
+            (state.request.b.lu === true ||
+              (!apply(stringIncludes, destination, ["?"]) && !apply(stringIncludes, destination, ["#"]))) &&
+            !apply(stringIncludes, destination, ["@"])) {
+          const field = consumeField(destination, 2048, state);
+          if (!field.secret && field.value === destination) wire[imageSource ? "m" : "u"] = destination;
+        }
+      }
 
       if (descriptor.role === "password") {
         wire.v = { k: "redacted" };
       } else if (descriptor.role === "checkbox" || descriptor.role === "radio") {
         wire.v = { k: "boolean", value: (states & 1) !== 0 };
       } else if (
-        descriptor.role === "combobox" ||
+        (descriptor.role === "combobox" && descriptor.tag === "select") ||
         descriptor.role === "listbox" ||
         descriptor.role === "option"
       ) {
@@ -1481,14 +1990,17 @@
       } else if (descriptor.role === "slider" || descriptor.role === "progress") {
         const raw = attribute(element, "aria-valuenow", 64) || attribute(element, "value", 64) || "0";
         wire.v = { k: "ordinal", value: boundedOrdinal(raw) };
-      } else if (
-        descriptor.role === "textbox" ||
-        descriptor.role === "searchbox" ||
-        descriptor.role === "spinbutton"
-      ) {
+      } else if (textFillRole(descriptor.role) || descriptor.role === "spinbutton") {
         if (credentialField(element, descriptor, wire.n || "")) {
           wire.v = { k: "redacted" };
           setSensitivity(record, "secret");
+        } else if (descriptor.richText === true || descriptor.plainTextEditable === true) {
+          // An editor's value is its text as typed: one line per paragraph.
+          const value = richValue(element, mathMin(2048, mathMax(0, state.request.b.x - state.visited)));
+          if (value !== null) addValue(record, value, state);
+          record.sink = null;
+        } else if (descriptor.plainTextEditable && descriptor.editableEmpty) {
+          addValue(record, "", state);
         } else if (descriptor.contentEditable !== true) {
           let value = null;
           try {
@@ -1497,10 +2009,11 @@
           } catch (_) {
             value = null;
           }
-          if (typeof value === "string" && value !== "") addValue(record, value, state);
+          if (typeof value === "string") addValue(record, value, state);
         }
       }
     }
+    if ((state.fieldTruncations || 0) !== beforeFieldTruncations) wire.fc = false;
     return record;
   }
 
@@ -1520,11 +2033,15 @@
 
   function traverse(root, state, anchored) {
     const records = [];
+    // Only metadata is queued during the ordinary viewport traversal. Deferred
+    // headings consume spare output capacity afterward, never displacing a
+    // visible control or prose record that appears later in document order.
+    const headings = [];
     const focused = focusedElements();
     const stack = [];
 
     if (!anchored) {
-      const documentRecord = buildRecord(document, classify(document), null, null, false, false, state);
+      const documentRecord = buildRecord(document, classify(document), null, documentRect(), false, false, state);
       documentRecord.depth = 0;
       const index = addRecord(records, documentRecord, state);
       const rootElement = read(documentElementGetter, document);
@@ -1532,7 +2049,7 @@
         stack.push({ node: rootElement, parent: index, sink: null, depth: 1, disabled: false });
       }
     } else if (root === document) {
-      const documentRecord = buildRecord(document, classify(document), null, null, false, false, state);
+      const documentRecord = buildRecord(document, classify(document), null, documentRect(), false, false, state);
       documentRecord.depth = 0;
       const index = addRecord(records, documentRecord, state);
       const rootElement = read(documentElementGetter, document);
@@ -1555,9 +2072,14 @@
         continue;
       }
       if (type !== 1 && type !== 9 && type !== 11) continue;
-      if (type === 1 && shouldSkipSubtree(item.node)) continue;
+      if (type === 1 && shouldSkipSubtree(item.node)) {
+        pushHiddenPhotos(stack, item, state);
+        continue;
+      }
 
-      const descriptor = classify(item.node);
+      let descriptor = classify(item.node);
+      // Inline wrappers retain their existing prose/control source.
+      if (descriptor?.genericText && item.sink !== null) descriptor = null;
       let parent = item.parent;
       let sink = item.sink;
       let disabled = item.disabled;
@@ -1572,16 +2094,12 @@
         }
         disabled = disabledState(item.node, item.disabled);
         if (descriptor !== null) {
-          const visibleStyle = styleIsVisible(item.node);
+          const visibleStyle = descriptor.headMeta === true || styleIsVisible(item.node);
           const rect = visibleStyle ? elementRect(item.node) : null;
           const optionInExpansion = descriptor.role === "option" && anchored;
-          // Native <option> elements do not have independent page geometry in
-          // WebKit while their owning <select> is closed. Retain them only when
-          // their nearest retained semantic parent is an already-admitted native
-          // select. This exposes bounded, ref-addressable choices without making
-          // arbitrary non-rendered DOM actionable or treating offscreen selects
-          // as visible. A filtered select can leave the Document as its option's
-          // nearest retained parent; brand-check before using an Element getter.
+          // Closed native options lack geometry. Admit only under a retained
+          // select, never an offscreen/filtered select. Brand-check the parent:
+          // filtering can leave Document here, which rejects Element getters.
           const optionOfAdmittedSelect =
             descriptor.role === "option" &&
             descriptor.tag === "option" &&
@@ -1590,16 +2108,27 @@
             nodeType(records[parent].element) === 1 &&
             tagName(records[parent].element) === "select";
           const visible =
-            visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect);
+            visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect || descriptor.headMeta === true);
           const initialPriority =
             descriptor.role === "dialog" ||
             descriptor.role === "landmark" ||
             focused.has(item.node);
           const admitted = visible && (
             !anchored
-              ? optionOfAdmittedSelect || (rect !== null && (initialPriority || inViewport(rect)))
+              ? optionOfAdmittedSelect || descriptor.headMeta === true || (rect !== null && (initialPriority || inViewport(rect)))
               : true
           );
+          if (!anchored && !admitted && visible &&
+              (descriptor.role === "heading" || summaryDetails(item.node) !== null) &&
+              !headings.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
+            const details = summaryDetails(item.node);
+            const priority = details === null ? 0 : read(detailsOpenGetter, details) ? 1 : 2;
+            const anchor = { element: item.node, descriptor, parent, rect, disabled, priority };
+            const before = headings.findIndex(existing => existing.priority < priority);
+            if (before >= 0) headings.splice(before, 0, anchor);
+            else headings.push(anchor);
+            if (headings.length > 24) { headings.pop(); mark(state, "node_limit", false); }
+          }
           if (admitted) {
             const semanticDepth = parent === null ? 0 : records[parent].depth + 1;
             if (semanticDepth > MAX_TREE_DEPTH) {
@@ -1619,7 +2148,23 @@
             const index = addRecord(records, record, state);
             if (index === null) break;
             parent = index;
-            sink = record.sink === null ? null : index;
+            // Structural wrappers and named links retain their enclosing prose
+            // sink; their own labels never replace the visible descendant text.
+            const inheritsProse = descriptor.role === "link" || descriptor.role === "document" ||
+              descriptor.role === "group" || descriptor.role === "landmark" || descriptor.role === "list";
+            sink = record.sink !== null ? index :
+              inheritsProse && record.sensitivity === "public" &&
+                sink !== null && records[sink].sink === "text" ? sink : null;
+            // A region is one structural level, not a full-DOM subtree. Keep
+            // nested regions as current, independently expandable anchors so
+            // an earlier navigation/sidebar cannot consume the parent's prose
+            // budget. Subtree retains explicit recursive semantics.
+            if (anchored && state.request.s?.k === "region" && item.node !== root &&
+                (descriptor.role === "landmark" || descriptor.role === "document" ||
+                 descriptor.role === "list" || descriptor.role === "table")) {
+              state.regionBoundary = true;
+              continue;
+            }
           } else {
             sink = null;
           }
@@ -1634,12 +2179,32 @@
         );
       }
     }
+    if (!anchored && !state.stopped) {
+      const original = state.request;
+      state.request = { ...original, b: { ...original.b, t: mathMin(original.b.t, state.textBytes + 2048) } };
+      for (const heading of headings) {
+        if (state.stopped || records.length >= original.b.n) {
+          if (!state.stopped) mark(state, "node_limit", false);
+          break;
+        }
+        // Reuse the ordinary name-inheritance fences (including editable and
+        // credential descendants), not a textContent/flat-text shortcut.
+        const scoped = traverse(heading.element, state, true);
+        const record = scoped[0];
+        if (record === undefined) continue;
+        if (heading.parent !== null) record.wire.p = heading.parent;
+        record.depth = heading.parent === null ? 0 : records[heading.parent].depth + 1;
+        if (record.depth > MAX_TREE_DEPTH) { mark(state, "depth_limit"); break; }
+        addRecord(records, record, state);
+      }
+      state.request = original;
+    }
     return records;
   }
 
   function compatibleScope(scope, descriptor) {
     if (descriptor === null) return false;
-    if (scope === "region") {
+    if (scope === "region" || scope === "text_search") {
       return ["document", "landmark", "group", "dialog"].includes(descriptor.role);
     }
     if (scope === "table") return descriptor.role === "table";
@@ -1650,20 +2215,46 @@
     return false;
   }
 
-  function addRollingChunk(chunks, chunk, byteLimit) {
-    if (chunk === "" || byteLimit === 0) return;
-    chunks.push(chunk);
-    let bytes = 0;
-    for (let index = chunks.length - 1; index >= 0; index -= 1) {
-      const separator = index === chunks.length - 1 ? 0 : 1;
-      const chunkBytes = utf8Length(chunks[index], byteLimit + 1);
-      if (bytes + separator + chunkBytes <= byteLimit) {
-        bytes += separator + chunkBytes;
+  function appendWindowChunk(window, chunk, bytes) {
+    if (chunk.text === "") return;
+    const last = window.chunks[window.chunks.length - 1];
+    const separator = window.bytes === 0 ? 0 : 1;
+    if (last !== undefined && last.run === chunk.run) {
+      last.text += ` ${chunk.text}`;
+      last.bytes += 1 + bytes;
+    } else {
+      chunk.bytes = bytes;
+      window.chunks.push(chunk);
+    }
+    window.bytes += separator + bytes;
+  }
+
+  function addRollingChunk(window, chunk, byteLimit, state) {
+    if (chunk.text === "" || byteLimit === 0) return;
+    appendWindowChunk(window, chunk, utf8Length(chunk.text, byteLimit + 1));
+    // The byte window bounds storage independently of the output-node budget.
+    // A deque avoids rescanning/shifting every retained source per DOM fragment.
+    while (window.bytes > byteLimit) {
+      const first = window.chunks[window.head];
+      const excess = window.bytes - byteLimit;
+      if (first.bytes <= excess) {
+        window.head += 1;
+        window.bytes -= first.bytes + (window.head < window.chunks.length ? 1 : 0);
       } else {
-        const keep = mathMax(0, byteLimit - bytes - separator);
-        chunks.splice(0, index + 1, utf8Suffix(chunks[index], keep));
-        return;
+        first.text = utf8Suffix(first.text, first.bytes - excess);
+        const kept = utf8Length(first.text, byteLimit + 1);
+        window.bytes -= first.bytes - kept;
+        first.bytes = kept;
+        if (kept === 0) {
+          window.head += 1;
+          if (window.head < window.chunks.length) window.bytes -= 1;
+        }
       }
+      mark(state, "scope_boundary", false);
+    }
+    if (window.head >= 128 && window.head * 2 >= window.chunks.length) {
+      window.chunks = window.chunks.slice(window.head);
+      window.head = 0;
     }
   }
 
@@ -1683,19 +2274,22 @@
     return suffix.join("");
   }
 
-  function surroundingText(anchor, state, beforeLimit, afterLimit) {
-    const before = [];
-    const after = [];
-    let afterBytes = 0;
+  function surroundingChunks(anchor, state, beforeLimit, afterLimit) {
+    const before = { chunks: [], head: 0, bytes: 0 };
+    const after = { chunks: [], head: 0, bytes: 0 };
     let seenAnchor = false;
+    let previousSource = null;
+    let run = 0;
     const root = read(documentElementGetter, document);
-    if (root === null || root === undefined) return "";
-    const stack = [{ node: root }];
+    if (root === null || root === undefined) return { before: [], after: [] };
+    const stack = [{ node: root, source: document, textual: false }];
     while (stack.length !== 0 && !state.stopped) {
-      const current = stack.pop().node;
+      const item = stack.pop();
+      const current = item.node;
       if (!visit(state)) break;
       if (current === anchor) {
         seenAnchor = true;
+        previousSource = null;
         continue;
       }
       const type = nodeType(current);
@@ -1703,33 +2297,63 @@
         if (!textNodeVisible(current)) continue;
         const raw = read(characterDataGetter, current);
         if (typeof raw !== "string") continue;
+        if (previousSource !== item.source) { run += 1; previousSource = item.source; }
         if (!seenAnchor) {
-          const normalized = normalizeText(raw, beforeLimit);
-          addRollingChunk(before, normalized.value, beforeLimit);
-        } else if (afterBytes < afterLimit) {
-          const normalized = normalizeText(raw, afterLimit - afterBytes);
-          if (normalized.value !== "") {
-            if (afterBytes !== 0 && afterBytes < afterLimit) {
-              after.push(" ");
-              afterBytes += 1;
-            }
-            const clipped = normalizeText(normalized.value, afterLimit - afterBytes);
-            after.push(clipped.value);
-            afterBytes += clipped.bytes;
+          // Keep the nearest suffix with a bounded tail scan and storage.
+          const scan = beforeLimit * 8 + 256;
+          const tail = apply(stringSlice, raw, [-scan]);
+          const normalized = normalizeText(tail, scan * 3);
+          addRollingChunk(before, { element: item.source, run, text: utf8Suffix(normalized.value, beforeLimit) }, beforeLimit, state);
+          if (normalized.truncated || normalized.bytes > beforeLimit || tail.length < raw.length) {
+            mark(state, "scope_boundary", false);
           }
+        } else if (after.bytes < afterLimit) {
+          const separator = after.bytes === 0 ? 0 : 1;
+          const normalized = normalizeText(raw, mathMax(0, afterLimit - after.bytes - separator));
+          if (normalized.value !== "") {
+            appendWindowChunk(after, { element: item.source, run, text: normalized.value }, normalized.bytes);
+          }
+          if (normalized.truncated) { mark(state, "scope_boundary", false); break; }
+        }
+        if (seenAnchor && after.bytes >= afterLimit) {
+          if (stack.length !== 0) mark(state, "scope_boundary", false);
+          break;
         }
         continue;
       }
-      if (type === 1 && shouldSkipSubtree(current)) continue;
-      if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, {}, state);
-      if (seenAnchor && afterBytes >= afterLimit) break;
+      let source = item.source;
+      let textual = item.textual;
+      if (type === 1) {
+        // A read window does not expose editable values, hidden ancestors, or
+        // credential descendants through an unrelated prose/heading source.
+        if (shouldSkipSubtree(current) || !styleIsVisible(current)) continue;
+        const editable = attribute(current, "contenteditable", 16);
+        const descriptor = classify(current);
+        const role = descriptor === null ? null : descriptor.role;
+        if ((editable !== null && lower(editable) !== "false") ||
+            sensitivityFor(current) !== "public" || role === "textbox" || role === "password" ||
+            role === "searchbox" || role === "spinbutton" || role === "combobox" ||
+            role === "listbox" || role === "option" || role === "frame_boundary") {
+          previousSource = null;
+          continue;
+        }
+        if (descriptor !== null && elementRect(current) !== null) {
+          const sink = recordSink(descriptor, false);
+          // Visible inline names belong to their surrounding prose/name too.
+          // Nested block prose remains an independent semantic source.
+          if (!textual || (sink === "text" && !descriptor.genericText)) {
+            source = current;
+            textual = sink === "name" || sink === "text";
+          }
+        }
+      }
+      if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, { source, textual }, state);
+      if (seenAnchor && afterLimit === 0) {
+        if (stack.length !== 0) mark(state, "scope_boundary", false);
+        break;
+      }
     }
-    if (!seenAnchor) return "";
-    const beforeText = before.join(" ");
-    const afterText = after.join("");
-    if (beforeText === "") return afterText;
-    if (afterText === "") return beforeText;
-    return `${beforeText} | ${afterText}`;
+    return seenAnchor ? { before: before.chunks.slice(before.head), after: after.chunks } : { before: [], after: [] };
   }
 
   function surroundingRecords(anchor, descriptor, state) {
@@ -1740,19 +2364,224 @@
     const disabled = nodeType(anchor) === 1 ? disabledState(anchor, false) : false;
     const record = buildRecord(anchor, descriptor, null, rect, disabled, focused.has(anchor), state);
     record.depth = 0;
-    record.sink = "text";
-    record.sinkBytes = 0;
-    const context = surroundingText(anchor, state, state.request.s.p, state.request.s.n);
-    if (context !== "") appendSink(record, context, state);
-    return [record];
+    delete record.wire.o;
+    delete record.wire.u;
+    const records = [record];
+    const window = surroundingChunks(anchor, state, state.request.s.p, state.request.s.n);
+    // Admit the nearest source on each side in turn. Preceding page furniture
+    // must not consume every output slot before following evidence is considered.
+    // The selected roots are subsequently emitted in their document order.
+    const chunks = [];
+    const admitted = new Set([anchor]);
+    let beforeIndex = window.before.length - 1;
+    let afterIndex = 0;
+    while (beforeIndex >= 0 || afterIndex < window.after.length) {
+      for (const preceding of [true, false]) {
+        const chunk = preceding ? window.before[beforeIndex--] : window.after[afterIndex++];
+        if (chunk === undefined) continue;
+        if (admitted.has(chunk.element)) { mark(state, "scope_boundary", false); continue; }
+        chunk.descriptor = classify(chunk.element);
+        if (chunk.descriptor === null) continue;
+        if (admitted.size >= state.request.b.n) { mark(state, "node_limit", false); continue; }
+        admitted.add(chunk.element);
+        chunks.push(chunk);
+      }
+    }
+    chunks.sort((left, right) => left.run - right.run);
+    // Project the collected prefix without resuming an exhausted DOM walk.
+    const inspectionStopped = state.stopped;
+    state.stopped = false;
+    for (const chunk of chunks) {
+      if (state.stopped) break;
+      const sourceDescriptor = chunk.descriptor;
+      // Admission retained at most one contiguous run per actual source. Never
+      // stitch across another source, the omitted anchor, or a privacy boundary.
+      const wire = { k: keyFor(chunk.element, state.request.g), r: sourceDescriptor.role };
+      if (sourceDescriptor.role === "heading") {
+        const level = sourceDescriptor.level || Number(attribute(chunk.element, "aria-level", 8));
+        wire.l = numberIsSafeInteger(level) && level >= 1 && level <= 6 ? level : 2;
+      }
+      const source = { wire, element: chunk.element, sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
+      records.push(source);
+      appendSink(source, chunk.text, state);
+    }
+    state.stopped = state.stopped || inspectionStopped;
+    return records;
+  }
+
+  function searchTextExcluded(element) {
+    if (shouldSkipSubtree(element) || !styleIsVisible(element)) return true;
+    const editable = attribute(element, "contenteditable", 16);
+    const described = classify(element);
+    const role = described === null ? null : described.role;
+    return (editable !== null && lower(editable) !== "false") || sensitivityFor(element) !== "public" ||
+      ["textbox", "password", "searchbox", "spinbutton", "combobox", "listbox", "option", "frame_boundary"].includes(role);
+  }
+
+  function searchTextRecords(anchor, descriptor, state) {
+    // Fixed native recipe: bounded literal-token matching over rendered source
+    // passages. It does not query selectors, inspect hidden values, or execute
+    // query text. Scan and retained output have independent hard ceilings.
+    // A fresh region ref cannot jump over an excluded ancestor. Include open
+    // shadow hosts when checking the path back to the original document.
+    let ancestor = anchor;
+    while (ancestor !== document) {
+      if (ancestor === null || !visit(state)) return null;
+      const type = nodeType(ancestor);
+      if (type === 1 && searchTextExcluded(ancestor)) return null;
+      const parent = read(nodeParentGetter, ancestor);
+      ancestor = parent === null && type === 11 ? read(shadowHostGetter, ancestor) : parent;
+      if (ancestor === undefined) return null;
+    }
+    const terms = new Set(apply(stringSplit, lower(state.request.s.q), [/[^\p{Alphabetic}\p{N}]+/u]));
+    terms.delete("");
+    // Symbol-only queries (for example "$" on an unlabeled price) are plain
+    // substrings. Never interpret them as regular expressions or add sentence
+    // punctuation to the exact-word OR terms of normal language queries.
+    const literal = terms.size === 0 ? apply(stringTrim, state.request.s.q, []) : null;
+    const candidates = [];
+    let pending = null;
+    let ordinal = 0;
+    let scannedBytes = 0;
+    const flush = () => {
+      if (pending === null) return;
+      const matched = new Set();
+      if (literal !== null) {
+        if (apply(stringIncludes, pending.text, [literal])) matched.add(literal);
+      } else {
+        for (const word of apply(stringSplit, lower(pending.text), [/[^\p{Alphabetic}\p{N}]+/u])) {
+          if (terms.has(word)) matched.add(word);
+        }
+      }
+      if (matched.size !== 0) {
+        pending.score = matched.size;
+        const duplicate = candidates.findIndex((candidate) => candidate.element === pending.element);
+        if (duplicate >= 0) {
+          // Keep one contiguous passage per real source; never stitch separate
+          // runs across descendants or a privacy boundary into a false quote.
+          if (candidates[duplicate].score >= pending.score) { pending = null; return; }
+          candidates.splice(duplicate, 1);
+        }
+        candidates.push(pending);
+        candidates.sort((left, right) => right.score - left.score || left.ordinal - right.ordinal);
+        if (candidates.length > 16) { candidates.pop(); mark(state, "scope_boundary", false); }
+      }
+      pending = null;
+    };
+    const stack = [{ node: anchor, source: anchor, textual: false }];
+    while (stack.length !== 0 && !state.stopped) {
+      const item = stack.pop();
+      if (!visit(state)) break;
+      const current = item.node;
+      const type = nodeType(current);
+      if (type === 3) {
+        if (!textNodeVisible(current)) { flush(); continue; }
+        const raw = read(characterDataGetter, current);
+        if (typeof raw !== "string") continue;
+        const remaining = 131072 - scannedBytes;
+        const normalized = normalizeText(raw, mathMin(4096, remaining), remaining);
+        scannedBytes += normalized.scannedBytes;
+        if (normalized.truncated) mark(state, "scope_boundary", false);
+        if (normalized.value !== "") {
+          if (pending !== null && pending.element !== item.source) flush();
+          if (pending === null) pending = { element: item.source, text: "", bytes: 0, ordinal: ordinal++ };
+          const part = normalizeText(normalized.value, mathMax(0, 4096 - pending.bytes - (pending.bytes === 0 ? 0 : 1)));
+          if (part.value !== "") {
+            pending.text += `${pending.bytes === 0 ? "" : " "}${part.value}`;
+            pending.bytes += part.bytes + (pending.bytes === 0 ? 0 : 1);
+          }
+          if (part.truncated) { mark(state, "scope_boundary", false); flush(); }
+        }
+        // A raw scan can skip meaningful text after a tiny normalized prefix
+        // (for example whitespace followed by a negation). End that quote here
+        // before any later sibling fragment from the same source is admitted.
+        if (normalized.truncated) flush();
+        if (scannedBytes >= 131072) { state.completeness = "inspection_limit"; state.stopped = true; break; }
+        continue;
+      }
+      let source = item.source;
+      let textual = item.textual;
+      if (type === 1) {
+        if (searchTextExcluded(current)) { flush(); continue; }
+        const described = classify(current);
+        if (described !== null && elementRect(current) !== null) {
+          const sink = recordSink(described, false);
+          if (!textual || (sink === "text" && !described.genericText)) { source = current; textual = sink === "name" || sink === "text"; }
+        }
+      }
+      if (type === 1 || type === 9 || type === 11) {
+        pushChildren(stack, current, { source, textual }, state);
+      }
+    }
+    flush();
+    const record = { wire: { k: keyFor(anchor, state.request.g), r: descriptor.role }, element: anchor,
+      sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0 };
+    const records = [record];
+    const stopped = state.stopped;
+    state.stopped = false;
+    // Highest coverage first is deterministic. Each independent result keeps
+    // its actual source key, never the searched region's provenance.
+    let outputBytes = 0;
+    for (const chunk of candidates) {
+      if (records.length >= state.request.b.n && chunk.element !== anchor) { mark(state, "node_limit", false); break; }
+      const part = normalizeText(chunk.text, mathMax(0, 8192 - outputBytes));
+      if (part.value === "") { mark(state, "text_limit", false); break; }
+      outputBytes += part.bytes;
+      const described = classify(chunk.element);
+      if (described === null) continue;
+      const source = chunk.element === anchor ? record : {
+        wire: { k: keyFor(chunk.element, state.request.g), r: described.role }, element: chunk.element,
+        sink: "text", sinkBytes: 0, sensitivity: "public", depth: 0
+      };
+      if (described.role === "heading") {
+        const level = described.level || Number(attribute(chunk.element, "aria-level", 8));
+        source.wire.l = numberIsSafeInteger(level) && level >= 1 && level <= 6 ? level : 2;
+      }
+      if (source !== record) records.push(source);
+      appendSink(source, part.value, state);
+      if (part.truncated) mark(state, "text_limit", false);
+      if (state.stopped) break;
+    }
+    state.stopped = state.stopped || stopped;
+    return records;
   }
 
   function encodeSnapshot(request, records, completeness) {
+    let dialogSample = "";
+    const pending = pendingDialogSample;
+    pendingDialogSample = null;
+    if (pending !== null && request.i === pending.i + 1 && request.g === pending.g + 1) {
+      const after = sampleVisiblePageDialogs();
+      if (arrayIsArray(after)) dialogSample = `,"u":${apply(jsonStringify, JSON, [{...pending, after}])}`;
+    }
+    let scrollSample = "";
+    const scroll = pendingScrollSample;
+    pendingScrollSample = null;
+    if (scroll !== null && request.i === scroll.i + 1 && request.g === scroll.g + 1) {
+      const target = resolveKey(scroll.t);
+      if (target !== null && scroll.chain) {
+        const chain = scrollAncestors(target), rect = elementRect(target), viewport = boundedViewport();
+        if (chain && chain.length === scroll.chain.length &&
+            chain.every((entry, index) => entry.element === scroll.chain[index].element)) {
+          const index = chain.findIndex((entry, i) => entry.before.some((value, axis) => value !== scroll.chain[i].before[axis]));
+          const entry = scroll.chain[mathMax(0, index)];
+          if (entry) scrollSample = `,"j":${apply(jsonStringify, JSON, [{a:scroll.a,i:scroll.i,g:scroll.g,t:scroll.t,
+            before:entry.before,after:chain[mathMax(0,index)].before,
+            visible:rect !== null && viewport !== null && actionPoint(target,rect,viewport) !== null}])}`;
+        }
+      } else if (target !== null && scrollElement(target) === scroll.element) {
+        const after = scrollPosition(scroll.element);
+        if (after !== null) {
+          const {element, ...sample} = scroll;
+          scrollSample = `,"j":${apply(jsonStringify, JSON, [{...sample, after}])}`;
+        }
+      }
+    }
     const encodedNodes = [];
     for (const record of records) encodedNodes.push(apply(jsonStringify, JSON, [record.wire]));
 
     const compose = (status) => {
-      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}","n":[`;
+      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample}${scrollSample},"n":[`;
       const parts = [];
       let bytes = utf8Length(header, request.b.w + 1) + 2;
       let truncated = false;
@@ -1777,6 +2606,46 @@
 
   function actionFault(code) {
     return `E2:${code}`;
+  }
+
+  function sampleVisiblePageDialogs() {
+    const state = { request: { b: { x: MAX_DIALOG_SAMPLE_NODES } }, visited: 0, stopped: false, completeness: "complete" };
+    const root = read(documentElementGetter, document);
+    if (root === null || root === undefined) return "page_dialog_sample_unavailable";
+    const stack = [{node: root}];
+    const result = [];
+    const viewport = boundedViewport();
+    if (viewport === null) return "page_dialog_sample_unavailable";
+    // This is a complete DOM census, not a semantic projection: framework
+    // wrappers must not consume the semantic tree's depth budget. The visited
+    // and queued node ceiling bounds both traversal work and stack memory,
+    // including deep trees. Incomplete samples never prove an
+    // absent dialog and never authorize dispatch.
+    while (stack.length > 0 && !state.stopped) {
+      const item = stack.pop();
+      if (++state.visited > MAX_DIALOG_SAMPLE_NODES) return "page_dialog_sample_limit";
+      const element = nodeType(item.node) === 1;
+      const hidden = element && shouldSkipSubtree(item.node);
+      if (element && !hidden) {
+        const tag = lower(read(elementTagGetter, item.node) || "");
+        const role = lower(attribute(item.node, "role", 32) || "");
+        if (tag === "dialog" || role === "dialog" || role === "alertdialog") {
+          const rect = styleIsVisible(item.node) ? elementRect(item.node) : null;
+          if (rect !== null && actionPoint(item.node, rect, viewport) !== null) {
+            if (result.length === MAX_DIALOG_SAMPLE_DIALOGS) return "page_dialog_sample_limit";
+            let key = apply(weakMapGet, dialogKeys, [item.node]);
+            if (key === undefined) {
+              if (!isPositiveSafeInteger(nextDialogKey)) return "page_dialog_sample_limit";
+              key = nextDialogKey++;
+              apply(weakMapSet, dialogKeys, [item.node, key]);
+            }
+            result.push(key);
+          }
+        }
+      }
+      if (!hidden) pushChildren(stack, item.node, {}, state);
+    }
+    return state.stopped ? "page_dialog_sample_limit" : result;
   }
 
   function actionOperationBit(kind) {
@@ -1927,7 +2796,7 @@
     return null;
   }
 
-  function runtimeDescriptor(element, generation) {
+  function runtimeDescriptor(element, generation, shallow = false) {
     const state = {
       request: {
         g: generation,
@@ -1944,7 +2813,10 @@
       completeness: "complete",
       stopped: false
     };
-    const records = traverse(element, state, true);
+    const descriptor = classify(element);
+    const records = shallow && descriptor !== null
+      ? [buildRecord(element, descriptor, null, element === document ? documentRect() : elementRect(element), false, focusedElements().has(element), state)]
+      : traverse(element, state, true);
     if (records.length === 0 || records[0].element !== element || state.completeness !== "complete") {
       return null;
     }
@@ -1954,6 +2826,7 @@
     const sensitivity = descriptorSensitivityCode(wire.q);
     if (value === null || role === 0 || sensitivity === 0) return null;
     return {
+      ...(wire.ak === undefined ? {} : { a: wire.ak }),
       r: role,
       o: wire.o || 0,
       q: sensitivity,
@@ -1969,7 +2842,7 @@
   function descriptorMatches(expected, actual) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n && expected.vk === actual.vk &&
       expected.vt === actual.vt && expected.vo === actual.vo && expected.vb === actual.vb
     );
@@ -1977,19 +2850,26 @@
 
   function descriptorMatchesFilledValue(expected, actual, value) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
-    const valueMatches = value === ""
-      ? actual.vk === 0 && actual.vt === null && actual.vo === 0 && !actual.vb
-      : actual.vk === 1 && actual.vt === value && actual.vo === 0 && !actual.vb;
+    const valueMatches = actual.vo === 0 && !actual.vb && actual.vk === 1 && actual.vt === value;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n && valueMatches
+    );
+  }
+
+  function descriptorMatchesRichValue(expected, actual, value) {
+    if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+    return (
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.n === actual.n && actual.vo === 0 && !actual.vb && actual.vk === 1 &&
+      plainWords(actual.vt) === plainWords(value)
     );
   }
 
   function descriptorMatchesSelectedValue(expected, actual, desired) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       expected.s === actual.s && expected.n === actual.n &&
       actual.vk === 4 && actual.vt === null && actual.vo === desired && !actual.vb
     );
@@ -1999,7 +2879,7 @@
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     const selectedBit = 2;
     return (
-      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
       (expected.s & ~selectedBit) === (actual.s & ~selectedBit) &&
       (actual.s & selectedBit) !== 0 && expected.n === actual.n &&
       expected.vk === actual.vk && expected.vt === actual.vt &&
@@ -2007,103 +2887,287 @@
     );
   }
 
-  function fillControlKind(descriptor, value) {
-    if (descriptor.tag === "input") {
-      if (
-        (descriptor.inputType !== "text" && descriptor.inputType !== "search") ||
-        (descriptor.role !== "textbox" && descriptor.role !== "searchbox")
-      ) {
-        return 0;
+  function captureEditingContext(node) {
+    const context = [];
+    let current = read(nodeParentGetter, node);
+    for (let depth = 0; depth < MAX_TREE_DEPTH; depth += 1) {
+      if (current === document) return context;
+      if (current === null || nodeType(current) !== 1 || read(nodeConnectedGetter, current) !== true ||
+          apply(nodeGetRoot, current, []) !== document || disabledState(current, false) ||
+          has(current, "readonly") || has(current, "inert") || has(current, "hidden") ||
+          lower(attribute(current, "aria-readonly", 16) || "") === "true" ||
+          lower(attribute(current, "aria-hidden", 16) || "") === "true" || !styleIsVisible(current) ||
+          sensitivityFor(current) !== "public" ||
+          credentialField(current, { role: "group", tag: tagName(current) }, attribute(current, "aria-label", 512) || "")) return null;
+      context.push({ node: current, editable: read(editableGetter, current) === true });
+      current = read(nodeParentGetter, current);
+    }
+    return null;
+  }
+
+  function editingContextMatches(target, request, current) {
+    const entry = keyNodes.get(request.t);
+    if (entry === undefined || entry.node !== target || entry.generation !== request.g ||
+        entry.editingContext === undefined) return false;
+    const prior = entry.editingContext;
+    current = current || null;
+    if (prior === null || current === null) return prior === current;
+    return prior.length === current.length && prior.every((item, index) =>
+      item.node === current[index].node && item.editable === current[index].editable);
+  }
+
+  function editableHostSupport(node, structure, witness) {
+    try {
+      if (read(editableGetter, node) !== true) return 3;
+      if (!["div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6"].includes(tagName(node))) return 4;
+      const parent = read(nodeParentGetter, node);
+      const editableParent = parent !== null && nodeType(parent) === 1 && read(editableGetter, parent) === true;
+      const children = read(nodeChildNodesGetter, node);
+      const length = listLength(children);
+      let kinds = 0;
+      let firstUnsupported = 0;
+      for (let index = 0; index < mathMin(length, 128); index += 1) {
+        const kind = nodeType(listItem(children, index));
+        if (kind !== 3 || read(characterDataGetter, listItem(children, index)) !== "") witness.empty = false;
+        kinds |= kind === 3 ? 1 : kind === 1 ? 2 : 4;
+        if (kind !== 3 && firstUnsupported === 0) firstUnsupported = kind === 1 ? 7 : 8;
       }
+      structure.push(mathMin(length, 129), kinds, editableParent);
+      if (editableParent) {
+        if (length > 128 || firstUnsupported !== 0) return 5;
+        const context = captureEditingContext(node);
+        if (context === null) return 5;
+        witness.context = context;
+      }
+      if (length > 128) return 6;
+      return firstUnsupported || 1;
+    } catch (_) { return 9; }
+  }
+
+  // Formatting and paragraph elements only, bounded: no controls, frames,
+  // media or nested hosts that editing the whole host would erase.
+  const RICH_TEXT_TAGS = ["p", "div", "br", "span", "b", "strong", "i", "em", "u", "s", "code",
+    "a", "ul", "ol", "li", "blockquote", "pre", "h1", "h2", "h3", "font", "mark", "sub", "sup"];
+  function richTextShape(host) {
+    try {
+      const stack = [{ node: host, depth: 0 }];
+      let seen = 0;
+      while (stack.length !== 0) {
+        const { node, depth } = stack.pop();
+        const children = read(nodeChildNodesGetter, node);
+        const length = listLength(children);
+        for (let index = 0; index < length; index += 1) {
+          const child = listItem(children, index);
+          const kind = nodeType(child);
+          if ((seen += 1) > 512) return false;
+          if (kind === 3 || kind === 8) continue;
+          if (kind !== 1 || depth >= 8 || !RICH_TEXT_TAGS.includes(tagName(child))) return false;
+          stack.push({ node: child, depth: depth + 1 });
+        }
+      }
+      return true;
+    } catch (_) { return false; }
+  }
+
+  const RICH_TEXT_BLOCKS = ["p", "div", "li", "blockquote", "pre", "h1", "h2", "h3", "ul", "ol"];
+  // Reads within `limit` nodes; null when the editor's text does not fit,
+  // so an unvisited remainder is never reported as its value.
+  function richValue(host, limit) {
+    const lines = [""];
+    const stack = [{ node: host, depth: 0, index: 0 }];
+    let seen = 0;
+    while (stack.length !== 0) {
+      if (seen >= limit) return null;
+      const frame = stack[stack.length - 1];
+      const children = read(nodeChildNodesGetter, frame.node);
+      if (frame.index >= listLength(children)) {
+        stack.pop();
+        if (stack.length !== 0 && RICH_TEXT_BLOCKS.includes(tagName(frame.node)) && lines[lines.length - 1] !== "") lines.push("");
+        continue;
+      }
+      const child = listItem(children, frame.index);
+      frame.index += 1;
+      seen += 1;
+      const kind = nodeType(child);
+      if (kind === 3) {
+        const text = read(characterDataGetter, child);
+        if (typeof text === "string") lines[lines.length - 1] += text.replace(/\u00a0/g, " ");
+      } else if (kind === 1) {
+        const tag = tagName(child);
+        if (tag === "br") {
+          lines.push("");
+        } else if (frame.depth < 8) {
+          if (RICH_TEXT_BLOCKS.includes(tag) && lines[lines.length - 1] !== "") lines.push("");
+          stack.push({ node: child, depth: frame.depth + 1, index: 0 });
+        }
+      }
+    }
+    while (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+    const value = lines.join("\n");
+    return plainWords(value) === "" ? "" : value;
+  }
+
+  // Text as a person reads it, for comparing a rich editor with its input.
+  function plainWords(value) {
+    return typeof value === "string"
+      ? apply(stringTrim, value.replace(/[\s\u00a0]+/g, " "), [])
+      : null;
+  }
+
+  function textFillRole(role) {
+    return role === "textbox" || role === "searchbox" || role === "combobox";
+  }
+
+  function fillControlKind(descriptor, value) {
+    if (!textFillRole(descriptor.role)) return 0;
+    if (descriptor.tag === "input") {
+      if (descriptor.inputType !== "text" && descriptor.inputType !== "search") return 0;
       for (const character of value) {
         const point = character.codePointAt(0);
         if (point === 0x09 || point === 0x0a || point === 0x0d) return 0;
       }
       return 1;
     }
-    if (descriptor.tag === "textarea" && descriptor.role === "textbox") {
-      return 2;
-    }
+    if (descriptor.tag === "textarea" && descriptor.role !== "searchbox") return 2;
+    if (descriptor.contentEditable === true && descriptor.plainTextEditable === true) return 3;
+    if (descriptor.contentEditable === true && descriptor.richText === true) return 4;
     return 0;
   }
 
-  function pageRelayAttribute(target, name) {
-    try {
-      return apply(getAttribute, target, [name]);
-    } catch (_) {
-      return null;
+  // The browser's own editing replaces a rich editor's text: select the
+  // host's contents and insert, one paragraph at a time, so the editor
+  // takes it through its input events like typed text.
+  function runRichFill(target, value, revalidate, settled) {
+    if ([htmlElementFocus, documentExecCommand, documentGetSelection, documentCreateRange,
+      rangeSelectNodeContents, selectionRemoveAllRanges, selectionAddRange, eventTargetAddEventListener,
+      eventTargetRemoveEventListener, eventPreventDefault].some(call => typeof call !== "function")) {
+      return "unsupported_interaction";
     }
+    try {
+      if (!revalidate()) return "target_changed";
+      apply(htmlElementFocus, target, []);
+      const selection = apply(documentGetSelection, document, []);
+      const range = apply(documentCreateRange, document, []);
+      apply(rangeSelectNodeContents, range, [target]);
+      // Inside the paragraphs, as an editor's own select-all does: replacing
+      // them keeps the first paragraph the editor expects its text in.
+      const children = read(nodeChildNodesGetter, target);
+      const first = listLength(children) === 0 ? null : listItem(children, 0);
+      const last = listLength(children) === 0 ? null : listItem(children, listLength(children) - 1);
+      if (first !== null && nodeType(first) === 1 && nodeType(last) === 1 &&
+          typeof rangeSetStart === "function" && typeof rangeSetEnd === "function") {
+        apply(rangeSetStart, range, [first, 0]);
+        apply(rangeSetEnd, range, [last, listLength(read(nodeChildNodesGetter, last))]);
+      }
+      apply(selectionRemoveAllRanges, selection, []);
+      apply(selectionAddRange, selection, [range]);
+    } catch (_) { return "unsupported_interaction"; }
+    // Each insertion is checked again after the page's own beforeinput
+    // handlers ran, and cancelled when the target is no longer the one admitted.
+    let refused = false;
+    const guard = event => {
+      try {
+        if (!revalidate()) { refused = true; apply(eventPreventDefault, event, []); }
+      } catch (_) { refused = true; apply(eventPreventDefault, event, []); }
+    };
+    try {
+      apply(eventTargetAddEventListener, target, ["beforeinput", guard]);
+      const lines = apply(stringSplit, value, ["\n"]);
+      if (value === "") {
+        apply(documentExecCommand, document, ["delete", false, null]);
+      }
+      for (let index = 0; index < lines.length && !refused; index += 1) {
+        if (index > 0) apply(documentExecCommand, document, ["insertParagraph", false, null]);
+        if (refused) break;
+        if (lines[index] !== "" && apply(documentExecCommand, document, ["insertText", false, lines[index]]) !== true) {
+          return index === 0 ? "unsupported_interaction" : "applied_unverified_mutation";
+        }
+      }
+    } catch (_) {
+      return refused ? "applied_unverified_beforeinput_revalidation" : "applied_unverified_mutation";
+    } finally {
+      try { apply(eventTargetRemoveEventListener, target, ["beforeinput", guard]); } catch (_) {}
+    }
+    if (refused) return "applied_unverified_beforeinput_revalidation";
+    try {
+      if (!settled()) return "applied_unverified_postcondition";
+    } catch (_) { return "applied_unverified_postcondition"; }
+    return "ok";
   }
 
-  function clearPageRelayAttributes(target) {
-    try {
-      apply(removeAttribute, target, [PAGE_RELAY_COMMAND]);
-      apply(removeAttribute, target, [PAGE_RELAY_TERMINAL]);
-    } catch (_) {
-      // A replaced document or target is handled as closed transport failure.
+  // Only runAction's admitted private ref can reach this recipe. There is no
+  // page-world request listener, shared callback, transport marker or token.
+  function runFixedFill(target, descriptor, request) {
+    const value = request.z;
+    const kind = fillControlKind(descriptor, value);
+    // A rich editor has no recorded editing context; it must stay under the
+    // parent it had when the fill was admitted.
+    let parentAtAdmission = null;
+    try { parentAtAdmission = read(nodeParentGetter, target); } catch (_) { return "unsupported_interaction"; }
+    // The target is still the admitted, writable, non-credential field in the
+    // same editing context; the descriptor check holds only before the write.
+    const sameTarget = () => {
+      if (resolveKeyAtGeneration(request.t, request.g) !== target ||
+          read(nodeConnectedGetter, target) !== true ||
+          apply(nodeGetRoot, target, []) !== document) return false;
+      const current = classify(target);
+      if (current === null || fillControlKind(current, value) !== kind ||
+          disabledState(target, false) || has(target, "readonly") ||
+          lower(attribute(target, "aria-readonly", 16) || "") === "true" ||
+          credentialField(target, current, attribute(target, "aria-label", 512) || "")) return false;
+      if (kind === 3) return editingContextMatches(target, request, current.editingContext);
+      return kind !== 4 || read(nodeParentGetter, target) === parentAtAdmission;
+    };
+    const revalidate = () => sameTarget() && descriptorMatches(request.f, runtimeDescriptor(target, request.g));
+    // Every editable host is typed into through the browser's own editing, as
+    // a person types: editors that keep their own model (Notion's blocks,
+    // ProseMirror, Lexical) take it, where a raw text write is undone.
+    if (kind === 3 || kind === 4) {
+      if (!validActionText(value)) return "unsupported_interaction";
+      // Before focusing, the whole descriptor must still match; from then on
+      // focus and the typed value change it, so identity, state and label decide.
+      const label = attribute(target, "aria-label", 512) || "";
+      let checks = 0;
+      const sameLabeled = () => sameTarget() && (attribute(target, "aria-label", 512) || "") === label;
+      return runRichFill(target, value, () => (checks++ < 1 ? revalidate() : sameLabeled()), sameLabeled);
     }
-  }
-
-  function runPageRelayFill(target, descriptor, value, attempt) {
-    const projected = exactValueText(value, MAX_VALUE_BYTES);
-    if (
-      projected.truncated || projected.value !== value ||
-      utf8Length(value, MAX_VALUE_BYTES + 1) > MAX_VALUE_BYTES
-    ) {
+    const valueSetter = kind === 1 ? inputValueSetter :
+      kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
+    if (valueSetter === null || typeof nativeInputEvent !== "function" ||
+        typeof fixedDispatchEvent !== "function" || !validActionText(value)) {
       return "unsupported_interaction";
     }
-    const control = fillControlKind(descriptor, value);
-    if (control === 0) {
-      return "unsupported_interaction";
-    }
-
-    let root;
-    let command;
+    let before;
+    let input;
     try {
-      root = read(documentElementGetter, document);
-      if (root === null || pageRelayAttribute(root, PAGE_RELAY_READY) !== "1") {
-        return "page_relay_not_ready";
-      }
-      if (pageRelayAttribute(target, PAGE_RELAY_COMMAND) !== null) {
-        clearPageRelayAttributes(target);
-        return "stale_reference";
-      }
-      apply(removeAttribute, target, [PAGE_RELAY_TERMINAL]);
-      command = apply(jsonStringify, JSON, [{ v: 1, a: attempt, z: value }]);
-      if (
-        typeof command !== "string" ||
-        utf8Length(command, MAX_PAGE_RELAY_COMMAND_BYTES + 1) > MAX_PAGE_RELAY_COMMAND_BYTES
-      ) {
-        return "unsupported_interaction";
-      }
-      apply(setAttribute, target, [PAGE_RELAY_COMMAND, command]);
-    } catch (_) {
-      return "unsupported_interaction";
-    }
-
-    const checkpoint = apply(promiseResolve, nativePromise, []);
+      if (!revalidate()) return "target_changed";
+      before = new nativeInputEvent("beforeinput", {
+        bubbles: true, cancelable: true, composed: true, data: value,
+        inputType: "insertReplacementText", isComposing: false
+      });
+      input = new nativeInputEvent("input", {
+        bubbles: true, cancelable: false, composed: true, data: value,
+        inputType: "insertReplacementText", isComposing: false
+      });
+    } catch (_) { return "unsupported_interaction"; }
     try {
-      return apply(promiseThen, checkpoint, [() => {
-        const terminal = pageRelayAttribute(target, PAGE_RELAY_TERMINAL);
-        clearPageRelayAttributes(target);
-        if (terminal === `1|${attempt}|ok`) return "ok";
-        if (terminal === `1|${attempt}|refused-command`) return "invalid_request";
-        if (terminal === `1|${attempt}|refused-identity`) return "stale_reference";
-        if (terminal === `1|${attempt}|refused-type`) return "unsupported_interaction";
-        if (terminal === `1|${attempt}|refused-state`) return "target_disabled";
-        if (terminal === `1|${attempt}|refused-credential`) return "credential_boundary";
-        if (terminal === `1|${attempt}|refused-construct`) return "unsupported_interaction";
-        if (terminal === `1|${attempt}|indeterminate`) return "applied_unverified";
-        if (terminal === `1|0|duplicate`) return "target_occluded";
-        if (terminal === `1|0|invalid`) return "internal";
-        // The page-world recipe may already have called the native setter.
-        // This must never be surfaced as a clean retryable refusal.
-        return "applied_unverified";
-      }]);
-    } catch (_) {
-      clearPageRelayAttributes(target);
-      return "applied_unverified";
-    }
+      if (apply(fixedDispatchEvent, target, [before]) !== true) {
+        return "applied_unverified_beforeinput_cancelled";
+      }
+      if (!revalidate()) return "applied_unverified_beforeinput_revalidation";
+    } catch (_) { return "applied_unverified_beforeinput_revalidation"; }
+    try {
+      write(valueSetter, target, value);
+      apply(fixedDispatchEvent, target, [input]);
+    } catch (_) { return "applied_unverified_mutation"; }
+    try {
+      if (kind === 3) {
+        const current = classify(target);
+        if (current === null || !editingContextMatches(target, request, current.editingContext))
+          return "applied_unverified_postcondition";
+      }
+    } catch (_) { return "applied_unverified_postcondition"; }
+    return "ok";
   }
 
   function runFixedSelect(target, desired) {
@@ -2142,7 +3206,37 @@
     }]);
   }
 
+  function finishActionRendering(result, dialogs = null) {
+    // Keep presentation through queued rendering; the next capture proves the outcome.
+    return new nativePromise((resolve) => {
+      let frame = null, timer = null, poll = null, finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (frame !== null) apply(fixedCancelAnimationFrame, globalThis, [frame]);
+        if (timer !== null) apply(fixedClearTimeout, globalThis, [timer]);
+        if (poll !== null) apply(fixedClearTimeout, globalThis, [poll]);
+        resolve(result);
+      };
+      const check = () => {
+        if (finished) return;
+        if (dialogs === null) { finish(); return; }
+        const after = sampleVisiblePageDialogs();
+        if (!arrayIsArray(after) || dialogs.some(key => !after.includes(key)) || after.some(key => !dialogs.includes(key))) finish();
+        else poll = apply(fixedTimeout, globalThis, [check, 25]);
+      };
+      timer = apply(fixedTimeout, globalThis, [finish, 250]);
+      try {
+        frame = apply(fixedAnimationFrame, globalThis, [() => {
+          if (!finished) frame = apply(fixedAnimationFrame, globalThis, [check]);
+        }]);
+      } catch (_) { finish(); }
+    });
+  }
+
   function runAction(request) {
+    pendingDialogSample = null;
+    pendingScrollSample = null;
     let readyState;
     try {
       readyState = read(documentReadyStateGetter, document);
@@ -2160,24 +3254,27 @@
     }
     sweepIdentities(request.g);
     const target = resolveKeyAtGeneration(request.t, request.g);
-    if (target === null || nodeType(target) !== 1) return actionFault("stale_reference");
+    if (target === null || (nodeType(target) !== 1 && !(request.k === "scroll" && target === document))) return actionFault("stale_reference");
     const descriptor = classify(target);
     if (descriptor === null) return actionFault("target_changed");
-    const credential = credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
+    const credential = target === document ? 0 : credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
     if (credential || descriptor.role === "password") return actionFault("credential_boundary");
     if (descriptor.role !== request.r) return actionFault("target_changed");
-    const disabled = disabledState(target, false);
-    const readonly = has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true";
+    const disabled = target !== document && disabledState(target, false);
+    const readonly = target !== document && (has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true");
     if (disabled || ((request.k === "fill" || request.k === "select") && readonly)) {
       return actionFault("target_disabled");
     }
     const required = actionOperationBit(request.k);
-    if (required === 0 || (operationBits(descriptor, disabled, readonly) & required) === 0) {
-      return actionFault("unsupported_interaction");
+    if (required === 0 || (operationBits(descriptor, disabled, readonly, target) & required) === 0) {
+      return actionFault(request.k === "scroll" ? "target_operations_changed" : "unsupported_interaction");
     }
-    const targetDescriptor = runtimeDescriptor(target, request.g);
+    const targetDescriptor = runtimeDescriptor(target, request.g, request.k === "scroll" && request.sc[1] !== "into_view");
     if (!descriptorMatches(request.f, targetDescriptor)) {
-      return actionFault("target_changed");
+      return actionFault(targetDescriptor === null ? "target_descriptor_incomplete" :
+        request.f.n !== targetDescriptor.n ? "target_name_changed" :
+        request.f.s !== targetDescriptor.s ? "target_state_changed" :
+        request.f.o !== targetDescriptor.o ? "target_operations_changed" : "target_descriptor_changed");
     }
     let delta = 0;
     let selectedOption = null;
@@ -2194,7 +3291,7 @@
       delta = computed;
     }
 
-    const finalTargetDescriptor = runtimeDescriptor(target, request.g);
+    const finalTargetDescriptor = runtimeDescriptor(target, request.g, request.k === "scroll" && request.sc[1] !== "into_view");
     const finalOptionDescriptor = selectedOption === null
       ? null
       : runtimeDescriptor(selectedOption, request.g);
@@ -2206,10 +3303,10 @@
     ) {
       return actionFault("target_changed");
     }
-    if (!styleIsVisible(target)) return actionFault("target_occluded");
-    const rect = elementRect(target);
+    if (target !== document && !styleIsVisible(target)) return actionFault("target_occluded");
+    let rect = target === document ? documentRect() : elementRect(target);
     if (rect === null) return actionFault("target_occluded");
-    if (!geometryCompatible(request.e, rect)) return actionFault("target_changed");
+    if (!geometryCompatible(request.e, rect)) return actionFault("target_geometry_changed");
     const viewport = boundedViewport();
     if (viewport === null) return actionFault("internal");
 
@@ -2220,18 +3317,64 @@
       readiness = "scroll";
     } else {
       point = actionPoint(target, rect, viewport);
-      if (point === null) return actionFault("target_occluded");
+      // A target below the fold or under a sticky header is brought to the
+      // middle of the view once; one still covered there stays refused.
+      if (point === null && target !== document && typeof fixedScrollIntoView === "function") {
+        try {
+          apply(fixedScrollIntoView, target, [{ block: "center", inline: "nearest", behavior: "instant" }]);
+          rect = elementRect(target);
+          point = rect === null ? null : actionPoint(target, rect, viewport);
+        } catch (_) {
+          point = null;
+        }
+      }
+      if (point === null || rect === null) return actionFault("target_occluded");
       readiness = "visible";
     }
     const geometry = wireRect(rect);
+    if (request.k === "scroll") {
+      if (request.sc[1] === "into_view") {
+        const chain = target === document ? null : scrollAncestors(target);
+        if (!chain || chain.length === 0 || [fixedScrollIntoView, fixedAnimationFrame, fixedCancelAnimationFrame, fixedTimeout, fixedClearTimeout].some(call => typeof call !== "function")) return actionFault("unsupported_interaction");
+        pendingScrollSample = {a:request.a,i:request.i,g:request.g,t:request.t,chain};
+        try { apply(fixedScrollIntoView,target,[{block:"center",inline:"nearest",behavior:"instant"}]); }
+        catch (_) { pendingScrollSample = null; return actionFault("applied_unverified_postcondition"); }
+        return finishActionRendering(encodeActionEvidence(request,"fixed_semantic_recipe",readiness,geometry,viewport,point,0));
+      }
+      const element = scrollElement(target);
+      const before = element === null ? null : scrollPosition(element);
+      if (before === null || [fixedScrollBy, fixedAnimationFrame, fixedCancelAnimationFrame,
+          fixedTimeout, fixedClearTimeout].some(call => typeof call !== "function")) return actionFault("unsupported_interaction");
+      const horizontal = request.sc[0] === "left" || request.sc[0] === "right";
+      const extent = read(horizontal ? clientWidthGetter : clientHeightGetter, element);
+      const distance = request.sc[1] === "line" ? 40 : mathMax(1, mathRound(extent * (request.sc[1] === "half_page" ? 0.5 : 0.9)));
+      const delta = distance * (["up", "left"].includes(request.sc[0]) ? -1 : 1);
+      pendingScrollSample = {a: request.a, i: request.i, g: request.g, t: request.t, before, element};
+      try {
+        apply(fixedScrollBy, element, [{left: horizontal ? delta : 0, top: horizontal ? 0 : delta, behavior: "instant"}]);
+      } catch (_) {
+        pendingScrollSample = null;
+        return actionFault("applied_unverified_postcondition");
+      }
+      return finishActionRendering(encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, 0));
+    }
     if (request.k === "click") {
       if (typeof htmlElementClick !== "function") return actionFault("unsupported_interaction");
+      if (request.u === true) {
+        if ([fixedAnimationFrame, fixedCancelAnimationFrame, fixedTimeout, fixedClearTimeout].some(call => typeof call !== "function")) return actionFault("unsupported_interaction");
+        const before = sampleVisiblePageDialogs();
+        if (!arrayIsArray(before)) return actionFault(before);
+        pendingDialogSample = {a: request.a, i: request.i, g: request.g, before};
+      }
       try {
+        pointerDown(target, point);
         apply(htmlElementClick, target, []);
       } catch (_) {
+        pendingDialogSample = null;
         return actionFault("unsupported_interaction");
       }
-      return encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
+      const result = encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
+      return pendingDialogSample === null ? result : finishActionRendering(result, pendingDialogSample.before);
     } else if (request.k === "fill") {
       const finishFill = (result) => {
         if (result !== "ok") {
@@ -2239,27 +3382,30 @@
         }
         const finalTarget = resolveKeyAtGeneration(request.t, request.g);
         const finalDescriptor = finalTarget === target ? classify(target) : null;
-        // The page-world setter has run once an `ok` terminal is observed.
+        // The captured isolated-world setter has run when the recipe returns ok.
         // Every later mismatch is indeterminate, never a retryable target fault.
         if (finalDescriptor === null || finalDescriptor.role !== request.r) {
-          return actionFault("applied_unverified");
+          return actionFault("applied_unverified_postcondition");
         }
         const finalDisabled = disabledState(target, false);
         const finalReadonly = has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true";
-        if (finalDisabled || finalReadonly) return actionFault("applied_unverified");
+        if (finalDisabled || finalReadonly) return actionFault("applied_unverified_postcondition");
         if (
           credentialField(target, finalDescriptor, attribute(target, "aria-label", 512) || "") ||
           finalDescriptor.role === "password" || fillControlKind(finalDescriptor, request.z) === 0
         ) {
-          return actionFault("applied_unverified");
+          return actionFault("applied_unverified_postcondition");
         }
         const filledDescriptor = runtimeDescriptor(target, request.g);
-        if (!descriptorMatchesFilledValue(request.f, filledDescriptor, request.z)) {
-          return actionFault("applied_unverified");
+        // An editor typed into takes focus, as typing gives it.
+        const rich = fillControlKind(finalDescriptor, request.z) >= 3;
+        if (rich ? !descriptorMatchesRichValue(request.f, filledDescriptor, request.z)
+          : !descriptorMatchesFilledValue(request.f, filledDescriptor, request.z)) {
+          return actionFault("applied_unverified_postcondition");
         }
         return encodeActionEvidence(
           request,
-          "page_world_compatibility_fill",
+          "fixed_semantic_recipe",
           "form",
           geometry,
           viewport,
@@ -2267,12 +3413,11 @@
           delta
         );
       };
-      const result = runPageRelayFill(target, descriptor, request.z, request.a);
-      if (typeof result === "string") return finishFill(result);
+      const result = runFixedFill(target, descriptor, request);
       try {
-        return apply(promiseThen, result, [finishFill, () => actionFault("applied_unverified")]);
+        return finishFill(result);
       } catch (_) {
-        return actionFault("applied_unverified");
+        return actionFault("applied_unverified_postcondition");
       }
     } else if (request.k === "select") {
       const desired = read(optionIndexGetter, selectedOption);
@@ -2300,9 +3445,79 @@
         point,
         delta
       );
+    } else if (request.k === "press") {
+      const key = PRESS_KEYS[request.pk];
+      if (key === undefined || typeof nativeKeyboardEvent !== "function" || typeof htmlElementFocus !== "function") {
+        return actionFault("unsupported_interaction");
+      }
+      try {
+        if (target !== document) apply(htmlElementFocus, target, []);
+        const init = { key: key[0], code: key[1], keyCode: key[2], which: key[2], bubbles: true, cancelable: true, composed: true };
+        const down = new nativeKeyboardEvent("keydown", init);
+        const handled = apply(fixedDispatchEvent, target, [down]) !== true;
+        if (key[0] === "Enter" || key[0] === " ") {
+          apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keypress", init)]);
+        }
+        apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keyup", init)]);
+        // A key the page did not handle does what the browser would.
+        if (!handled && key[0] === "Enter" && descriptor.tag === "input") {
+          const form = read(inputFormGetter, target);
+          if (form !== null && form !== undefined && typeof formRequestSubmit === "function") {
+            apply(formRequestSubmit, form, []);
+          }
+        }
+      } catch (_) {
+        return actionFault("applied_unverified_postcondition");
+      }
+      return finishActionRendering(encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta));
     } else {
       return actionFault("unsupported_interaction");
     }
+  }
+
+  // Key, code and legacy key code of each fixed key recipe, by its wire name.
+  const PRESS_KEYS = {
+    enter: ["Enter", "Enter", 13], escape: ["Escape", "Escape", 27], space: [" ", "Space", 32],
+    tab: ["Tab", "Tab", 9], arrow_up: ["ArrowUp", "ArrowUp", 38], arrow_down: ["ArrowDown", "ArrowDown", 40],
+    arrow_left: ["ArrowLeft", "ArrowLeft", 37], arrow_right: ["ArrowRight", "ArrowRight", 39],
+    home: ["Home", "Home", 36], end: ["End", "End", 35], page_up: ["PageUp", "PageUp", 33],
+    page_down: ["PageDown", "PageDown", 34], backspace: ["Backspace", "Backspace", 8], delete: ["Delete", "Delete", 46]
+  };
+
+  // A click as a person makes it: pointer and mouse down and up at the point
+  // before the click, so menus that open on pointer down (Radix, Headless UI)
+  // open, and the target takes focus as the browser would give it.
+  function pointerDown(target, point) {
+    if (typeof nativeMouseEvent !== "function") return;
+    const init = { bubbles: true, cancelable: true, composed: true, clientX: point.x, clientY: point.y,
+      button: 0, buttons: 1, view: globalThis };
+    const pointer = typeof nativePointerEvent === "function";
+    const pointerInit = { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent("pointerdown", pointerInit)]);
+    apply(fixedDispatchEvent, target, [new nativeMouseEvent("mousedown", init)]);
+    if (typeof htmlElementFocus === "function" && read(nodeConnectedGetter, target) === true) {
+      apply(htmlElementFocus, target, [{ preventScroll: true }]);
+    }
+    const up = { ...init, buttons: 0 };
+    if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent("pointerup", { ...pointerInit, buttons: 0 })]);
+    apply(fixedDispatchEvent, target, [new nativeMouseEvent("mouseup", up)]);
+  }
+
+  function focusedModalRoot() {
+    for (const focused of focusedElements()) {
+      let current = focused;
+      for (let depth = 0; depth < MAX_TREE_DEPTH && current !== null && current !== document; depth += 1) {
+        if (nodeType(current) === 1) {
+          const descriptor = classify(current);
+          if (descriptor !== null && descriptor.role === "dialog" &&
+              attribute(current, "aria-modal", 16) === "true" &&
+              styleIsVisible(current) && elementRect(current) !== null) return current;
+        }
+        current = nodeType(current) === 11 && shadowHostGetter !== null
+          ? read(shadowHostGetter, current) : read(nodeParentGetter, current);
+      }
+    }
+    return null;
   }
 
   function run(request) {
@@ -2318,6 +3533,7 @@
     sweepIdentities(request.g);
     const state = {
       request,
+      recordEditingWitness: true,
       visited: 0,
       textBytes: 0,
       completeness: "complete",
@@ -2326,7 +3542,8 @@
 
     let records;
     if (request.s.k === "initial") {
-      records = traverse(document, state, false);
+      const modal = focusedModalRoot();
+      records = traverse(modal || document, state, modal !== null);
     } else {
       const anchor = resolveKey(request.s.a);
       if (anchor === null) return fault("anchor_missing");
@@ -2335,16 +3552,20 @@
       if (nodeType(anchor) === 1 && descriptor.role !== "option") {
         if (!styleIsVisible(anchor) || elementRect(anchor) === null) return fault("anchor_missing");
       }
-      if (request.s.k === "surrounding_text") {
+      if (request.s.k === "text_search") {
+        records = searchTextRecords(anchor, descriptor, state);
+        if (records === null) return fault("anchor_missing");
+      } else if (request.s.k === "surrounding_text") {
         records = surroundingRecords(anchor, descriptor, state);
         if (records === null) return fault("anchor_missing");
       } else if (request.s.k === "frame") {
         records = traverse(anchor, state, true);
-        if (state.completeness === "complete") state.completeness = "scope_boundary";
+        mark(state, "scope_boundary", false);
       } else {
         records = traverse(anchor, state, true);
       }
     }
+    if (state.regionBoundary) mark(state, "scope_boundary", false);
     return encodeSnapshot(request, records, state.completeness);
   }
 
@@ -2405,6 +3626,17 @@
         return;
       }
       if (encoded === CHANNEL_STOP) return;
+      if (encoded === CHANNEL_PARK) {
+        clearDocumentState();
+        let parked;
+        try {
+          parked = await apply(post, channel, [CHANNEL_PARKED]);
+        } catch (_) {
+          return;
+        }
+        if (parked !== CHANNEL_ACK) return;
+        return;
+      }
 
       const invoked = invoke(encoded);
       const result = typeof invoked === "string" ? invoked : await invoked;
@@ -2425,6 +3657,7 @@
   }
 
   function startNativeTransport() {
+    if (transportActive) return;
     let channel;
     let post;
     try {
@@ -2436,7 +3669,12 @@
       return;
     }
     if (typeof post !== "function") return;
-    void serveNativeInvocations(channel, post);
+    transportActive = true;
+    const serving = serveNativeInvocations(channel, post);
+    void apply(promiseThen, serving, [
+      () => { transportActive = false; },
+      () => { transportActive = false; }
+    ]);
   }
 
   objectFreeze(invoke);
@@ -2447,5 +3685,6 @@
     configurable: false,
     enumerable: false
   });
+  apply(eventTargetAddEventListener, globalThis, ["pageshow", startNativeTransport, true]);
   startNativeTransport();
 })();

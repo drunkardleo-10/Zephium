@@ -586,6 +586,12 @@ export const fields = {
     description: m.pref_performance_exceptions_help,
     initial: "",
   },
+  "work.decisions": {
+    section: "work",
+    label: m.settings_decisions,
+    description: m.settings_decisions_desc,
+    initial: "recommended",
+  },
   "about.diagnostics": {
     section: "about",
     label: m.pref_about_diagnostics,

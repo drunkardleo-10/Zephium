@@ -846,3 +846,56 @@ fn escaped_stale_presentation_fallback_cannot_rearm_over_a_new_navigation() {
     );
     assert_eq!(engine.calls().len(), calls_before_stale_wake);
 }
+
+#[test]
+fn same_document_url_refresh_preserves_presentation_and_rejects_stale_facts() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let original = "https://chromewebstore.google.com/category/extensions";
+    let listing =
+        "https://chromewebstore.google.com/detail/vimium/dbepggeogbaibhgnhhndojpepiihcmeb";
+    shell.handle(Command::Navigate {
+        id,
+        input: original.into(),
+    });
+    let navigation = NavigationPresentationId::from_raw(420);
+    commit_url(&mut shell, id, original);
+    shell.handle(Command::Engine(presentation_pending(
+        id, navigation, original,
+    )));
+    let presents = engine
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("present "))
+        .count();
+    commit_url(&mut shell, id, listing);
+    // URL attribution alone does not manufacture presentation evidence.
+    assert_eq!(
+        shell.presentation.presented_navigations.get(&id).unwrap().1,
+        original
+    );
+    shell.handle(Command::Engine(presentation_pending(
+        id, navigation, listing,
+    )));
+    assert_eq!(
+        shell.presentation.presented_navigations.get(&id),
+        Some(&(navigation, listing.into()))
+    );
+    assert!(!shell.presentation.pending_presentations.contains_key(&id));
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("present "))
+            .count(),
+        presents
+    );
+    shell.handle(Command::Engine(presentation_pending(
+        id, navigation, original,
+    )));
+    assert_eq!(
+        shell.presentation.presented_navigations.get(&id).unwrap().1,
+        listing
+    );
+}

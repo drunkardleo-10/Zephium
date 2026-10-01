@@ -1,0 +1,199 @@
+diff --git a/dist/components/Chart/Chart.base.svelte b/dist/components/Chart/Chart.base.svelte
+index 822df191b5341470e7d9027dafc66831006d548d..23020bc1f3f1f67dda26434eb4a96169558e1666 100644
+--- a/dist/components/Chart/Chart.base.svelte
++++ b/dist/components/Chart/Chart.base.svelte
+@@ -486,19 +486,10 @@
+   // combined.  Loading via `$effect` + `{#if}` sidesteps `{#await}` entirely.  An
+   // `$effect` (not `$derived.by`) is used deliberately: awaiting an `import()` inside
+   // a `$derived` would require consumers to compile with `experimental.async`.
+-  let TransformContext = $state<typeof import('../TransformContext.svelte').default>();
+-  let BrushContext = $state<typeof import('../BrushContext.svelte').default>();
+-
+-  $effect(() => {
+-    if (transform && !TransformContext) {
+-      import('../TransformContext.svelte').then((m) => (TransformContext = m.default));
+-    }
+-  });
+-  $effect(() => {
+-    if (brush && !BrushContext) {
+-      import('../BrushContext.svelte').then((m) => (BrushContext = m.default));
+-    }
+-  });
++  // Zephium patch: pan, zoom and brush are not bundled; their lazy chunks defeat the app's
++  // chunk merging, and the app's charts use neither.
++  const TransformContext: typeof import('../TransformContext.svelte').default | undefined = undefined;
++  const BrushContext: typeof import('../BrushContext.svelte').default | undefined = undefined;
+ 
+   /**
+    * Explicit dimensions are already the real ones, and the server has nothing to measure — only an
+diff --git a/dist/components/Grid/Grid.base.svelte b/dist/components/Grid/Grid.base.svelte
+index 7fa2f161ec828360e9f31a1973a8ba54edfbb16c..ae7a99b6ffaead365f5e35a2ae47e48c729f0eb5 100644
+--- a/dist/components/Grid/Grid.base.svelte
++++ b/dist/components/Grid/Grid.base.svelte
+@@ -24,6 +24,7 @@
+ 
+   import { isScaleBand } from '../../utils/scales.svelte.js';
+   import { extractLayerProps } from '../../utils/attributes.js';
++  import Spline from '../Spline/Spline.svg.svelte';
+ 
+   import { GridState } from './Grid.shared.svelte.js';
+ 
+@@ -134,18 +135,16 @@
+               class={cls('lc-grid-y-radial-circle', classes.line, splineProps?.class)}
+             />
+           {:else}
+-            {#await import('../Spline/Spline.svelte') then { default: Spline }}
+-              <Spline
+-                data={c.xTickVals.map((tx) => ({ x: tx, y: tick }))}
+-                x="x"
+-                y="y"
+-                {stroke}
+-                motion={c.tweenConfig}
+-                curve={curveLinearClosed}
+-                {...splineProps}
+-                class={cls('lc-grid-y-radial-line', classes.line, splineProps?.class)}
+-              />
+-            {/await}
++            <Spline
++              data={c.xTickVals.map((tx) => ({ x: tx, y: tick }))}
++              x="x"
++              y="y"
++              {stroke}
++              motion={c.tweenConfig}
++              curve={curveLinearClosed}
++              {...splineProps}
++              class={cls('lc-grid-y-radial-line', classes.line, splineProps?.class)}
++            />
+           {/if}
+         {:else}
+           <Line
+diff --git a/dist/components/Highlight/Highlight.base.svelte b/dist/components/Highlight/Highlight.base.svelte
+index 9de8ce1205655d640676b24e1211cc90bed863e9..34345d254df8f753382d98d9c38b2aa9d03e438d 100644
+--- a/dist/components/Highlight/Highlight.base.svelte
++++ b/dist/components/Highlight/Highlight.base.svelte
+@@ -20,6 +20,7 @@
+ <script lang="ts">
+   import { asAny } from '../../utils/types.js';
+   import { extractLayerProps } from '../../utils/attributes.js';
++  import Bar from '../Bar/Bar.svg.svelte';
+ 
+   import { HighlightState } from './Highlight.shared.svelte.js';
+ 
+@@ -86,15 +87,13 @@
+     {#if typeof bar === 'function'}
+       {@render bar()}
+     {:else}
+-      {#await import('../Bar/Bar.svelte') then { default: Bar }}
+-        <Bar
+-          motion={motion === 'spring' ? 'spring' : undefined}
+-          data={c.highlightData}
+-          {opacity}
+-          {...extractLayerProps(bar, 'lc-highlight-bar')}
+-          onclick={onBarClick && ((e: MouseEvent) => onBarClick(e, { data: c.highlightData }))}
+-        />
+-      {/await}
++      <Bar
++        motion={motion === 'spring' ? 'spring' : undefined}
++        data={c.highlightData}
++        {opacity}
++        {...extractLayerProps(bar, 'lc-highlight-bar')}
++        onclick={onBarClick && ((e: MouseEvent) => onBarClick(e, { data: c.highlightData }))}
++      />
+     {/if}
+   {/if}
+ 
+diff --git a/dist/components/tooltip/TooltipContext.svelte b/dist/components/tooltip/TooltipContext.svelte
+index f76d5c7c77090035b83821f33141c7ecab354750..c32ed54440fef493c203189b8cb3a12f78709789 100644
+--- a/dist/components/tooltip/TooltipContext.svelte
++++ b/dist/components/tooltip/TooltipContext.svelte
+@@ -124,6 +124,7 @@
+   import { getGeoContext } from '../../contexts/geo.js';
+   import Svg from './../layers/Svg.svelte';
+   import ChartClipPath from '../ChartClipPath/ChartClipPath.svelte';
++  import Arc from '../Arc/Arc.svg.svelte';
+   // Voronoi (used only when mode === 'voronoi') and Arc (used only for radial
+   // bounds/band mode) are dynamically imported inline in the markup via
+   // `{#await import(...)}` so non-voronoi/non-radial tooltip users don't pay
+@@ -836,34 +837,7 @@
+     {@render children?.({ state: tooltipState })}
+ 
+     {#if mode === 'voronoi'}
+-      {#await import('../Voronoi/Voronoi.svelte') then { default: Voronoi }}
+-        <Svg>
+-          <!-- `Voronoi` resolves its own panel's rows, so there's nothing to narrow here -->
+-          <Voronoi
+-            x={xProp}
+-            y={yProp}
+-            r={radius}
+-            onpointerenter={(e, { data }) => {
+-              showTooltip(e, data);
+-            }}
+-            onpointermove={(e, { data }) => {
+-              showTooltip(e, data);
+-            }}
+-            onpointerleave={() => hideTooltip()}
+-            onpointerdown={(e) => {
+-              // @ts-expect-error
+-              if (e.target?.hasPointerCapture(e.pointerId)) {
+-                // @ts-expect-error
+-                e.target.releasePointerCapture(e.pointerId);
+-              }
+-            }}
+-            onclick={(e, { data }) => {
+-              onclick(e, { data });
+-            }}
+-            classes={{ path: cls('lc-tooltip-voronoi-path', debug && 'debug') }}
+-          />
+-        </Svg>
+-      {/await}
++      <!-- Zephium patch: voronoi mode is not bundled. -->
+     {:else if mode === 'bounds' || isBandMode}
+       <Svg center={ctx.radial}>
+         {#snippet children({ facet })}
+@@ -871,27 +845,25 @@
+             {#each rectsFor(panelData(facet)) as rect}
+               <!-- svelte-ignore a11y_click_events_have_key_events -->
+               {#if ctx.radial}
+-                {#await import('../Arc/Arc.svelte') then { default: Arc }}
+-                  <Arc
+-                    innerRadius={rect.y}
+-                    outerRadius={rect.y + rect.height}
+-                    startAngle={rect.x}
+-                    endAngle={rect.x + rect.width}
+-                    class={cls('lc-tooltip-rect', debug && 'debug')}
+-                    onpointerenter={(e) => showTooltip(e, rect?.data)}
+-                    onpointermove={(e) => showTooltip(e, rect?.data)}
+-                    onpointerleave={() => hideTooltip()}
+-                    onpointerdown={(e) => {
+-                      const target = e.target as Element;
+-                      if (target?.hasPointerCapture(e.pointerId)) {
+-                        target.releasePointerCapture(e.pointerId);
+-                      }
+-                    }}
+-                    onclick={(e) => {
+-                      onclick(e, { data: rect?.data });
+-                    }}
+-                  />
+-                {/await}
++                <Arc
++                  innerRadius={rect.y}
++                  outerRadius={rect.y + rect.height}
++                  startAngle={rect.x}
++                  endAngle={rect.x + rect.width}
++                  class={cls('lc-tooltip-rect', debug && 'debug')}
++                  onpointerenter={(e) => showTooltip(e, rect?.data)}
++                  onpointermove={(e) => showTooltip(e, rect?.data)}
++                  onpointerleave={() => hideTooltip()}
++                  onpointerdown={(e) => {
++                    const target = e.target as Element;
++                    if (target?.hasPointerCapture(e.pointerId)) {
++                      target.releasePointerCapture(e.pointerId);
++                    }
++                  }}
++                  onclick={(e) => {
++                    onclick(e, { data: rect?.data });
++                  }}
++                />
+               {:else}
+                 <rect
+                   x={rect?.x}

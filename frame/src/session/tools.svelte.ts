@@ -10,7 +10,9 @@ let initialized = false;
 let initializing: Promise<void> | null = null;
 export const activeTool = () => tool;
 export function open(kind: ToolKind) {
-  if (browser.currentPage() !== null) {
+  // Work keeps the column, so a tool opens beside its canvas; any other page gives way to Browse.
+  const page = browser.currentPage();
+  if (page !== null && page !== "work") {
     queued = kind;
     void browser.open(null);
     return;

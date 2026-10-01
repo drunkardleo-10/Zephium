@@ -17,6 +17,7 @@ repository = "https://github.com/zephium/zephium"
 
 [workspace.dependencies]
 zephium-agentic = { path = "crates/zephium-agentic", version = "=0.1.0" }
+zephium-decision = { path = "crates/zephium-decision", version = "=0.1.0" }
 zephium-agent-model-catalog = { path = "crates/zephium-agent-model-catalog", version = "=0.1.0" }
 zephium-agent-runtime = { path = "crates/zephium-agent-runtime", version = "=0.1.0" }
 zephium-agent-provider-transport = { path = "crates/zephium-agent-provider-transport", version = "=0.1.0" }
@@ -25,12 +26,6 @@ zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default
 zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "=0.1.0", default-features = false }
 zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0.1.0", default-features = false }
 zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
-zephium-extension-authority = { path = "crates/zephium-extension-authority", version = "=0.1.0" }
-zephium-extension-distribution = { path = "crates/zephium-extension-distribution", version = "=0.1.0", default-features = false }
-zephium-extension-repository = { path = "crates/zephium-extension-repository", version = "=0.1.0" }
-zephium-extension-runtime-api = { path = "crates/zephium-extension-runtime-api", version = "=0.1.0" }
-zephium-extension-service = { path = "crates/zephium-extension-service", version = "=0.1.0" }
-zephium-extension-updater = { path = "crates/zephium-extension-updater", version = "=0.1.0" }
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
 zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
 zephium-notes = { path = "crates/zephium-notes", version = "=0.1.0" }

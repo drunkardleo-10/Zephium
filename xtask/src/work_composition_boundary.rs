@@ -59,12 +59,140 @@ fn preparation_precedes_attachment(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
+    require(
+        source,
+        &[
+            "let request = qualifier::load_request(started, profile)?;",
+            "let profile = wait_for_profile(app, control, started, None)?;",
+            "wait_for_profile(app, control, started, Some(profile))?;",
+            "control::profile_wait_failure(started, Instant::now(), control.admission.cancelled())",
+            ".admission.admit(|| {",
+            "#[cfg(not(feature = \"macos-work-retained-product-probe\"))] let admit = super::admit_trusted_work;",
+            "#[cfg(feature = \"macos-work-retained-product-probe\")] let admit = super::admit_retained_trusted_work;",
+            "let view = admit(app, request)",
+            "Some((view.clone(), false))",
+            "let settled = control.admission.settle(result);",
+            "if state.control.admission.cancel() { request_stop(&state.control); api.prevent_exit();",
+            "let accepted = matches!(state.control.admission.terminal(), Some(Ok(report)) if report.accepted);",
+            "worker.join().is_ok()",
+            "let qualified = accepted && joined && normal_shutdown_clean;",
+            "!owner.terminal_failure.load(Ordering::Acquire)",
+            "qualifier::cancel(view)",
+            "let mut observer = ApplicationObserver::default();",
+        ],
+    )?;
+    for forbidden in [
+        "AgentWorkController::",
+        "MacosWorkComposition::",
+        "WebviewEngine::",
+        "SqliteStore::",
+        "spawn_suspended",
+        "prepare_public_qualification",
+        "shutdown_with_deadline",
+        "set_focus(",
+        "activate(",
+        "process::exit(",
+        "#[tauri::command]",
+        "impl AgentBrowserPort",
+        "ready_for_shutdown",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "navigation observer acquired another owner/authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn inspection_composition(retained: &str, discovery: &str, observer: &str) -> Result<(), String> {
+    for wrapper in [retained, discovery] {
+        let production = wrapper.split("\n#[cfg(test)]").next().unwrap_or(wrapper);
+        require(production, &[
+            "fn allows_progressive_observation(&self) -> bool { self.0.allows_progressive_observation() }",
+        ])?;
+    }
+    let retained = retained.split("\n#[cfg(test)]").next().unwrap_or(retained);
+    let observer = observer.split("\n#[cfg(test)]").next().unwrap_or(observer);
+    for source in [retained, observer] {
+        require(source, &[
+            "self.observe_kind(event.kind());",
+            "AgentBrowserToolKind::Read | AgentBrowserToolKind::Locate | AgentBrowserToolKind::Snapshot,",
+            "AgentWorkEventKind::ToolProposed(_)",
+            "AgentWorkEventKind::ActionActive",
+            "AgentWorkEventKind::Recovery => self.failed = true",
+        ])?;
+    }
+    require(retained, &[") if DEFINITION.inspection => {}"])?;
+    require(observer, &[") if self.definition.inspection => {}"])?;
+    Ok(())
+}
+
+fn commerce_selection(desktop: &str, composition: &str, retained: &str) -> Result<(), String> {
+    // Specialization must inherit the exact debug/isolated/retained entry and
+    // public-retention gates, not introduce an independent launcher or runtime.
+    require(desktop, &["macos-work-retained-commerce-probe = [\"macos-work-retained-product-probe\", \"zephium-work-composition/retained-commerce-qualification\"]"])?;
+    require(
+        composition,
+        &["retained-commerce-qualification = [\"retained-product-qualification\"]"],
+    )?;
+    require(retained, &[
+        "#[cfg(feature = \"retained-commerce-qualification\")] #[path = \"retained_commerce_objective.rs\"] mod objective;",
+        "#[cfg(not(feature = \"retained-commerce-qualification\"))] #[path = \"retained_svelte_objective.rs\"] mod objective;",
+        "use objective::{DOCUMENT_POLICY, INITIAL, ORIGIN, PATH_PREFIX, TASK_NAME};",
+        "initial: INITIAL, document_policy: DOCUMENT_POLICY, origin: ORIGIN, task_name: TASK_NAME,",
+        "ContextNavigationTarget::parse(INITIAL)",
+        "PATH_PREFIX.into()",
+    ])
+}
+
 pub(crate) fn check(root: &Path) -> Result<(), String> {
     let read = |path: &str| {
         fs::read_to_string(root.join(path))
             .map_err(|_| format!("missing Work composition source {path}"))
     };
     let native = read("crates/zephium-work-composition/src/native.rs")?;
+    require(
+        &native,
+        &[
+            "let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;",
+            "prepared.with_browser_profile(binding)",
+        ],
+    )?;
+    require(&read("crates/zephium-app/src/work.rs")?, &[
+        "self.controller.profile_storage_binding()? != (binding.profile(), binding.storage_class())",
+        "profile == Some(crate::AgentWorkProfileReadiness::Ready(binding))",
+        "if !profile_valid { self.stopping = true; self.fail(AgentWorkFailure::Contract); self.abort_staged(); }",
+    ])?;
+    require(&read("crates/zephium-app/src/shell/mod.rs")?, &[
+        "let profile = self.work_profile_binding(); if let Some(work) = &mut self.work { work.admit(submission, Some(profile)); }",
+    ])?;
+    ordinary_navigation_observer(&read("desktop/src/navigation_probe.rs")?)?;
+    commerce_selection(
+        &read("desktop/Cargo.toml")?,
+        &read("crates/zephium-work-composition/Cargo.toml")?,
+        &read("crates/zephium-work-composition/src/retained_product_qualification.rs")?,
+    )?;
+    inspection_composition(
+        &read("crates/zephium-work-composition/src/retained_product_qualification.rs")?,
+        &read("crates/zephium-work-composition/src/discovery_qualification.rs")?,
+        &read("crates/zephium-work-composition/src/navigation_qualification_observer.rs")?,
+    )?;
+    require(&read("desktop/Cargo.toml")?, &[
+        "macos-work-navigation-probe = [\"macos-work\", \"zephium-work-composition/navigation-qualification\", \"tauri/custom-protocol\"]",
+    ])?;
+    require(
+        &read("desktop/build.rs")?,
+        &[
+            "env::var_os(\"CARGO_FEATURE_MACOS_WORK_NAVIGATION_PROBE\").is_some()",
+            "navigation_probe_config::validate(",
+        ],
+    )?;
+    require(&read("desktop/src/lib.rs")?, &[
+        "#[cfg(all(feature = \"macos-work-navigation-probe\", any(not(debug_assertions), not(target_os = \"macos\"))))] compile_error!",
+        "#[cfg(all(feature = \"macos-work-navigation-probe\", not(feature = \"macos-work-profile-enrollment\"), target_os = \"macos\"))] navigation_probe::install(app.handle())?;",
+    ])?;
     production(&native)?;
     require(
         &native,
@@ -126,7 +254,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &[
             "default = []",
             "navigation-qualification = [\"macos-work\", \"dep:zephium-agentic\", \"dep:zephium-core\", \"dep:zephium-agent-runtime\"]",
-            "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\"]",
+            "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\", \"zephium-agent-provider-transport/probe-harness\",]",
             "retained-public-qualification = [\"retained-qualification\", \"zephium-engine/native-agentic-public-resource-probe\"]",
         ],
     )?;
@@ -224,6 +352,145 @@ fn combined_result_qualification(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn commerce_selection_cannot_bypass_original_qualification_or_retained_entry() {
+        let desktop = include_str!("../../desktop/Cargo.toml");
+        let composition = include_str!("../../crates/zephium-work-composition/Cargo.toml");
+        let retained = include_str!(
+            "../../crates/zephium-work-composition/src/retained_product_qualification.rs"
+        );
+        commerce_selection(desktop, composition, retained).unwrap();
+        assert!(commerce_selection(
+            &desktop.replace(
+                "macos-work-retained-commerce-probe = [\"macos-work-retained-product-probe\",",
+                "macos-work-retained-commerce-probe = [\"macos-work-navigation-probe\","
+            ),
+            composition,
+            retained
+        )
+        .is_err());
+        assert!(commerce_selection(
+            desktop,
+            &composition.replace(
+                "retained-commerce-qualification = [\"retained-product-qualification\"]",
+                "retained-commerce-qualification = [\"macos-work\"]"
+            ),
+            retained
+        )
+        .is_err());
+        assert!(commerce_selection(
+            desktop,
+            composition,
+            &retained.replace(
+                "retained_commerce_objective.rs",
+                "retained_svelte_objective.rs"
+            )
+        )
+        .is_err());
+        assert!(commerce_selection(
+            desktop,
+            composition,
+            &retained.replace("PATH_PREFIX.into()", "\"/\".into()")
+        )
+        .is_err());
+    }
+    #[test]
+    fn exact_discovery_wrappers_and_observers_cannot_drop_inspection() {
+        let retained = include_str!(
+            "../../crates/zephium-work-composition/src/retained_product_qualification.rs"
+        );
+        let discovery =
+            include_str!("../../crates/zephium-work-composition/src/discovery_qualification.rs");
+        let observer = include_str!(
+            "../../crates/zephium-work-composition/src/navigation_qualification_observer.rs"
+        );
+        inspection_composition(retained, discovery, observer).unwrap();
+        assert!(inspection_composition(
+            &retained.replace("self.0.allows_progressive_observation()", "false"),
+            discovery,
+            observer
+        )
+        .is_err());
+        assert!(inspection_composition(
+            retained,
+            &discovery.replace("self.0.allows_progressive_observation()", "false"),
+            observer
+        )
+        .is_err());
+        assert!(inspection_composition(
+            &retained.replace(
+                "AgentBrowserToolKind::Snapshot",
+                "AgentBrowserToolKind::Wait"
+            ),
+            discovery,
+            observer
+        )
+        .is_err());
+        assert!(inspection_composition(
+            retained,
+            discovery,
+            &observer.replace(
+                "AgentBrowserToolKind::Snapshot",
+                "AgentBrowserToolKind::Wait"
+            )
+        )
+        .is_err());
+        assert!(inspection_composition(
+            &retained.replace("self.observe_kind(event.kind());", ""),
+            discovery,
+            observer
+        )
+        .is_err());
+    }
+    #[test]
+    fn navigation_observer_cannot_bypass_admission_or_ordinary_shutdown() {
+        let source = include_str!("../../desktop/src/navigation_probe.rs");
+        ordinary_navigation_observer(source).unwrap();
+        for boundary in [
+            "let admit = super::admit_trusted_work;",
+            "let admit = super::admit_retained_trusted_work;",
+            "worker.join().is_ok()",
+            "accepted && joined && normal_shutdown_clean",
+            "api.prevent_exit()",
+            ".admit(||",
+            "control.admission.settle(result)",
+            "state.control.admission.cancel()",
+            "state.control.admission.terminal()",
+        ] {
+            assert!(ordinary_navigation_observer(&source.replace(boundary, "removed")).is_err());
+        }
+        for mutation in [
+            "WebviewEngine::new()",
+            "window.set_focus()",
+            "shell.shutdown_with_deadline()",
+        ] {
+            assert!(ordinary_navigation_observer(&format!("{source}\n{mutation}")).is_err());
+        }
+    }
+    #[test]
+    fn retained_public_retention_is_excluded_and_shipping_selection_is_stateless() {
+        let controller = include_str!("../../crates/zephium-agent-controller/src/work_retained.rs");
+        require(
+            controller,
+            &[
+                "task, AgentBrowserRetention::Stateless,",
+                "#[cfg(feature = \"probe-harness\")] pub fn try_new_for_public_probe(",
+                "task, AgentBrowserRetention::InspectablePublicData,",
+            ],
+        )
+        .unwrap();
+        let product = include_str!("../../crates/zephium-app/src/work_resources_product.rs");
+        require(product, &["#[cfg(feature = \"work-execution-probe\")] #[path = \"work_resources_public_product.rs\"] mod public_qualification;"]).unwrap();
+        let actor = include_str!("../../crates/zephium-app/src/work_resources_application.rs");
+        require(actor, &["#[cfg(feature = \"work-execution-probe\")] #[path = \"work_resources_public_actor.rs\"] mod public_qualification;"]).unwrap();
+        for (source, token) in [
+            (controller, "AgentBrowserRetention::Stateless"),
+            (product, "#[cfg(feature = \"work-execution-probe\")]"),
+            (actor, "#[cfg(feature = \"work-execution-probe\")]"),
+        ] {
+            assert!(require(&source.replace(token, "removed"), &[token]).is_err());
+        }
+    }
     #[test]
     fn combined_qualification_requires_verified_effects_and_exact_post_action_source() {
         let source = include_str!("../../crates/zephium-terra-macos-probe/src/work_application.rs");

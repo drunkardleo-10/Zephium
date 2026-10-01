@@ -7,15 +7,30 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod acceptance;
+#[cfg(all(target_os = "macos", feature = "decision-eval"))]
+mod decision_eval;
+#[cfg(all(target_os = "macos", feature = "decision-eval"))]
+mod decision_observation;
+#[cfg(target_os = "macos")]
+mod lead_smoke;
 #[cfg(target_os = "macos")]
 mod work_actor;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_app_editors;
+mod work_app_views;
 #[cfg(target_os = "macos")]
 mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
 mod work_commerce;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_durable;
 mod work_navigation;
 mod work_route;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_site;
 mod work_sites;
 
 #[cfg(not(target_os = "macos"))]
@@ -29,6 +44,50 @@ fn main() {
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let result = match arguments.as_slice() {
+        #[cfg(feature = "decision-eval")]
+        [argument] if argument == "--live-decision-eval" => decision_eval::run(),
+        #[cfg(feature = "decision-eval")]
+        [argument, case] if argument == "--live-decision-eval-case" => {
+            decision_eval::run_case(case, ProbeModel::Luna)
+        }
+        #[cfg(feature = "decision-eval")]
+        [argument] if argument == "--live-decision-eval-terra" => decision_eval::run_terra(),
+        #[cfg(feature = "decision-eval")]
+        [argument, paths @ ..] if argument == "--search-reuse-replay" && !paths.is_empty() => {
+            decision_eval::search_reuse_replay(paths)
+        }
+        #[cfg(feature = "decision-eval")]
+        [argument, effort] if argument == "--live-decision-eval-effort" => {
+            decision_eval::run_effort(effort)
+        }
+        #[cfg(feature = "decision-eval")]
+        [argument, case] if argument == "--live-decision-eval-case-terra" => {
+            decision_eval::run_case(case, ProbeModel::Terra)
+        }
+        #[cfg(feature = "decision-eval")]
+        [argument, site] if argument == "--record-decision-observation" => {
+            decision_observation::run(site)
+        }
+        #[cfg(feature = "decision-eval")]
+        [argument, site, lists]
+            if argument == "--record-decision-observation" && lists == "release-lists" =>
+        {
+            decision_observation::use_release_lists().and_then(|()| decision_observation::run(site))
+        }
+        [argument] if argument == "--check-provider-keychain" => {
+            let started = std::time::Instant::now();
+            let result = zephium_agentic::load_macos_probe_openai_credential()
+                .map(|_| ())
+                .map_err(|_| ProbeFailure::Keychain);
+            let _ = writeln!(
+                std::io::stderr(),
+                "keychain_check available={} elapsed_ms={}",
+                result.is_ok(),
+                started.elapsed().as_millis()
+            );
+            result
+        }
+        [argument] if argument == "--live-lead-smoke" => lead_smoke::run(),
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
         [argument] if argument == "--live-two-action" => run_two_action(
@@ -63,6 +122,108 @@ fn main() {
             run_variable_workflow()
         }
         [argument] if argument == "--live-public-luna-work-actor-inspectable" => work_actor::run(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-public-durable-work" => work_durable::run(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-public-coordinated-work" => {
+            work_durable::run_coordinated()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-public-cancelled-work" => work_durable::run_cancelled(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-public-work-product" => work_durable::run_product(),
+        #[cfg(feature = "durable-runtime")]
+        [argument, path, count] if argument == "--replay-agent-turn" => {
+            work_durable::replay_agent_turn(path, count, None)
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument, path, count, effort] if argument == "--replay-agent-turn" => {
+            work_durable::replay_agent_turn(path, count, Some(effort))
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-acceptance" => acceptance::run(),
+        #[cfg(feature = "durable-runtime")]
+        [argument, scenario] if argument == "--live-acceptance-only" => {
+            acceptance::run_one(scenario)
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument, check] if argument == "--loopback-site" => work_site::run(check),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-human-government-work" => {
+            work_durable::run_agent_human_government()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-government-work" => {
+            work_durable::run_agent_government()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-files-work" => work_durable::run_agent_files(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-disclosure-work" => {
+            work_durable::run_agent_disclosure()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-scroll-work" => work_durable::run_agent_scroll(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-money-node-work" => work_durable::run_money_node(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-money-work" => work_durable::run_agent_money(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-architecture-work" => {
+            work_durable::run_agent_architecture()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-engine-chart-work" => {
+            work_durable::run_agent_engine_chart()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-explain-mechanism-work" => {
+            work_durable::run_agent_explain_mechanism()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-code-review-work" => {
+            work_durable::run_agent_code_review()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-explain-rust-work" => {
+            work_durable::run_agent_explain_rust()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-concept-comparison-work" => {
+            work_durable::run_agent_concept_comparison()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
+        #[cfg(feature = "durable-runtime")]
+        [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
+        #[cfg(feature = "durable-runtime")]
+        [argument, start, goal] if argument == "--live-site" => work_durable::run_site(start, goal),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-airbnb-listing-work" => {
+            work_durable::run_agent_listing()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument, url] if argument == "--live-agent-page-work" => {
+            work_durable::run_agent_page(url)
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument, url] if argument == "--live-agent-listing-page-work" => {
+            work_durable::run_agent_listing_page(url)
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-product-details-work" => {
+            work_durable::run_agent_details()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-collection-work" => {
+            work_durable::run_agent_collection()
+        }
         [argument] if argument == "--live-public-luna-work-application-inspectable" => {
             work_application::run()
         }
@@ -109,7 +270,7 @@ fn main() {
         }
         let _ = writeln!(
             std::io::stderr().lock(),
-            "macos-terra-agentic-probe: failed; stage={}; action_step={}; tool_kind={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; locate_query_bytes={}; locate_query_terms={}; locate_scanned_nodes={}; protocol_event={}; content=redacted",
+            "macos-terra-agentic-probe: failed; stage={}; action_step={}; tool_kind={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; protocol_event={}; content=redacted",
             error.label(),
             error.action_step(),
             error.tool_kind_label(),
@@ -118,9 +279,6 @@ fn main() {
             error.verification_reason_label(),
             error.wait_label(),
             error.settle_millis(),
-            error.locate_query_bytes(),
-            error.locate_query_terms(),
-            error.locate_scanned_nodes(),
             error.protocol_event_label()
         );
         std::process::exit(1);
@@ -189,6 +347,12 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::ActionPending) => "controller_action_pending",
             Self::Provider(TerraProbeProviderError::ActionLimit) => "controller_action_limit",
             Self::Provider(TerraProbeProviderError::Action(_)) => "controller_action_refused",
+            Self::Provider(TerraProbeProviderError::ActionRejected(_)) => {
+                "controller_action_rejected"
+            }
+            Self::Provider(TerraProbeProviderError::ActionUnverified) => {
+                "controller_action_unverified"
+            }
             Self::Provider(TerraProbeProviderError::UnsupportedTool(_)) => {
                 "controller_tool_unsupported"
             }
@@ -202,9 +366,6 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::DiffEncoding(_)) => "provider_diff_encoding",
             Self::Provider(TerraProbeProviderError::LocateTool) => "provider_locate_tool",
             Self::Provider(TerraProbeProviderError::Locate) => "provider_locate",
-            Self::Provider(TerraProbeProviderError::LocateNoMatches { .. }) => {
-                "provider_locate_no_matches"
-            }
             Self::Provider(TerraProbeProviderError::LocateEncoding(_)) => {
                 "provider_locate_encoding"
             }
@@ -312,7 +473,8 @@ impl ProbeFailure {
                 _,
             )) => "provider_model_protocol_unsupported_output",
             Self::Provider(TerraProbeProviderError::ModelProtocol(
-                AgentProviderProtocolError::ToolCall,
+                AgentProviderProtocolError::ToolCall
+                | AgentProviderProtocolError::ToolContract(_, _),
                 _,
             )) => "provider_model_protocol_tool_call",
             Self::Provider(TerraProbeProviderError::ModelProtocol(
@@ -327,6 +489,17 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::Proposal) => "provider_proposal",
             Self::Provider(TerraProbeProviderError::Continuation) => "provider_continuation",
             Self::Provider(TerraProbeProviderError::TurnLimit) => "provider_turn_limit",
+            Self::Provider(TerraProbeProviderError::NoExtractionEvidence) => {
+                "provider_no_extraction_evidence"
+            }
+            Self::Provider(TerraProbeProviderError::RequestPolicy(_)) => "provider_request_policy",
+            Self::Provider(TerraProbeProviderError::RequestContract(_)) => {
+                "provider_request_contract"
+            }
+            Self::Provider(TerraProbeProviderError::ActionProposalLoop) => {
+                "provider_action_proposal_loop"
+            }
+            Self::Provider(TerraProbeProviderError::NoProgress) => "provider_no_progress",
             Self::Proposal { .. } => "proposal_contract",
             Self::Engine(_) => "native_engine",
             Self::Verification => "fresh_snapshot_verification",
@@ -425,42 +598,6 @@ impl ProbeFailure {
         match self {
             Self::PostFirstActionVerification { settle_millis, .. }
             | Self::PostSecondActionVerification { settle_millis, .. } => settle_millis,
-            _ => 0,
-        }
-    }
-
-    const fn locate_query_bytes(self) -> u16 {
-        match self {
-            Self::Provider(
-                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
-                    query_bytes,
-                    ..
-                },
-            ) => query_bytes,
-            _ => 0,
-        }
-    }
-
-    const fn locate_query_terms(self) -> u8 {
-        match self {
-            Self::Provider(
-                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
-                    query_terms,
-                    ..
-                },
-            ) => query_terms,
-            _ => 0,
-        }
-    }
-
-    const fn locate_scanned_nodes(self) -> u16 {
-        match self {
-            Self::Provider(
-                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
-                    scanned_nodes,
-                    ..
-                },
-            ) => scanned_nodes,
             _ => 0,
         }
     }

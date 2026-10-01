@@ -59,6 +59,20 @@ fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
 }
 
 #[test]
+fn legacy_closed_tab_without_identity_still_reopens() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "legacy.example");
+    shell.handle(Command::Close(tab));
+    let profile = shell.windows.focused().unwrap().profile;
+    shell.recently_closed[0].session_id = None;
+    shell.recently_closed[0].closed_at_ms = None;
+
+    assert!(shell.restore_recently_closed_tab(profile).is_some());
+}
+
+#[test]
 fn forged_runtime_ids_cannot_cross_the_focused_space_or_profile() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

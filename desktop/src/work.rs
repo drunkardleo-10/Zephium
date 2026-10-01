@@ -5,6 +5,47 @@ use tauri::Manager;
 use zephium_app::{AgentWorkApplicationHandle, PreparedAgentWork};
 use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 
+/// Nonblocking selected-session query for an ordinary Work invocation. Wait for
+/// Ready before passing that exact binding to launch. Selecting a browser
+/// profile does not identify an authenticated service account.
+pub fn selected_work_profile(
+    app: &tauri::AppHandle,
+) -> Result<zephium_app::AgentWorkProfileRequest, WorkAdmissionFailure> {
+    let shell = app
+        .try_state::<zephium_app::Handle>()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    Ok(shell.work_profile_binding())
+}
+
+/// Launches a product-approved natural-language objective through the retained
+/// browser runtime. Drain `take_event` for live progress, inspect `snapshot`,
+/// and move the source-bound terminal result with `take_extraction`. Draining
+/// events releases bounded runtime backpressure. Queue admission is not success.
+pub fn launch_public_read_work(
+    app: &tauri::AppHandle,
+    profile: zephium_app::AgentWorkProfileBinding,
+    invocation: zephium_work_composition::PublicReadWorkInvocation,
+) -> Result<zephium_app::RetainedWorkHandle, WorkAdmissionFailure> {
+    let request = invocation
+        .into_request(profile)
+        .map_err(WorkAdmissionFailure::Contract)?;
+    admit_retained_trusted_work(app, request)
+}
+
+/// Launches a product-approved public objective with independently assessed,
+/// reversible local actions. The trusted Rust invocation owns the action policy;
+/// neither the UI nor this adapter can manufacture refs or widen its effects.
+pub fn launch_public_local_action_work(
+    app: &tauri::AppHandle,
+    profile: zephium_app::AgentWorkProfileBinding,
+    invocation: zephium_work_composition::PublicLocalActionWorkInvocation,
+) -> Result<zephium_app::RetainedWorkHandle, WorkAdmissionFailure> {
+    let request = invocation
+        .into_request(profile)
+        .map_err(WorkAdmissionFailure::Contract)?;
+    admit_retained_trusted_work(app, request)
+}
+
 pub(crate) struct WorkCompositionState(Mutex<CompositionAdmission>);
 
 struct CompositionAdmission {
@@ -69,6 +110,54 @@ pub fn admit_trusted_work(
     request: TrustedWorkRequest,
 ) -> Result<AgentWorkApplicationHandle, WorkAdmissionFailure> {
     admit_after(app, request, None)
+}
+
+/// Launches one approved read-only objective on an application-retained page.
+/// This is trusted Rust composition only, never Tauri IPC. The original Shell
+/// rechecks profile and owners; the returned handle reports actual admission.
+pub fn admit_retained_trusted_work(
+    app: &tauri::AppHandle,
+    request: TrustedWorkRequest,
+) -> Result<zephium_app::RetainedWorkHandle, WorkAdmissionFailure> {
+    let shell = app
+        .try_state::<zephium_app::Handle>()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    let state = app
+        .try_state::<WorkCompositionState>()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    let mut owner = state
+        .0
+        .lock()
+        .map_err(|_| WorkAdmissionFailure::Unavailable)?;
+    if owner.initial_attached {
+        return Err(WorkAdmissionFailure::Unavailable);
+    }
+    let composition = owner
+        .composition
+        .as_ref()
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    let handle = composition
+        .launch_retained(&shell.callback_handle(), request)
+        .map_err(WorkAdmissionFailure::Contract)?
+        .ok_or(WorkAdmissionFailure::Unavailable)?;
+    owner.initial_attached = true;
+    Ok(handle)
+}
+
+#[cfg(any(
+    feature = "macos-work-retained-product-probe",
+    feature = "macos-work-lifetime-diagnostic"
+))]
+pub(crate) fn retained_resource_failure_cause(
+    app: &tauri::AppHandle,
+    view: &zephium_app::RetainedWorkHandle,
+) -> Option<zephium_engine::WorkResourceFailureCause> {
+    let state = app.try_state::<WorkCompositionState>()?;
+    let owner = state.0.lock().ok()?;
+    owner
+        .composition
+        .as_ref()?
+        .retained_resource_failure_cause(view)
 }
 
 /// Explicit fresh trusted work after an exact completed predecessor. This is

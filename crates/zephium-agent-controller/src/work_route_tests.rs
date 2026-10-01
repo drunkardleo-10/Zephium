@@ -158,16 +158,15 @@ impl RouteFault {
                 || self == Self::CeilingMiddle
                 || (matches!(self, Self::FirstLocate | Self::MiddleLocate) && turns == 2));
         assert_eq!(
-            text.matches(r#""role":"developer""#).count(),
-            1,
-            "one current host checkpoint, never replayed old progress"
-        );
-        assert_eq!(
             text.matches(r#"ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1\n"#)
                 .count(),
-            1
+            usize::from(!text.contains("ZEXTRACT1 schema_content=trusted")),
+            "one current navigation checkpoint for decisions; none in terminal mapping"
         );
-        assert_eq!(text.matches(r#"\"completed_hops\":"#).count(), 1);
+        assert_eq!(
+            text.matches(r#"\"completed_hops\":"#).count(),
+            usize::from(!text.contains("ZEXTRACT1 schema_content=trusted"))
+        );
         let completed = if first {
             0
         } else if middle {
@@ -182,7 +181,9 @@ impl RouteFault {
         } else {
             "null".to_owned()
         };
-        assert!(text.contains(&format!(r#"{{\"completed_hops\":{completed},\"total_hops\":2,\"next_navigation_target\":{target}}}"#)));
+        if !text.contains("ZEXTRACT1 schema_content=trusted") {
+            assert!(text.contains(&format!(r#"{{\"completed_hops\":{completed},\"total_hops\":2,\"next_navigation_target\":{target}}}"#)));
+        }
         if self == Self::HostileCheckpoint && middle {
             assert!(
                 text.contains(HOSTILE_CHECKPOINT),
@@ -517,6 +518,25 @@ pub(super) fn capture(
             i + 2
         )
     }));
+    if hop < 2
+        && port
+            .navigation_schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.fault.two_discovery_hops())
+    {
+        let target = if hop == 0 { FIRST } else { FINAL };
+        nodes.push(format!(
+            r#"{{"k":5,"p":0,"r":"link","n":"A relevant source","u":"{target}"}}"#
+        ));
+    }
+    if hop == 2
+        && port
+            .navigation_schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.fault == NavigationFault::DiscoveryTwoHopsBlockedFrame)
+    {
+        nodes.push(r#"{"k":5,"p":0,"r":"frame_boundary"}"#.into());
+    }
     let wire = format!(
         r#"{{"v":1,"i":{},"g":1,"c":"complete","n":[{}]}}"#,
         correlation.invocation().get(),

@@ -23,9 +23,26 @@ mod terra;
 mod action;
 
 #[cfg(feature = "provider-transport")]
+mod work_reinspection;
+#[cfg(feature = "provider-transport")]
+pub use work_reinspection::{
+    AgentWorkEffectObservedState, AgentWorkEffectReadTarget, AgentWorkEffectReinspection,
+    AgentWorkEffectReinspectionError, AgentWorkEffectReinspectionRefusal,
+    AgentWorkEffectReobservation,
+};
+
+#[cfg(feature = "provider-transport")]
 mod work_form;
 #[cfg(feature = "provider-transport")]
-pub use work_form::{AgentWorkFormGoal, AgentWorkFormPhase, AgentWorkFormTask};
+pub use work_form::{
+    AgentWorkFormExtractionTask, AgentWorkFormGoal, AgentWorkFormPhase, AgentWorkFormTask,
+};
+#[cfg(feature = "provider-transport")]
+mod work_discovery;
+#[cfg(feature = "provider-transport")]
+pub use work_discovery::{
+    AgentWorkAccountSource, AgentWorkDiscoveryTask, AgentWorkLocalActionPolicy,
+};
 
 #[cfg(feature = "provider-transport")]
 pub use action::{
@@ -35,15 +52,16 @@ pub use action::{
 
 #[cfg(feature = "provider-transport")]
 pub use terra::{
-    AgentBrowserAccountError, AgentBrowserModel, AgentBrowserProviderError,
-    AgentBrowserProviderTurn, AgentBrowserRetention, AgentBrowserSession,
-    AgentBrowserSessionFinishRefusal, AgentBrowserSessionTerminal, AgentWorkClosedUnsuccessfully,
-    AgentWorkContextSpec, AgentWorkController, AgentWorkEvent, AgentWorkEventKind,
-    AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
-    AgentWorkRecovery, AgentWorkRetainedBrowser, AgentWorkRetainedController,
-    AgentWorkRetainedHandle, AgentWorkRetainedOutcome, AgentWorkRetainedRecovery,
+    AgentBrowserAccountError, AgentBrowserDecisionProvider, AgentBrowserModel,
+    AgentBrowserProviderError, AgentBrowserProviderTurn, AgentBrowserRetention,
+    AgentBrowserSession, AgentBrowserSessionFinishRefusal, AgentBrowserSessionTerminal,
+    AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController, AgentWorkEvent,
+    AgentWorkEventKind, AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle,
+    AgentWorkHumanRequest, AgentWorkInitialReadiness, AgentWorkOutcome, AgentWorkRecovery,
+    AgentWorkRetainedBrowser, AgentWorkRetainedController, AgentWorkRetainedHandle,
+    AgentWorkRetainedOutcome, AgentWorkRetainedRecovery, AgentWorkRetainedResourceSpec,
     AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
-    AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
+    AgentWorkTaskProgress, AgentWorkWaitingForHuman, MAX_AGENT_WORK_EVENTS,
 };
 
 #[cfg(feature = "probe-harness")]

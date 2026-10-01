@@ -13,12 +13,14 @@ import {
   KeyboardIcon,
   Globe02Icon,
   SparklesIcon,
+  AiBrowserIcon,
   Clock01Icon,
   DashboardSpeed01Icon,
   PuzzleIcon,
   InformationCircleIcon,
+  Plug01Icon,
 } from "@hugeicons/core-free-icons";
-export const sections = [
+const allSections = [
   {
     id: "general",
     group: "browser",
@@ -97,18 +99,18 @@ export const sections = [
     icon: Globe02Icon,
   },
   {
+    id: "work",
+    group: "intelligence",
+    title: m.section_work,
+    description: m.section_work_description,
+    icon: AiBrowserIcon,
+  },
+  {
     id: "ai",
     group: "intelligence",
     title: m.section_ai,
     description: m.section_ai_description,
     icon: SparklesIcon,
-  },
-  {
-    id: "models",
-    group: "intelligence",
-    title: m.section_models,
-    description: m.section_models_description,
-    icon: Layers01Icon,
   },
   {
     id: "plugins",
@@ -122,7 +124,7 @@ export const sections = [
     group: "intelligence",
     title: m.section_mcp,
     description: m.section_mcp_description,
-    icon: Globe02Icon,
+    icon: Plug01Icon,
   },
   {
     id: "skills",
@@ -137,6 +139,13 @@ export const sections = [
     title: m.section_memory,
     description: m.section_memory_description,
     icon: InformationCircleIcon,
+  },
+  {
+    id: "sites",
+    group: "intelligence",
+    title: m.section_sites,
+    description: m.section_sites_description,
+    icon: Globe02Icon,
   },
   {
     id: "focus",
@@ -181,21 +190,15 @@ export const sections = [
     icon: InformationCircleIcon,
   },
 ] as const;
-export type SettingsSection = (typeof sections)[number]["id"];
+export type SettingsSection = (typeof allSections)[number]["id"];
+export const sections = allSections.filter((section) => section.id !== "account");
 export const groups = [
   { id: "browser", label: m.settings_browser },
   { id: "personalize", label: m.settings_personalize },
   { id: "intelligence", label: m.settings_intelligence },
   { id: "application", label: m.settings_application },
 ] as const;
-export const emptySections = new Set<SettingsSection>([
-  "ai",
-  "models",
-  "plugins",
-  "mcp",
-  "skills",
-  "memory",
-]);
+export const emptySections = new Set<SettingsSection>(["plugins"]);
 export function searchSettings(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));

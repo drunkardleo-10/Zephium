@@ -266,7 +266,10 @@ mod tests {
             text: Some(value.into()),
             marks: marks
                 .iter()
-                .map(|m| DocumentMark { kind: (*m).into() })
+                .map(|m| DocumentMark {
+                    kind: (*m).into(),
+                    attrs: None,
+                })
                 .collect(),
             ..node("text", Vec::new())
         }

@@ -1,6 +1,8 @@
 //! Persistent Work native page ownership. No run is stored in the page owner;
 //! only admitted invocation/task envelopes carry temporary execution leases.
 
+#[cfg(target_os = "macos")]
+use super::agent_context::AgentPendingScreenshot;
 use super::{
     profiles::{
         bind_profile_persistence_class, profile_scoped_value, profile_value_is_isolated,
@@ -10,8 +12,13 @@ use super::{
     EngineHost,
 };
 use crate::agent_context_port::{
-    work_browser_monotonic_now, WorkLifecycleTask, WorkObservationTask, WorkResourceGuard,
+    work_browser_monotonic_now, WorkActionTask, WorkLifecycleTask, WorkObservationTask,
+    WorkResourceGuard,
 };
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+use crate::WorkResourceFailureCause as ResourceFailureCause;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zephium_agentic::{
@@ -22,31 +29,142 @@ use zephium_agentic::{
 };
 use zephium_core::{ids::ProfileId, ports::engine::Partition};
 
-const CONSTRUCTION_BUDGET: Duration = Duration::from_secs(30);
-const READ_BUDGET: Duration = Duration::from_secs(15);
 const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+// Web pages may perform a bounded same-document URL finalization shortly after
+// their exact native navigation finishes. Only an explicitly trusted document
+// policy enters this native quiet-period fence. Exact documents pay no delay.
+const DOCUMENT_FINALIZATION_QUIET_PERIOD: Duration = Duration::from_millis(500);
+/// A page an action's admitted load committed but never reported loaded is
+/// taken as loaded after this long.
+const HAND_ON_COMMITTED_SETTLE: Duration = Duration::from_secs(4);
+
+struct DocumentFinalizationWake {
+    timer: Option<crate::platform::imp::ContentPolicyTimeout>,
+    ticket: crate::platform::work_document_navigation::WorkDocumentFinalizationTicket,
+}
+
+enum DocumentFinalizationProgress {
+    Pending,
+    Ready(zephium_agentic::ContextNavigationTarget),
+    WakeUnavailable,
+    Refused,
+}
 
 #[cfg(feature = "native-agentic-work-resource-probe")]
 #[path = "work_resource_witness.rs"]
 mod witness;
 
+#[path = "work_resource_action.rs"]
+mod action;
+#[path = "work_resource_human.rs"]
+mod human;
+#[path = "work_resource_navigation.rs"]
+mod navigation;
+#[path = "work_resource_observation.rs"]
+mod observation;
+
+#[cfg(target_os = "macos")]
+pub(super) struct AnonymousWorkStore {
+    session: zephium_agentic::WeakWorkBrowserSession,
+    pub(super) profile: zephium_core::ids::ProfileId,
+    pub(super) store: crate::platform::imp::WebsiteDataStore,
+}
+
+#[cfg(target_os = "macos")]
+impl EngineHost {
+    pub(super) fn anonymous_work_store(
+        &mut self,
+        session: &zephium_agentic::WorkBrowserSession,
+    ) -> Result<crate::platform::imp::WebsiteDataStore, ContextPortFailure> {
+        self.anonymous_work_stores.retain(|_, entry| {
+            entry.session.is_current() || self.erasure_tombstones.contains(&entry.profile)
+        });
+        if !session.is_current() {
+            return Err(ContextPortFailure::Stale);
+        }
+        if let Some(entry) = self.anonymous_work_stores.get(&session.id()) {
+            return Ok(entry.store.clone());
+        }
+        if self.anonymous_work_stores.len() >= MAX_LIVE_CONTEXTS {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        let store = crate::platform::imp::new_ephemeral_data_store()
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        if self.anonymous_work_stores.values().any(|entry| {
+            objc2::rc::Retained::as_ptr(&entry.store) == objc2::rc::Retained::as_ptr(&store)
+        }) || self
+            .macos_ephemeral_data_stores
+            .values()
+            .any(|other| objc2::rc::Retained::as_ptr(other) == objc2::rc::Retained::as_ptr(&store))
+        {
+            return Err(ContextPortFailure::NativeRefused);
+        }
+        let id = session.id();
+        let profile = session.profile();
+        if !session.register_retirement(Box::new(move || {
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                super::best_effort_with(move |host| {
+                    if !host.erasure_tombstones.contains(&profile) {
+                        host.anonymous_work_stores.remove(&id);
+                    }
+                });
+            });
+        })) {
+            return Err(ContextPortFailure::Stale);
+        }
+        self.anonymous_work_stores.insert(
+            id,
+            AnonymousWorkStore {
+                session: session.downgrade(),
+                profile: session.profile(),
+                store: store.clone(),
+            },
+        );
+        Ok(store)
+    }
+}
+
 pub(super) struct WorkNativeResource {
-    guard: Arc<WorkResourceGuard>,
+    pub(super) guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
+    construction_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
+    human_presentation: Option<crate::platform::imp::WorkHumanPresentation>,
+    human_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
+    human_progress: Option<zephium_agentic::WorkBrowserHumanProgress>,
+    /// Handed over without a presentation, for a decision made elsewhere.
+    human_unpresented: bool,
     revocation: Option<WorkLifecycleTask>,
     destruction: Option<WorkLifecycleTask>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
-    observation: Option<(
-        SemanticRuntimeCorrelation,
-        crate::platform::imp::ContentPolicyTimeout,
-    )>,
-    last_invocation: u64,
+    observation: Option<observation::WorkObservation>,
+    action: Option<action::WorkAction>,
+    reading_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
+    presentation_wake: Option<observation::ObservationWake>,
+    frame_generation: u64,
+    frame_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    frame_captured_at: Option<Instant>,
+    navigation: Option<navigation::WorkNavigation>,
+    history_back: Option<navigation::WorkHistoryBack>,
+    #[cfg(target_os = "macos")]
+    pub(super) screenshot: Option<AgentPendingScreenshot>,
+    document_finalization_wake: Option<DocumentFinalizationWake>,
+    document_finalization_ready:
+        Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
+    hand_on_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
+    pub(super) last_invocation: u64,
+    /// The document a look last completed on: a document's first look waits
+    /// longer for a heavy app still starting its own scripts.
+    pub(super) looked_document:
+        Option<crate::platform::work_document_navigation::WorkDocumentStamp>,
     document_started: bool,
     retirement_clean: bool,
     deadline_expired: bool,
-    lifecycle_deadline: Option<Instant>,
+    // Pair wall-clock expiry with its exact lifecycle class. Destruction can
+    // overtake construction, so diagnostics must not infer this from whichever
+    // task fields happen to remain populated when the deadline wins.
+    lifecycle_deadline: Option<(Instant, Operation)>,
     content_policy: Option<crate::platform::imp::ContentPolicyRegistration>,
-    view: Option<crate::platform::imp::AgentOwnedView>,
+    pub(super) view: Option<crate::platform::imp::AgentOwnedView>,
     native_resource: Option<NativeResourceLease>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     witness: Option<witness::RenderingHolder>,
@@ -54,6 +172,8 @@ pub(super) struct WorkNativeResource {
     witness_attempted: bool,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     witness_admission: Option<witness::Admission>,
+    #[cfg(feature = "native-agentic-work-resource-probe")]
+    presentation_observations: u16,
 }
 impl WorkNativeResource {
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -100,11 +220,30 @@ impl WorkNativeResource {
         Self {
             guard,
             construction: None,
+            construction_presentation: None,
+            human_presentation: None,
+            human_wake: None,
+            human_progress: None,
+            human_unpresented: false,
             revocation: None,
             destruction: None,
             watchdog: None,
             observation: None,
+            action: None,
+            reading_presentation: None,
+            presentation_wake: None,
+            frame_generation: 0,
+            frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frame_captured_at: None,
+            navigation: None,
+            history_back: None,
+            #[cfg(target_os = "macos")]
+            screenshot: None,
+            document_finalization_wake: None,
+            document_finalization_ready: None,
+            hand_on_wake: None,
             last_invocation: 0,
+            looked_document: None,
             document_started: false,
             retirement_clean: true,
             deadline_expired: false,
@@ -118,6 +257,8 @@ impl WorkNativeResource {
             witness_attempted: false,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             witness_admission: None,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            presentation_observations: 0,
         }
     }
     pub(super) fn guard(&self) -> Arc<WorkResourceGuard> {
@@ -140,6 +281,127 @@ impl WorkNativeResource {
             || self.revocation.is_some()
             || self.destruction.is_some()
             || self.observation.is_some()
+            || self.action.is_some()
+            || self.navigation.is_some()
+            || self.history_back.is_some()
+            || {
+                #[cfg(target_os = "macos")]
+                {
+                    self.screenshot.is_some()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    false
+                }
+            }
+    }
+    fn schedule_document_finalization_wake(
+        &mut self,
+        ticket: crate::platform::work_document_navigation::WorkDocumentFinalizationTicket,
+    ) -> bool {
+        if self.document_finalization_wake.is_some() || self.document_finalization_ready.is_some() {
+            return false;
+        }
+        let guard = self.guard.clone();
+        let rejected = guard.clone();
+        let wake_ticket = ticket.clone();
+        let timer = crate::platform::imp::schedule_content_policy_timeout(
+            DOCUMENT_FINALIZATION_QUIET_PERIOD,
+            move || {
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.wake_work_document_finalization(&guard, wake_ticket)
+                }) {
+                    rejected.fail();
+                }
+            },
+        );
+        let Some(timer) = timer else {
+            return false;
+        };
+        self.document_finalization_wake = Some(DocumentFinalizationWake {
+            timer: Some(timer),
+            ticket,
+        });
+        true
+    }
+    fn progress_document_finalization(
+        &mut self,
+        gate: &crate::platform::work_document_navigation::WorkDocumentNavigation,
+    ) -> DocumentFinalizationProgress {
+        let Some(ticket) = self.document_finalization_ready.take() else {
+            if self.document_finalization_wake.is_some() {
+                return DocumentFinalizationProgress::Pending;
+            }
+            return match gate
+                .finalization_ticket()
+                .filter(|ticket| self.schedule_document_finalization_wake(ticket.clone()))
+            {
+                Some(_) => DocumentFinalizationProgress::Pending,
+                None => DocumentFinalizationProgress::WakeUnavailable,
+            };
+        };
+        let outcome = self.view.as_ref().map_or(Err(()), |view| {
+            gate.finalize_after_quiet_period(ticket, || {
+                crate::platform::imp::current_url(view.view())
+            })
+        });
+        match outcome {
+            Ok(Some(effective)) => DocumentFinalizationProgress::Ready(effective),
+            Ok(None) => match gate
+                .finalization_ticket()
+                .filter(|ticket| self.schedule_document_finalization_wake(ticket.clone()))
+            {
+                Some(_) => DocumentFinalizationProgress::Pending,
+                None => DocumentFinalizationProgress::WakeUnavailable,
+            },
+            Err(()) => DocumentFinalizationProgress::Refused,
+        }
+    }
+    /// A document an action's admitted load put in place (a saved consent)
+    /// settles like a load of its own: a page that never reports it finished
+    /// is taken as loaded after a short wait, then the quiet period and the
+    /// location sample make it ready.
+    fn progress_hand_on(&mut self) {
+        if self.construction.is_some() || self.navigation.is_some() || self.history_back.is_some() {
+            return;
+        }
+        let Some(gate) = self
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .cloned()
+        else {
+            return;
+        };
+        if !gate.handed_on() {
+            return;
+        }
+        if let Some(since) = gate.hand_on_committed_since() {
+            if since.elapsed() >= HAND_ON_COMMITTED_SETTLE {
+                gate.accept_committed_load();
+            } else if self.hand_on_wake.is_none() {
+                let guard = self.guard.clone();
+                self.hand_on_wake = crate::platform::imp::schedule_content_policy_timeout(
+                    HAND_ON_COMMITTED_SETTLE.saturating_sub(since.elapsed()),
+                    move || {
+                        let rejected = guard.clone();
+                        if !crate::host::try_with_agent_context_terminal(move |host| {
+                            host.progress_work_resource(&guard)
+                        }) {
+                            rejected.fail();
+                        }
+                    },
+                );
+            }
+        }
+        if gate.finalization_pending() {
+            self.hand_on_wake = None;
+            match self.progress_document_finalization(&gate) {
+                DocumentFinalizationProgress::Ready(_) | DocumentFinalizationProgress::Pending => {}
+                DocumentFinalizationProgress::WakeUnavailable
+                | DocumentFinalizationProgress::Refused => self.guard.fail(),
+            }
+        }
     }
     pub(super) fn resident(&self) -> bool {
         self.view.is_some()
@@ -149,20 +411,105 @@ impl WorkNativeResource {
             && self.view.is_none()
             && self.guard.callbacks_drained()
             && self.observation.is_none()
+            && self.action.is_none()
+            && self.navigation.is_none()
+            && self.history_back.is_none()
+            && {
+                #[cfg(target_os = "macos")]
+                {
+                    self.screenshot.is_none()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    true
+                }
+            }
     }
     fn retire_construction(&mut self) {
+        self.retire_construction_presentation();
+        if self
+            .lifecycle_deadline
+            .is_some_and(|(_, operation)| operation == Operation::Construct)
+        {
+            self.watchdog = None;
+            self.lifecycle_deadline = None;
+        }
         if let Some(task) = self.construction.take() {
             task.complete(Outcome::Refused);
         }
+    }
+    fn present_construction(&mut self) -> bool {
+        use crate::platform::imp::{PresentationState, WorkObservationPresentation};
+        let Some((deadline, Operation::Construct)) = self.lifecycle_deadline else {
+            return false;
+        };
+        let Some(view) = &self.view else {
+            return false;
+        };
+        if self.construction_presentation.is_some() {
+            return false;
+        }
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        let prepared = {
+            let guard = self.guard.clone();
+            WorkObservationPresentation::prepare(view.view(), deadline, move |failure| {
+                guard.record_failure_cause(ResourceFailureCause::ConstructionPresentation(failure));
+            })
+        };
+        #[cfg(not(feature = "native-agentic-work-lifetime-diagnostic"))]
+        let prepared = WorkObservationPresentation::prepare(view.view(), deadline);
+        let Ok(presentation) = prepared else {
+            return false;
+        };
+        // Retain the native owner before exposing the loading page beneath chrome.
+        self.construction_presentation = Some(presentation);
+        self.construction_presentation
+            .as_mut()
+            .is_some_and(|presentation| {
+                matches!(
+                    presentation.present(),
+                    PresentationState::Ready | PresentationState::Acquiring
+                )
+            })
+    }
+    fn retire_construction_presentation(&mut self) -> bool {
+        let retired = self
+            .construction_presentation
+            .as_mut()
+            .is_none_or(|presentation| {
+                presentation.retire() == crate::platform::imp::PresentationState::Retired
+            });
+        if retired {
+            self.construction_presentation = None;
+        } else {
+            self.retirement_clean = false;
+            self.guard.fail();
+        }
+        retired
     }
     fn prepare_destruction(&mut self) -> bool {
         // Settle terminals this host still owns before waiting for their
         // physical delivery barriers. Ingress-owned queued tasks and accepted
         // reads remain independently owed; refusal is not a drain shortcut.
         self.retire_construction();
+        self.cancel_observation(SemanticRuntimePortFailure::Shutdown);
+        self.cancel_action();
+        #[cfg(target_os = "macos")]
+        if let Some(screenshot) = &self.screenshot {
+            // Native capture owns physical capacity until its callback returns.
+            // Cancellation prevents disclosure but does not counterfeit drain.
+            screenshot.cancelled.store(true, Ordering::Release);
+        }
+        if let Some(navigation) = self.navigation.take() {
+            navigation.refuse(ContextPortFailure::Shutdown);
+        }
+        if let Some(history) = self.history_back.take() {
+            history.refuse(ContextPortFailure::Shutdown);
+        }
         if let Some(task) = self.revocation.take() {
             task.complete(Outcome::Refused);
         }
+        self.retire_page();
         self.destruction_drained()
     }
     pub(super) fn consistent(&self, id: ContextId) -> bool {
@@ -175,7 +522,7 @@ impl WorkNativeResource {
             })
             && (self.view.is_none() || self.content_policy.is_some())
     }
-    fn ready(&self) -> bool {
+    pub(super) fn ready(&self) -> bool {
         let Some(view) = self.view.as_ref() else {
             return false;
         };
@@ -187,8 +534,85 @@ impl WorkNativeResource {
         }
         gate.ready(crate::platform::imp::current_url(view.view()).as_deref())
     }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    fn deadline_failure_cause(&self, operation: Operation) -> ResourceFailureCause {
+        Self::deadline_failure_cause_for_gate(
+            operation,
+            self.view.as_ref().and_then(|view| view.work_navigation()),
+        )
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    fn deadline_failure_cause_for_gate(
+        operation: Operation,
+        gate: Option<&crate::platform::work_document_navigation::WorkDocumentNavigation>,
+    ) -> ResourceFailureCause {
+        use crate::WorkResourceDeadlineStage as Stage;
+
+        let stage = match operation {
+            Operation::Construct => {
+                gate.map_or(Stage::ConstructionNativeSetup, |gate| gate.deadline_stage())
+            }
+            Operation::Revoke => Stage::RevocationDrain,
+            Operation::Destroy => Stage::DestructionDrain,
+            Operation::Acquire | Operation::PresentHuman | Operation::ContinueAfterHuman => {
+                Stage::Unattributed
+            }
+        };
+        ResourceFailureCause::LifecycleDeadline(stage)
+    }
+    /// One bounded frame for the canvas after a settled observation or action.
+    /// Never more than one capture in flight, never faster than four a second.
+    pub(super) fn capture_frame(&mut self) {
+        use std::sync::atomic::Ordering;
+        let visible = self
+            .reading_presentation
+            .as_ref()
+            .is_some_and(crate::platform::imp::WorkObservationPresentation::visible_for_audit);
+        let recent = self
+            .frame_captured_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(250));
+        if !visible || recent || self.frame_in_flight.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let id = self.guard.resource().identity().context();
+        let generation = self.frame_generation.saturating_add(1);
+        let in_flight = self.frame_in_flight.clone();
+        in_flight.store(true, Ordering::Release);
+        let dispatched = crate::platform::imp::capture_work_frame(view.view(), move |encoded| {
+            if let Some((width, height, png)) = encoded {
+                super::work_frames::store(
+                    id,
+                    zephium_agentic::WorkBrowserFrame {
+                        generation,
+                        width,
+                        height,
+                        png: Arc::new(png),
+                    },
+                );
+            }
+            in_flight.store(false, Ordering::Release);
+        });
+        if dispatched {
+            self.frame_generation = generation;
+            self.frame_captured_at = Some(Instant::now());
+        } else {
+            self.frame_in_flight.store(false, Ordering::Release);
+        }
+    }
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
+        super::work_frames::clear(self.guard.resource().identity().context());
+        if !self.retire_human_presentation()
+            || !self.retire_construction_presentation()
+            || !self.retire_reading_presentation()
+            || !self.retire_observation_presentation()
+            || !self.retire_action_presentation()
+        {
+            return false;
+        }
         #[cfg(feature = "native-agentic-work-resource-probe")]
         if !self.retire_witness() {
             self.retirement_clean = false;
@@ -285,6 +709,40 @@ impl EngineHost {
             .filter(|resource| resource.guard.execution_reserved())
             .count()
     }
+    fn wake_work_document_finalization(
+        &mut self,
+        guard: &Arc<WorkResourceGuard>,
+        ticket: crate::platform::work_document_navigation::WorkDocumentFinalizationTicket,
+    ) {
+        let id = guard.resource().identity().context();
+        let ready = self
+            .work_resources
+            .get_mut(&id)
+            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
+            .is_some_and(|resource| {
+                let Some(mut wake) = resource.document_finalization_wake.take() else {
+                    return false;
+                };
+                if wake.ticket != ticket {
+                    resource.document_finalization_wake = Some(wake);
+                    return false;
+                }
+                // The one-shot entered before the host turn. Dropping its
+                // handle here cannot manufacture another wake.
+                wake.timer = None;
+                if resource
+                    .document_finalization_ready
+                    .replace(ticket)
+                    .is_some()
+                {
+                    guard.fail();
+                }
+                true
+            });
+        if ready {
+            self.progress_work_resource(guard);
+        }
+    }
     pub(crate) fn handle_work_lifecycle_task(&mut self, task: WorkLifecycleTask) {
         let Some(request) = task.request() else {
             return;
@@ -346,14 +804,29 @@ impl EngineHost {
             return;
         };
         match operation {
+            Operation::PresentHuman | Operation::ContinueAfterHuman => {
+                resource.handle_human(task);
+            }
             Operation::Acquire => {
-                let accepted = request.lease().is_some_and(|lease| {
+                let mut accepted = request.lease().is_some_and(|lease| {
                     work_browser_monotonic_now()
                         .is_some_and(|now| guard.acquisition_current(lease, now))
                 }) && !self.erasure_tombstones.contains(&resource.profile())
                     && execution_count <= MAX_EXECUTING_CONTEXTS
                     && resource.ready()
                     && !resource.pending();
+                #[cfg(target_os = "macos")]
+                if accepted {
+                    accepted = resource
+                        .view
+                        .as_mut()
+                        .and_then(|view| {
+                            view.work_navigation()
+                                .and_then(|gate| gate.ready_target())
+                                .map(|target| (view, target))
+                        })
+                        .is_some_and(|(view, target)| view.begin_history_lease(target).is_ok());
+                }
                 task.complete(if accepted {
                     Outcome::Acquired
                 } else {
@@ -365,8 +838,14 @@ impl EngineHost {
             {
                 let deadline = LifecycleDeadline::from_task(&task);
                 resource.revocation = Some(task);
+                #[cfg(target_os = "macos")]
+                if let Some(screenshot) = &resource.screenshot {
+                    screenshot.cancelled.store(true, Ordering::Release);
+                }
                 resource.deadline_expired = false;
-                resource.lifecycle_deadline = Instant::now().checked_add(DRAIN_BUDGET);
+                resource.lifecycle_deadline = Instant::now()
+                    .checked_add(DRAIN_BUDGET)
+                    .map(|deadline| (deadline, Operation::Revoke));
                 resource.watchdog =
                     deadline.and_then(|deadline| timeout(guard.clone(), deadline, DRAIN_BUDGET));
                 if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
@@ -380,7 +859,9 @@ impl EngineHost {
                 resource.destruction = Some(task);
                 resource.retire_page();
                 resource.deadline_expired = false;
-                resource.lifecycle_deadline = Instant::now().checked_add(DRAIN_BUDGET);
+                resource.lifecycle_deadline = Instant::now()
+                    .checked_add(DRAIN_BUDGET)
+                    .map(|deadline| (deadline, Operation::Destroy));
                 resource.watchdog =
                     deadline.and_then(|deadline| timeout(guard.clone(), deadline, DRAIN_BUDGET));
                 if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
@@ -395,9 +876,17 @@ impl EngineHost {
 
     fn construct_work_resource(&mut self, task: WorkLifecycleTask) {
         let guard = task.guard();
-        let original_deadline = Instant::now().checked_add(CONSTRUCTION_BUDGET);
+        let original_deadline = guard.construction_deadline(Instant::now());
+        if original_deadline.is_none_or(|deadline| deadline <= Instant::now()) {
+            task.complete(Outcome::Refused);
+            return;
+        }
         let result = self.build_work_resource(guard.clone());
         let Ok(mut resource) = result else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            if let Err(failure) = &result {
+                guard.record_failure_cause(ResourceFailureCause::NativeAdmission(*failure));
+            }
             #[cfg(feature = "native-agentic-work-resource-probe")]
             guard.record_construction_evidence(|| {
                 crate::agent_context_port::resource_witness::ConstructionEvidence {
@@ -417,11 +906,23 @@ impl EngineHost {
         };
         let deadline = LifecycleDeadline::from_task(&task);
         resource.construction = Some(task);
-        resource.lifecycle_deadline = original_deadline;
-        resource.watchdog =
-            deadline.and_then(|deadline| timeout(guard.clone(), deadline, CONSTRUCTION_BUDGET));
+        resource.lifecycle_deadline =
+            original_deadline.map(|deadline| (deadline, Operation::Construct));
+        resource.watchdog = deadline.and_then(|ticket| {
+            original_deadline.and_then(|deadline| {
+                timeout(
+                    guard.clone(),
+                    ticket,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+            })
+        });
         if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::NativeAdmission(
+                ContextPortFailure::ResourceExhausted,
+            ));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             resource.record_construction_failure("construction_watchdog");
             guard.fail();
@@ -466,31 +967,43 @@ impl EngineHost {
             .native_resources
             .try_acquire(NativeResourceClass::TransientConstruction)
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
-        let store = match guard.storage() {
-            ContextProfileStorageClass::Durable => None,
-            ContextProfileStorageClass::Ephemeral => {
-                if self.macos_ephemeral_data_stores.len() >= MAX_PROFILE_PERSISTENCE_BINDINGS
-                    && !self.macos_ephemeral_data_stores.contains_key(&profile)
-                {
-                    return Err(ContextPortFailure::ProfileUnavailable);
+        // Anonymous sessions never borrow the user's profile cookie store.
+        let store = if guard.isolated_public() {
+            Some(match guard.anonymous_session() {
+                Some(session) if session.admits(profile, guard.resource().identity().work()) => {
+                    self.anonymous_work_store(session)?
                 }
-                let store = profile_scoped_value(
-                    &mut self.macos_ephemeral_data_stores,
-                    profile,
-                    crate::platform::imp::new_ephemeral_data_store,
-                )
-                .map_err(|_| ContextPortFailure::ProfileUnavailable)?;
-                if !profile_value_is_isolated(
-                    &self.macos_ephemeral_data_stores,
-                    profile,
-                    &store,
-                    |left, right| {
-                        objc2::rc::Retained::as_ptr(left) == objc2::rc::Retained::as_ptr(right)
-                    },
-                ) {
-                    return Err(ContextPortFailure::ProfileUnavailable);
+                Some(_) => return Err(ContextPortFailure::Stale),
+                None => crate::platform::imp::new_ephemeral_data_store()
+                    .map_err(|_| ContextPortFailure::NativeRefused)?,
+            })
+        } else {
+            match guard.storage() {
+                ContextProfileStorageClass::Durable => None,
+                ContextProfileStorageClass::Ephemeral => {
+                    if self.macos_ephemeral_data_stores.len() >= MAX_PROFILE_PERSISTENCE_BINDINGS
+                        && !self.macos_ephemeral_data_stores.contains_key(&profile)
+                    {
+                        return Err(ContextPortFailure::ProfileUnavailable);
+                    }
+                    let store = profile_scoped_value(
+                        &mut self.macos_ephemeral_data_stores,
+                        profile,
+                        crate::platform::imp::new_ephemeral_data_store,
+                    )
+                    .map_err(|_| ContextPortFailure::ProfileUnavailable)?;
+                    if !profile_value_is_isolated(
+                        &self.macos_ephemeral_data_stores,
+                        profile,
+                        &store,
+                        |left, right| {
+                            objc2::rc::Retained::as_ptr(left) == objc2::rc::Retained::as_ptr(right)
+                        },
+                    ) {
+                        return Err(ContextPortFailure::ProfileUnavailable);
+                    }
+                    Some(store)
                 }
-                Some(store)
             }
         };
         let legacy = guard.clone();
@@ -508,11 +1021,30 @@ impl EngineHost {
         let mut resource = WorkNativeResource {
             guard: guard.clone(),
             construction: None,
+            construction_presentation: None,
+            human_presentation: None,
+            human_wake: None,
+            human_progress: None,
+            human_unpresented: false,
             revocation: None,
             destruction: None,
             watchdog: None,
             observation: None,
+            action: None,
+            reading_presentation: None,
+            presentation_wake: None,
+            frame_generation: 0,
+            frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frame_captured_at: None,
+            navigation: None,
+            history_back: None,
+            #[cfg(target_os = "macos")]
+            screenshot: None,
+            document_finalization_wake: None,
+            document_finalization_ready: None,
+            hand_on_wake: None,
             last_invocation: 0,
+            looked_document: None,
             document_started: false,
             retirement_clean: false,
             deadline_expired: false,
@@ -526,34 +1058,57 @@ impl EngineHost {
             witness_attempted: false,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             witness_admission: None,
+            #[cfg(feature = "native-agentic-work-resource-probe")]
+            presentation_observations: 0,
+        };
+        let callbacks = crate::platform::imp::AgentOwnedViewCallbacks::new(
+            move |_| {
+                legacy.fail();
+                resource_callback(legacy.clone());
+            },
+            move || resource_callback(location.clone()),
+            move || {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                renderer.record_failure_cause(ResourceFailureCause::RendererLost);
+                renderer.fail();
+                resource_callback(renderer.clone());
+            },
+            move || {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                invariant.record_failure_cause(ResourceFailureCause::SemanticNativeInvariant);
+                invariant.fail();
+                resource_callback(invariant.clone());
+            },
+            move || {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                panic.record_failure_cause(ResourceFailureCause::SemanticNativeInvariant);
+                panic.fail();
+                resource_callback(panic.clone());
+            },
+        );
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        let callbacks = {
+            let diagnostic = guard.clone();
+            callbacks
+                .with_failure_diagnostic(move |failure| diagnostic.record_failure_cause(failure))
         };
         let view = crate::platform::imp::build_owned_work_view(
             &self.parent,
             ContextOwnedViewport::STANDARD,
             profile,
-            guard.storage(),
+            if guard.isolated_public() {
+                ContextProfileStorageClass::Ephemeral
+            } else {
+                guard.storage()
+            },
             store.as_ref(),
-            crate::platform::imp::AgentOwnedViewCallbacks::new(
-                move |_| {
-                    legacy.fail();
-                    resource_callback(legacy.clone());
-                },
-                move || resource_callback(location.clone()),
-                move || {
-                    renderer.fail();
-                    resource_callback(renderer.clone());
-                },
-                move || {
-                    invariant.fail();
-                    resource_callback(invariant.clone());
-                },
-                move || {
-                    panic.fail();
-                    resource_callback(panic.clone());
-                },
-            ),
+            callbacks,
         );
         let Ok(view) = view else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::NativeAdmission(
+                ContextPortFailure::NativeRefused,
+            ));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             resource.record_construction_failure("view_build");
             guard.fail();
@@ -563,6 +1118,10 @@ impl EngineHost {
             crate::platform::imp::install_content_policy_on_view(view.view(), &policy);
         resource.view = Some(view);
         let Ok(registration) = registration else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::NativeAdmission(
+                ContextPortFailure::NativeRefused,
+            ));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             resource.record_construction_failure("content_policy_install");
             guard.fail();
@@ -574,6 +1133,8 @@ impl EngineHost {
     }
 
     pub(crate) fn progress_work_resource(&mut self, guard: &Arc<WorkResourceGuard>) {
+        self.progress_work_action(guard);
+        self.progress_work_observation(guard);
         let id = guard.resource().identity().context();
         let Some(resource) = self
             .work_resources
@@ -582,11 +1143,16 @@ impl EngineHost {
         else {
             return;
         };
-        if resource
+        let expired_lifecycle = resource
             .lifecycle_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+            .and_then(|(deadline, operation)| (Instant::now() >= deadline).then_some(operation));
+        if let Some(_operation) = expired_lifecycle {
+            if _operation == Operation::Construct && resource.document_started {
+                guard.construction_timed_out();
+            }
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(resource.deadline_failure_cause(_operation));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("construction_deadline");
@@ -613,12 +1179,31 @@ impl EngineHost {
             }
             return;
         }
+        resource.progress_navigation(self.erasure_tombstones.contains(&resource.profile()));
+        resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
+        resource.progress_human(self.erasure_tombstones.contains(&resource.profile()));
+        resource.progress_hand_on();
+        if resource
+            .construction_presentation
+            .as_mut()
+            .is_some_and(|presentation| {
+                !matches!(
+                    presentation.poll(),
+                    crate::platform::imp::PresentationState::Ready
+                        | crate::platform::imp::PresentationState::Acquiring
+                )
+            })
+        {
+            guard.fail();
+        }
         if resource
             .view
             .as_ref()
             .and_then(|view| view.work_navigation())
             .is_none_or(|gate| gate.failed())
         {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::UnattributedResourceFailure);
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("navigation_gate");
@@ -626,11 +1211,17 @@ impl EngineHost {
             guard.fail();
         }
         if !guard.is_healthy() {
+            resource.retire_human_presentation();
+            resource.retire_construction_presentation();
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(ResourceFailureCause::UnattributedResourceFailure);
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("native_health");
             }
             resource.watchdog = None;
+            resource.document_finalization_wake = None;
+            resource.document_finalization_ready = None;
             resource.lifecycle_deadline = None;
             if let Some(task) = resource.construction.take() {
                 task.complete(Outcome::Refused);
@@ -642,6 +1233,9 @@ impl EngineHost {
         }
         if resource.construction.is_some() {
             if !guard.construction_current() {
+                resource.retire_construction_presentation();
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                guard.record_failure_cause(ResourceFailureCause::UnattributedResourceFailure);
                 #[cfg(feature = "native-agentic-work-resource-probe")]
                 resource.record_construction_failure("construction_authority");
                 guard.fail();
@@ -653,7 +1247,7 @@ impl EngineHost {
                 return;
             }
             if !resource.document_started {
-                let Some(view) = resource.view.as_mut() else {
+                let Some(view) = resource.view.as_ref() else {
                     guard.fail();
                     return;
                 };
@@ -665,6 +1259,16 @@ impl EngineHost {
                     return;
                 }
                 if let Some(document) = guard.document() {
+                    if !resource.present_construction() {
+                        guard.fail();
+                        resource.retire_construction();
+                        return;
+                    }
+                    let Some(view) = resource.view.as_mut() else {
+                        guard.fail();
+                        resource.retire_construction();
+                        return;
+                    };
                     resource.document_started = true;
                     if view.prepare_semantic_document_load().is_err()
                         || gate
@@ -672,9 +1276,14 @@ impl EngineHost {
                             .is_err()
                         || view.view().load_url(document.as_url().as_str()).is_err()
                     {
+                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                        guard.record_failure_cause(ResourceFailureCause::NativeAdmission(
+                            ContextPortFailure::NativeRefused,
+                        ));
                         #[cfg(feature = "native-agentic-work-resource-probe")]
                         resource.record_construction_failure("document_dispatch");
                         guard.fail();
+                        resource.retire_construction();
                     }
                     return;
                 }
@@ -684,49 +1293,71 @@ impl EngineHost {
                 .as_ref()
                 .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
             {
-                if let Some(view) = resource.view.as_ref() {
-                    if let Some(gate) = view
-                        .work_navigation()
-                        .filter(|gate| gate.finalization_pending())
-                    {
-                        // No lease/read exists here. Freeze one revision-fenced
-                        // native location under the original navigation identity.
-                        match gate.finalize(|| crate::platform::imp::current_url(view.view())) {
-                            Ok(effective) if guard.construction_current() => {
-                                resource.watchdog = None;
-                                resource.lifecycle_deadline = None;
-                                if let Some(task) = resource.construction.take() {
+                let finalizing = resource
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .filter(|gate| gate.finalization_pending())
+                    .cloned();
+                if let Some(gate) = finalizing {
+                    // No lease/read exists here. Require one native quiet
+                    // period, then freeze one revision-fenced location sample
+                    // under the original navigation identity.
+                    match resource.progress_document_finalization(&gate) {
+                        DocumentFinalizationProgress::Pending => return,
+                        DocumentFinalizationProgress::Ready(effective)
+                            if guard.construction_current() =>
+                        {
+                            let retired = resource.retire_construction_presentation();
+                            resource.watchdog = None;
+                            resource.lifecycle_deadline = None;
+                            if let Some(task) = resource.construction.take() {
+                                if retired {
                                     task.complete_document(effective);
-                                }
-                            }
-                            _ => {
-                                #[cfg(feature = "native-agentic-work-resource-probe")]
-                                guard.record_construction_evidence(|| {
-                                    // Finalization already consumed its sole
-                                    // sample. Do not inspect the URL again to
-                                    // describe a failed/raced attempt.
-                                    crate::agent_context_port::resource_witness::ConstructionEvidence {
-                                        cause: "document_finalization",
-                                        port_failure: None,
-                                        navigation: gate.construction_evidence(),
-                                        document_started: resource.document_started,
-                                        deadline_expired: resource.deadline_expired,
-                                        guard_healthy: guard.is_healthy(),
-                                        current_document: false,
-                                        current_components: None,
-                                        semantic_pending: view.semantic_pending_for_audit(),
-                                    }
-                                });
-                                guard.fail();
-                                resource.watchdog = None;
-                                resource.lifecycle_deadline = None;
-                                if let Some(task) = resource.construction.take() {
+                                } else {
                                     task.complete(Outcome::Refused);
                                 }
                             }
                         }
-                        return;
+                        DocumentFinalizationProgress::Ready(_)
+                        | DocumentFinalizationProgress::WakeUnavailable
+                        | DocumentFinalizationProgress::Refused => {
+                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                            guard.record_failure_cause(
+                                ResourceFailureCause::DocumentFinalizationRefused,
+                            );
+                            #[cfg(feature = "native-agentic-work-resource-probe")]
+                            guard.record_construction_evidence(|| {
+                                // A raced authoritative sample is never repeated
+                                // for diagnostics. A stale quiet ticket consumed
+                                // no sample and would have remained Pending.
+                                crate::agent_context_port::resource_witness::ConstructionEvidence {
+                                    cause: "document_finalization",
+                                    port_failure: None,
+                                    navigation: gate.construction_evidence(),
+                                    document_started: resource.document_started,
+                                    deadline_expired: resource.deadline_expired,
+                                    guard_healthy: guard.is_healthy(),
+                                    current_document: false,
+                                    current_components: None,
+                                    semantic_pending: resource
+                                        .view
+                                        .as_ref()
+                                        .and_then(|view| view.semantic_pending_for_audit()),
+                                }
+                            });
+                            guard.fail();
+                            resource.retire_construction_presentation();
+                            resource.watchdog = None;
+                            resource.document_finalization_wake = None;
+                            resource.document_finalization_ready = None;
+                            resource.lifecycle_deadline = None;
+                            if let Some(task) = resource.construction.take() {
+                                task.complete(Outcome::Refused);
+                            }
+                        }
                     }
+                    return;
                 }
             }
             if resource.ready()
@@ -735,20 +1366,44 @@ impl EngineHost {
                     .as_ref()
                     .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
             {
+                let retired = resource.retire_construction_presentation();
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
                 if let Some(task) = resource.construction.take() {
-                    task.complete(Outcome::Constructed);
+                    task.complete(if retired {
+                        Outcome::Constructed
+                    } else {
+                        Outcome::Refused
+                    });
                 }
             }
             return;
         }
+        let presentation_retired = if resource.revocation.is_some() {
+            resource.retire_reading_presentation()
+        } else {
+            true
+        };
         if let Some(task) = resource.revocation.as_ref() {
-            let drained = task
-                .request()
-                .and_then(|request| request.lease())
-                .is_some_and(|lease| guard.lease_drained(lease))
+            let drained = presentation_retired
+                && task
+                    .request()
+                    .and_then(|request| request.lease())
+                    .is_some_and(|lease| guard.lease_drained(lease))
                 && resource.observation.is_none()
+                && resource.action.is_none()
+                && resource.navigation.is_none()
+                && resource.history_back.is_none()
+                && {
+                    #[cfg(target_os = "macos")]
+                    {
+                        resource.screenshot.is_none()
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        true
+                    }
+                }
                 && resource.ready()
                 && resource
                     .view
@@ -792,7 +1447,12 @@ impl EngineHost {
                 .as_ref()
                 .is_some_and(|task| deadline.matches(task))
         {
+            if deadline.operation == Operation::Construct && resource.document_started {
+                guard.construction_timed_out();
+            }
             resource.deadline_expired = true;
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            guard.record_failure_cause(resource.deadline_failure_cause(deadline.operation));
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("construction_deadline");
@@ -800,147 +1460,6 @@ impl EngineHost {
             guard.fail();
             self.progress_work_resource(guard);
         }
-    }
-
-    pub(crate) fn handle_work_observation_task(&mut self, mut task: WorkObservationTask) {
-        let guard = task.guard();
-        let id = guard.resource().identity().context();
-        let Some(request) = task.request() else {
-            return;
-        };
-        let correlation = request.invocation().correlation();
-        let lease = request.lease().clone();
-        let Some(resource) = self
-            .work_resources
-            .get_mut(&id)
-            .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
-        else {
-            task.refuse(SemanticRuntimePortFailure::Stale);
-            return;
-        };
-        let admitted = work_browser_monotonic_now().is_some_and(|now| guard.admits(&lease, now))
-            && !self.erasure_tombstones.contains(&resource.profile())
-            && !resource.pending()
-            && resource.ready()
-            && request.invocation().invocation().get() > resource.last_invocation
-            && request.invocation().budget()
-                == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED
-            && request.invocation().scope() == zephium_agentic::SemanticRuntimeScopeClass::Initial;
-        if !admitted {
-            task.refuse(SemanticRuntimePortFailure::Stale);
-            return;
-        }
-        #[cfg(feature = "native-agentic-work-resource-probe")]
-        if !resource.admit_witness_read() {
-            task.refuse(SemanticRuntimePortFailure::Stale);
-            return;
-        }
-        let Some(invocation) = task.take_invocation() else {
-            guard.fail();
-            return;
-        };
-        let Some(now) = work_browser_monotonic_now() else {
-            task.complete(Err(SemanticRuntimePortFailure::TimedOut));
-            return;
-        };
-        let duration =
-            Duration::from_millis(lease.deadline().millis().saturating_sub(now.millis()))
-                .min(READ_BUDGET);
-        let timeout_guard = guard.clone();
-        let timeout_correlation = correlation.clone();
-        let watchdog = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
-            let rejected = timeout_guard.clone();
-            if !crate::host::try_with_agent_context_terminal(move |host| {
-                host.timeout_work_observation(&timeout_guard, &timeout_correlation)
-            }) {
-                rejected.fail();
-            }
-        });
-        let Some(watchdog) = watchdog else {
-            task.complete(Err(SemanticRuntimePortFailure::Shutdown));
-            return;
-        };
-        resource.last_invocation = invocation.invocation().get();
-        resource.observation = Some((correlation.clone(), watchdog));
-        let Some(view) = resource.view.as_ref() else {
-            task.complete(Err(SemanticRuntimePortFailure::Retired));
-            return;
-        };
-        let _ = view.dispatch_semantic(invocation, move |outcome| {
-            // The task/permit remains owned across this mandatory next-main-
-            // queue barrier. Revocation cannot report zero while the WebKit
-            // reply/result handler or this lease-bearing envelope can run.
-            dispatch2::DispatchQueue::main().exec_async(move || {
-                let rejected = guard.clone();
-                if !crate::host::try_with_agent_context_terminal(move |host| {
-                    host.finish_work_observation(task, correlation, lease, outcome)
-                }) {
-                    rejected.fail();
-                }
-            });
-        });
-    }
-
-    fn timeout_work_observation(
-        &mut self,
-        guard: &Arc<WorkResourceGuard>,
-        correlation: &SemanticRuntimeCorrelation,
-    ) {
-        let Some(resource) = self
-            .work_resources
-            .get_mut(&guard.resource().identity().context())
-            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
-        else {
-            return;
-        };
-        if resource
-            .observation
-            .as_ref()
-            .is_some_and(|(pending, _)| pending == correlation)
-        {
-            guard.fail();
-            if let Some(runtime) = resource.view.as_ref().and_then(|view| view.semantic()) {
-                runtime.timeout(correlation.invocation());
-            }
-        }
-    }
-    fn finish_work_observation(
-        &mut self,
-        task: WorkObservationTask,
-        correlation: SemanticRuntimeCorrelation,
-        lease: zephium_agentic::WorkBrowserExecutionLease,
-        outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>,
-    ) {
-        let guard = task.guard();
-        let Some(resource) = self
-            .work_resources
-            .get_mut(&guard.resource().identity().context())
-            .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
-        else {
-            guard.fail();
-            task.complete(Err(SemanticRuntimePortFailure::Stale));
-            return;
-        };
-        if resource
-            .observation
-            .as_ref()
-            .is_none_or(|(pending, _)| pending != &correlation)
-        {
-            guard.fail();
-            task.complete(Err(SemanticRuntimePortFailure::Stale));
-            return;
-        }
-        resource.observation = None;
-        let usable = work_browser_monotonic_now().is_some_and(|now| guard.admits(&lease, now))
-            && resource.ready()
-            && !self.erasure_tombstones.contains(&resource.profile());
-        #[cfg(feature = "native-agentic-work-resource-probe")]
-        let usable = usable && resource.witness_ready();
-        task.complete(if usable {
-            outcome
-        } else {
-            Err(SemanticRuntimePortFailure::Cancelled)
-        });
     }
 
     pub(super) fn force_shutdown_work_resources(&mut self) -> bool {
@@ -1346,6 +1865,33 @@ mod tests {
         assert!(deadlines
             .iter()
             .all(|deadline| !deadline.matches_request(&destroy)));
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[test]
+    fn lifecycle_deadline_classification_uses_exact_operation_and_closed_gate_stage() {
+        use crate::{WorkResourceDeadlineStage as Stage, WorkResourceFailureCause as Failure};
+
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Construct, None),
+            Failure::LifecycleDeadline(Stage::ConstructionNativeSetup)
+        );
+        let gate = crate::platform::work_document_navigation::WorkDocumentNavigation::default();
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Construct, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::ConstructionBootstrap)
+        );
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Revoke, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::RevocationDrain)
+        );
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Destroy, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::DestructionDrain)
+        );
+        assert_eq!(
+            WorkNativeResource::deadline_failure_cause_for_gate(Operation::Acquire, Some(&gate)),
+            Failure::LifecycleDeadline(Stage::Unattributed)
+        );
     }
     #[test]
     fn source_owner_retains_partial_construction_capacity_and_lease_retirement_never_cancels_document(

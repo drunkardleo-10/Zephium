@@ -28,7 +28,10 @@ use objc2_foundation::{
 use objc2_web_kit::{WKURLSchemeHandler, WKURLSchemeTask};
 
 use crate::{
-  native_admission::{InFlightPermit, CUSTOM_PROTOCOL_OVERFLOW_STATUS},
+  native_admission::{
+    InFlightAdmission, InFlightPermit, WaitList, CUSTOM_PROTOCOL_OVERFLOW_STATUS,
+    CUSTOM_PROTOCOL_WAITING_LIMIT,
+  },
   native_bounds::{
     bounded_nsstring, CustomProtocolRequestBudget, CUSTOM_PROTOCOL_HEADER_NAME_LIMIT,
     CUSTOM_PROTOCOL_HEADER_VALUE_LIMIT, CUSTOM_PROTOCOL_METHOD_LIMIT, PAGE_URL_LIMIT,
@@ -49,12 +52,70 @@ struct PendingResponse {
   _permit: InFlightPermit,
 }
 
+/// One admission scope: a scheme of one webview. Equal by identity, not by
+/// the shared counter it carries.
+struct Pool {
+  webview_id: String,
+  protocol_index: usize,
+  admission: InFlightAdmission,
+}
+
+impl PartialEq for Pool {
+  fn eq(&self, other: &Self) -> bool {
+    self.webview_id == other.webview_id && self.protocol_index == other.protocol_index
+  }
+}
+
+/// A started task waiting for its scheme's in-flight slot.
+struct Waiting {
+  task: Retained<ProtocolObject<dyn WKURLSchemeTask>>,
+  webview: Retained<WryWebView>,
+  task_key: usize,
+  protocol_index: usize,
+}
+
 thread_local! {
   // WKURLSchemeTask and WryWebView are main-thread-only Objective-C objects.
   // Keep their ownership on that thread and let asynchronous workers carry
   // only the opaque token used to find them again.
   static PENDING_RESPONSES: RefCell<HashMap<u64, PendingResponse>> =
     RefCell::new(HashMap::new());
+  static WAITING: RefCell<WaitList<Pool, Waiting>> =
+    const { RefCell::new(WaitList::new(CUSTOM_PROTOCOL_WAITING_LIMIT)) };
+}
+
+/// Starts waiting tasks while their schemes have room. Called after anything
+/// that can free a slot; never while a registry is borrowed.
+fn drain_waiting() {
+  loop {
+    let ready = WAITING
+      .try_with(|waiting| {
+        let mut waiting = waiting.try_borrow_mut().ok()?;
+        if waiting.is_empty() {
+          return None;
+        }
+        waiting.take_ready(|pool| pool.admission.try_acquire())
+      })
+      .ok()
+      .flatten();
+    let Some((waiting, permit)) = ready else {
+      return;
+    };
+    run_task(
+      &waiting.webview,
+      &waiting.task,
+      waiting.protocol_index,
+      permit,
+    );
+  }
+}
+
+fn forget_waiting(keep: impl FnMut(&Pool, &Waiting) -> bool) {
+  let _ = WAITING.try_with(|waiting| {
+    if let Ok(mut waiting) = waiting.try_borrow_mut() {
+      waiting.retain(keep);
+    }
+  });
 }
 
 fn fail_task(task: &ProtocolObject<dyn WKURLSchemeTask>) {
@@ -155,6 +216,7 @@ pub(crate) fn cancel_pending_for_webview(webview_id: &str) {
       responses.retain(|_, pending| pending.webview_id != webview_id);
     }
   });
+  forget_waiting(|pool, _| pool.webview_id != webview_id);
 }
 
 fn respond_to_pending(
@@ -245,6 +307,8 @@ fn finish_pending_response(token: u64, sent_response: HttpResponse<Cow<'static, 
     #[cfg(feature = "tracing")]
     tracing::warn!("failed to complete custom protocol task: {_error:?}");
   }
+  drop(pending);
+  drain_waiting();
 }
 
 pub fn create(name: &str) -> crate::Result<&AnyClass> {
@@ -281,6 +345,79 @@ extern "C" fn start_task(
   webview: &WryWebView,
   task: &ProtocolObject<dyn WKURLSchemeTask>,
 ) {
+  let Some(ivar) = this.class().instance_variable(c"protocol_index") else {
+    fail_task(task);
+    return;
+  };
+  let protocol_index: usize = unsafe { *ivar.load(this) };
+  admit_task(webview, task, protocol_index);
+  drain_waiting();
+}
+
+/// Starts a task now if its scheme has a free slot and nobody is ahead of it,
+/// queues it otherwise, and refuses it only when the wait list is full.
+fn admit_task(
+  webview: &WryWebView,
+  task: &ProtocolObject<dyn WKURLSchemeTask>,
+  protocol_index: usize,
+) {
+  let Some(admission) = webview
+    .ivars()
+    .custom_protocol_admission
+    .get(protocol_index)
+  else {
+    fail_task(task);
+    return;
+  };
+  let pool = Pool {
+    webview_id: webview.ivars().webview_id.clone(),
+    protocol_index,
+    admission: admission.clone(),
+  };
+  let queued_ahead = WAITING
+    .try_with(|waiting| {
+      waiting
+        .try_borrow()
+        .map(|waiting| waiting.has_waiting(&pool))
+        .unwrap_or(true)
+    })
+    .unwrap_or(true);
+  if !queued_ahead {
+    if let Some(permit) = admission.try_acquire() {
+      run_task(webview, task, protocol_index, permit);
+      return;
+    }
+  }
+  let waiting = Waiting {
+    task: task.retain(),
+    webview: webview.retain(),
+    task_key: task.hash(),
+    protocol_index,
+  };
+  let queued = WAITING
+    .try_with(|list| {
+      list
+        .try_borrow_mut()
+        .ok()
+        .map(|mut list| list.push(pool, waiting).is_ok())
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+  if !queued {
+    match unsafe { task.request() }.URL() {
+      Some(url) => finish_task_with_empty_status(task, &url, CUSTOM_PROTOCOL_OVERFLOW_STATUS),
+      None => fail_task(task),
+    }
+  }
+}
+
+fn run_task(
+  webview: &WryWebView,
+  task: &ProtocolObject<dyn WKURLSchemeTask>,
+  protocol_index: usize,
+  permit: InFlightPermit,
+) {
   #[cfg(feature = "tracing")]
   let span =
     tracing::info_span!(parent: None, "wry::custom_protocol::handle", uri = tracing::field::Empty)
@@ -292,12 +429,6 @@ extern "C" fn start_task(
   // dynamically allocated C string had no matching Objective-C deallocator
   // and gave asynchronous responders a fabricated process-long lifetime.
   let webview_id = webview.ivars().webview_id.clone();
-
-  let Some(ivar) = this.class().instance_variable(c"protocol_index") else {
-    fail_task(task);
-    return;
-  };
-  let protocol_index: usize = unsafe { *ivar.load(this) };
 
   let function = WEBVIEW_STATE.read().ok().and_then(|state| {
     state
@@ -319,11 +450,6 @@ extern "C" fn start_task(
       .and_then(|uri| bounded_nsstring(&uri, PAGE_URL_LIMIT))
     else {
       fail_task(task);
-      return;
-    };
-
-    let Some(permit) = webview.ivars().custom_protocol_admission.try_acquire() else {
-      finish_task_with_empty_status(task, &url, CUSTOM_PROTOCOL_OVERFLOW_STATUS);
       return;
     };
 
@@ -467,8 +593,11 @@ extern "C" fn stop_task(
   task: &ProtocolObject<dyn WKURLSchemeTask>,
 ) {
   let task_key = task.hash();
-  cancel_pending_task(&webview.ivars().webview_id, task_key);
+  let webview_id = &webview.ivars().webview_id;
+  forget_waiting(|pool, waiting| &pool.webview_id != webview_id || waiting.task_key != task_key);
+  cancel_pending_task(webview_id, task_key);
   webview.remove_custom_task_key(task_key);
+  drain_waiting();
 }
 
 #[cfg(test)]

@@ -12,6 +12,8 @@
 //! this owner retains every native and profile obligation until exact close
 //! or process shutdown.
 
+#[cfg(target_os = "macos")]
+mod favicon;
 #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
 #[path = "agent_foreground_probe.rs"]
 mod foreground_probe;
@@ -48,10 +50,10 @@ use zephium_agentic::{
     ContextNavigationRequest, ContextNavigationSettlement, ContextNavigationTarget,
     ContextOperationJoin, ContextOperationKind, ContextOwnedViewport, ContextProfileLease,
     ContextProfileLeasePurpose, ContextProfileStorageClass, ContextTransitionRequest,
-    ContextTransitionSettlement, FrameId, SemanticActionKind, SemanticActionNativeFailure,
-    SemanticFrameTrust, SemanticInvocationId, SemanticRuntimePortFailure,
-    SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
-    SemanticScreenshotRequestId, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
+    ContextTransitionSettlement, FrameId, SemanticActionNativeFailure, SemanticFrameTrust,
+    SemanticInvocationId, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
+    SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure, SemanticScreenshotRequestId,
+    SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::ports::engine::Partition;
@@ -99,11 +101,11 @@ enum AgentReplacementRejoin {
 }
 
 #[cfg(target_os = "macos")]
-struct AgentPendingScreenshot {
+pub(super) struct AgentPendingScreenshot {
     id: SemanticScreenshotRequestId,
     context: ContextJoin,
     snapshot_generation: SemanticSnapshotGeneration,
-    cancelled: Arc<AtomicBool>,
+    pub(super) cancelled: Arc<AtomicBool>,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
     task: AgentScreenshotTask,
 }
@@ -229,6 +231,7 @@ pub(super) struct AgentOwnedContext {
     rendering_probe: Option<foreground_probe::AgentForegroundRendering>,
     #[cfg(feature = "native-agentic-foreground-probe")]
     rendering_probe_attempted: bool,
+    favicon: Option<favicon::AgentFaviconPoll>,
     view: crate::platform::imp::AgentOwnedView,
     native_resource: Option<NativeResourceLease>,
 }
@@ -265,6 +268,7 @@ impl AgentOwnedContext {
             rendering_probe: None,
             #[cfg(feature = "native-agentic-foreground-probe")]
             rendering_probe_attempted: false,
+            favicon: None,
             view,
             native_resource: Some(native_resource),
         }
@@ -1068,7 +1072,180 @@ impl EngineHost {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn handle_agent_screenshot_task(&mut self, task: AgentScreenshotTask) {
+        let retained = task.request().is_some_and(|request| {
+            self.work_resources
+                .contains_key(&request.context().identity().id())
+        });
+        if retained {
+            self.start_work_resource_screenshot(task);
+            return;
+        }
         self.start_owned_agent_screenshot(task);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_work_resource_screenshot(&mut self, mut task: AgentScreenshotTask) {
+        let Some(request) = task.request() else {
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let context = request.context();
+        let id = context.identity().id();
+        let request_id = request.id();
+        let snapshot_generation = request.snapshot_generation();
+        let admitted_at = task.admitted_at();
+        let Some(capture_window_millis) = request
+            .deadline()
+            .millis()
+            .checked_sub(request.requested_at().millis())
+        else {
+            task.refuse(SemanticScreenshotNativeFailure::TimedOut);
+            return;
+        };
+        let capture_window = Duration::from_millis(capture_window_millis);
+        let elapsed = Instant::now().saturating_duration_since(admitted_at);
+        if capture_window.is_zero() || elapsed >= capture_window {
+            task.refuse(SemanticScreenshotNativeFailure::TimedOut);
+            return;
+        }
+
+        let failure = match self.work_resources.get(&id) {
+            None => Some(SemanticScreenshotNativeFailure::Stale),
+            Some(resource)
+                if resource.guard.resource().identity().context() != context.identity().id() =>
+            {
+                Some(SemanticScreenshotNativeFailure::Stale)
+            }
+            Some(resource) if !resource.guard.is_healthy() || !resource.ready() => {
+                Some(SemanticScreenshotNativeFailure::Shutdown)
+            }
+            Some(resource) if resource.pending() => {
+                Some(SemanticScreenshotNativeFailure::ResourceExhausted)
+            }
+            Some(resource) if snapshot_generation.get() != resource.last_invocation => {
+                Some(SemanticScreenshotNativeFailure::Stale)
+            }
+            Some(resource)
+                if resource
+                    .view
+                    .as_ref()
+                    .is_none_or(|view| view.semantic_pending_for_audit() != Some(false)) =>
+            {
+                Some(SemanticScreenshotNativeFailure::NotReady)
+            }
+            Some(_) => None,
+        };
+        if let Some(failure) = failure {
+            task.refuse(failure);
+            return;
+        }
+
+        let callback_guard = task.callback_guard();
+        let timeout_guard = callback_guard.clone();
+        let Some(watchdog) = crate::platform::imp::schedule_content_policy_timeout(
+            capture_window.saturating_sub(elapsed),
+            move || {
+                let rejected = timeout_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_work_resource_screenshot(
+                        id,
+                        request_id,
+                        Err(SemanticScreenshotNativeFailure::TimedOut),
+                    );
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+        ) else {
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let Some(request) = task.take_request() else {
+            drop(watchdog);
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let Some(physical) = task.take_physical() else {
+            drop(watchdog);
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let pending = AgentPendingScreenshot {
+            id: request_id,
+            context,
+            snapshot_generation,
+            cancelled: cancelled.clone(),
+            watchdog,
+            task,
+        };
+        let Some(resource) = self.work_resources.get_mut(&id) else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            return;
+        };
+        let Some(view) = resource.view.as_ref() else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Shutdown));
+            return;
+        };
+        let Some(document_gate) = view.work_navigation().cloned() else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            return;
+        };
+        let Some(document) = document_gate.observation_stamp(context) else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            return;
+        };
+        resource.screenshot = Some(pending);
+
+        let native_guard = callback_guard.clone();
+        let panic_guard = callback_guard.clone();
+        let dispatched = view.dispatch_screenshot(
+            request,
+            admitted_at,
+            cancelled,
+            move |outcome| {
+                drop(physical);
+                let outcome = if document_gate.observation_stamp(context) == Some(document) {
+                    outcome
+                } else {
+                    Err(SemanticScreenshotNativeFailure::Stale)
+                };
+                let rejected = native_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_work_resource_screenshot(id, request_id, outcome);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+            move || panic_guard.callback_dispatch_rejected(),
+        );
+        if let Err(failure) = dispatched {
+            self.finish_work_resource_screenshot(id, request_id, Err(failure));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn finish_work_resource_screenshot(
+        &mut self,
+        id: ContextId,
+        request_id: SemanticScreenshotRequestId,
+        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ) {
+        let Some(pending) = self.work_resources.get_mut(&id).and_then(|resource| {
+            (resource
+                .screenshot
+                .as_ref()
+                .is_some_and(|pending| pending.id == request_id))
+            .then(|| resource.screenshot.take())
+            .flatten()
+        }) else {
+            return;
+        };
+        pending.complete(outcome);
+        if let Some(resource) = self.work_resources.get(&id) {
+            let guard = resource.guard.clone();
+            self.progress_work_resource(&guard);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1163,6 +1340,13 @@ impl EngineHost {
                 .count();
         #[cfg(not(all(target_os = "macos", feature = "native-agentic-foreground-probe")))]
         let visible_surfaces = 0usize;
+        #[cfg(target_os = "macos")]
+        let visible_surfaces = visible_surfaces
+            + self
+                .work_resources
+                .values()
+                .filter(|resource| resource.observation_visible())
+                .count();
         let queued_request_tasks = admission_counts
             .map(|(pending, _)| pending)
             .and_then(|pending| pending.checked_sub(1))
@@ -1663,10 +1847,7 @@ impl EngineHost {
             task.refuse(SemanticActionNativeFailure::TimedOut);
             return;
         }
-        if !matches!(
-            request.kind(),
-            SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
-        ) {
+        if !zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.kind()) {
             task.refuse(SemanticActionNativeFailure::UnsupportedInteraction);
             return;
         }
@@ -2047,6 +2228,10 @@ impl EngineHost {
         task: AgentContextTask,
         request: ContextNavigationRequest,
     ) {
+        if request.document_policy() != zephium_agentic::WorkBrowserDocumentPolicy::Exact {
+            task.refuse(ContextPortFailure::Unsupported);
+            return;
+        }
         let operation = request.operation();
         let requested = operation.context();
         let id = requested.identity().id();
@@ -2592,8 +2777,12 @@ impl EngineHost {
                 "agent-context navigation terminal lost its exact gate or target",
             );
         }
+        let committed = outcome.is_ok();
         pending.complete(outcome);
         self.retry_deferred_owned_agent_location_check(id);
+        if committed {
+            self.start_agent_favicon(id);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -2967,30 +3156,21 @@ impl EngineHost {
         let deadline = now
             .checked_add(Duration::from_secs(5))
             .ok_or(ContextPortFailure::NativeRefused)?;
-        self.ensure_windows_extension_profile_at_path(
+        self.ensure_windows_profile_environment_at_path(
             profile,
             deadline,
             expected_user_data_folder.clone(),
+            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
         )
-        .map_err(map_windows_extension_profile_failure)?;
-        let native_profile = self
-            .windows_extension_profiles
-            .get(&profile)
-            .cloned()
-            .ok_or(ContextPortFailure::ExtensionIsolationUnproven)?;
-        let selected_is_empty =
-            if request.profile_lease().storage_class() == ContextProfileStorageClass::Durable {
-                native_profile
-                    .inventory_is_empty(deadline)
-                    .map_err(map_windows_extension_profile_failure)?
-            } else {
-                false
-            };
-        if !selected_is_empty && self.agent_cookie_quarantined_profiles.contains(&profile) {
+        .map_err(map_windows_profile_environment_failure)?;
+        // Durable environments admit human extensions from startup. Work
+        // always uses its existing, separate automation subprofile.
+        let selected = false;
+        if !selected && self.agent_cookie_quarantined_profiles.contains(&profile) {
             return Err(ContextPortFailure::CookieTransferFailed);
         }
-        let owned_profile = if selected_is_empty {
-            crate::platform::imp::AgentOwnedProfile::selected(native_profile)
+        let owned_profile = if selected {
+            crate::platform::imp::AgentOwnedProfile::Selected
         } else {
             crate::platform::imp::AgentOwnedProfile::automation(profile)
         };
@@ -3025,6 +3205,7 @@ impl EngineHost {
             request.profile_lease().storage_class(),
             &expected_user_data_folder,
             deadline,
+            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
             crate::platform::imp::AgentOwnedViewCallbacks::new(
                 move |terminal| {
                     let rejected = navigation_guard.clone();
@@ -3282,7 +3463,7 @@ impl EngineHost {
             .and_then(|binding| {
                 binding
                     .view
-                    .cookie_destination(&expected_environment, terminal_deadline)
+                    .cookie_destination(&expected_environment)
                     .map_err(|_| ContextCookieTransferFailure::DestinationUnavailable)
             });
         let (destination_manager, destination_native_profile) = match destination_authority {
@@ -3560,6 +3741,10 @@ impl EngineHost {
         task: AgentContextTask,
         request: ContextNavigationRequest,
     ) {
+        if request.document_policy() != zephium_agentic::WorkBrowserDocumentPolicy::Exact {
+            task.refuse(ContextPortFailure::Unsupported);
+            return;
+        }
         let operation = request.operation();
         let requested = operation.context();
         let id = requested.identity().id();
@@ -3753,10 +3938,7 @@ impl EngineHost {
             return;
         }
         let expected = binding.committed_target.clone();
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
-            .unwrap_or_else(Instant::now);
-        if let Err(failure) = binding.view.attest(deadline) {
+        if let Err(failure) = binding.view.attest() {
             task.refuse(map_owned_view_construction_failure(failure));
             return;
         }
@@ -4824,42 +5006,14 @@ impl EngineHost {
 }
 
 #[cfg(target_os = "windows")]
-fn map_windows_extension_profile_failure(
-    failure: crate::platform::imp::WindowsNativeExtensionFailure,
+fn map_windows_profile_environment_failure(
+    failure: super::construction::WindowsProfileEnvironmentFailure,
 ) -> ContextPortFailure {
-    use crate::platform::imp::WindowsNativeExtensionFailure as Failure;
+    use super::construction::WindowsProfileEnvironmentFailure as Failure;
     match failure {
-        Failure::ExistingEnvironmentModeConflict | Failure::ProfileHostUnavailable => {
-            ContextPortFailure::ProfileBusy
-        }
-        Failure::EnvironmentAttestation
-        | Failure::ProfileMismatch
-        | Failure::PrivateProfileUnsupported => ContextPortFailure::ProfileUnavailable,
-        Failure::InventoryCapacityExceeded
-        | Failure::InventoryIdentityConflict
-        | Failure::InventoryOwnerMissing
-        | Failure::InventoryMismatch
-        | Failure::ProfileInterfaceUnavailable => ContextPortFailure::ExtensionIsolationUnproven,
-        Failure::NativeCall(_)
-        | Failure::NativeCallTimedOut(_)
-        | Failure::NativeCallInterruptedByShutdown(_)
-        | Failure::NativeMessagePumpFailed(_)
-        | Failure::NativeCallbackDisconnected(_)
-        | Failure::AdapterFailStopped
-        | Failure::ReentrantNativeCall
-        | Failure::NativeOwnerCapacityExceeded
-        | Failure::MissingNativeObject
-        | Failure::IdentityReadbackFailed
-        | Failure::IdentityMalformed
-        | Failure::IdentityMismatchQuarantined
-        | Failure::EnabledReadbackFailed
-        | Failure::InstalledOwnerDisabled
-        | Failure::ProfileHostConstructionFailed
-        | Failure::ProfileHostCleanupFailed
-        | Failure::AdapterInvariant
-        | Failure::PackageRootAccess(_)
-        | Failure::PackageRootRejected(_)
-        | Failure::RemovedOwnerStillPresent => ContextPortFailure::NativeRefused,
+        Failure::Busy => ContextPortFailure::ProfileBusy,
+        Failure::Mismatch => ContextPortFailure::ProfileUnavailable,
+        Failure::Construction => ContextPortFailure::NativeRefused,
     }
 }
 
@@ -5123,9 +5277,9 @@ mod tests {
             .split_once("#[cfg(target_os = \"windows\")]\nimpl EngineHost {")
             .expect("Windows owner implementation")
             .1;
-        let extension_profile = windows
-            .find("ensure_windows_extension_profile_at_path(")
-            .expect("extension-enabled environment proof");
+        let environment = windows
+            .find("ensure_windows_profile_environment_at_path(")
+            .expect("profile environment proof");
         let transient_resource = windows
             .find("try_acquire(NativeResourceClass::TransientConstruction)")
             .expect("transient resource");
@@ -5147,7 +5301,7 @@ mod tests {
         let publish = windows
             .find("self.agent_contexts.entry(id)")
             .expect("private owner publication");
-        assert!(extension_profile < transient_resource);
+        assert!(environment < transient_resource);
         assert!(transient_resource < build);
         assert!(build < cleanup_import);
         assert!(cleanup_import < process);

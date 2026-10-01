@@ -53,6 +53,11 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
     build: {
       emptyOutDir: !later,
       target: "es2022",
+      // Bundled assets have no network latency. Eagerly preloading the whole
+      // module graph can overflow the native protocol's 32-request admission
+      // limit before the main stylesheet loads. Native module imports schedule
+      // their dependencies; Vite still loads CSS before each lazy destination.
+      modulePreload: false,
       rolldownOptions: {
         output: {
           // Bound the native custom-protocol startup burst without making lazy
@@ -74,7 +79,9 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
               {
                 name: "chrome-shared",
                 priority: 2,
-                test: /[\\/]src[\\/]shared[\\/](ipc[\\/]|platform\.ts|lib[\\/]motion\.ts|i18n[\\/]runtime\.js)/u,
+                // Preferences are read by lazy destinations too; kept here they
+                // never make a destination import the browser entry.
+                test: /[\\/]src[\\/](?:shared[\\/](ipc[\\/]|platform\.ts|lib[\\/]motion\.ts|i18n[\\/]runtime\.js)|domain[\\/]preferences[\\/])/u,
                 tags: ["$initial"],
               },
             ],

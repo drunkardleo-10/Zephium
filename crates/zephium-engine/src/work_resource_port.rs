@@ -18,8 +18,29 @@ use zephium_agentic::{
 /// Process-monotonic Work clock, initialized only at the explicit Work edge.
 /// Original core deadlines must use this domain; no lease rebases its origin.
 pub fn work_browser_monotonic_now() -> Option<AgentPolicyInstant> {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis())
+    u64::try_from(
+        WORK_CLOCK_ORIGIN
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .ok()
+    .map(AgentPolicyInstant::from_millis)
+}
+
+static WORK_CLOCK_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+/// Projects an existing absolute deadline into the same epoch as native Work
+/// admission. Fractional milliseconds round up because policy time is discrete;
+/// the original `Instant` remains the independently enforced execution deadline.
+/// This never starts a new timeout or adds an arbitrary grace period.
+pub fn work_browser_monotonic_deadline(deadline: Instant) -> Option<AgentPolicyInstant> {
+    project_work_deadline(*WORK_CLOCK_ORIGIN.get_or_init(Instant::now), deadline)
+}
+
+fn project_work_deadline(origin: Instant, deadline: Instant) -> Option<AgentPolicyInstant> {
+    let nanos = deadline.checked_duration_since(origin)?.as_nanos();
+    u64::try_from(nanos.div_ceil(1_000_000))
         .ok()
         .map(AgentPolicyInstant::from_millis)
 }
@@ -31,6 +52,9 @@ enum Phase {
     Acquiring,
     Leased,
     Revoking,
+    PresentingHuman,
+    PresentedHuman,
+    ContinuingAfterHuman,
     Destroying,
     Destroyed,
     Quarantined,
@@ -42,13 +66,25 @@ struct State {
     // The lease terminal can transfer before its physical callback returns.
     // Keep that exact delivery reservation separate from the active lease.
     retirement_delivery: Option<WorkBrowserExecutionLease>,
+    human_delivery: Option<Operation>,
+    human_deadline: Option<AgentPolicyInstant>,
     reads: usize,
+    navigation: Option<zephium_agentic::ContextOperationJoin>,
+    action: Option<zephium_agentic::SemanticActionAttemptId>,
+    // Explicit lease retirement closes evidence waiting too, even when sticky
+    // quarantine prevents admission of the retirement lifecycle itself.
+    action_drain_closed: bool,
+    observed: Option<zephium_agentic::ContextJoin>,
+    document_epoch: u64,
     callbacks: usize,
     uncertain: bool,
     notification_pending: bool,
 }
 
 pub(crate) struct WorkResourceGuard {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(super) failure_cause:
+        Mutex<Option<super::work_resource_failure_diagnostic::WorkResourceFailureCause>>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(super) construction_evidence_claimed: AtomicBool,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -56,8 +92,11 @@ pub(crate) struct WorkResourceGuard {
     admission: std::sync::Weak<AgentPortAdmission>,
     resource: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
+    isolated_public: bool,
+    anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     document: Option<ContextNavigationTarget>,
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    construction_window: Option<(zephium_agentic::WorkBrowserConstructionAttempt, Instant)>,
     state: Mutex<State>,
     // Drop order is deliberate: the original native reporting owner retires
     // before its counted delivery lane. No audit may overlook a live reporter.
@@ -70,8 +109,22 @@ pub(crate) struct WorkNotificationPermit {
     _permit: AgentTaskPermit,
 }
 impl WorkResourceGuard {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(crate) fn record_failure_cause(
+        &self,
+        failure: super::work_resource_failure_diagnostic::WorkResourceFailureCause,
+    ) {
+        // Diagnostics neither fail nor wake the guard. Preserve the first
+        // content-free cause across construction, retention, execution and
+        // cleanup; poisoned diagnostic storage stays observationally absent.
+        if let Ok(mut first) = self.failure_cause.lock() {
+            first.get_or_insert(failure);
+        }
+    }
     fn new(request: &WorkBrowserResourceRequest, admission: &Arc<AgentPortAdmission>) -> Self {
         Self {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            failure_cause: Mutex::new(None),
             #[cfg(feature = "native-agentic-work-resource-probe")]
             construction_evidence_claimed: AtomicBool::new(false),
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -79,8 +132,11 @@ impl WorkResourceGuard {
             admission: Arc::downgrade(admission),
             resource: request.resource().clone(),
             storage: request.storage(),
+            isolated_public: request.isolated_public(),
+            anonymous_session: request.anonymous_session().cloned(),
             document: request.document().cloned(),
             document_policy: request.document_policy(),
+            construction_window: request.construction_window(),
             health: None,
             health_permit: None,
             #[cfg(test)]
@@ -90,7 +146,14 @@ impl WorkResourceGuard {
                 construction_pending: true,
                 lease: None,
                 retirement_delivery: None,
+                human_delivery: None,
+                human_deadline: None,
                 reads: 0,
+                navigation: None,
+                action: None,
+                action_drain_closed: false,
+                observed: None,
+                document_epoch: 1,
                 callbacks: 0,
                 uncertain: false,
                 notification_pending: false,
@@ -114,9 +177,12 @@ impl WorkResourceGuard {
             self.fail();
         }
     }
+    #[cfg_attr(feature = "native-agentic-work-lifetime-diagnostic", track_caller)]
     fn report_uncertainty(&self) {
         let uncertain = self.state.lock().map_or(true, |state| state.uncertain);
         if uncertain {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            self.record_unclassified_failure();
             if let Some(health) = &self.health {
                 health.invalidate();
             }
@@ -142,11 +208,23 @@ impl WorkResourceGuard {
             })
         })
     }
+    pub(crate) fn anonymous_session(&self) -> Option<&zephium_agentic::WorkBrowserSession> {
+        self.anonymous_session.as_ref()
+    }
+    pub(crate) fn isolated_public(&self) -> bool {
+        self.isolated_public
+    }
     pub(crate) fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
+    fn session_current(&self) -> bool {
+        self.anonymous_session
+            .as_ref()
+            .is_none_or(|session| session.is_current())
+    }
     pub(crate) fn construction_current(&self) -> bool {
-        self.port_open()
+        self.session_current()
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 state.phase == Phase::Constructing && state.construction_pending && !state.uncertain
@@ -172,10 +250,28 @@ impl WorkResourceGuard {
     pub(crate) fn document(&self) -> Option<&ContextNavigationTarget> {
         self.document.as_ref()
     }
+    pub(crate) fn construction_deadline(&self, now: Instant) -> Option<Instant> {
+        let (attempt, original) = self.construction_window.unwrap_or((
+            zephium_agentic::WorkBrowserConstructionAttempt::Initial,
+            now.checked_add(zephium_agentic::WorkBrowserConstructionAttempt::Initial.budget())?,
+        ));
+        now.checked_add(attempt.budget())
+            .map(|deadline| deadline.min(original))
+    }
+    pub(crate) fn construction_timed_out(&self) {
+        if self.construction_current() && self.is_healthy() {
+            if let Some(health) = &self.health {
+                health.construction_timed_out();
+            }
+        }
+    }
     pub(crate) fn document_policy(&self) -> zephium_agentic::WorkBrowserDocumentPolicy {
         self.document_policy
     }
+    #[cfg_attr(feature = "native-agentic-work-lifetime-diagnostic", track_caller)]
     pub(crate) fn fail(&self) {
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        self.record_unclassified_failure();
         // Invalidate the stable application observation before waking it. No
         // native ownership lock is held while invoking its coalesced wake.
         if let Some(health) = &self.health {
@@ -190,6 +286,18 @@ impl WorkResourceGuard {
             state.phase = Phase::Quarantined;
         }
     }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[track_caller]
+    fn record_unclassified_failure(&self) {
+        use super::work_resource_failure_diagnostic::{
+            WorkNativeGuardFailureSource, WorkResourceFailureCause,
+        };
+        let caller = std::panic::Location::caller();
+        self.record_failure_cause(WorkResourceFailureCause::NativeGuardFailure {
+            source: WorkNativeGuardFailureSource::of(caller.file()),
+            line: caller.line(),
+        });
+    }
     fn admit_lifecycle(
         &self,
         request: &WorkBrowserResourceRequest,
@@ -197,6 +305,7 @@ impl WorkResourceGuard {
     ) -> Result<(), ContextPortFailure> {
         if request.resource() != &self.resource
             || request.storage() != self.storage
+            || request.isolated_public() != self.isolated_public
             || request.document() != self.document.as_ref()
             || request.document_policy() != self.document_policy
         {
@@ -206,14 +315,24 @@ impl WorkResourceGuard {
             .state
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
+        if request.operation() == Operation::Revoke
+            && request.lease().is_some()
+            && state.lease.as_ref() == request.lease()
+        {
+            state.action_drain_closed = true;
+        }
         match request.operation() {
             Operation::Acquire
-                if self.health_current()
+                if self.session_current()
+                    && self.health_current()
                     && state.phase == Phase::Retained
                     && !state.uncertain
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
                     && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
                     && state.callbacks == 0 =>
             {
                 let lease = request
@@ -222,6 +341,47 @@ impl WorkResourceGuard {
                     .ok_or(ContextPortFailure::TimedOut)?;
                 state.lease = Some(lease.clone());
                 state.phase = Phase::Acquiring;
+            }
+            Operation::PresentHuman
+                if self.session_current()
+                    && self.health_current()
+                    && state.phase == Phase::Retained
+                    && !state.uncertain
+                    && state.lease.is_none()
+                    && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
+                    && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
+                    && state.callbacks == 0 =>
+            {
+                let deadline = request
+                    .human_deadline()
+                    .filter(|deadline| {
+                        *deadline > now
+                            && deadline.millis() - now.millis()
+                                <= zephium_agentic::MAX_WORK_HUMAN_WAIT_MILLIS
+                    })
+                    .ok_or(ContextPortFailure::TimedOut)?;
+                if request.human_source().is_none() {
+                    return Err(ContextPortFailure::Stale);
+                }
+                state.human_deadline = Some(deadline);
+                state.human_delivery = Some(Operation::PresentHuman);
+                state.observed = None;
+                state.phase = Phase::PresentingHuman;
+            }
+            Operation::ContinueAfterHuman
+                if self.session_current()
+                    && self.health_current()
+                    && state.phase == Phase::PresentedHuman
+                    && !state.uncertain
+                    && state.human_delivery.is_none()
+                    && state.human_deadline == request.human_deadline()
+                    && state.human_deadline.is_some_and(|deadline| now < deadline) =>
+            {
+                state.human_delivery = Some(Operation::ContinueAfterHuman);
+                state.phase = Phase::ContinuingAfterHuman;
             }
             Operation::Revoke if state.phase == Phase::Leased || state.phase == Phase::Revoking => {
                 if state.lease.as_ref() != request.lease() || state.retirement_delivery.is_some() {
@@ -244,7 +404,8 @@ impl WorkResourceGuard {
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
     ) -> bool {
-        self.port_open()
+        self.session_current()
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
@@ -252,6 +413,8 @@ impl WorkResourceGuard {
                     && state.retirement_delivery.is_none()
                     && state.callbacks == 0
                     && state.lease.as_ref() == Some(lease)
+                    && state.navigation.is_none()
+                    && state.action.is_none()
                     && now < lease.deadline()
             })
     }
@@ -260,7 +423,8 @@ impl WorkResourceGuard {
         lease: &WorkBrowserExecutionLease,
         now: AgentPolicyInstant,
     ) -> bool {
-        self.port_open()
+        self.session_current()
+            && self.port_open()
             && self.health_current()
             && self.state.lock().is_ok_and(|state| {
                 !state.uncertain
@@ -276,6 +440,28 @@ impl WorkResourceGuard {
             state.lease.is_some() || state.retirement_delivery.is_some()
         })
     }
+    pub(crate) fn human_current(&self, operation: Operation, now: AgentPolicyInstant) -> bool {
+        self.session_current()
+            && self.port_open()
+            && self.health_current()
+            && self.state.lock().is_ok_and(|state| {
+                !state.uncertain
+                    && state.lease.is_none()
+                    && state.retirement_delivery.is_none()
+                    && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
+                    && state.callbacks == 0
+                    && state.human_deadline.is_some_and(|deadline| now < deadline)
+                    && matches!(
+                        (operation, state.phase),
+                        (
+                            Operation::PresentHuman,
+                            Phase::PresentingHuman | Phase::PresentedHuman
+                        ) | (Operation::ContinueAfterHuman, Phase::ContinuingAfterHuman)
+                    )
+            })
+    }
     pub(crate) fn lease_drained(&self, lease: &WorkBrowserExecutionLease) -> bool {
         self.health_current()
             && self.state.lock().is_ok_and(|state| {
@@ -284,6 +470,8 @@ impl WorkResourceGuard {
                     && state.lease.as_ref() == Some(lease)
                     && state.retirement_delivery.as_ref() == Some(lease)
                     && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
                     && state.callbacks == 0
             })
     }
@@ -291,7 +479,10 @@ impl WorkResourceGuard {
         self.state.lock().is_ok_and(|state| {
             !state.construction_pending
                 && state.retirement_delivery.is_none()
+                && state.human_delivery.is_none()
                 && state.reads == 0
+                && state.navigation.is_none()
+                && state.action.is_none()
                 && state.callbacks == 0
                 && !state.notification_pending
         })
@@ -345,7 +536,8 @@ impl WorkResourceGuard {
             .state
             .lock()
             .map_err(|_| ContextPortFailure::NativeRefused)?;
-        if state.uncertain
+        if !self.session_current()
+            || state.uncertain
             || !self.health_current()
             || state.phase != Phase::Leased
             || state.lease.as_ref() != Some(request.lease())
@@ -355,10 +547,21 @@ impl WorkResourceGuard {
         if now >= request.lease().deadline() {
             return Err(ContextPortFailure::TimedOut);
         }
-        if state.reads != 0 {
+        if state.reads != 0
+            || state.navigation.is_some()
+            || state.action.is_some()
+            || state.callbacks != 0
+        {
             return Err(ContextPortFailure::ResourceExhausted);
         }
+        let context = request.invocation().frame().context();
+        if context.navigation_epoch().get() != state.document_epoch
+            || context.frame_generation().get() != state.document_epoch
+        {
+            return Err(ContextPortFailure::Stale);
+        }
         state.reads = 1;
+        state.observed = Some(context);
         Ok(())
     }
     fn read_terminal_begin(&self) {
@@ -425,6 +628,8 @@ impl WorkResourceGuard {
                 && debt == zephium_agentic::WorkBrowserLeaseNativeDebt::default()
                 && resource_retained
                 && state.reads == 0
+                && state.navigation.is_none()
+                && state.action.is_none()
                 && state.callbacks == 0 =>
             {
                 state.phase = Phase::Retained;
@@ -435,11 +640,35 @@ impl WorkResourceGuard {
             (Operation::Destroy, Outcome::Destroyed)
                 if !state.construction_pending
                     && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
                     && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
                     && state.callbacks == 0 =>
             {
                 state.phase = Phase::Destroyed;
                 state.lease = None;
+            }
+            (Operation::PresentHuman, Outcome::HumanPresented)
+                if state.phase == Phase::PresentingHuman
+                    && !state.uncertain
+                    && state.human_delivery == Some(Operation::PresentHuman) =>
+            {
+                state.phase = Phase::PresentedHuman;
+            }
+            (Operation::ContinueAfterHuman, Outcome::HumanContinued)
+                if state.phase == Phase::ContinuingAfterHuman
+                    && !state.uncertain
+                    && state.human_delivery == Some(Operation::ContinueAfterHuman) =>
+            {
+                if let Some(epoch) = state.document_epoch.checked_add(1) {
+                    state.document_epoch = epoch;
+                    state.phase = Phase::Retained;
+                    state.human_deadline = None;
+                } else {
+                    state.uncertain = true;
+                    state.phase = Phase::Quarantined;
+                }
             }
             _ => {
                 state.uncertain = true;
@@ -476,6 +705,8 @@ impl WorkResourceGuard {
             && state.phase == Phase::Retained
             && state.lease.is_none()
             && state.reads == 0
+            && state.navigation.is_none()
+            && state.action.is_none()
             && state.callbacks == 0;
         // Publication joins the fixed slot with its short registration lock.
         // Registration never invokes code, so it cannot call back into this
@@ -528,6 +759,9 @@ impl WorkResourceGuard {
                 state.phase = Phase::Retained;
             }
         } else {
+            if state.human_delivery == Some(request.operation()) {
+                state.human_delivery = None;
+            }
             if request.operation() == Operation::Revoke
                 && state.retirement_delivery.as_ref() == request.lease()
             {
@@ -541,6 +775,24 @@ impl WorkResourceGuard {
         drop(state);
         self.report_uncertainty();
     }
+    fn finish_human_delivery(&self, operation: Operation, returned: bool, released: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let exact = state.human_delivery == Some(operation);
+        if !exact || !returned || !released {
+            state.uncertain = true;
+            if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
+                state.phase = Phase::Quarantined;
+            }
+        }
+        if exact && released {
+            state.human_delivery = None;
+        }
+        drop(state);
+        self.report_uncertainty();
+    }
 }
 
 #[derive(Default)]
@@ -548,6 +800,22 @@ pub(super) struct WorkIngress {
     rows: BTreeMap<ContextId, Arc<WorkResourceGuard>>,
 }
 impl AgentPortAdmission {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(super) fn resource_failure_cause(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<super::work_resource_failure_diagnostic::WorkResourceFailureCause> {
+        let guard = self
+            .work
+            .lock()
+            .ok()?
+            .rows
+            .get(&resource.identity().context())
+            .filter(|guard| guard.resource() == resource)?
+            .clone();
+        let result = *guard.failure_cause.lock().ok()?;
+        result
+    }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(super) fn witness_resource(
         &self,
@@ -597,6 +865,38 @@ impl AgentPortAdmission {
 
 impl AgentContextTask {
     pub(crate) fn work_ingress_matches(&self, guards: Vec<Arc<WorkResourceGuard>>) -> bool {
+        if guards
+            .iter()
+            .map(|guard| guard.resource.identity().context())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != guards.len()
+        {
+            return false;
+        }
+        if let Some(group) = &self.permit.admission.group {
+            let Some(group) = group.upgrade() else {
+                return false;
+            };
+            let Ok(members) = group.members.lock() else {
+                return false;
+            };
+            let Ok(ingress) = members
+                .iter()
+                .map(|member| member.work.lock())
+                .collect::<Result<Vec<_>, _>>()
+            else {
+                return false;
+            };
+            return ingress.iter().map(|rows| rows.rows.len()).sum::<usize>() == guards.len()
+                && guards.iter().all(|guard| {
+                    ingress.iter().any(|rows| {
+                        rows.rows
+                            .get(&guard.resource.identity().context())
+                            .is_some_and(|current| Arc::ptr_eq(current, guard))
+                    })
+                });
+        }
         self.permit.admission.work.lock().is_ok_and(|ingress| {
             ingress.rows.len() == guards.len()
                 && guards.iter().all(|guard| {
@@ -628,6 +928,9 @@ impl WorkLifecycleTask {
     pub(crate) fn complete_document(mut self, effective: ContextNavigationTarget) {
         self.deliver_document(Outcome::Constructed, Some(effective));
     }
+    pub(crate) fn complete_human_document(mut self, effective: ContextNavigationTarget) {
+        self.deliver_document(Outcome::HumanContinued, Some(effective));
+    }
     fn deliver(&mut self, outcome: Outcome) {
         self.deliver_document(outcome, None);
     }
@@ -636,6 +939,11 @@ impl WorkLifecycleTask {
             return;
         };
         let construction = request.operation() == Operation::Construct;
+        let human = matches!(
+            request.operation(),
+            Operation::PresentHuman | Operation::ContinueAfterHuman
+        )
+        .then_some(request.operation());
         let revocation = (request.operation() == Operation::Revoke)
             .then(|| request.lease().cloned())
             .flatten();
@@ -649,6 +957,9 @@ impl WorkLifecycleTask {
         let callback_returned = if let Some(completion) = self.completion.take() {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 completion(match effective {
+                    Some(document) if outcome == Outcome::HumanContinued => {
+                        request.complete_human_document(document)
+                    }
                     Some(document) => request.complete_document(document),
                     None => request.complete(outcome),
                 })
@@ -688,6 +999,13 @@ impl WorkLifecycleTask {
             }
         }
         self.permit.release();
+        if let Some(operation) = human {
+            self.guard.finish_human_delivery(
+                operation,
+                callback_returned,
+                self.permit.released && self.permit.admission.counts().is_some(),
+            );
+        }
         if let Some(lease) = &revocation {
             self.guard.finish_revocation_delivery(
                 lease,
@@ -696,7 +1014,9 @@ impl WorkLifecycleTask {
                 delivery,
             );
         }
-        if (construction || revocation.is_some()) && self.guard.destruction_started() {
+        if (construction || revocation.is_some() || human.is_some())
+            && self.guard.destruction_started()
+        {
             crate::host::notify_work_resource(self.guard.clone());
         }
     }
@@ -817,6 +1137,16 @@ impl EngineAgentBrowserPort {
         let Some(now) = work_browser_monotonic_now() else {
             return reject(request, ContextPortFailure::NativeRefused);
         };
+        // A group's pages share one run; each still opens in its own store
+        // (the run's anonymous one, or the person's session for its site).
+        if let Some(group) = &self.admission.group {
+            if group
+                .upgrade()
+                .is_none_or(|group| group.work != request.resource().identity().work())
+            {
+                return reject(request, ContextPortFailure::NativeRefused);
+            }
+        }
         let health = request.take_resource_health_reporter();
         let health_permit = if health.is_some() {
             match self.admission.reserve() {
@@ -832,6 +1162,9 @@ impl EngineAgentBrowserPort {
             };
             let id = request.resource().identity().context();
             if request.operation() == Operation::Construct {
+                if self.admission.group.is_some() && !ingress.rows.is_empty() {
+                    return reject(request, ContextPortFailure::ResourceExhausted);
+                }
                 if ingress.rows.contains_key(&id) {
                     return reject(request, ContextPortFailure::Stale);
                 }
@@ -1034,3 +1367,11 @@ impl EngineAgentBrowserPort {
 #[cfg(test)]
 #[path = "work_resource_port_tests.rs"]
 mod tests;
+
+#[path = "work_resource_navigation_port.rs"]
+mod navigation;
+pub(crate) use navigation::{WorkHistoryBackTask, WorkNavigationTask};
+
+#[path = "work_resource_action_port.rs"]
+mod action;
+pub(crate) use action::WorkActionTask;

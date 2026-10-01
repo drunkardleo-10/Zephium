@@ -13,10 +13,10 @@ use crate::semantic_settle::exact_document_successor;
 use crate::{
     AgentActiveEffect, ContextJoin, SemanticActionAttemptId, SemanticActionExecutionApplied,
     SemanticActionFailure, SemanticActionRevalidationError, SemanticActionSettlementTerminal,
-    SemanticCompleteness, SemanticDialogState, SemanticInvocationId, SemanticPreparedAction,
-    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus,
-    SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-    SemanticVerification, MAX_SEMANTIC_ACTION_TEXT_BYTES,
+    SemanticDialogState, SemanticInvocationId, SemanticPreparedAction, SemanticScrollAmount,
+    SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus, SemanticSettleTracker,
+    SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticVerification,
+    MAX_SEMANTIC_ACTION_TEXT_BYTES,
 };
 
 /// Largest absolute independently sampled scroll coordinate.
@@ -238,8 +238,10 @@ impl fmt::Debug for SemanticEffectEvidence<'_> {
 /// deliberately different: its verifier needs the exact adjacent before/after
 /// values, but those values must never become public runtime data. This helper
 /// selects and borrows them inside the agentic core, returning only the opaque
-/// evidence envelope. Navigation, dialog, and scroll postconditions require
-/// separately sampled non-snapshot evidence and therefore fail closed here.
+/// evidence envelope. Page-dialog transitions consume independent bounded samples
+/// carried privately by the adjacent snapshot. Scroll transitions use independent,
+/// action-bound position samples in the adjacent snapshot.
+/// Native navigation/dialog postconditions require other evidence.
 pub fn prepare_semantic_action_snapshot_evidence<'a>(
     action: &'a SemanticPreparedAction,
     attempt: SemanticActionAttemptId,
@@ -247,6 +249,14 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
     snapshot: &'a SemanticSnapshot,
 ) -> Result<SemanticEffectEvidence<'a>, SemanticSnapshotEvidenceError> {
     match action.verification() {
+        SemanticVerification::PageDialogOpened
+        | SemanticVerification::PageDialogClosed
+        | SemanticVerification::PageChanged
+        | SemanticVerification::ScrollPositionChanged => Ok(SemanticEffectEvidence::snapshot(
+            attempt,
+            observed_at,
+            snapshot,
+        )),
         SemanticVerification::TargetValueMatchesInput => {
             let (before, after) = action.verification_fill_values(snapshot)?;
             Ok(SemanticEffectEvidence::exact_target_value(
@@ -268,9 +278,7 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
                 snapshot,
             ))
         }
-        SemanticVerification::NavigationCommitted
-        | SemanticVerification::Dialog(_)
-        | SemanticVerification::ScrollPositionChanged => {
+        SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_) => {
             Err(SemanticSnapshotEvidenceError::NonSnapshotEvidenceRequired)
         }
     }
@@ -279,6 +287,10 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
 /// Closed class of independently established effect proof.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticEffectProofKind {
+    /// An independently sampled DOM dialog became visible in the same frame.
+    PageDialogOpened,
+    /// An independently sampled DOM dialog disappeared in the same frame.
+    PageDialogClosed,
     /// Exact allowlisted target state transitioned in the adjacent snapshot.
     TargetState,
     /// Exact safe fill value matched the requested bounded input.
@@ -295,6 +307,8 @@ pub enum SemanticEffectProofKind {
     Dialog,
     /// Scroll position moved in the declared direction.
     Scroll,
+    /// The action frame's content changed after the action.
+    PageChanged,
 }
 
 /// Opaque proof that one exact settled action met its declared postcondition.
@@ -312,6 +326,8 @@ pub struct SemanticVerifiedAction {
     current_invocation: Option<SemanticInvocationId>,
     current_snapshot: Option<SemanticSnapshotGeneration>,
     action_guard: [u8; 32],
+    pub(crate) kind: crate::SemanticActionKind,
+    pub(crate) scroll: Option<(SemanticScrollDirection, SemanticScrollAmount)>,
 }
 
 impl SemanticVerifiedAction {
@@ -514,9 +530,97 @@ pub struct SemanticActionVerificationRefusal {
 }
 
 impl SemanticActionVerificationRefusal {
+    /// A terminal whose fresh snapshot no longer holds its target: the action
+    /// ran, its outcome is simply not observed. The terminal's authority
+    /// returns through the same path as a failed verification.
+    pub fn unobserved(
+        terminal: SemanticActionSettlementTerminal,
+        observed_at: SemanticSettleInstant,
+        error: SemanticActionRevalidationError,
+    ) -> Self {
+        Self {
+            terminal: Box::new(terminal),
+            observed_at,
+            error: map_target_error(error),
+        }
+    }
+
     /// Closed independent-verification failure.
     pub const fn error(&self) -> SemanticVerificationError {
         self.error
+    }
+
+    /// A navigation-like read (opening a channel, thread, message, tab or
+    /// date) whose own target re-rendered, left or never showed the awaited
+    /// state while the page it acted on visibly changed: the action applied,
+    /// proven by that change. Any other effect keeps its refusal, and so does
+    /// a read whose page did not change.
+    pub fn applied_by_page_change(
+        self,
+        action: &SemanticPreparedAction,
+        snapshot: &SemanticSnapshot,
+    ) -> Result<SemanticActionVerifiedTerminal, Self> {
+        let target_bound = matches!(
+            self.error,
+            SemanticVerificationError::TargetMissing
+                | SemanticVerificationError::TargetChanged
+                | SemanticVerificationError::IncompleteSnapshot
+                | SemanticVerificationError::OutcomeNotObserved
+                | SemanticVerificationError::SettlementFailed(
+                    crate::SemanticActionFailure::StaleReference
+                )
+        );
+        let tracker = self.terminal.tracker();
+        if !target_bound
+            || !matches!(
+                tracker.status(),
+                crate::SemanticSettleStatus::ReadyForVerification
+                    | crate::SemanticSettleStatus::Failed(
+                        crate::SemanticActionFailure::StaleReference
+                    )
+            )
+            || action.effect() != crate::SemanticEffectClass::Read
+            || !matches!(
+                action.kind(),
+                crate::SemanticActionKind::Click
+                    | crate::SemanticActionKind::Press
+                    | crate::SemanticActionKind::Select
+            )
+            || action.verification() == SemanticVerification::PageChanged
+                && self.error == SemanticVerificationError::OutcomeNotObserved
+            || snapshot.frame() != action.frame()
+            || snapshot.generation().get() <= action.checkpoint_snapshot().get()
+            || self.observed_at > tracker.deadline()
+            || tracker
+                .terminal_at()
+                .is_some_and(|terminal| self.observed_at < terminal)
+            || crate::semantic_action::page_digest(snapshot) == action.page_digest()
+        {
+            return Err(self);
+        }
+        let attempt = tracker.attempt();
+        let (active, execution, mut settlement) = self.terminal.into_parts();
+        settlement.settle_by_page_change();
+        let verified = SemanticVerifiedAction {
+            attempt,
+            ordinal: action.ordinal(),
+            verification: action.verification(),
+            proof: SemanticEffectProofKind::PageChanged,
+            observed_at: self.observed_at,
+            deadline: settlement.deadline(),
+            current_context: snapshot.frame().context(),
+            current_invocation: Some(snapshot.invocation()),
+            current_snapshot: Some(snapshot.generation()),
+            action_guard: action.verification_guard(),
+            kind: action.kind(),
+            scroll: action.scroll_recipe(),
+        };
+        Ok(SemanticActionVerifiedTerminal {
+            active,
+            execution,
+            settlement,
+            verified,
+        })
     }
 
     /// Monotonic instant carried by the consumed independent proof attempt.
@@ -615,6 +719,69 @@ pub(crate) fn verify_semantic_action(
     let (proof, current_context, current_invocation, current_snapshot) =
         match (action.verification(), evidence.kind) {
             (
+                SemanticVerification::PageDialogOpened,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let sample = snapshot
+                    .page_dialog_sample
+                    .as_ref()
+                    .ok_or(SemanticVerificationError::OutcomeNotObserved)?;
+                if snapshot.frame() != action.frame()
+                    || action.checkpoint_snapshot().get().checked_add(1)
+                        != Some(snapshot.generation().get())
+                    || action.checkpoint_invocation().get().checked_add(1)
+                        != Some(snapshot.invocation().get())
+                    || sample.a != evidence.attempt.get()
+                    || sample.i != action.checkpoint_invocation().get()
+                    || sample.g != action.checkpoint_snapshot().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                if !sample.after.iter().any(|key| !sample.before.contains(key)) {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::PageDialogOpened,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
+            }
+            (
+                SemanticVerification::PageDialogClosed,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let sample = snapshot
+                    .page_dialog_sample
+                    .as_ref()
+                    .ok_or(SemanticVerificationError::OutcomeNotObserved)?;
+                if snapshot.frame() != action.frame()
+                    || action.checkpoint_snapshot().get().checked_add(1)
+                        != Some(snapshot.generation().get())
+                    || action.checkpoint_invocation().get().checked_add(1)
+                        != Some(snapshot.invocation().get())
+                    || sample.a != evidence.attempt.get()
+                    || sample.i != action.checkpoint_invocation().get()
+                    || sample.g != action.checkpoint_snapshot().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                // The bound target is independently required to remain under its
+                // exact dialog ancestor through the pre-dispatch checkpoint.
+                // Requiring a sole visible dialog immediately before the click
+                // makes the sampled identity unambiguous: an unrelated dialog
+                // cannot close and satisfy this proof.
+                if sample.before.len() != 1 || sample.after.contains(&sample.before[0]) {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::PageDialogClosed,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
+            }
+            (
                 SemanticVerification::TargetState { state, present },
                 SemanticEffectEvidenceKind::Snapshot(snapshot),
             ) => {
@@ -637,7 +804,7 @@ pub(crate) fn verify_semantic_action(
                     after,
                 },
             ) => {
-                if snapshot.completeness() != SemanticCompleteness::Complete {
+                if !action.has_complete_snapshot_evidence(snapshot) {
                     return Err(SemanticVerificationError::IncompleteSnapshot);
                 }
                 let (observed_before, observed_after) = action
@@ -740,6 +907,64 @@ pub(crate) fn verify_semantic_action(
                 }
                 (SemanticEffectProofKind::Dialog, context, None, None)
             }
+            (SemanticVerification::PageChanged, SemanticEffectEvidenceKind::Snapshot(snapshot)) => {
+                if snapshot.frame() != action.frame()
+                    || snapshot.generation().get() <= action.checkpoint_snapshot().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                if crate::semantic_action::page_digest(snapshot) == action.page_digest() {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::PageChanged,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
+            }
+            (
+                SemanticVerification::ScrollPositionChanged,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let sample = snapshot
+                    .scroll_sample
+                    .as_ref()
+                    .ok_or(SemanticVerificationError::OutcomeNotObserved)?;
+                if snapshot.frame() != action.frame()
+                    || action.checkpoint_snapshot().get().checked_add(1)
+                        != Some(snapshot.generation().get())
+                    || action.checkpoint_invocation().get().checked_add(1)
+                        != Some(snapshot.invocation().get())
+                    || sample.a != evidence.attempt.get()
+                    || sample.i != action.checkpoint_invocation().get()
+                    || sample.g != action.checkpoint_snapshot().get()
+                    || sample.t != action.target_key().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                let (direction, amount) = action
+                    .scroll_recipe()
+                    .ok_or(SemanticVerificationError::ActionMismatch)?;
+                let before = SemanticScrollPosition::try_new(sample.before[0], sample.before[1])
+                    .map_err(|_| SemanticVerificationError::OutcomeNotObserved)?;
+                let after = SemanticScrollPosition::try_new(sample.after[0], sample.after[1])
+                    .map_err(|_| SemanticVerificationError::OutcomeNotObserved)?;
+                let observed = if amount == SemanticScrollAmount::IntoView {
+                    sample.visible == Some(true) && before != after
+                } else {
+                    sample.visible.is_none() && moved_in_direction(before, after, direction)
+                };
+                if !observed {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::Scroll,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
+            }
             (
                 SemanticVerification::ScrollPositionChanged,
                 SemanticEffectEvidenceKind::Scroll {
@@ -779,6 +1004,8 @@ pub(crate) fn verify_semantic_action(
         current_invocation,
         current_snapshot,
         action_guard: action.verification_guard(),
+        kind: action.kind(),
+        scroll: action.scroll_recipe(),
     })
 }
 
@@ -786,7 +1013,16 @@ fn verification_target<'a>(
     action: &SemanticPreparedAction,
     snapshot: &'a SemanticSnapshot,
 ) -> Result<(usize, &'a crate::SemanticNode), SemanticVerificationError> {
-    if snapshot.completeness() != SemanticCompleteness::Complete {
+    let complete_state = matches!(
+        action.verification(),
+        SemanticVerification::TargetState { .. }
+    ) && action.checkpoint_invocation().get().checked_add(1)
+        == Some(snapshot.invocation().get())
+        && snapshot
+            .nodes()
+            .iter()
+            .any(|node| node.key() == action.target_key() && node.fields_complete() == Some(true));
+    if !action.has_complete_snapshot_evidence(snapshot) && !complete_state {
         return Err(SemanticVerificationError::IncompleteSnapshot);
     }
     action
@@ -842,6 +1078,10 @@ mod tests {
     use zephium_core::ids::ProfileId;
 
     fn observation() -> (SemanticObservation, ContextRegistry) {
+        observation_with_fill_role("textbox")
+    }
+
+    fn observation_with_fill_role(role: &str) -> (SemanticObservation, ContextRegistry) {
         let identity = ContextIdentity::new(
             ContextId::from_raw(71),
             ContextRunId::from_raw(72),
@@ -885,13 +1125,15 @@ mod tests {
             json!([
                 {"k": 1, "r": "document", "o": 16},
                 {"k": 2, "p": 0, "r": "button", "n": "Private submit", "o": 1},
-                {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                {"k": 3, "p": 0, "r": role, "n": "Private title",
                  "v": {"k": "text", "value": "old"}, "o": 10,
                  "b": {"x": 10, "y": 20, "w": 200, "h": 30}},
                 {"k": 4, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1},
                 {"k": 5, "p": 0, "r": "combobox", "n": "Private priority",
                  "v": {"k": "ordinal", "value": 0}, "o": 12},
-                {"k": 6, "p": 4, "r": "option", "n": "Private high", "o": 1}
+                {"k": 6, "p": 4, "r": "option", "n": "Private high", "o": 1},
+                {"k": 7, "p": 0, "r": "dialog", "n": "Private dialog"},
+                {"k": 8, "p": 6, "r": "button", "n": "Private dialog result", "o": 1}
             ]),
         );
         let request = crate::SemanticObservationRequest::initial(
@@ -1023,6 +1265,223 @@ mod tests {
     }
 
     #[test]
+    fn field_clipped_siblings_do_not_block_an_independently_complete_fill_target() {
+        let (template, _) = observation_with_fill_role("combobox");
+        let frame = template.frames()[0].frame().clone();
+        let nodes = |complete: Option<bool>, value: &str| {
+            let mut target = json!({"k": 3, "p": 0, "r": "combobox", "n": "Private title",
+                "o": 10, "v": {"k": "text", "value": value}});
+            if let Some(complete) = complete {
+                target["fc"] = json!(complete);
+            }
+            json!([
+                {"k": 1, "r": "document", "o": 16, "fc": true},
+                target,
+                {"k": 8, "p": 0, "r": "button", "n": "x".repeat(512), "o": 9, "fc": false}
+            ])
+        };
+        for status in [
+            "field_limit",
+            "node_limit",
+            "text_limit",
+            "depth_limit",
+            "inspection_limit",
+            "wire_limit",
+            "scope_boundary",
+            "unsupported_frame",
+        ] {
+            for local in [None, Some(false), Some(true)] {
+                let before = snapshot_for_frame(frame.clone(), 1, 1, status, nodes(local, "old"));
+                let request = crate::SemanticObservationRequest::initial(
+                    SemanticObservationId::new(1).unwrap(),
+                    frame.context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                );
+                let observation = SemanticObservationAssembler::new(request, before)
+                    .unwrap()
+                    .finish()
+                    .unwrap();
+                let batch = bind(
+                    &observation,
+                    SemanticActionIntent::Fill {
+                        target: SemanticReferenceId::new(2).unwrap(),
+                        value: SemanticActionText::try_new("query".to_owned()).unwrap(),
+                    },
+                    SemanticWaitCondition::Immediate,
+                    SemanticVerification::TargetValueMatchesInput,
+                )
+                .unwrap();
+                let prepared = batch.actions()[0].prepare(&observation.frames()[0]);
+                let allowed = status == "field_limit" && local == Some(true);
+                assert_eq!(prepared.is_ok(), allowed, "preparation: {status}/{local:?}");
+                if !allowed {
+                    // A later complete checkpoint cannot repair an incomplete
+                    // model-delivered binding by silently laundering its ref.
+                    let current = snapshot_for_frame(
+                        frame.clone(),
+                        2,
+                        2,
+                        "field_limit",
+                        nodes(Some(true), "old"),
+                    );
+                    assert!(batch.actions()[0].prepare(&current).is_err());
+                    continue;
+                }
+                let action = prepared.unwrap();
+                for after_status in [
+                    "field_limit",
+                    "node_limit",
+                    "text_limit",
+                    "depth_limit",
+                    "inspection_limit",
+                    "wire_limit",
+                    "scope_boundary",
+                    "unsupported_frame",
+                ] {
+                    for after_local in [None, Some(false), Some(true)] {
+                        let after = snapshot_for_frame(
+                            frame.clone(),
+                            2,
+                            2,
+                            after_status,
+                            nodes(after_local, "query"),
+                        );
+                        let evidence = prepare_semantic_action_snapshot_evidence(
+                            &action,
+                            SemanticActionAttemptId::new(1).unwrap(),
+                            SemanticSettleInstant::from_millis(101),
+                            &after,
+                        )
+                        .unwrap();
+                        let verified =
+                            verify_semantic_action(&immediate(&action, 1), &action, evidence);
+                        assert_eq!(
+                            verified.is_ok(),
+                            after_status == "field_limit" && after_local == Some(true),
+                            "verification: {after_status}/{after_local:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn field_clipping_requires_complete_select_target_and_exact_option() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Select {
+                target: SemanticReferenceId::new(5).unwrap(),
+                option: SemanticReferenceId::new(6).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetSelectionMatchesOption,
+        )
+        .unwrap();
+        for target_complete in [None, Some(false), Some(true)] {
+            for option_complete in [None, Some(false), Some(true)] {
+                let nodes = |selected: bool| {
+                    let mut target = json!({"k":5,"p":0,"r":"combobox","n":"Private priority","o":12,"v":{"k":"ordinal","value":u8::from(selected)}});
+                    let mut option = json!({"k":6,"p":1,"r":"option","n":"Private high","o":1,"s":if selected {2} else {0}});
+                    if let Some(complete) = target_complete {
+                        target["fc"] = json!(complete);
+                    }
+                    if let Some(complete) = option_complete {
+                        option["fc"] = json!(complete);
+                    }
+                    json!([{"k":1,"r":"document","o":16},target,option,{"k":8,"p":0,"r":"paragraph","t":"x".repeat(4096),"fc":false}])
+                };
+                let before = snapshot_for_frame(
+                    observation.frames()[0].frame().clone(),
+                    1,
+                    1,
+                    "field_limit",
+                    nodes(false),
+                );
+                let prepared = batch.actions()[0].prepare(&before);
+                let allowed = target_complete == Some(true) && option_complete == Some(true);
+                assert_eq!(prepared.is_ok(), allowed);
+                let action = batch.actions()[0]
+                    .prepare(&observation.frames()[0])
+                    .unwrap();
+                let after = snapshot_for_frame(
+                    observation.frames()[0].frame().clone(),
+                    2,
+                    2,
+                    "field_limit",
+                    nodes(true),
+                );
+                let evidence = SemanticEffectEvidence::snapshot(
+                    SemanticActionAttemptId::new(1).unwrap(),
+                    SemanticSettleInstant::from_millis(101),
+                    &after,
+                );
+                assert_eq!(
+                    verify_semantic_action(&immediate(&action, 1), &action, evidence).is_ok(),
+                    allowed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn editable_combobox_fill_requires_bound_operation_and_exact_text_postcondition() {
+        let (observation, _) = observation_with_fill_role("combobox");
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).expect("target"),
+                value: SemanticActionText::try_new("query".to_owned()).expect("text"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .expect("editable combobox bound");
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        for (operations, value, succeeds) in [
+            (10, json!({"k": "text", "value": "query"}), true),
+            (10, json!({"k": "text", "value": "wrong query"}), false),
+            (10, json!({"k": "ordinal", "value": 0}), false),
+            (12, json!({"k": "text", "value": "query"}), false),
+        ] {
+            let snapshot = current(
+                &observation,
+                json!([
+                    {"k": 1, "r": "document", "o": 16},
+                    {"k": 3, "p": 0, "r": "combobox", "n": "Private title",
+                     "v": value, "o": operations}
+                ]),
+            );
+            let verified = prepare_semantic_action_snapshot_evidence(
+                &action,
+                SemanticActionAttemptId::new(1).expect("attempt"),
+                SemanticSettleInstant::from_millis(101),
+                &snapshot,
+            )
+            .is_ok_and(|evidence| {
+                verify_semantic_action(&immediate(&action, 1), &action, evidence).is_ok()
+            });
+            assert_eq!(verified, succeeds);
+        }
+        assert!(
+            bind(
+                &observation,
+                SemanticActionIntent::Fill {
+                    target: SemanticReferenceId::new(5).expect("select-only combobox"),
+                    value: SemanticActionText::try_new("query".to_owned()).expect("text"),
+                },
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::TargetValueMatchesInput,
+            )
+            .is_err(),
+            "combobox role alone cannot bind Fill"
+        );
+    }
+
+    #[test]
     fn snapshot_evidence_helper_keeps_fill_values_private_and_rejects_other_evidence_classes() {
         let (observation, _) = observation();
         let fill_batch = bind(
@@ -1131,22 +1590,10 @@ mod tests {
                 SemanticWaitCondition::Dialog(SemanticDialogState::Present),
                 SemanticVerification::Dialog(SemanticDialogState::Present),
             ),
-            (
-                SemanticWaitCondition::ScrollPositionChanged,
-                SemanticVerification::ScrollPositionChanged,
-            ),
         ];
         for (wait, verification) in unsupported {
-            let intent = if verification == SemanticVerification::ScrollPositionChanged {
-                SemanticActionIntent::Scroll {
-                    target: SemanticReferenceId::new(1).expect("target"),
-                    direction: SemanticScrollDirection::Down,
-                    amount: SemanticScrollAmount::Page,
-                }
-            } else {
-                SemanticActionIntent::Click {
-                    target: SemanticReferenceId::new(2).expect("target"),
-                }
+            let intent = SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(2).expect("target"),
             };
             let batch = bind(&observation, intent, wait, verification).expect("batch");
             let action = batch.actions()[0]
@@ -1306,6 +1753,170 @@ mod tests {
         .expect_err("substituted action");
         assert_eq!(refusal.error(), SemanticVerificationError::ActionMismatch);
         assert_eq!(refusal.into_parts().0.attempt().get(), 23);
+    }
+
+    #[test]
+    fn a_read_whose_target_re_rendered_applies_only_when_its_page_changed() {
+        let (template, _) = observation();
+        let original = json!([
+            {"k": 1, "r": "document", "o": 16},
+            {"k": 4, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1,
+             "b": {"x": 10, "y": 60, "w": 20, "h": 20}}
+        ]);
+        let observation = SemanticObservationAssembler::new(
+            crate::SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).expect("observation"),
+                template.request().context(),
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            snapshot_for_frame(
+                template.frames()[0].frame().clone(),
+                1,
+                1,
+                "complete",
+                original.clone(),
+            ),
+        )
+        .expect("assembler")
+        .finish()
+        .expect("observation");
+        let prepared = |effect: SemanticEffectClass| {
+            let proposal = SemanticActionProposal::try_new(
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(2).expect("target"),
+                },
+                effect,
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::TargetState {
+                    state: crate::SemanticState::Checked,
+                    present: true,
+                },
+                SemanticSettleBudget::try_new(250).expect("budget"),
+            )
+            .expect("proposal");
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).expect("batch"),
+                &observation,
+                &[observation.frames()[0].frame().clone()],
+                vec![proposal],
+            )
+            .expect("batch")
+            .actions()[0]
+                .prepare(&observation.frames()[0])
+                .expect("prepare")
+        };
+        let at = SemanticSettleInstant::from_millis(101);
+        let opened = current(
+            &observation,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 9, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1},
+                {"k": 10, "p": 0, "r": "paragraph", "t": "Private channel"}
+            ]),
+        );
+        let read = prepared(SemanticEffectClass::Read);
+        let applied = SemanticActionVerificationRefusal::unobserved(
+            execution_terminal(&read, 31),
+            at,
+            crate::SemanticActionRevalidationError::TargetMissing,
+        )
+        .applied_by_page_change(&read, &opened)
+        .expect("page changed");
+        assert_eq!(
+            applied.verified().proof(),
+            SemanticEffectProofKind::PageChanged
+        );
+        assert!(applied.verified().matches_action(&read));
+        assert_eq!(
+            applied.settlement().status(),
+            SemanticSettleStatus::ReadyForVerification
+        );
+
+        let unchanged = current(&observation, original);
+        let refusal = verify_semantic_action_terminal(
+            execution_terminal(&read, 32),
+            &read,
+            SemanticEffectEvidence::snapshot(
+                SemanticActionAttemptId::new(32).expect("attempt"),
+                at,
+                &unchanged,
+            ),
+        )
+        .expect_err("not checked");
+        assert_eq!(
+            refusal.error(),
+            SemanticVerificationError::OutcomeNotObserved
+        );
+        let refusal = refusal
+            .applied_by_page_change(&read, &unchanged)
+            .expect_err("nothing changed");
+        assert_eq!(refusal.into_parts().0.attempt().get(), 32);
+
+        let draft = prepared(SemanticEffectClass::LocalWrite);
+        assert!(SemanticActionVerificationRefusal::unobserved(
+            execution_terminal(&draft, 33),
+            at,
+            crate::SemanticActionRevalidationError::TargetMissing,
+        )
+        .applied_by_page_change(&draft, &opened)
+        .is_err());
+    }
+
+    #[test]
+    fn clearing_requires_an_explicit_observed_empty_value() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).unwrap(),
+                value: SemanticActionText::try_new(String::new()).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .unwrap();
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .unwrap();
+        let attempt = SemanticActionAttemptId::new(1).unwrap();
+        let tracker = immediate(&action, 1);
+        for explicit_empty in [false, true] {
+            let mut field = json!({"k":3,"p":0,"r":"textbox","n":"Private title","o":10});
+            if explicit_empty {
+                field["v"] = json!({"k":"text","value":""});
+            }
+            let snapshot = current(&observation, json!([{"k":1,"r":"document","o":16},field]));
+            let evidence = prepare_semantic_action_snapshot_evidence(
+                &action,
+                attempt,
+                SemanticSettleInstant::from_millis(101),
+                &snapshot,
+            );
+            if explicit_empty {
+                let proof = verify_semantic_action(&tracker, &action, evidence.unwrap()).unwrap();
+                assert_eq!(proof.proof(), SemanticEffectProofKind::ExactTargetValue);
+            } else {
+                assert!(
+                    evidence.is_err(),
+                    "missing fresh value cannot prove successful clear"
+                );
+                assert_eq!(
+                    verify_semantic_action(
+                        &tracker,
+                        &action,
+                        SemanticEffectEvidence::exact_target_value(
+                            attempt,
+                            SemanticSettleInstant::from_millis(101),
+                            &snapshot,
+                            "old",
+                            "",
+                        )
+                    ),
+                    Err(SemanticVerificationError::TargetChanged),
+                    "caller-supplied empty evidence cannot replace missing observation"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1501,6 +2112,187 @@ mod tests {
     }
 
     #[test]
+    fn page_dialog_requires_independent_correlated_adjacent_samples() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(2).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::PageDialogOpened,
+        )
+        .unwrap();
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .unwrap();
+        let tracker = immediate(&action, 2);
+        let sample = crate::semantic_wire::PageDialogSample {
+            a: 2,
+            i: 1,
+            g: 1,
+            before: vec![8],
+            after: vec![8, 9],
+        };
+        // An overlay can occlude/remove the opener; the independent frame sample
+        // remains the proof, not target state or completeness of scoped nodes.
+        let mut snapshot = snapshot_for_frame(
+            observation.frames()[0].frame().clone(),
+            2,
+            2,
+            "node_limit",
+            json!([{"k": 40, "r": "dialog"}]),
+        );
+        snapshot.page_dialog_sample = Some(sample.clone());
+        let verify = |snapshot: &SemanticSnapshot| {
+            verify_semantic_action(
+                &tracker,
+                &action,
+                prepare_semantic_action_snapshot_evidence(
+                    &action,
+                    SemanticActionAttemptId::new(2).unwrap(),
+                    SemanticSettleInstant::from_millis(101),
+                    snapshot,
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            verify(&snapshot).unwrap().proof(),
+            SemanticEffectProofKind::PageDialogOpened
+        );
+        for field in [
+            "attempt",
+            "invocation",
+            "generation",
+            "existing",
+            "missing",
+            "skipped",
+            "origin",
+        ] {
+            let mut invalid = snapshot.clone();
+            match field {
+                "attempt" => invalid.page_dialog_sample.as_mut().unwrap().a += 1,
+                "invocation" => invalid.page_dialog_sample.as_mut().unwrap().i += 1,
+                "generation" => invalid.page_dialog_sample.as_mut().unwrap().g += 1,
+                "existing" => invalid.page_dialog_sample.as_mut().unwrap().before = vec![8, 9],
+                "missing" => invalid.page_dialog_sample = None,
+                "skipped" => {
+                    invalid = snapshot_for_frame(
+                        observation.frames()[0].frame().clone(),
+                        3,
+                        3,
+                        "complete",
+                        json!([{"k": 40, "r": "dialog"}]),
+                    );
+                    invalid.page_dialog_sample = Some(sample.clone());
+                }
+                "origin" => {
+                    let frame = SemanticFrameJoin::try_new(
+                        observation.request().context(),
+                        FrameId::MAIN,
+                        FrameGeneration::INITIAL,
+                        SemanticOrigin::parse("https://another.example.test/").unwrap(),
+                        SemanticFrameTrust::SameOrigin,
+                    )
+                    .unwrap();
+                    invalid = snapshot_for_frame(frame, 2, 2, "complete", json!([]));
+                    invalid.page_dialog_sample = Some(sample.clone());
+                }
+                _ => unreachable!(),
+            }
+            assert!(verify(&invalid).is_err(), "accepted {field}");
+        }
+    }
+
+    #[test]
+    fn page_dialog_close_requires_a_removed_correlated_dialog() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(8).unwrap(),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::PageDialogClosed,
+        )
+        .unwrap();
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .unwrap();
+        let tracker = immediate(&action, 2);
+        let mut snapshot = snapshot_for_frame(
+            observation.frames()[0].frame().clone(),
+            2,
+            2,
+            "complete",
+            json!([{"k": 1, "r": "document"}]),
+        );
+        snapshot.page_dialog_sample = Some(crate::semantic_wire::PageDialogSample {
+            a: 2,
+            i: 1,
+            g: 1,
+            before: vec![9],
+            after: vec![],
+        });
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence)
+                .unwrap()
+                .proof(),
+            SemanticEffectProofKind::PageDialogClosed
+        );
+
+        // Closing one dialog may reveal a different dialog, e.g. cookie choices.
+        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![10];
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence)
+                .unwrap()
+                .proof(),
+            SemanticEffectProofKind::PageDialogClosed
+        );
+        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![9, 10];
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence),
+            Err(SemanticVerificationError::OutcomeNotObserved)
+        );
+
+        snapshot.page_dialog_sample.as_mut().unwrap().before = vec![8, 9];
+        snapshot.page_dialog_sample.as_mut().unwrap().after = vec![8];
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &action,
+            SemanticActionAttemptId::new(2).unwrap(),
+            SemanticSettleInstant::from_millis(101),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_semantic_action(&tracker, &action, evidence),
+            Err(SemanticVerificationError::OutcomeNotObserved)
+        );
+    }
+
+    #[test]
     fn target_state_requires_a_real_transition_and_exact_adjacent_snapshot() {
         let (observation, _) = observation();
         assert_eq!(
@@ -1598,6 +2390,39 @@ mod tests {
             ),
             Err(SemanticVerificationError::IncompleteSnapshot)
         );
+        for (witness, invocation, state, accepted) in [
+            (Some(true), 2, 1, true),
+            (Some(false), 2, 1, false),
+            (None, 2, 1, false),
+            (Some(true), 3, 1, false),
+            (Some(true), 2, 0, false),
+        ] {
+            let mut node = json!({"k":4,"p":0,"r":"checkbox","n":"Private toggle","s":state,"o":1});
+            if let Some(witness) = witness {
+                node["fc"] = json!(witness);
+            }
+            let partial = snapshot_for_frame(
+                observation.frames()[0].frame().clone(),
+                invocation,
+                2,
+                "node_limit",
+                json!([{"k":1,"r":"document","o":16},node]),
+            );
+            let verified = verify_semantic_action(
+                &tracker,
+                action,
+                SemanticEffectEvidence::snapshot(
+                    SemanticActionAttemptId::new(2).unwrap(),
+                    SemanticSettleInstant::from_millis(102),
+                    &partial,
+                ),
+            );
+            assert_eq!(
+                verified.is_ok(),
+                accepted,
+                "local witness {witness:?}/{invocation}/{state}"
+            );
+        }
     }
 
     #[test]
@@ -1828,6 +2653,83 @@ mod tests {
             ),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn scroll_snapshot_requires_exact_adjacent_sample_and_real_movement() {
+        for amount in [SemanticScrollAmount::Page, SemanticScrollAmount::IntoView] {
+            let (observation, _) = observation();
+            let batch = bind(
+                &observation,
+                SemanticActionIntent::Scroll {
+                    target: SemanticReferenceId::new(1).unwrap(),
+                    direction: SemanticScrollDirection::Down,
+                    amount,
+                },
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::ScrollPositionChanged,
+            )
+            .unwrap();
+            let action = batch.actions()[0]
+                .prepare(&observation.frames()[0])
+                .unwrap();
+            let tracker = immediate(&action, 7);
+            let mut snapshot = current(&observation, json!([{ "k": 1, "r": "document", "o": 16 }]));
+            snapshot.scroll_sample = Some(crate::semantic_wire::ScrollSample {
+                a: 7,
+                i: action.checkpoint_invocation().get(),
+                g: action.checkpoint_snapshot().get(),
+                t: action.target_key().get(),
+                before: [0, 10],
+                after: [0, 300],
+                visible: (amount == SemanticScrollAmount::IntoView).then_some(true),
+            });
+            let verify = |snapshot: &SemanticSnapshot| {
+                verify_semantic_action(
+                    &tracker,
+                    &action,
+                    prepare_semantic_action_snapshot_evidence(
+                        &action,
+                        SemanticActionAttemptId::new(7).unwrap(),
+                        SemanticSettleInstant::from_millis(101),
+                        snapshot,
+                    )
+                    .unwrap(),
+                )
+            };
+            assert_eq!(
+                verify(&snapshot).unwrap().proof(),
+                SemanticEffectProofKind::Scroll
+            );
+            for corruption in [
+                "attempt",
+                "invocation",
+                "generation",
+                "target",
+                "stationary",
+                "wrong_direction",
+                "missing",
+                "visibility",
+            ] {
+                let mut invalid = snapshot.clone();
+                let sample = invalid.scroll_sample.as_mut().unwrap();
+                match corruption {
+                    "attempt" => sample.a += 1,
+                    "invocation" => sample.i += 1,
+                    "generation" => sample.g += 1,
+                    "target" => sample.t += 1,
+                    "stationary" => sample.after = sample.before,
+                    "wrong_direction" if amount == SemanticScrollAmount::IntoView => {
+                        sample.visible = None
+                    }
+                    "wrong_direction" => sample.after = [0, 0],
+                    "visibility" => sample.visible = Some(false),
+                    "missing" => invalid.scroll_sample = None,
+                    _ => unreachable!(),
+                }
+                assert!(verify(&invalid).is_err(), "{corruption}");
+            }
+        }
     }
 
     #[test]

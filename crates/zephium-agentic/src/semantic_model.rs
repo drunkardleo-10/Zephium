@@ -90,6 +90,25 @@ impl SemanticModelEncodingBudget {
         token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
     };
 
+    /// Terminal extraction has a different representation contract from an
+    /// initial observation. Preserve the full STANDARD read: up to 64 KiB for
+    /// escaped values (2 * 32 KiB), 16 KiB for its 128 rows, the original 16-KiB
+    /// admitted frame-provenance envelope, and 16 KiB for the bounded schema /
+    /// framing. This changes no capture/read/request/run limit. Actual encoded
+    /// bytes are only a conservative preflight to whole-request exact counting,
+    /// never an allocation, charge or token-count claim for the ceiling itself.
+    pub const EXTRACTION_PROVIDER_EXACT_CONSERVATIVE: Self = Self {
+        max_bytes: 2 * crate::SemanticReadBudget::STANDARD.max_bytes()
+            + 128 * crate::SemanticReadBudget::STANDARD.max_items() as u32
+            + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
+            + 16 * 1024,
+        max_tokens: 2 * crate::SemanticReadBudget::STANDARD.max_bytes()
+            + 128 * crate::SemanticReadBudget::STANDARD.max_items() as u32
+            + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
+            + 16 * 1024,
+        token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
+    };
+
     /// Initial snapshot budget for a provider with an exact counting path.
     pub const INITIAL_EXACT: Self = Self {
         max_bytes: 32 * 1024,
@@ -620,6 +639,44 @@ pub enum SemanticModelDeliveryError {
     Cancelled,
 }
 
+/// Fits one captured main-frame observation without altering any retained node or ref.
+/// Whole trailing nodes are omitted only when necessary; their absence is explicitly
+/// classified as host projection truncation. The returned observation must replace
+/// the original for all model, policy, evidence and continuation joins.
+/// A smallest-root refusal remains explicit; this never increases the byte budget.
+pub fn fit_semantic_observation_for_model(
+    observation: SemanticObservation,
+    budget: SemanticModelEncodingBudget,
+) -> Result<SemanticObservation, SemanticModelEncodingError> {
+    match encode_semantic_observation(&observation, budget) {
+        Ok(_) => return Ok(observation),
+        Err(SemanticModelEncodingError::OutputLimit) => {}
+        Err(error) => return Err(error),
+    }
+    let mut low = 1usize;
+    let mut high = usize::from(observation.node_count()).saturating_sub(1);
+    let mut best = None;
+    // Preorder prefixes retain every ancestor; exact encoding grows monotonically
+    // with retained nodes. At most log2(node_count) bounded encodings are needed.
+    while low <= high {
+        let count = low + (high - low) / 2;
+        let candidate = observation
+            .model_prefix(count)
+            .ok_or(SemanticModelEncodingError::OutputLimit)?;
+        match encode_semantic_observation(&candidate, budget) {
+            Ok(_) => {
+                best = Some(candidate);
+                low = count + 1;
+            }
+            Err(SemanticModelEncodingError::OutputLimit) => {
+                high = count - 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    best.ok_or(SemanticModelEncodingError::OutputLimit)
+}
+
 /// Encodes one complete observation into deterministic compact `ZSEM3` lines.
 pub fn encode_semantic_observation(
     observation: &SemanticObservation,
@@ -696,18 +753,34 @@ pub fn encode_semantic_observation(
             } else {
                 output.push("-")?;
             }
-            checked_write(
-                &mut output,
-                format_args!(
-                    " r={} q={} src={}",
-                    role_label(node.role()),
-                    sensitivity_label(node.sensitivity()),
-                    source_label(node.trust()),
-                ),
-            )?;
+            // q=public and src=page are the defaults and are left out.
+            checked_write(&mut output, format_args!(" r={}", role_label(node.role())))?;
+            if node.sensitivity() != SemanticSensitivity::Public {
+                checked_write(
+                    &mut output,
+                    format_args!(" q={}", sensitivity_label(node.sensitivity())),
+                )?;
+            }
+            if node.trust() != SemanticTrust::UntrustedPage {
+                checked_write(
+                    &mut output,
+                    format_args!(" src={}", source_label(node.trust())),
+                )?;
+            }
             if let Some(level) = node.heading_level() {
                 checked_write(&mut output, format_args!(" level={}", level.get()))?;
             }
+            if let Some(kind) = node.landmark_kind() {
+                checked_write(&mut output, format_args!(" landmark={}", kind.label()))?;
+            }
+            if let Some(target) = node.link_destination() {
+                output.push(" destination=")?;
+                write_quoted(&mut output, target.as_url().as_str())?;
+            }
+            if node.image_source().is_some() {
+                output.push(" image_source_available=true")?;
+            }
+            write_disclosure(&mut output, node)?;
             write_states(&mut output, node.states())?;
             write_operations(&mut output, node.operations())?;
             if let Some(name) = node.name() {
@@ -917,6 +990,20 @@ pub(crate) fn write_states(
     Ok(())
 }
 
+pub(crate) fn write_disclosure(
+    output: &mut BoundedModelBuffer,
+    node: &crate::SemanticNode,
+) -> Result<(), SemanticModelEncodingError> {
+    if node.activation() == Some(crate::SemanticActivation::Disclosure) {
+        output.push(if node.states().contains(SemanticState::Expanded) {
+            " disclosure=expanded"
+        } else {
+            " disclosure=collapsed"
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn write_operations(
     output: &mut BoundedModelBuffer,
     operations: crate::SemanticOperations,
@@ -994,7 +1081,7 @@ fn write_frame_boundary(
     }
 }
 
-fn scope_label(scope: &SemanticScope) -> &'static str {
+pub(crate) fn scope_label(scope: &SemanticScope) -> &'static str {
     match scope {
         SemanticScope::Initial => "initial",
         SemanticScope::Region(_) => "region",
@@ -1002,6 +1089,7 @@ fn scope_label(scope: &SemanticScope) -> &'static str {
         SemanticScope::Table(_) => "table",
         SemanticScope::Frame(_) => "frame",
         SemanticScope::SurroundingText { .. } => "surrounding_text",
+        SemanticScope::TextSearch { .. } => "text_search",
     }
 }
 
@@ -1013,16 +1101,20 @@ pub(crate) fn frame_trust_label(trust: SemanticFrameTrust) -> &'static str {
     }
 }
 
-fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
+pub(crate) fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
     match completeness {
         SemanticCompleteness::Complete => "complete",
         SemanticCompleteness::Truncated(SemanticTruncation::NodeLimit) => "truncated_nodes",
         SemanticCompleteness::Truncated(SemanticTruncation::TextLimit) => "truncated_text",
+        SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => "truncated_field",
         SemanticCompleteness::Truncated(SemanticTruncation::DepthLimit) => "truncated_depth",
         SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit) => {
             "truncated_inspection"
         }
         SemanticCompleteness::Truncated(SemanticTruncation::WireLimit) => "truncated_wire",
+        SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit) => {
+            "truncated_model_projection"
+        }
         SemanticCompleteness::Truncated(SemanticTruncation::ScopeBoundary) => "truncated_scope",
         SemanticCompleteness::Truncated(SemanticTruncation::UnsupportedFrame) => "truncated_frame",
     }
@@ -1234,6 +1326,7 @@ mod tests {
                     "p": 0,
                     "r": "button",
                     "n": "N @a99 p=- r=button",
+                    "ak": 6,
                     "s": 64,
                     "o": 1,
                     "b": {"x": 1, "y": 2, "w": 30, "h": 40}
@@ -1258,6 +1351,10 @@ mod tests {
     }
 
     fn observation_with_text_value(value: &str) -> SemanticObservation {
+        observation_with_fill_support(value, None)
+    }
+
+    fn observation_with_fill_support(value: &str, support: Option<u8>) -> SemanticObservation {
         let baseline = observation();
         let frame = baseline.frames()[0].frame().clone();
         let context = baseline.request().context();
@@ -1269,7 +1366,8 @@ mod tests {
             "n": [
                 {"k": 9101, "r": "document", "o": 16},
                 {"k": 9102, "p": 0, "r": "textbox", "n": "Long value",
-                 "v": {"k": "text", "value": value}, "o": 11}
+                 "v": {"k": "text", "value": value}, "o": 11, "fs": support,
+                 "es": support.map(|_| (1, 1, false)), "fc": support.map(|_| true)}
             ]
         }))
         .expect("wire");
@@ -1380,6 +1478,22 @@ mod tests {
     }
 
     #[test]
+    fn host_fill_and_completeness_metadata_never_enter_provider_projection() {
+        let encoding_budget = budget(8192, 1000, SemanticTokenCountRequirement::Exact);
+        let plain = encode_semantic_observation(
+            &observation_with_fill_support("fixture", None),
+            encoding_budget,
+        )
+        .unwrap();
+        let diagnostic = encode_semantic_observation(
+            &observation_with_fill_support("fixture", Some(1)),
+            encoding_budget,
+        )
+        .unwrap();
+        assert_eq!(plain.content, diagnostic.content);
+    }
+
+    #[test]
     fn compact_encoding_is_deterministic_delimited_and_secret_safe() {
         let observation = observation();
         let encoding_budget = budget(8192, 1000, SemanticTokenCountRequirement::Exact);
@@ -1389,13 +1503,14 @@ mod tests {
         assert!(first
             .content
             .starts_with("ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=4\n"));
-        assert!(first.content.contains(
-            "r=heading q=public src=page level=1 name=\"Repo \\\"settings\\\"\\\\path\\u2028tail\""
-        ));
         assert!(first
             .content
-            .contains("r=password q=secret src=page ops=fill name=\"Password\" value=[redacted]"));
+            .contains("r=heading level=1 name=\"Repo \\\"settings\\\"\\\\path\\u2028tail\""));
+        assert!(first
+            .content
+            .contains("r=password q=secret ops=fill name=\"Password\" value=[redacted]"));
         assert!(first.content.contains("name=\"N @a99 p=- r=button\""));
+        assert!(first.content.contains("disclosure=collapsed"));
         assert!(!first.content.contains(" rect="));
         assert_eq!(first.content.lines().count(), 6);
         assert_eq!(first.content.matches("\nN ").count(), 4);
@@ -1424,7 +1539,7 @@ mod tests {
             .content
             .starts_with("ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=5\n"));
         assert!(encoded.content.contains(
-            "r=combobox q=public src=page ops=click,select,press name=\"Language\" value=0 options=2 option_refs=locate selected=\"English\""
+            "r=combobox ops=click,select,press name=\"Language\" value=0 options=2 option_refs=locate selected=\"English\""
         ));
         assert!(!encoded.content.contains("name=\"Deutsch\""));
         assert!(encoded.content.contains("name=\"Polski\""));
@@ -1448,6 +1563,18 @@ mod tests {
         assert!(encoded.content.contains("name=\"English\""));
         assert!(encoded.content.contains("name=\"Deutsch\""));
         assert!(!encoded.content.contains(" options="));
+    }
+
+    #[test]
+    fn initial_snapshot_preserves_explicit_empty_native_value() {
+        let encoded = encode_semantic_observation(
+            &observation_with_text_value(""),
+            budget(8192, 1000, SemanticTokenCountRequirement::Exact),
+        )
+        .expect("encode empty value");
+        assert!(encoded
+            .content
+            .contains("name=\"Long value\" value=\"\" source_bytes=0 truncated=false\n"));
     }
 
     #[test]

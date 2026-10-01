@@ -1,0 +1,147 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<title>Local owned capability qualification</title>
+<style>body { font: 16px system-ui; margin: 24px } h3 { font-size: 14px } input { display:block; margin:12px }</style>
+<main>
+<button id="prepare" aria-label="Primary semantic action" aria-expanded="false">Prepare fixed editor</button>
+<input id="editor" aria-label="Surface probe editor" value="original" autocomplete="off">
+<input id="file" type="file" aria-label="Surface file control">
+<h3 id="setup">Surface setup pending</h3><h3 id="witness">Surface witness pending</h3>
+</main>
+<script>
+(() => {
+  'use strict';
+  const selected = location.hash.slice(1);
+  if (selected.startsWith('isolated-fill-')) {
+    const kind = selected.slice('isolated-fill-'.length);
+    if (!['normal','cancel','replace','adopt','retarget','protected','ancestor','div-rich','div-nested','div-identity','div-editable','div-structure','prepare-selection','prepare-ancestor'].includes(kind)) return;
+    const old = document.getElementById('editor');
+    const root = document.createElement('div'); root.contentEditable = 'true'; root.setAttribute('role','group');
+    root.innerHTML = '<span id="editor" contenteditable="true" role="textbox" aria-label="Surface probe editor">original</span><div contenteditable="false">Formatted sibling</div>';
+    // A small plain-text field inside a larger editing host. The middle
+    // wrapper inherits editability; the unrelated rich field is never selected.
+    const host=document.createElement('div');host.contentEditable='true';host.setAttribute('role','group');
+    const wrapper=document.createElement('div');wrapper.setAttribute('role','group');host.append(wrapper);wrapper.append(root);
+    const outside=document.createElement('div');outside.innerHTML='<b>Unrelated rich field</b>';host.append(outside);
+    old.replaceWith(host);
+    const leaf = root.firstChild, sibling = root.lastChild;
+    let protectedNode=sibling;
+    if(kind==='div-rich')sibling.innerHTML='<b>Formatted sibling</b>';
+    if(kind==='div-nested')sibling.innerHTML='<div contenteditable="false">Formatted sibling</div>';
+    const decoy = document.createElement('input'); decoy.value = 'decoy original'; decoy.setAttribute('aria-label','Command decoy'); root.after(decoy);
+    const frame = document.createElement('iframe'); document.body.append(frame);
+    const child = frame.contentDocument;
+    let before = 0, inputs = 0, trusted = false, active = false, sticky = false, model = 'original', eventHost = true;
+    let preparationChanged=false;
+    const publish = () => {
+      document.getElementById('witness').textContent = `Command fill witness ${kind} before ${before} inputs ${inputs} trusted ${trusted} active ${active} sticky ${sticky} sibling ${sibling.parentNode===root&&sibling.contentEditable==='false'&&Array.from(sibling.childNodes).every(node=>node.nodeType===3)&&sibling.textContent==='Formatted sibling'} model ${model==='local surface witness'?'replacement':model==='original'?'original':'other'} child ${leaf.ownerDocument===child} hidden ${document.hidden} spine ${root.parentNode===wrapper&&wrapper.parentNode===host&&host.contentEditable==='true'&&wrapper.isContentEditable&&root.isContentEditable} outside ${outside.parentNode===host&&outside.innerHTML==='<b>Unrelated rich field</b>'} event_host ${eventHost}`;
+      if(kind.startsWith('prepare-'))document.getElementById('witness').textContent+=` preparation_changed ${preparationChanged}`;
+    };
+    document.addEventListener('selectionchange',()=>{
+      if(!kind.startsWith('prepare-')||preparationChanged||document.getSelection().toString()!=='original')return;
+      preparationChanged=true;
+      if(kind==='prepare-selection'){
+        const range=document.createRange();range.selectNodeContents(outside);
+        const selection=document.getSelection();selection.removeAllRanges();selection.addRange(range);
+      } else host.contentEditable='plaintext-only';
+      publish();
+    });
+    host.addEventListener('beforeinput', event => {
+      before++;
+      eventHost=eventHost&&event.target===host;
+      if (kind==='cancel') event.preventDefault();
+      if (kind==='replace') leaf.replaceWith(leaf.cloneNode(true));
+      if (kind==='adopt') { child.body.append(child.adoptNode(leaf)); leaf.focus(); const r=child.createRange();r.selectNodeContents(leaf);const s=frame.contentWindow.getSelection();s.removeAllRanges();s.addRange(r); }
+      if (kind==='retarget') { decoy.focus();decoy.select(); }
+      if (kind==='protected') sibling.textContent='Page changed sibling';
+      if (kind==='div-identity') { protectedNode=sibling.cloneNode(true);sibling.replaceWith(protectedNode); }
+      if (kind==='div-editable') sibling.contentEditable='true';
+      if (kind==='div-structure') sibling.append(document.createElement('span'));
+      if (kind==='ancestor') host.contentEditable='plaintext-only';
+      publish();
+    });
+    host.addEventListener('input', event => {
+      eventHost=eventHost&&event.target===host;
+      inputs++;trusted=event.isTrusted;active=navigator.userActivation.isActive;sticky=navigator.userActivation.hasBeenActive;
+      model=Array.from(root.childNodes).filter(node=>node!==protectedNode).map(node=>node.textContent).join('');
+      queueMicrotask(()=>{const next=document.createElement('span');next.contentEditable='true';next.setAttribute('role','textbox');next.setAttribute('aria-label','Surface probe editor');next.textContent=model;root.replaceChildren(next,protectedNode);publish();});
+    });
+    document.getElementById('prepare').addEventListener('click', event => {
+      event.currentTarget.setAttribute('aria-expanded','true'); leaf.focus({preventScroll:true});
+      document.getElementById('setup').textContent='Surface setup prepared';publish();
+    },{once:true});
+    return;
+  }
+  const row = ['display-command', 'display-command-direct', 'display-document-start'].includes(selected) ? 'display' : selected;
+  if (!['ui', 'media', 'capture', 'display', 'passkey', 'geolocation'].includes(row)) return;
+  const editor = document.getElementById('editor');
+  const report = document.getElementById('witness');
+  const states = new Map();
+  let trusted = false, active = false, sticky = false, inputs = 0;
+  const publish = () => {
+    report.textContent = `Surface witness ${row} inputs ${inputs} trusted ${trusted} active ${active} sticky ${sticky} secure ${isSecureContext} ` +
+      Array.from(states, ([key, value]) => `${key} ${value}`).join(' ');
+  };
+  const safeError = error => ['NotAllowedError', 'SecurityError', 'NotSupportedError', 'AbortError', 'InvalidStateError', 'TypeError', 'NotFoundError'].includes(error?.name) ? error.name : 'other-error';
+  const attempt = (key, operation) => {
+    states.set(key, 'pending');
+    try {
+      Promise.resolve(operation()).then(result => {
+        // Never serialize credentials, device information, or exception messages.
+        if (result?.getTracks) result.getTracks().forEach(track => track.stop());
+        states.set(key, 'resolved'); publish();
+      }, error => { states.set(key, safeError(error)); publish(); });
+    } catch (error) { states.set(key, safeError(error)); }
+  };
+  editor.addEventListener('input', event => {
+    if (inputs++) return;
+    trusted = event.isTrusted; active = navigator.userActivation.isActive;
+    sticky = navigator.userActivation.hasBeenActive;
+    setTimeout(() => { states.set('timer', 'fired'); publish(); }, 1000);
+    if (row === 'ui') {
+      states.set('popup', window.open('about:blank', '_blank') === null ? 'denied' : 'admitted');
+      alert('Fixed local qualification alert'); states.set('alert', 'completed');
+      states.set('confirm', confirm('Fixed local qualification confirm') ? 'admitted' : 'denied');
+      states.set('prompt', prompt('Fixed local qualification prompt') === null ? 'denied' : 'admitted');
+      const file = document.getElementById('file');
+      file.addEventListener('cancel', () => { states.set('file', 'cancelled'); publish(); });
+      file.addEventListener('change', () => { states.set('file', file.files.length ? 'selected' : 'empty'); publish(); });
+      states.set('file', 'click-returned'); file.click();
+      window.close(); states.set('close', 'returned');
+    } else if (['media', 'capture', 'display'].includes(row)) {
+      if (row !== 'display') {
+        if (navigator.mediaDevices?.getUserMedia) attempt('capture', () => navigator.mediaDevices.getUserMedia({audio:true, video:true}));
+        else states.set('capture', 'unavailable');
+      }
+      if (row !== 'capture') {
+        if (navigator.mediaDevices?.getDisplayMedia) attempt('display', () => navigator.mediaDevices.getDisplayMedia({video:true}));
+        else states.set('display', 'unavailable');
+      }
+      if (document.documentElement.requestFullscreen) attempt('fullscreen', () => document.documentElement.requestFullscreen());
+      else states.set('fullscreen', 'unavailable');
+    } else if (row === 'geolocation') {
+      if (navigator.geolocation) {
+        states.set('location', 'pending');
+        navigator.geolocation.getCurrentPosition(() => { states.set('location', 'resolved'); publish(); },
+          error => { states.set('location', error.code === 1 ? 'denied' : error.code === 2 ? 'unavailable' : 'timeout'); publish(); },
+          {timeout:1000, maximumAge:0, enableHighAccuracy:false});
+      } else states.set('location', 'unavailable');
+    } else if (row === 'passkey') {
+      if (navigator.credentials?.get && window.PublicKeyCredential) {
+        const abort = new AbortController();
+        // Fixed nonexistent credential; no discoverable credential enumeration,
+        // credential creation, registration, provider, or remote relying party.
+        attempt('assertion', () => navigator.credentials.get({publicKey:{challenge:new Uint8Array(32).fill(19),
+          allowCredentials:[{type:'public-key', id:new Uint8Array(64).fill(29)}], timeout:1000,
+          userVerification:'discouraged'}, signal:abort.signal}));
+        setTimeout(() => { abort.abort(); states.set('abort', 'sent'); publish(); }, 800);
+      } else states.set('assertion', 'unavailable');
+    }
+    publish();
+  }, {once:true});
+  document.getElementById('prepare').addEventListener('click', event => {
+    event.currentTarget.setAttribute('aria-expanded', 'true');
+    editor.focus({preventScroll:true}); editor.select();
+    document.getElementById('setup').textContent = 'Surface setup prepared';
+  }, {once:true});
+})();
+</script></html>

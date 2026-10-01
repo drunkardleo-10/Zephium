@@ -2,10 +2,13 @@
   import * as m from "$shared/i18n/messages";
   import { Alert02Icon } from "@hugeicons/core-free-icons";
   import { settle } from "$domain/operations";
+  import { extensions } from "$domain/extensions";
+  import { webext } from "$domain/webext";
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
+  import Button from "$shared/ui/Button";
   import { flushSync, type Snippet } from "svelte";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import { addressSecurity, editingAddress, restingAddress } from "../lib/address-model";
@@ -27,6 +30,19 @@
   let composing = false;
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
+  let activeContent = $derived(tabs.activeTab()?.content ?? "web");
+  let listedId = $derived(webext.isAvailable() ? extensions.chromeStoreListingId(activeUrl) : null);
+  let listedInstalled = $derived(listedId === null ? null : webext.named(listedId));
+  let removing = $state(false);
+  $effect(() => {
+    void listedId;
+    removing = false;
+  });
+  let placeholder = $derived(
+    activeContent === "extension_owned"
+      ? "Extension page — enter an address to open a new tab"
+      : m.ui_enter_an_address(),
+  );
   let authoritativeValue = $derived(restingAddress(activeUrl));
   let value = $derived(editing ? draft : authoritativeValue);
   let security = $derived(addressSecurity(activeUrl));
@@ -47,6 +63,7 @@
     if (composing || pending || !value.trim()) return;
     const id = tabs.activeId();
     const profile = tabs.profile()?.id;
+    const opensNewTab = activeContent !== "web";
     const submitted = value;
     pending = true;
     failed = false;
@@ -56,7 +73,12 @@
           ? commands.browserOpenUrl(submitted, false)
           : commands.tabsNavigate(id, submitted),
       );
-      if (tabs.profile()?.id !== profile || (id !== null && tabs.activeId() !== id)) return;
+      if (tabs.profile()?.id !== profile) return;
+      if (id !== null && tabs.activeId() !== id) {
+        if (opensNewTab && result.outcome !== "failed" && result.outcome !== "rejected")
+          input.blur();
+        return;
+      }
       if (result.outcome === "failed" || result.outcome === "rejected") failed = true;
       else if (value === submitted) input.blur();
     } catch {
@@ -188,7 +210,7 @@
         autocomplete="off"
         autocapitalize="off"
         enterkeyhint="go"
-        placeholder={m.ui_enter_an_address()}
+        {placeholder}
         spellcheck="false"
         {value}
         oninput={handleInput}
@@ -213,6 +235,57 @@
 
     {#if !compact && trailing}{@render trailing()}{/if}
   </div>
+  {#if !compact && listedInstalled}
+    {#if removing}
+      <div
+        class="store-remove"
+        role="group"
+        aria-label={m.webext_remove_confirm({ name: listedInstalled.name })}
+      >
+        <span>{m.webext_remove_confirm({ name: listedInstalled.name })}</span>
+        <Button size="compact" variant="secondary" onclick={() => (removing = false)}
+          >{m.webext_keep()}</Button
+        >
+        <Button
+          size="compact"
+          variant="danger"
+          onclick={() => {
+            removing = false;
+            if (listedInstalled) void webext.uninstall(listedInstalled.id);
+          }}>{m.webext_remove()}</Button
+        >
+      </div>
+    {:else}
+      <Button
+        variant="secondary"
+        size="compact"
+        class="mt-2 w-full"
+        onclick={() => (removing = true)}>{m.webext_store_remove()}</Button
+      >
+    {/if}
+  {:else if !compact && listedId !== null}
+    <Button
+      variant="primary"
+      size="compact"
+      class="mt-2 w-full"
+      pending={webext.isInstalling()}
+      data-extension-store-install
+      title="Install this extension in Zephium"
+      onclick={() => {
+        const id = tabs.activeId();
+        if (id !== null) void webext.prepare(id);
+      }}
+    >
+      {webext.isPreparing()
+        ? "Preparing…"
+        : webext.isInstalling()
+          ? m.webext_store_installing()
+          : m.webext_store_install()}
+    </Button>
+    {#if webext.error() !== null && webext.review() === null}
+      <p class="mt-1 text-[11px] leading-4 text-danger" role="alert">{webext.error()}</p>
+    {/if}
+  {/if}
   {#if failed}<p id="address-error" role="alert" class="sr-only">{m.browser_nav_failed()}</p>{/if}
   {#if tabs.activeTab()?.popup_blocked}
     <p class="popup-notice" role="status" title={m.address_popup_blocked()}>
@@ -223,6 +296,21 @@
 </form>
 
 <style>
+  .store-remove {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-block-start: 8px;
+    color: var(--color-label-secondary);
+    font-size: 11px;
+    line-height: 14px;
+  }
+
+  .store-remove > span {
+    flex: 1;
+    min-inline-size: 0;
+  }
+
   .popup-notice {
     display: flex;
     align-items: center;

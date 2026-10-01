@@ -9,6 +9,6 @@ try {
   mount(App, { target });
   // The native presentation barrier observes this DOM synchronously.
   flushSync();
-} catch {
-  console.error("trusted browser initialization failed");
+} catch (error) {
+  console.error("trusted browser initialization failed", error);
 }

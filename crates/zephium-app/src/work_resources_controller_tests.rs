@@ -6,6 +6,24 @@ use std::time::{Duration, Instant};
 use zephium_agent_controller::*;
 use zephium_agent_runtime::*;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "work_resources_durable_tests.rs"]
+mod durable_tests;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "work_resources_application_tests.rs"]
+mod application_tests;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "work_resources_product_tests.rs"]
+mod product_tests;
+
+#[path = "work_resources_navigation_tests.rs"]
+mod navigation_tests;
+
+#[path = "work_resources_action_tests.rs"]
+mod action_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
@@ -30,6 +48,31 @@ impl AgentAuditPort for Audit {
 }
 #[derive(Default)]
 struct Native {
+    hold_human: AtomicBool,
+    human: Mutex<
+        Option<(
+            WorkBrowserResourceRequest,
+            WorkBrowserResourceCompletionCallback,
+        )>,
+    >,
+    hold_construct: AtomicBool,
+    construction: Mutex<
+        Option<(
+            WorkBrowserResourceRequest,
+            WorkBrowserResourceCompletionCallback,
+        )>,
+    >,
+    resource_sink: Mutex<Option<NativeSink>>,
+    allow_global_shutdown: AtomicBool,
+    global_sealed: AtomicBool,
+    global_audits: AtomicUsize,
+    hold_global_audit: AtomicBool,
+    pending_global_audit: Mutex<Option<ContextNativeEvent>>,
+    global_queued_debt: AtomicU8,
+    wrong_global_audit_kind: AtomicBool,
+    wrong_global_audit_identity: AtomicBool,
+    synchronous_global_seal: AtomicBool,
+    reject_global_audit: AtomicBool,
     reporters: Arc<Mutex<BTreeMap<ContextId, WorkBrowserResourceHealthReporter>>>,
     gate: Arc<AtomicBool>,
     tasks: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -40,15 +83,99 @@ struct Native {
         )>,
     >,
     hold_read: AtomicBool,
+    hold_expansion: AtomicBool,
+    region_root: AtomicBool,
+    dense_expansion: AtomicBool,
+    reject_expansion: AtomicBool,
+    missing_expansion_anchor: AtomicBool,
     not_ready: AtomicBool,
     reads: AtomicUsize,
+    observation_budgets: Mutex<Vec<SemanticRuntimeBudget>>,
     acquisitions: AtomicUsize,
     destructions: AtomicUsize,
     arm_notification: Mutex<Option<Arc<AtomicBool>>>,
     before_publication: Mutex<Option<mpsc::Receiver<()>>>,
     final_document: Mutex<Option<ContextNavigationTarget>>,
+    discovery: AtomicBool,
+    form_actions: AtomicBool,
+    form_applied: AtomicBool,
+    actions: AtomicUsize,
+    hold_action: AtomicBool,
+    reject_action: AtomicBool,
+    before_action_return: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    action: Mutex<
+        Option<(
+            WorkBrowserActionRequest,
+            WorkBrowserActionCompletionCallback,
+        )>,
+    >,
+    navigation_count: AtomicUsize,
+    hold_navigation: AtomicBool,
+    reject_navigation: AtomicBool,
+    after_navigation: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    navigation: Mutex<
+        Option<(
+            WorkBrowserNavigationRequest,
+            WorkBrowserNavigationCompletionCallback,
+        )>,
+    >,
 }
 impl Native {
+    fn release_construction(&self) {
+        self.hold_construct.store(false, Ordering::Release);
+        let (request, callback) = self.construction.lock().unwrap().take().unwrap();
+        assert!(matches!(
+            self.work_resource_lifecycle(request, callback),
+            WorkBrowserResourceDispatch::Scheduled
+        ));
+    }
+    fn global_audit(&self, audit: ContextResourceAuditId, shutdown: bool) {
+        let audit = if self.wrong_global_audit_identity.load(Ordering::Acquire) {
+            ContextResourceAuditId::new(audit.get() + 1).unwrap()
+        } else {
+            audit
+        };
+        let live = u8::try_from(self.reporters.lock().unwrap().len()).unwrap();
+        let snapshot = ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+            known_bindings: live,
+            resident_views: live,
+            owned_reservations: live,
+            borrowed_leases: 0,
+            visible_surfaces: 0,
+            suspended_views: 0,
+            pending_operations: u8::from(self.read.lock().unwrap().is_some()),
+            pending_captures: 0,
+            queued_tasks: self.global_queued_debt.load(Ordering::Acquire),
+        })
+        .unwrap();
+        self.global_audits.fetch_add(1, Ordering::AcqRel);
+        let event = if shutdown && !self.wrong_global_audit_kind.load(Ordering::Acquire) {
+            ContextNativeEvent::ShutdownAuditSettled(ContextShutdownAuditSettlement::new(
+                audit,
+                Ok(snapshot),
+            ))
+        } else {
+            ContextNativeEvent::ResourceAuditSettled(ContextResourceAuditSettlement::new(
+                audit,
+                Ok(snapshot),
+            ))
+        };
+        if self.hold_global_audit.load(Ordering::Acquire) {
+            assert!(self
+                .pending_global_audit
+                .lock()
+                .unwrap()
+                .replace(event)
+                .is_none());
+        } else {
+            self.resource_sink.lock().unwrap().as_ref().unwrap()(event);
+        }
+    }
+
+    fn release_global_audit(&self) {
+        let event = self.pending_global_audit.lock().unwrap().take().unwrap();
+        self.resource_sink.lock().unwrap().as_ref().unwrap()(event);
+    }
     fn read_result(
         request: WorkBrowserObservationRequest,
         callback: WorkBrowserObservationCompletionCallback,
@@ -74,6 +201,34 @@ impl AgentBrowserPort for Native {
         mut request: WorkBrowserResourceRequest,
         callback: WorkBrowserResourceCompletionCallback,
     ) -> WorkBrowserResourceDispatch {
+        if matches!(
+            request.operation(),
+            WorkBrowserResourceOperation::PresentHuman
+                | WorkBrowserResourceOperation::ContinueAfterHuman
+        ) {
+            if self.hold_human.load(Ordering::Acquire) {
+                assert!(self
+                    .human
+                    .lock()
+                    .unwrap()
+                    .replace((request, callback))
+                    .is_none());
+            } else {
+                finish_human_fixture(request, callback);
+            }
+            return WorkBrowserResourceDispatch::Scheduled;
+        }
+        if request.operation() == WorkBrowserResourceOperation::Construct
+            && self.hold_construct.load(Ordering::Acquire)
+        {
+            assert!(self
+                .construction
+                .lock()
+                .unwrap()
+                .replace((request, callback))
+                .is_none());
+            return WorkBrowserResourceDispatch::Scheduled;
+        }
         if self.gate.load(Ordering::Acquire)
             && matches!(
                 request.operation(),
@@ -87,6 +242,8 @@ impl AgentBrowserPort for Native {
             };
         }
         let outcome = match request.operation() {
+            WorkBrowserResourceOperation::PresentHuman
+            | WorkBrowserResourceOperation::ContinueAfterHuman => unreachable!("handled above"),
             WorkBrowserResourceOperation::Construct => {
                 let reporter = request.take_resource_health_reporter().unwrap();
                 assert!(reporter.install(request.resource()));
@@ -159,17 +316,105 @@ impl AgentBrowserPort for Native {
         callback: WorkBrowserObservationCompletionCallback,
     ) -> WorkBrowserObservationDispatch {
         self.reads.fetch_add(1, Ordering::AcqRel);
+        self.observation_budgets
+            .lock()
+            .unwrap()
+            .push(request.invocation().budget());
+        let expansion = request.invocation().scope() != SemanticRuntimeScopeClass::Initial;
+        if expansion && self.missing_expansion_anchor.swap(false, Ordering::AcqRel) {
+            let (_, completion) = request.into_parts();
+            callback(completion.settle(Err(SemanticRuntimePortFailure::Result(
+                SemanticRuntimeResultError::Runtime(SemanticRuntimeFault::AnchorMissing),
+            ))));
+            return WorkBrowserObservationDispatch::Scheduled;
+        }
+        if expansion && self.reject_expansion.load(Ordering::Acquire) {
+            return WorkBrowserObservationDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::NativeRefused,
+            };
+        }
         if self.not_ready.swap(false, Ordering::AcqRel) {
             let (_, completion) = request.into_parts();
             callback(completion.settle(Err(SemanticRuntimePortFailure::NotReady)));
             return WorkBrowserObservationDispatch::Scheduled;
         }
-        if self.hold_read.load(Ordering::Acquire) {
+        if self.hold_read.load(Ordering::Acquire)
+            || (expansion && self.hold_expansion.load(Ordering::Acquire))
+        {
             *self.read.lock().unwrap() = Some((request, callback));
         } else {
-            Self::read_result(request, callback);
+            if self.form_actions.load(Ordering::Acquire) {
+                action_tests::read_result(self, request, callback);
+            } else if self.discovery.load(Ordering::Acquire) {
+                navigation_tests::read_result(self, request, callback);
+            } else {
+                Self::read_result(request, callback);
+            }
         }
         WorkBrowserObservationDispatch::Scheduled
+    }
+    fn work_resource_act(
+        &self,
+        request: WorkBrowserActionRequest,
+        callback: WorkBrowserActionCompletionCallback,
+    ) -> WorkBrowserActionDispatch {
+        assert!(self.form_actions.load(Ordering::Acquire));
+        self.actions.fetch_add(1, Ordering::AcqRel);
+        if self.reject_action.load(Ordering::Acquire) {
+            drop(callback);
+            return WorkBrowserActionDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::NativeRefused,
+            };
+        }
+        if self.hold_action.load(Ordering::Acquire) {
+            assert!(self
+                .action
+                .lock()
+                .unwrap()
+                .replace((request, callback))
+                .is_none());
+        } else {
+            action_tests::action_result(self, request, callback);
+        }
+        WorkBrowserActionDispatch::Scheduled
+    }
+    fn work_resource_navigate(
+        &self,
+        request: WorkBrowserNavigationRequest,
+        callback: WorkBrowserNavigationCompletionCallback,
+    ) -> WorkBrowserNavigationDispatch {
+        assert!(
+            self.discovery.load(Ordering::Acquire),
+            "only explicit discovery fixtures navigate"
+        );
+        self.navigation_count.fetch_add(1, Ordering::AcqRel);
+        if self.reject_navigation.load(Ordering::Acquire) {
+            drop(callback);
+            if let Some(action) = self.after_navigation.lock().unwrap().take() {
+                action();
+            }
+            return WorkBrowserNavigationDispatch::Rejected {
+                request: Box::new(request),
+                failure: ContextPortFailure::NativeRefused,
+            };
+        }
+        if self.hold_navigation.load(Ordering::Acquire) {
+            assert!(self
+                .navigation
+                .lock()
+                .unwrap()
+                .replace((request, callback))
+                .is_none());
+        } else {
+            let target = request.navigation().target().clone();
+            callback(request.into_completion().settle(Ok(target)));
+        }
+        if let Some(action) = self.after_navigation.lock().unwrap().take() {
+            action();
+        }
+        WorkBrowserNavigationDispatch::Scheduled
     }
     fn dispatch(&self, _: ContextNativeRequest) -> ContextDispatch {
         panic!("retained path has no legacy context capability")
@@ -187,8 +432,15 @@ impl AgentBrowserPort for Native {
     fn transfer_cookies(&self, _: ContextCookieTransferRequest) -> ContextDispatch {
         panic!("no retained cookie authority")
     }
-    fn audit_resources(&self, _: ContextResourceAuditId) -> ContextDispatch {
-        ContextDispatch::Unsupported
+    fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch {
+        if !self.allow_global_shutdown.load(Ordering::Acquire)
+            || !self.global_sealed.load(Ordering::Acquire)
+            || self.reject_global_audit.load(Ordering::Acquire)
+        {
+            return ContextDispatch::Unsupported;
+        }
+        self.global_audit(audit, false);
+        ContextDispatch::Scheduled
     }
     fn capture_semantic_screenshot(
         &self,
@@ -197,8 +449,19 @@ impl AgentBrowserPort for Native {
     ) -> ContextDispatch {
         panic!("no retained screenshot authority")
     }
-    fn seal_for_shutdown(&self, _: ContextResourceAuditId) -> ContextShutdownDispatch {
-        // This fixture never manufactures a global native shutdown proof.
+    fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
+        if self.allow_global_shutdown.load(Ordering::Acquire)
+            && !self.global_sealed.swap(true, Ordering::AcqRel)
+        {
+            if self.synchronous_global_seal.load(Ordering::Acquire) {
+                return ContextShutdownDispatch::SealedWithoutAudit(
+                    ContextPortFailure::NativeRefused,
+                );
+            }
+            self.global_audit(audit, true);
+            return ContextShutdownDispatch::AuditScheduled;
+        }
+        // Ordinary scoped fixtures do not opt into global native shutdown.
         ContextShutdownDispatch::SealedWithoutAudit(ContextPortFailure::NativeRefused)
     }
 }
@@ -237,14 +500,47 @@ fn setup_with_document_policy(
     WorkBrowserResourceJoin,
     RetainedBrowser,
 ) {
+    let (owner, native, resource) = construct_fixture(storage, policy, effective);
+    let mut acquire = owner
+        .acquire(
+            &resource,
+            ContextRunId::generate(),
+            now(),
+            AgentPolicyInstant::from_millis(600_002),
+        )
+        .unwrap();
+    let Some(LifecycleResult::Event(WorkBrowserResourceEvent::Acquired(lease))) =
+        acquire.poll(now()).unwrap()
+    else {
+        panic!("original acquisition")
+    };
+    let browser = owner.retained_browser(lease, now()).unwrap();
+    (owner, native, resource, browser)
+}
+fn construct_fixture(
+    storage: ContextProfileStorageClass,
+    policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    effective: Option<ContextNavigationTarget>,
+) -> (WorkResourceOwner, Arc<Native>, WorkBrowserResourceJoin) {
+    construct_fixture_with_wake(storage, policy, effective, Arc::new(|| true))
+}
+fn construct_fixture_with_wake(
+    storage: ContextProfileStorageClass,
+    policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    effective: Option<ContextNavigationTarget>,
+    wake: WakeApplication,
+) -> (WorkResourceOwner, Arc<Native>, WorkBrowserResourceJoin) {
     let native = Arc::new(Native::default());
     *native.final_document.lock().unwrap() = effective;
     let port = native.clone();
     let owner = WorkResourceOwner::new(
         WorkId::generate(),
         ProfileId::generate(),
-        Arc::new(|| true),
-        Box::new(move |_| Some(port)),
+        wake,
+        Box::new(move |sink| {
+            *port.resource_sink.lock().unwrap() = Some(sink);
+            Some(port)
+        }),
     )
     .unwrap();
     let mut construct = owner
@@ -262,21 +558,7 @@ fn setup_with_document_policy(
     else {
         panic!("original construction")
     };
-    let mut acquire = owner
-        .acquire(
-            &resource,
-            ContextRunId::generate(),
-            now(),
-            AgentPolicyInstant::from_millis(600_002),
-        )
-        .unwrap();
-    let Some(LifecycleResult::Event(WorkBrowserResourceEvent::Acquired(lease))) =
-        acquire.poll(now()).unwrap()
-    else {
-        panic!("original acquisition")
-    };
-    let browser = owner.retained_browser(lease, now()).unwrap();
-    (owner, native, resource, browser)
+    (owner, native, resource)
 }
 fn input(binding: &WorkBrowserReadBinding, clock: Arc<Clock>) -> AgentWorkRunInput {
     input_with_source(
@@ -309,9 +591,114 @@ fn input_with_budget(
 ) -> AgentWorkRunInput {
     let identity = binding.frame().context().identity();
     let origin = binding.frame().origin().clone();
-    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
+    input_for_context(identity, origin, clock, storage, target, budget)
+}
+fn input_for_context(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<Clock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+) -> AgentWorkRunInput {
+    input_for_context_until(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        Instant::now() + Duration::from_secs(600),
+    )
+}
+fn input_for_context_until(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<Clock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    deadline: Instant,
+) -> AgentWorkRunInput {
+    input_for_context_authority(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        (deadline, None),
+    )
+}
+fn input_for_context_authority(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<dyn TerraControllerClock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
+) -> AgentWorkRunInput {
+    input_for_context_authority_with_document_policy(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        (deadline, discovery),
+        WorkBrowserDocumentPolicy::Exact,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn input_for_context_authority_with_document_policy(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<dyn TerraControllerClock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
+    document_policy: WorkBrowserDocumentPolicy,
+) -> AgentWorkRunInput {
+    input_for_context_effects(
+        identity,
+        origin,
+        clock,
+        storage,
+        target,
+        budget,
+        (deadline, discovery),
+        document_policy,
+        AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap(),
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn input_for_context_effects(
+    identity: ContextIdentity,
+    origin: SemanticOrigin,
+    clock: Arc<dyn TerraControllerClock>,
+    storage: ContextProfileStorageClass,
+    target: ContextNavigationTarget,
+    budget: AgentRunBudget,
+    (deadline, discovery): (Instant, Option<AgentNavigationDiscovery>),
+    document_policy: WorkBrowserDocumentPolicy,
+    effects: AgentEffectScope,
+) -> AgentWorkRunInput {
     let node = AgentPlanNodeId::generate();
     let expires = AgentPolicyInstant::from_millis(600_002);
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![identity.profile()],
+        vec![AgentAccountScope::Anonymous],
+        vec![origin.clone()],
+        SemanticSensitivity::Public,
+        effects,
+    )
+    .unwrap();
+    let authority = match discovery {
+        Some(scope) => authority.with_navigation_discovery(scope).unwrap(),
+        None => authority,
+    };
     let manifest = AgentRunManifest::try_new(
         AgentRunManifestId::generate(),
         identity.owner(),
@@ -327,19 +714,7 @@ fn input_with_budget(
         budget,
         AgentPolicyInstant::from_millis(1),
         expires,
-        vec![AgentPlanNodeScope::new(
-            node,
-            AgentPlanNodeAuthority::try_new(
-                vec![identity.profile()],
-                vec![AgentAccountScope::Anonymous],
-                vec![origin],
-                SemanticSensitivity::Public,
-                effects,
-            )
-            .unwrap(),
-            budget,
-            expires,
-        )],
+        vec![AgentPlanNodeScope::new(node, authority, budget, expires)],
     )
     .unwrap();
     let ids = TerraControllerIds::try_new(
@@ -354,14 +729,15 @@ fn input_with_budget(
     AgentWorkRunInput::try_new(
         manifest,
         AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
-        AgentWorkContextSpec::try_new(identity, storage, target).unwrap(),
+        AgentWorkContextSpec::try_new_with_document_policy(
+            identity,
+            storage,
+            target,
+            document_policy,
+        )
+        .unwrap(),
         "Read the current page and extract its label with source evidence.".into(),
-        AgentWorkRunSettings::new(
-            AgentBrowserModel::Luna,
-            ids,
-            clock,
-            Instant::now() + Duration::from_secs(600),
-        ),
+        AgentWorkRunSettings::new(AgentBrowserModel::Luna, ids, clock, deadline),
     )
     .unwrap()
 }
@@ -445,32 +821,79 @@ fn retained_admission_requires_exact_frozen_target_and_original_storage_class() 
 #[test]
 fn startup_finalized_binding_reaches_common_controller_without_rebasing_original_request() {
     let requested = "https://retained-fixture.invalid/frozen";
-    let final_url = "https://retained-fixture.invalid/frozen?opaque=one";
-    for (input_url, invalidate, accepted) in [
-        (final_url, false, true),
-        (requested, false, false),
+    let finalized = "https://retained-fixture.invalid/frozen?opaque=one";
+    for (row_policy, effective_url, input_url, input_policy, invalidate, accepted) in [
         (
-            "https://retained-fixture.invalid/frozen?opaque=two",
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            false,
+            true,
+        ),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some("https://retained-fixture.invalid/frozen?opaque=two"),
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            false,
+            true,
+        ),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            finalized,
+            WorkBrowserDocumentPolicy::Exact,
             false,
             false,
         ),
-        (final_url, true, false),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            requested,
+            WorkBrowserDocumentPolicy::Exact,
+            false,
+            false,
+        ),
+        (
+            WorkBrowserDocumentPolicy::Exact,
+            None,
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            false,
+            false,
+        ),
+        (
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            Some(finalized),
+            requested,
+            WorkBrowserDocumentPolicy::InitialQueryFinalization,
+            true,
+            false,
+        ),
     ] {
         let (owner, native, resource, browser) = setup_with_document_policy(
             ContextProfileStorageClass::Ephemeral,
-            zephium_agentic::WorkBrowserDocumentPolicy::InitialQueryFinalization,
-            Some(ContextNavigationTarget::parse(final_url).unwrap()),
+            row_policy,
+            effective_url.map(|url| ContextNavigationTarget::parse(url).unwrap()),
         );
         assert_eq!(
             browser.binding().requested_document().as_url().as_str(),
             requested
         );
-        assert_eq!(browser.binding().document().as_url().as_str(), final_url);
-        let input = input_with_source(
-            browser.binding(),
+        assert_eq!(
+            browser.binding().document().as_url().as_str(),
+            effective_url.unwrap_or(requested)
+        );
+        let input = input_for_context_authority_with_document_policy(
+            browser.binding().frame().context().identity(),
+            browser.binding().frame().origin().clone(),
             Arc::new(Clock(AtomicU64::new(2))),
             ContextProfileStorageClass::Ephemeral,
             ContextNavigationTarget::parse(input_url).unwrap(),
+            AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).unwrap(),
+            (Instant::now() + Duration::from_secs(600), None),
+            input_policy,
         );
         if invalidate {
             native
@@ -552,6 +975,104 @@ fn prepared_with_audit(
     )
     .unwrap();
     (controller, handle, scope, server)
+}
+
+struct HumanRequestTask(AgentWorkExtractionTask);
+impl AgentWorkTask for HumanRequestTask {
+    fn allows_human_request(&self) -> bool {
+        true
+    }
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        self.0.extraction_schema()
+    }
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.0.evaluate(observation)
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        self.0.assess(action)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.0.attest_account(context, now)
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.0.accept_extraction(result)
+    }
+}
+
+#[test]
+fn retained_model_handoff_closes_as_waiting_and_relinquishes_actor_authority() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (owner, native, resource, browser) = setup();
+    let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
+    let response = response_stream(1)
+        .replace("\"name\":\"extract\"", "\"name\":\"show_for_human\"")
+        .replace(
+            r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+            r#"{\"reason\":\"sign_in\"}"#,
+        );
+    let (transport, server) = fixture_provider_responses(vec![response]);
+    let (controller, mut result, scope) = AgentWorkRetainedController::try_new_for_probe(
+        input,
+        Box::new(browser),
+        transport,
+        AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-not-a-secret".into(),
+        )
+        .unwrap(),
+        Arc::new(Audit(false)),
+        Box::new(HumanRequestTask(task())),
+    )
+    .unwrap();
+    let (_handle, lifecycle) = start(controller, scope);
+    let mut outcome = None;
+    wait_until(|| {
+        while result.take_event().is_some() {}
+        outcome = result.take_outcome();
+        outcome.is_some()
+    });
+    let Some(AgentWorkRetainedOutcome::WaitingForHuman(waiting)) = outcome else {
+        panic!("retained model handoff must be a clean waiting outcome");
+    };
+    assert_eq!(waiting.request().reason(), AgentBrowserHumanReason::SignIn);
+    assert_eq!(
+        waiting.request().retained_resource(),
+        Some(resource.identity())
+    );
+    assert_eq!(waiting.closure().model_calls(), 1);
+    assert_eq!(waiting.closure().effects(), 0);
+    assert!(matches!(
+        lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
+        AgentRuntimeScopedDrain::Drained(_)
+    ));
+    native.join();
+    assert_eq!(native.reads.load(Ordering::Acquire), 1);
+    assert_eq!(native.destructions.load(Ordering::Acquire), 0);
+    let mut destroy = owner.destroy(&resource).unwrap();
+    assert!(matches!(
+        destroy.poll(now()).unwrap(),
+        Some(LifecycleResult::Event(WorkBrowserResourceEvent::Destroyed(
+            _
+        )))
+    ));
+    owner.seal_resources().unwrap();
+    assert!(owner.locally_retired());
+    assert_eq!(server.join().unwrap(), 1);
 }
 
 struct GatedAudit {
@@ -893,6 +1414,28 @@ fn snapshot_probe_not_ready_consumes_one_dispatch_and_drains_without_provider() 
         AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)
     );
     assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
+    assert!(closed.policy_settlement().model_usage_exact());
+    assert_eq!(
+        closed
+            .policy_settlement()
+            .accounting()
+            .consumed_model_tokens(),
+        0
+    );
+    assert_eq!(
+        closed
+            .policy_settlement()
+            .accounting()
+            .consumed_cost_micro_usd(),
+        0
+    );
+    assert_eq!(
+        closed
+            .policy_settlement()
+            .accounting()
+            .reserved_operations(),
+        0
+    );
     assert_eq!(native.reads.load(Ordering::Acquire), 1);
     assert!(!release.returned().unwrap());
     assert!(matches!(
@@ -975,10 +1518,18 @@ fn pre_provider_budget_refusal_drains_worker_and_preserves_late_original_reporte
     let Some(AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed)) = outcome else {
         panic!("budget must fail before provider dispatch");
     };
-    assert_eq!(
+    assert!(matches!(
         closed.failure(),
-        AgentWorkFailure::Browser(AgentBrowserProviderError::Authority)
-    );
+        AgentWorkFailure::Browser(AgentBrowserProviderError::RequestPolicy(
+            AgentPolicyError::ModelInputBudget {
+                call: 1,
+                cost: 77_830,
+                remaining_cost: 50_000,
+                node_scope: false,
+                ..
+            }
+        ))
+    ));
     assert_eq!(closed.policy_settlement().closure().model_calls(), 0);
     assert!(release.returned().unwrap());
     assert!(matches!(
@@ -1782,4 +2333,22 @@ fn scoped_worker_drain_is_not_held_native_notification_or_successor_or_destroy_p
     // never invents successful cleanup after a terminal failed destroy attempt.
     assert!(!owner.locally_retired());
     assert_eq!(server.join().unwrap(), 2);
+}
+
+fn finish_human_fixture(
+    request: WorkBrowserResourceRequest,
+    callback: WorkBrowserResourceCompletionCallback,
+) {
+    let completion = match request.operation() {
+        WorkBrowserResourceOperation::PresentHuman => {
+            request.human_progress().unwrap().record_ready(true);
+            request.complete(WorkBrowserResourceNativeOutcome::HumanPresented)
+        }
+        WorkBrowserResourceOperation::ContinueAfterHuman => {
+            let document = request.human_source().unwrap().clone();
+            request.complete_human_document(document)
+        }
+        _ => panic!("human fixture operation"),
+    };
+    callback(completion);
 }

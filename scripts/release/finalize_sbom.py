@@ -53,9 +53,9 @@ EXPECTED_ADBLOCK_LICENSE_SHA256 = (
     "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
 )
 EXPECTED_ADBLOCK_FEATURE_GRAPHS = {
-    "windows": "full-regex-handling",
-    "linux": "content-blocking,full-regex-handling",
-    "macos": "content-blocking,full-regex-handling",
+    "windows": "addr,css-validation,cssparser,embedded-domain-resolver,full-regex-handling,selectors",
+    "linux": "addr,content-blocking,css-validation,cssparser,embedded-domain-resolver,full-regex-handling,selectors",
+    "macos": "addr,content-blocking,css-validation,cssparser,embedded-domain-resolver,full-regex-handling,selectors",
 }
 EXPECTED_BLOCKER_FEATURE_GRAPHS = {
     "windows": "runtime",
@@ -71,23 +71,23 @@ EXPECTED_BLOCKER_SEED_LICENSE = "CC-BY-SA-3.0"
 EXPECTED_BLOCKER_SEED_LICENSE_SHA256 = (
     "3f941b3b89cf7b8370ceb83cc76d2120d471b58735d8ca60238a751a48d7f72f"
 )
-EXPECTED_BLOCKER_SEED_REVISION = 202607241759
+EXPECTED_BLOCKER_SEED_REVISION = 202609300903
 EXPECTED_BLOCKER_SEED_FILE_SHA256 = {
-    "catalog.json": "535fe97cdfd129a9084296491efa3721b43da22e469c42062a20cca4ec94b4dc",
-    "release-seed.json": "93c8ecad97a6a6f678362643995df97a5c77e8e6403019ddb69d282432192f82",
-    "compile-report.json": "551027e69cb14e3ac4cc6af6d14e280f4b5728dee9bc93c8c001b22fe9f8d13f",
-    "easylist.txt.gz": "5e2df212962c1afe1acb315c28af8d72976dae176e7305b8d530948702ea7972",
-    "easyprivacy.txt.gz": "4d20d41b7246b302cc07a40d066fe7f1091a0675f798021a8389f2cb2d14355f",
+    "catalog.json": "2889f78f4016dcbc127a3ceaf26eb267411f7885d8b50d72b9052e870a696cf0",
+    "release-seed.json": "4d500d3207e17a236d8ecf0386de73ce7c4a8fc51792f24fd246dadee70e754a",
+    "compile-report.json": "e0c854f2728d65c8f7252bf1857e70265b49a8a87c39f76acf2d0a31bdf1a93d",
+    "easylist.txt.gz": "421c75f11cac2ab9c34ba1f83e8e37011f48ae56301e8a95998d940c67bfe7c2",
+    "easyprivacy.txt.gz": "d4fa2492d96e6aa15626ec9aea83fa4662945898869bb576d9205dc2fa1fe20a",
     "LICENSE-CC-BY-SA-3.0.txt": EXPECTED_BLOCKER_SEED_LICENSE_SHA256,
-    "NOTICE": "6652e8725b3884ee0aafa241084caf9aac6735e68cb121dc2a5802c7d9a3fed7",
+    "NOTICE": "2f6dfda0ec55079cd3141dbc170b0e06588e8143005c12a65533ea2d028e5359",
 }
 EXPECTED_ZEPHIUM_LICENSE_SHA256 = (
     "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
 )
 EXPECTED_ZEPHIUM_LICENSE_SIZE = 16_726
 ZEPHIUM_INSTALLED_LICENSE = "Zephium-MPL-2.0.txt"
-EXPECTED_BLOCKER_POLICY_FORMAT = 4
-EXPECTED_BLOCKER_WEBKIT_ARTIFACT_FORMAT = 3
+EXPECTED_BLOCKER_POLICY_FORMAT = 5
+EXPECTED_BLOCKER_WEBKIT_ARTIFACT_FORMAT = 4
 EXPECTED_BLOCKER_SEED_SOURCES = (
     (
         "easylist",
@@ -636,7 +636,7 @@ def blocker_component_properties(platform: str) -> list[dict[str, str]]:
         },
         {
             "name": "zephium:blocker:supply-feature-graph",
-            "value": "release-bundle",
+            "value": "release-bundle,official-https",
         },
     ]
     properties.extend(
@@ -1018,7 +1018,7 @@ def blocker_seed_provenance(
     )
     compilers = quality.get("compilers")
     if (
-        quality.get("schema_version") != 1
+        quality.get("schema_version") != 2
         or quality.get("package_revision") != revision
         or quality.get("catalog_manifest_sha256") != digests["catalog.json"]
         or quality.get("release_seed_manifest_sha256")
@@ -1058,12 +1058,28 @@ def blocker_seed_provenance(
                 "sources",
                 "runtime",
                 "webkit",
+                "cosmetics",
             },
             f"blocker seed {target} compiler report",
         )
         digest = _lower_sha256(
             compiler.get("policy_sha256"), f"blocker seed {target} policy digest"
         )
+        cosmetics = compiler.get("cosmetics")
+        if not isinstance(cosmetics, dict):
+            raise SbomError("blocker seed has no static cosmetic report")
+        _exact_object_keys(
+            cosmetics,
+            {"accepted_rules", "rejected_rules", "generic_hide_controls", "policy_sha256", "policy_bytes", "native_artifact_sha256", "native_json_bytes"},
+            "blocker seed static cosmetic report",
+        )
+        _lower_sha256(cosmetics.get("policy_sha256"), "blocker seed cosmetic policy digest")
+        for name, maximum in (("accepted_rules", 50_000), ("rejected_rules", 500_000), ("generic_hide_controls", 1_024), ("policy_bytes", 16 * 1024 * 1024)):
+            value = cosmetics.get(name)
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise SbomError(f"blocker seed cosmetic {name} exceeds its budget")
+        if cosmetics.get("native_artifact_sha256") is not None or cosmetics.get("native_json_bytes") is not None:
+            raise SbomError("selective cosmetics unexpectedly contain a blanket native artifact")
         if policy_digest is None:
             policy_digest = digest
         if (

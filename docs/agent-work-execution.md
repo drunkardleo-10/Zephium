@@ -37,9 +37,13 @@ or provider work. `AgentWorkHandle` exposes bounded content-free events and the
 single move-only terminal/recovery outcome; it exposes no page/native internals.
 
 The caller must keep pumping the engine's native dispatcher during execution
-and shutdown. It must install the selected profile's authoritative content
-policy before constructing a Work page. An uninstalled policy is a refusal,
-not permission to bypass profile security.
+and shutdown. The selected browser profile must already have its authoritative
+content policy applied by the ordinary profile/policy owner before constructing
+a Work page. Application admission waits for that existing readiness under the
+original deadline; inventing a profile or installing a task-specific fallback
+policy is not a repair. An uninstalled policy is a refusal, not permission to
+bypass profile security. The [composition binding](agent-work-composition.md)
+preserves the actor-selected session's profile and persistence class.
 
 ## Ownership and bounds
 
@@ -176,6 +180,78 @@ Persisted recovery facts classify interruption after restart; they do not
 restore live executable state or fabricate a clean controller. Approval review
 requires fresh admission and never executes an old proposal.
 
+## Working as you
+
+A run works on a site in the person's own browser session. The lead's
+`browse { start, goal, records }` becomes a page task: one Work-owned page on
+the start URL's site (its registrable domain), driven by the page agent
+(`AgentWorkDiscoveryTask` with the site-session scope and `SiteWorkPolicy`,
+at most 60 actions, 40 model calls and 8 minutes of its own time; time held
+for the person does not count). The document gate follows the site's own
+redirects and same-document routes and cancels page-initiated and cross-site
+loads without losing the page. A same-site load a step starts (a search or
+filter form, a script navigation) is cancelled and followed as the page
+agent's own navigation; a same-site form POST passes only for an approved
+commitment.
+
+Before a run first works on a site where the profile holds cookies (a
+presence fact, never their contents), Rust reads the whole start page before
+any model call; a signed-out page goes on without a question, otherwise it
+asks once: Allow (this run), Always
+for the site (kept per profile, `WorkRequest::SiteAccess`), or Not now (the
+site is worked privately). Never and the closed list of sensitive sites
+(banks, password managers, health and tax portals; Ask at most) keep the
+session closed; a private run (`WorkAgentGrantV1.private`) uses the run's own
+storage everywhere. A plain `read` uses the session only on a site the run
+already works on as the person.
+
+The page agent reads, navigates, searches, filters and fills drafts. A step
+Rust reads as committing (send, post, pay, book, delete, share, save, submit a
+non-search form, Enter in a composer, an edit that saves as it types), or one
+the page agent declares so, is held: the page stays as it is and the run
+records a `Confirm` step (headline, action, the exact text, facts from the
+page's own region, the page's frame, other sites the text quotes). The person
+decides through `ApproveStep`; an autosaving edit also offers "Allow edits on
+this site for this run" (`for_run`). An approval runs once, and only while the
+step and its preview are unchanged; a changed page asks again, a decline is
+never retried. The step's status is its receipt. A step read as harmless whose
+page then says it committed something stops the page task. Password and
+secret fields are never typed into. A sign-in wall (a password field or a
+sign-in form, read by Rust or raised by the page agent) holds the page for the
+person; the page continues by itself once their navigation settles back on the
+site, off any sign-in path. A page load the person finishes on the site in an
+ordinary tab (a count, never its URL) wakes a held page, which starts over
+once in the fresh session. Facts from the person's pages never ride a search
+query, provider retention never applies to them, and diagnostics carry only
+the page kind and its path class. Origin grants, their page budget and the
+single-field update are retired; stored runs that used them still load.
+
+## Artifact kinds
+
+An agent turn places closed semantic objects (`WorkArtifactDataV1`): `answer`,
+`document`, `table`, `comparison_matrix`, `findings`, `chart`, `checklist`,
+`evidence_collection`, `diagram`, `code` and `browser_resource_preview`. Each
+is validated in Rust, and a refused object reaches the model as a closed
+notice naming the first field that failed, never its value.
+
+Every finished request publishes exactly one `answer`: `{ kind: "answer",
+markdown }`, the reply a careful expert would write in a chat, at most 16 KB
+and 400 lines. Its Markdown is a closed subset: level 2 and 3 headings,
+paragraphs, bullet and numbered lists nested at most one level, bold, inline
+code, fenced code naming a language from the `code` kind's list, and block
+quotes. A line scanner in core, not a Markdown parser, refuses raw links and
+bare URLs (`AnswerLink`), images (`AnswerImage`), HTML (`AnswerHtml`), level 1
+or deeper headings (`AnswerHeading`), tables (`AnswerTable`, since a table is
+its own object), unnamed or unclosed fences (`AnswerFence`), deeper lists
+(`AnswerNesting`) and empty or oversized text (`AnswerText`); code fences and
+code spans are passed over. A knowledge answer that names a URL is refused as
+`KnowledgeLink`, as any knowledge object that claims an observed source. The
+answer never repeats a table, diagram or code its set holds; it refers to
+them by title. `document` is only text the person asked for as a note, brief
+or letter. `findings` are cited research facts only: a findings object with an
+empty evidence array is refused as `FindingsUncited`, whose notice sends the
+prose to the answer.
+
 ## Evidence and remaining product seams
 
 The excluded public Luna qualifiers compose this actor with the actual
@@ -184,16 +260,24 @@ The application qualifier additionally uses the [trusted macOS composition](agen
 actual shell admission, journal and application shutdown. It requires trusted
 task completion, durable success, focus isolation and clean native/store/worker
 teardown. See the [M6 record](../eval/agentic-browsing/m6-production-qualification.md).
-Only explicit public qualification can enable retained provider logs;
+Only an explicit synthetic qualification can enable retained provider logs;
 production/BYOK remains `store:false`. Local diagnostics contain only closed
 states, correlations, counters and timings; no page/provider data or secrets.
+
+The first exact authenticated read-only workflow is separately recorded in the
+[macOS Notion qualification](../eval/agentic-browsing/macos-authenticated-notion.md).
+It proves one user-attested disposable-workspace task, same-document progressive
+inspection, source-bound extraction, durable terminal publication, and clean
+retained-resource reuse. It does not implement or qualify native account
+discovery, writes, arbitrary Notion pages, Windows, or concurrent Browse.
 
 Next: trusted product task/plan authoring and a user-facing Work command over
 the opt-in Rust desktop admission port. No UI/IPC authority is added, and the
 full Tauri window/bootstrap path is not live-qualified. Local/hosted model
 transport adapters must share the same session semantics. Native macOS
-suspend/resume, authenticated/public multi-site qualification, concurrent Browse
-interaction, navigation and richer tool adapters remain open. A suspension
+suspend/resume, broader authenticated/public multi-site qualification,
+concurrent Browse interaction, navigation and richer tool adapters remain
+open. A suspension
 request currently revokes and closes: it is `Cancelled` only if all original
 owners drain, otherwise recovery. It does not claim an unimplemented native
 suspend operation succeeded or retain resumable execution.
