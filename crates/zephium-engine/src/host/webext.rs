@@ -409,21 +409,31 @@ impl WebextHost {
             );
         };
         let extension_id = install.extension_id.clone();
-        if let Some(parent) = parent {
-            *entry.bridge.popup.borrow_mut() = Some((parent, request.anchor().rect()));
-        }
         let tab = entry.bridge.ids.borrow_mut().tab(request.tab());
         if entry.runtime.context(&extension_id).is_none() {
             return ExtensionActionSettlement::Rejected(
                 ExtensionActionRejection::RuntimeUnavailable,
             );
         }
+        *entry.bridge.popup.borrow_mut() = parent.map(|parent| (parent, request.anchor().rect()));
         // WebKit drops what a popup sends while the worker sleeps, and the
         // popup then waits forever; wake it first (immediate when running).
         let waking = extension_id.clone();
         entry.runtime.start_background(&waking, move |_| {
             super::dispatch::best_effort_with(move |host| {
                 if let Some(entry) = host.webext.profiles.get(&profile) {
+                    // Only a popup consumes the anchor; left behind, it would
+                    // retain the button and place a later action.openPopup
+                    // on it, perhaps in a window since closed.
+                    let tab_object = entry.runtime.tab_object(tab);
+                    let popup = entry
+                        .runtime
+                        .context(&extension_id)
+                        .and_then(|context| unsafe { context.actionForTab(tab_object.as_deref()) })
+                        .is_some_and(|action| unsafe { action.presentsPopup() });
+                    if !popup {
+                        entry.bridge.popup.borrow_mut().take();
+                    }
                     entry.runtime.perform_action(&extension_id, Some(tab));
                 }
             });
