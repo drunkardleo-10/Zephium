@@ -581,6 +581,7 @@
   let flow: ReturnType<typeof useSvelteFlow> | undefined;
   let following = $state(true);
   let fitted = false;
+  let requestsSeen = false;
   let stands: Record<string, string> = {};
   const requests: Record<string, true> = {};
   function resumeFollow() {
@@ -607,14 +608,18 @@
    * A request just sent stands in the middle of what can be seen: between
    * the island and the composer, at the zoom the person reads at.
    */
-  function centreRequest(id: string) {
+  function centreRequest(id: string, tries = 12) {
     const node = nodeFor(id);
-    if (!node || !flow || !canvasWidth) return;
+    if (!node || !flow || !canvasWidth || !(node.width ?? node.measured?.width)) {
+      // A just-sent card is placed and measured a few frames after it exists.
+      if (tries > 0) requestAnimationFrame(() => centreRequest(id, tries - 1));
+      return;
+    }
     homed = false;
     const zoom = viewport.zoom;
     const position = absolutePosition(node, nodes);
-    const width = (node.width ?? 320) * zoom;
-    const height = (node.height ?? 80) * zoom;
+    const width = (node.width ?? node.measured?.width ?? 320) * zoom;
+    const height = (node.height ?? node.measured?.height ?? 80) * zoom;
     const top = fitTopInset;
     const bottom = canvasHeight - fitBottomInset;
     void flow.setViewport(
@@ -647,8 +652,8 @@
     const h = size.height * zoom;
     const clamp = (value: number, min: number, max: number) =>
       Math.max(min, Math.min(value, Math.max(min, max)));
-    const x = clamp((width * 5) / 6 - w / 2, air, width - air - w);
-    const y = clamp(top + ((bottom - top) * 5) / 6 - h / 2, top + air, bottom - air - h);
+    const x = clamp((width * 2) / 3 - w / 2, air, width - air - w);
+    const y = clamp(top + (bottom - top) / 2 - h / 2, top + air, bottom - air - h);
     void flow?.setViewport(
       { x: x - position.x * zoom, y: y - position.y * zoom, zoom },
       {
@@ -666,14 +671,17 @@
     const paused = still;
     untrack(() => {
       // A new lane's request card, or the end of a run, resumes following.
-      const seeded = Object.keys(requests).length > 0;
-      for (const id of cards)
-        if (!requests[id]) {
-          requests[id] = true;
-          if (!seeded) continue;
-          following = true;
-          requestAnimationFrame(() => centreRequest(id));
-        }
+      // Cards present when the canvas first looks (or arriving together, as a
+      // work loads) are not new; one card appearing on its own was just sent,
+      // including the first request of an empty work.
+      const fresh = cards.filter((id) => !requests[id]);
+      for (const id of fresh) requests[id] = true;
+      const sent = requestsSeen && fresh.length === 1 ? fresh[0] : undefined;
+      requestsSeen = true;
+      if (sent) {
+        following = true;
+        requestAnimationFrame(() => centreRequest(sent));
+      }
       if (!agents.length && Object.keys(stands).length) {
         stands = {};
         following = true;

@@ -94,10 +94,11 @@
       : curve(sourceX, sourceY, `${sourcePosition}`, targetX, targetY, `${targetPosition}`),
   );
   let line = $state<SVGPathElement>();
-  let flow = $state<HTMLElement>();
+  /** The stretches: the wrapper has no box, so visibility is read from the first. */
+  const pieces = $state<HTMLElement[]>([]);
   const carrying = $derived(!!data?.live && tone === "flow" && !!points);
   /** A dash and its gap: the work flows by this much each beat. */
-  const PERIOD = 9;
+  const PERIOD = 12;
   /**
    * A line at work carries fine dashes flowing from its start to its end.
    * Each straight stretch (its elbows left clear) is a window over a strip
@@ -132,7 +133,7 @@
   });
   let still = $state(true);
   $effect(() => {
-    const element = flow;
+    const element = pieces[0];
     if (!element) return;
     return watchStill(element, (next) => (still = next));
   });
@@ -165,12 +166,12 @@
 {#if stretches.length}<ViewportPortal target="back"
     ><span
       class="flow"
-      bind:this={flow}
       data-still={still ? "" : undefined}
       style:--period="{PERIOD}px"
       aria-hidden="true"
       >{#each stretches as stretch, index (index)}<span
           class="stretch"
+          bind:this={pieces[index]}
           style:inline-size="{stretch.length}px"
           style:transform="translate({stretch.x}px, {stretch.y}px) rotate({stretch.angle}deg)"
           ><span class="dashes"></span></span
@@ -201,7 +202,7 @@
 
   /* A line into a part at work is lit, and still: the part itself says what it does. */
   .work-edge-line.flow.live {
-    stroke: color-mix(in oklab, var(--color-soft-sky) 55%, var(--color-border-strong));
+    stroke: color-mix(in oklab, var(--color-text) 22%, var(--color-border-strong));
   }
 
   /* The work a line carries: fine dashes flowing along each straight stretch. */
@@ -227,10 +228,11 @@
     inset-inline: calc(var(--period) * -1) 0;
     background: repeating-linear-gradient(
       90deg,
-      color-mix(in oklab, var(--color-soft-sky) 85%, var(--color-agent-light)) 0 3px,
-      transparent 3px var(--period)
+      transparent 0,
+      color-mix(in oklab, var(--color-text) 75%, transparent) 2px 4px,
+      transparent 6px var(--period)
     );
-    animation: flow 480ms linear infinite;
+    animation: flow 720ms linear infinite;
   }
 
   .flow[data-still] .dashes {
