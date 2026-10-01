@@ -103,6 +103,12 @@
   }
 
   onMount(installCloseService);
+  // The startup read can land before the session has a profile, which lists
+  // nothing; read again once the profile is known, and when it changes.
+  let extensionProfile = $derived(tabs.profile()?.id);
+  $effect(() => {
+    if (extensionProfile) void webext.refresh();
+  });
   onMount(() => {
     let disposed = false;
 
