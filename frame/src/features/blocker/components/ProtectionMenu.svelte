@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ArrowRight01Icon, Cancel01Icon, SecurityCheckIcon } from "@hugeicons/core-free-icons";
   import { blocker, blockerSites, hiding, shieldPresentation } from "$domain/blocker";
+  import { tabs } from "$domain/tabs";
   import type { BlockerSiteAction } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
@@ -25,8 +26,9 @@
   });
 
   let blockedToday = $state<number | null>(null);
-  // Keyed to the profile string: `site` is a new object on every status event.
-  let profile = $derived(site?.context.profile);
+  // The day's count belongs to the profile, so it reads on pages without a
+  // site too (the new tab); keyed to the id, as `site` is new on every event.
+  let profile = $derived(tabs.profile()?.id);
   $effect(() => {
     void opened;
     if (!profile) return;
