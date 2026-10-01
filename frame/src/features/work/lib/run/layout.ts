@@ -48,7 +48,8 @@ type RunRow = {
   feeds: boolean;
 };
 export type RunInputs = {
-  request: Sized;
+  /** The request, and where its first line of words ends, when that is short of its column. */
+  request: Sized & { end?: number };
   inputs?: readonly Sized[];
   rows: readonly RunRow[];
   head?: Sized;
@@ -72,6 +73,8 @@ type RunLine = {
   laid: { source: Point; target: Point };
 };
 export type RunPlace = {
+  /** Where the request's first line ends: its lines leave from here. */
+  requestEnd: number;
   rects: Record<string, Rect>;
   /** The result's blocks, under its head. */
   board: Rect;
@@ -145,6 +148,8 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     ? Math.max(top + RUN.spine, Math.round((labels[0]! + labels.at(-1)!) / 8) * 4)
     : top + RUN.spine;
   const request = { x: 0, y: spine - RUN.spine, width: RUN.request, height: run.request.height };
+  // Lines leave from the end of the words, never from the column's edge past a short request.
+  const requestEnd = Math.min(RUN.request, run.request.end ?? RUN.request);
   rects[run.request.id] = request;
 
   let inputsBottom = top;
@@ -177,7 +182,8 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     });
   }
 
-  const resultX = run.rows.length ? snap(partsX + widest + RUN.feed) : RUN.request + RUN.gutter;
+  // Without parts the answer stands a fork's width past the words, joined to them by one line.
+  const resultX = run.rows.length ? snap(partsX + widest + RUN.feed) : snap(requestEnd + RUN.fork);
   const resultTop = spine - RUN.resultMid;
   let blocks = resultTop;
   if (run.head) {
@@ -196,7 +202,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   let resultRight = resultX + Math.max(run.head?.width ?? 0, run.board.width);
 
   // A request's line branches to the head of every row; each row's end merges into the result.
-  const start = { x: RUN.request + RUN.air, y: spine };
+  const start = { x: requestEnd + RUN.air, y: spine };
   const partEnds = labels.map((y) => ({ x: partsX - RUN.air, y }));
   branch(start, RUN.request + RUN.fork / 2, partEnds).forEach((points, index) => {
     const row = run.rows[index]!;
@@ -206,7 +212,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
       source: run.request.id,
       target: row.part.id,
       points,
-      from: { x: RUN.request + RUN.air, y: RUN.spine },
+      from: { x: requestEnd + RUN.air, y: RUN.spine },
       to: { x: -RUN.air, y: RUN.labelMid },
       laid: ORIGIN,
     });
@@ -240,7 +246,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
         source: run.request.id,
         target: resultId,
         points: [start, into],
-        from: { x: RUN.request + RUN.air, y: RUN.spine },
+        from: { x: requestEnd + RUN.air, y: RUN.spine },
         to,
         laid: ORIGIN,
       });
@@ -276,6 +282,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   const left = inputs.length ? -(RUN.inputs + RUN.gutter) : 0;
   return {
     rects,
+    requestEnd,
     board: { x: resultX, y: blocks, width: run.board.width, height: run.board.height },
     corner: { x: resultX, y: resultTop },
     extent,

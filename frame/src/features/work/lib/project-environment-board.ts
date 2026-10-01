@@ -1,3 +1,4 @@
+import { measure } from "./diagram-text";
 import type {
   WorkEnvironmentElement,
   WorkEnvironmentSnapshot,
@@ -374,9 +375,13 @@ export function environmentStages(
       const opened = !!options.requests?.has(draft.card);
       const turns: RunTurns = { local: localReads(runs), exchange: options.exchange?.(runs) ?? [] };
       const words = requestTextSize(request, opened);
+      // Where the words' first line ends, so the run's lines leave from them, not from past them.
+      const said = request.trim();
+      const single = measure(said, 17, 500);
       const requestPart = {
         id: draft.card,
         width: words.width,
+        ...(single < RUN.request - 8 ? { end: Math.ceil(single) + 8 } : {}),
         height:
           measured.get(measureKey(draft.card, RUN.request, opened)) ??
           words.height + turnsHeight(turns),

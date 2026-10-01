@@ -8,7 +8,7 @@ let context: CanvasRenderingContext2D | null | undefined;
 const widths = new Map<string, number>();
 
 /** A run of text's width in the interface face, measured once; estimated off the page. */
-function measure(text: string, size: number, weight: number): number {
+export function measure(text: string, size: number, weight: number): number {
   const key = `${size}|${weight}|${text}`;
   const known = widths.get(key);
   if (known !== undefined) return known;

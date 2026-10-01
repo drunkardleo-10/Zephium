@@ -21,7 +21,12 @@ test("a placement saved before boards is ignored: the block takes its board plac
     "objective-card": { x: 0, y: 0 },
     "result-card": stages[0]!.targets["result-card"],
   });
-  expect(stages[0]!.targets["result-card"]!.x).toBe(320 + 48);
+  // Without parts the answer stands a fork's width past the words, one line joining them.
+  const end = stages[0]!.lane.requestEnd;
+  expect(end).toBeLessThan(320);
+  expect(stages[0]!.targets["result-card"]!.x).toBe(Math.ceil((end + 96) / 8) * 8);
+  const line = stages[0]!.lane.lines.find((entry) => entry.kind === "part")!;
+  expect(line.points[0]).toMatchObject({ x: end + 6 });
   const view = environmentView(legacy);
   expect(view.positions).toEqual({});
   expect(view.sizes).toEqual({});

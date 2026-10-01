@@ -46,7 +46,9 @@ test("every message keeps its own request card, one run each down the request co
   expect(first.board.blocks.map((block) => [block.id, block.kind])).toEqual([
     ["result-card", "document"],
   ]);
-  expect(first.lane.rects["result-card"]).toMatchObject({ x: 320 + 48 });
+  expect(first.lane.rects["result-card"]).toMatchObject({
+    x: Math.ceil((first.lane.requestEnd + 96) / 8) * 8,
+  });
   const below = first.lane.extent + 120;
   expect(stages.map((stage) => [stage.card, stage.request, stage.place.x, stage.place.y])).toEqual([
     ["objective-card", "Compare quiet keyboards", 0, 0],

@@ -106,12 +106,33 @@ function midRun(loaded: BoardScene, at: number, only = 1): BoardScene {
   return { ...loaded, objectives };
 }
 
+/** The first run as it starts: the lead thinking, no parts yet, the answer on its way. */
+function thinking(loaded: BoardScene): BoardScene {
+  const objectives = new Map(
+    [...loaded.objectives].map(([id, projection]) => {
+      const copy = structuredClone(projection);
+      copy.executions = copy.executions.slice(0, 1);
+      const execution = copy.executions[0]!;
+      execution.status = "running";
+      execution.steps = (execution.steps ?? []).slice(0, 1).map((step) => ({
+        ...step,
+        status: "running" as const,
+      }));
+      execution.parts = [];
+      execution.artifacts = [];
+      return [id, copy] as const;
+    }),
+  );
+  return { ...loaded, objectives };
+}
+
 const only = (import.meta.env.VITE_LOOK as string | undefined)?.split(",");
 const LOOKS: [string, number][] = [
   ["research", 0],
   ["research", 50],
   ["blueprint", 50],
   ["research-live", 100],
+  ["research-thinking", 100],
   ["blueprint", 0],
   ["trip5", 0],
   ["trip5-live", 70],
@@ -130,10 +151,14 @@ test.each(
   ),
 )("%s at %d%%", async (name, percent) => {
   await page.viewport(1440, 900);
-  const base = name.replace(/-live$/u, "");
+  const base = name.replace(/-(live|thinking)$/u, "");
   const found = await scene(base);
   if (!found) return;
-  const loaded = name.endsWith("-live") ? midRun(found, base === "research" ? 3 : 2) : found;
+  const loaded = name.endsWith("-thinking")
+    ? thinking(found)
+    : name.endsWith("-live")
+      ? midRun(found, base === "research" ? 3 : 2)
+      : found;
   shown = base;
   const errors: string[] = [];
   const listen = (event: ErrorEvent) => errors.push(event.message);
