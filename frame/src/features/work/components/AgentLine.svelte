@@ -264,7 +264,7 @@
         : m.work_line_thinking();
     }
     // A run that ended short says what is missing and what helps, never why the machine gave up.
-    if (ended && newest) return ended.text;
+    if (shortOf && newest) return shortOf.text;
     switch (execution?.status) {
       case "completed":
       case "needs_review":
@@ -281,6 +281,20 @@
   });
   /** Why the run ended early, in Rust's closed words: the note its last unfinished step left. */
   const ending = $derived(execution ? endingNote(execution) : null);
+  /**
+   * A part's need speaks for the run only when the run gave no answer: an
+   * answered run says what it found and still offers the part's one remedy.
+   */
+  const shortOf = $derived(
+    ended &&
+      !(
+        closing &&
+        !!execution?.artifacts.length &&
+        (execution.status === "completed" || execution.status === "needs_review")
+      )
+      ? ended
+      : null,
+  );
   const settled = $derived(!live && !question && !proposal);
   /** A short run's one remedy, or Try again for one that simply stopped. */
   const remedy = $derived.by(() => {
@@ -299,7 +313,7 @@
       : live
         ? ("live" as const)
         : execution?.status === "completed" || execution?.status === "needs_review"
-          ? ended
+          ? shortOf
             ? ("stopped" as const)
             : ("done" as const)
           : execution && ["failed", "cancelled", "interrupted"].includes(execution.status)

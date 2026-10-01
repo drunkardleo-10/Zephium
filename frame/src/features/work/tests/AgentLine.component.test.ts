@@ -573,10 +573,27 @@ test("a sign-in wall offers to sign in, and the run goes on by itself once the p
   session.dispose();
 });
 
-test("a run that ended short says what is missing and offers the one thing that helps", async () => {
+test("an answered run says what it found and still offers a part's one remedy", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   session.projection = { ...structuredClone(projection), executions: [agentRun("needs_review")] };
+  const onact = vi.fn();
+  const screen = await render(AgentLine, {
+    session,
+    ended: { text: "Notion couldn’t be read", action: "Try again", onact },
+  });
+  await expect.element(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Notion couldn’t be read");
+  expect(screen.container.querySelector(".character.lead.stopped")).toBeNull();
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a run that ended short says what is missing and offers the one thing that helps", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const short = { ...agentRun("needs_review"), artifacts: [] };
+  session.projection = { ...structuredClone(projection), executions: [short] };
   const onact = vi.fn();
   const screen = await render(AgentLine, {
     session,
