@@ -48,6 +48,20 @@ export default defineConfig({
             "@tiptap/pm/state",
             "@tiptap/pm/view",
             "marked",
+            // The note editor loads lazily and imports these icons by deep
+            // path; found mid-run, they make Vite reload the page under test.
+            "@hugeicons/core-free-icons/CodeIcon",
+            "@hugeicons/core-free-icons/DashedLine01Icon",
+            "@hugeicons/core-free-icons/Heading01Icon",
+            "@hugeicons/core-free-icons/Heading02Icon",
+            "@hugeicons/core-free-icons/Heading03Icon",
+            "@hugeicons/core-free-icons/LeftToRightListBulletIcon",
+            "@hugeicons/core-free-icons/LeftToRightListNumberIcon",
+            "@hugeicons/core-free-icons/QuoteDownIcon",
+            "@hugeicons/core-free-icons/TextBoldIcon",
+            "@hugeicons/core-free-icons/TextItalicIcon",
+            "@hugeicons/core-free-icons/TextStrikethroughIcon",
+            "@hugeicons/core-free-icons/Unlink02Icon",
           ],
         },
         test: {
