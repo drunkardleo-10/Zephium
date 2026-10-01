@@ -85,6 +85,8 @@ impl DocumentStyleState {
 }
 
 struct Delivery {
+    id: ItemId,
+    dispatch: crate::MainThreadDispatch,
     state: Arc<DocumentStyleState>,
     sequence: u64,
     charged_bytes: usize,
@@ -105,6 +107,14 @@ impl Drop for Delivery {
         if state.active == Some(self.sequence) {
             state.active = None;
             state.pending_key = None;
+            // Dropped unfinished while a newer change waited on it (a URL
+            // change in place, say): nothing else would ever deliver that.
+            if std::mem::take(&mut state.dirty) {
+                let id = self.id;
+                let _ = (self.dispatch)(Box::new(move || {
+                    let _ = with_document_style(id, move |host| host.refresh_document_styles(id));
+                }));
+            }
         }
     }
 }
@@ -271,6 +281,8 @@ impl EngineHost {
         }
         let force_full = state.lock().force_full;
         let delivery = Delivery {
+            id,
+            dispatch: self.main_dispatch.clone(),
             state,
             reuse: false,
             force_full,
