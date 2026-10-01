@@ -288,7 +288,15 @@ impl WebextHost {
         // trails view creation and would unbind a view bound on insertion.
         for tab in surface.tabs() {
             let id = entry.bridge.ids.borrow_mut().tab(tab.id());
-            let view = view_for(tab.id());
+            // Extension pages are not engine views; without this, every
+            // publish after one opens unbinds it, so its messages arrive
+            // without a sender tab and the extension cannot close it.
+            let view = view_for(tab.id()).or_else(|| {
+                self.pages
+                    .get(&tab.id())
+                    .filter(|page| page.profile == surface.profile())
+                    .map(|page| page.view.clone())
+            });
             if zephium_webext_macos::tracing() {
                 eprintln!(
                     "webext-trace: publish tab {id} resident={} view={} url={:?}",
