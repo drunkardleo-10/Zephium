@@ -114,6 +114,7 @@ pub enum PermissionKind {
 pub struct PermissionRequestId(NonZeroU64);
 
 impl PermissionRequestId {
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
   pub(crate) const fn new(value: NonZeroU64) -> Self {
     Self(value)
   }
@@ -148,6 +149,7 @@ pub struct PermissionOrigin {
 }
 
 impl PermissionOrigin {
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
   pub(crate) fn new(scheme: String, host: String, port: Option<u16>) -> Self {
     Self {
       scheme: scheme.into_boxed_str(),
@@ -189,6 +191,7 @@ pub struct PermissionRequest {
 }
 
 impl PermissionRequest {
+  #[cfg(any(target_os = "macos", target_os = "ios"))]
   pub(crate) const fn new(
     id: PermissionRequestId,
     origin: PermissionOrigin,
