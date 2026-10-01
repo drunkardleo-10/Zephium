@@ -1,19 +1,20 @@
 /** Presentation-only store URL recognition. Rust revalidates the foreground
  * tab, origin and package before preparing an installation. */
-export function isChromeStoreListing(value: string): boolean {
+export function chromeStoreListingId(value: string): string | null {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.port !== "")
-      return false;
+      return null;
+    if (!["chromewebstore.google.com", "chrome.google.com"].includes(url.hostname)) return null;
     const path =
       url.hostname === "chrome.google.com"
         ? url.pathname.replace(/^\/webstore\//, "/")
         : url.pathname;
-    return (
-      ["chromewebstore.google.com", "chrome.google.com"].includes(url.hostname) &&
-      /^\/detail\/(?:[^/]+\/)?[a-p]{32}$/.test(path)
-    );
+    return /^\/detail\/(?:[^/]+\/)?([a-p]{32})$/.exec(path)?.[1] ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
+
+export const isChromeStoreListing = (value: string): boolean =>
+  chromeStoreListingId(value) !== null;

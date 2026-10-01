@@ -31,6 +31,13 @@
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
   let activeContent = $derived(tabs.activeTab()?.content ?? "web");
+  let listedId = $derived(webext.isAvailable() ? extensions.chromeStoreListingId(activeUrl) : null);
+  let listedInstalled = $derived(listedId === null ? null : webext.named(listedId));
+  let removing = $state(false);
+  $effect(() => {
+    void listedId;
+    removing = false;
+  });
   let placeholder = $derived(
     activeContent === "extension_owned"
       ? "Extension page — enter an address to open a new tab"
@@ -228,7 +235,35 @@
 
     {#if !compact && trailing}{@render trailing()}{/if}
   </div>
-  {#if !compact && webext.isAvailable() && extensions.isChromeStoreListing(activeUrl)}
+  {#if !compact && listedInstalled}
+    {#if removing}
+      <div
+        class="store-remove"
+        role="group"
+        aria-label={m.webext_remove_confirm({ name: listedInstalled.name })}
+      >
+        <span>{m.webext_remove_confirm({ name: listedInstalled.name })}</span>
+        <Button size="compact" variant="secondary" onclick={() => (removing = false)}
+          >{m.webext_keep()}</Button
+        >
+        <Button
+          size="compact"
+          variant="danger"
+          onclick={() => {
+            removing = false;
+            if (listedInstalled) void webext.uninstall(listedInstalled.id);
+          }}>{m.webext_remove()}</Button
+        >
+      </div>
+    {:else}
+      <Button
+        variant="secondary"
+        size="compact"
+        class="mt-2 w-full"
+        onclick={() => (removing = true)}>{m.webext_store_remove()}</Button
+      >
+    {/if}
+  {:else if !compact && listedId !== null}
     <Button
       variant="primary"
       size="compact"
@@ -261,6 +296,21 @@
 </form>
 
 <style>
+  .store-remove {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-block-start: 8px;
+    color: var(--color-label-secondary);
+    font-size: 11px;
+    line-height: 14px;
+  }
+
+  .store-remove > span {
+    flex: 1;
+    min-inline-size: 0;
+  }
+
   .popup-notice {
     display: flex;
     align-items: center;

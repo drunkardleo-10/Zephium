@@ -1,14 +1,27 @@
 <script lang="ts">
-  import { Download01Icon } from "@hugeicons/core-free-icons";
+  import { Delete02Icon, Download01Icon } from "@hugeicons/core-free-icons";
   import { extensions } from "$domain/extensions";
   import { tabs } from "$domain/tabs";
   import { webext } from "$domain/webext";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
 
-  let listing = $derived(
-    webext.isAvailable() && extensions.isChromeStoreListing(tabs.activeTab()?.url ?? ""),
+  let listedId = $derived(
+    webext.isAvailable() ? extensions.chromeStoreListingId(tabs.activeTab()?.url ?? "") : null,
   );
+  let listing = $derived(listedId !== null);
+  let installed = $derived(listedId === null ? null : webext.named(listedId));
+  // Removal deletes the extension's data, so the rail asks for a second click.
+  let armed = $state(false);
+  $effect(() => {
+    void listedId;
+    armed = false;
+  });
+  $effect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => (armed = false), 3000);
+    return () => clearTimeout(timer);
+  });
   let failure = $derived(webext.review() === null ? webext.error() : null);
   // Downloading, installing and starting all happen here; the rail has no
   // room for the words the full sidebar shows.
@@ -19,7 +32,23 @@
   At rail width the address field, and the Add button under it, are hidden;
   on a Web Store listing the rail carries the button instead.
 -->
-{#if listing}
+{#if installed}
+  {@const name = installed.name}
+  <button
+    type="button"
+    class="install remove"
+    class:armed
+    title={armed ? m.webext_store_remove_again({ name }) : m.webext_store_remove()}
+    aria-label={armed ? m.webext_store_remove_again({ name }) : m.webext_store_remove()}
+    onclick={() => {
+      if (!armed) return void (armed = true);
+      armed = false;
+      void webext.uninstall(installed.id);
+    }}
+  >
+    <Icon icon={Delete02Icon} size={16} />
+  </button>
+{:else if listing}
   <button
     type="button"
     class="install"
@@ -95,5 +124,16 @@
 
   .install:hover:not(:disabled) {
     background: var(--color-lit-hover);
+  }
+
+  .remove,
+  .remove:hover:not(:disabled) {
+    background: var(--row-active);
+    color: var(--color-muted);
+  }
+
+  .remove.armed {
+    background: var(--color-danger);
+    color: var(--color-on-lit);
   }
 </style>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isChromeStoreListing } from "../store-listing";
+import { chromeStoreListingId, isChromeStoreListing } from "../store-listing";
 
 const id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
 
@@ -19,4 +19,11 @@ describe("Chrome Web Store entry point", () => {
       expect(isChromeStoreListing(url)).toBe(false);
     }
   });
+});
+
+it("names the listed extension", () => {
+  expect(chromeStoreListingId(`https://chromewebstore.google.com/detail/name/${id}?hl=en`)).toBe(
+    id,
+  );
+  expect(chromeStoreListingId("https://chromewebstore.google.com/")).toBeNull();
 });

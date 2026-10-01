@@ -13,7 +13,7 @@ import {
   ExtensionProjectionModel,
   failureForContext,
 } from "./action-model";
-export { isChromeStoreListing } from "./store-listing";
+export { chromeStoreListingId, isChromeStoreListing } from "./store-listing";
 
 const NOTICE_LIFETIME_MS = 5_000;
 const ACTION_SHORTCUT_LIFETIME_MS = 1_000;
