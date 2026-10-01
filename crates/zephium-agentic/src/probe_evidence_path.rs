@@ -46,6 +46,7 @@ const fn windows_attributes_have_no_reparse_point(attributes: u32) -> bool {
 }
 
 /// Best-effort local proof record for an inspectable probe run.
+#[cfg(any(test, feature = "provider-transport"))]
 pub(crate) fn write_runtime_proof(name: &str, bytes: &[u8]) {
     let directory = std::path::Path::new("target/work-runtime-proof");
     let _ = std::fs::create_dir_all(directory);

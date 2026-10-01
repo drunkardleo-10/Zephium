@@ -29,6 +29,7 @@ pub struct Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        #[cfg(unix)]
         if let Some(group) = self.group {
             // SAFETY: a negative pid addresses the group this process created
             // for its own child; no other process is named.
@@ -36,6 +37,8 @@ impl Drop for Process {
                 libc::kill(-group, libc::SIGTERM);
             }
         }
+        #[cfg(not(unix))]
+        let _ = self.group;
         let _ = self.child.start_kill();
     }
 }
@@ -53,13 +56,20 @@ impl StdioServer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .process_group(0);
+            .kill_on_drop(true);
+        // The server and whatever it starts share one group, ended together.
+        #[cfg(unix)]
+        command.process_group(0);
+        // No console window flashes up for a server started on Windows.
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
         let mut child = command.spawn().map_err(|_| McpError::Spawn)?;
-        let group = child.id().and_then(|id| i32::try_from(id).ok());
+        let group = cfg!(unix)
+            .then(|| child.id().and_then(|id| i32::try_from(id).ok()))
+            .flatten();
         let stdout = child.stdout.take().ok_or(McpError::Spawn)?;
         let stdin = child.stdin.take().ok_or(McpError::Spawn)?;
         if let Some(mut stderr) = child.stderr.take() {
