@@ -523,8 +523,8 @@ function standFor(doing: AgentDoing, stage: WorkStage): CanvasPosition {
   }
   if (doing === "writing" || doing === "done")
     return { x: stage.lane.corner.x, y: stage.lane.corner.y - MARK - 10 };
-  // Thinking before any part: on the line that leaves the words, just past them.
-  return { x: stage.lane.requestEnd + 12, y: spine - MARK / 2 };
+  // Thinking before any part: just above the line that leaves the words, past them.
+  return { x: stage.lane.requestEnd + 16, y: spine - MARK - 8 };
 }
 const MARK = 24;
 
