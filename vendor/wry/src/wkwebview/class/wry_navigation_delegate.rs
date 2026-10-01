@@ -316,8 +316,7 @@ impl WryNavigationDelegate {
       std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>,
     >,
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
-    apple_navigation_action_handler:
-      Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
+    apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
     #[cfg(target_os = "macos")] main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
@@ -326,17 +325,16 @@ impl WryNavigationDelegate {
     on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
     mtm: MainThreadMarker,
   ) -> Retained<Self> {
-    let navigation_policy_function = Box::new(
-      move |url: String, action: AppleNavigationAction| -> bool {
+    let navigation_policy_function =
+      Box::new(move |url: String, action: AppleNavigationAction| -> bool {
         if let Some(navigation_handler) = apple_navigation_action_handler.as_ref() {
           (navigation_handler)(url, action)
         } else {
           navigation_handler
             .as_ref()
-            .is_none_or(|navigation_handler| (navigation_handler)(url))
+            .map_or(true, |navigation_handler| (navigation_handler)(url))
         }
-      },
-    );
+      });
 
     let on_page_load_handler = if let Some(handler) = on_page_load_handler {
       let custom_handler = Box::new(move |event| {

@@ -756,8 +756,7 @@ struct WebViewAttributes<'a> {
   /// navigation actions. It lets security-sensitive embedders distinguish a
   /// browser history traversal from page-driven links, forms, and reloads.
   #[cfg(any(target_os = "macos", target_os = "ios"))]
-  pub apple_navigation_action_handler:
-    Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
+  pub apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
   /// Accepted main-frame navigation attempts, before a document commits.
   /// The callback is observational and must not grant page authority.
   #[cfg(target_os = "macos")]

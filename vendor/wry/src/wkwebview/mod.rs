@@ -220,12 +220,12 @@ const fn unfocused_child_focus_decision(
 
 #[cfg(target_os = "macos")]
 fn window_identity(window: Option<&Retained<NSWindow>>) -> Option<usize> {
-  window.map(|window| Retained::as_ptr(window).addr())
+  window.map(|window| Retained::as_ptr(window) as usize)
 }
 
 #[cfg(target_os = "macos")]
 fn responder_identity(responder: Option<&Retained<NSResponder>>) -> Option<usize> {
-  responder.map(|responder| Retained::as_ptr(responder).addr())
+  responder.map(|responder| Retained::as_ptr(responder) as usize)
 }
 
 #[cfg(target_os = "macos")]
@@ -244,10 +244,7 @@ fn capture_unfocused_child_focus(
 }
 
 #[cfg(target_os = "macos")]
-fn focus_authority_preserved(
-  snapshot: &UnfocusedChildFocusSnapshot,
-  app: &NSApplication,
-) -> bool {
+fn focus_authority_preserved(snapshot: &UnfocusedChildFocusSnapshot, app: &NSApplication) -> bool {
   let key_window = app.keyWindow();
   let main_window = app.mainWindow();
   app.isActive() == snapshot.app_active
@@ -261,7 +258,10 @@ fn responder_is_owned_by_webview(
   webview: &WryWebView,
 ) -> bool {
   let exact_webview = current.as_ref().is_some_and(|responder| {
-    Retained::as_ptr(responder).addr() == std::ptr::from_ref(webview).addr()
+    std::ptr::eq(
+      Retained::as_ptr(responder).cast::<std::ffi::c_void>(),
+      std::ptr::from_ref(webview).cast::<std::ffi::c_void>(),
+    )
   });
   let owned_descendant = current
     .cloned()
@@ -421,8 +421,7 @@ impl InnerWebView {
     let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
 
     #[cfg(target_os = "macos")]
-    let focuses_during_initial_construction =
-      attributes.focuses_during_initial_construction();
+    let focuses_during_initial_construction = attributes.focuses_during_initial_construction();
     #[cfg(target_os = "macos")]
     let app = NSApplication::sharedApplication(mtm);
 
