@@ -231,10 +231,10 @@ impl Shell {
         profile: ProfileId,
         tab: ItemId,
     ) -> ExtensionBrowserRequestSettlement {
-        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+        if self.profile_of_item(tab) != Some(profile) {
             return rejected(ExtensionBrowserRequestRejection::InvalidScope);
         }
-        let _native = self.close(tab);
+        self.close_in_any_space(tab);
         applied()
     }
 
@@ -244,7 +244,7 @@ impl Shell {
         tab: ItemId,
         url: &str,
     ) -> ExtensionBrowserRequestSettlement {
-        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+        if self.profile_of_item(tab) != Some(profile) {
             return rejected(ExtensionBrowserRequestRejection::InvalidScope);
         }
         let effects = self.items.navigate(tab, url);
@@ -296,7 +296,7 @@ impl Shell {
     }
 
     fn extension_resident_tab(&self, profile: ProfileId, tab: ItemId) -> Option<&TabState> {
-        if self.profile_of_item(tab) != Some(profile) || !self.item_in_focused_scope(tab) {
+        if self.profile_of_item(tab) != Some(profile) {
             return None;
         }
         let state = self.items.tab(tab)?;
@@ -316,10 +316,7 @@ impl Shell {
         profile: ProfileId,
         tab: ItemId,
     ) -> ExtensionBrowserRequestSettlement {
-        if self.profile_of_item(tab) == Some(profile)
-            && self.item_in_focused_scope(tab)
-            && self.items.tab(tab).is_some()
-        {
+        if self.profile_of_item(tab) == Some(profile) && self.items.tab(tab).is_some() {
             rejected(ExtensionBrowserRequestRejection::TabDiscarded)
         } else {
             rejected(ExtensionBrowserRequestRejection::InvalidScope)

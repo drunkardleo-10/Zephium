@@ -145,6 +145,13 @@ impl Shell {
         {
             return;
         }
+        self.close_in_any_space(id);
+    }
+
+    /// Closes a tab even when it is in a space no window is showing.
+    /// Extensions see every space of their profile, so their requests must
+    /// reach those tabs too.
+    pub(super) fn close_in_any_space(&mut self, id: ItemId) {
         if self.item_in_focused_scope(id) {
             let _ = self.close(id);
             return;
@@ -162,7 +169,19 @@ impl Shell {
         self.cancel_page_permission_for_item(id);
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
-        self.cancel_discard_probe(id);
+        if matches!(
+            self.residency.discard_probes.get(&id),
+            Some(PendingDiscardProbe::Closing { .. })
+        ) {
+            // As in `close`: native destruction is already admitted.
+            self.items.mark_view_discarded(id);
+            self.residency.discard_probes.remove(&id);
+            if let Some(queue) = &self.self_queue {
+                queue.cancel_discard_probe(id);
+            }
+        } else {
+            self.cancel_discard_probe(id);
+        }
         let effects = self.items.remove(id);
         for (window_id, space, was_active) in affected {
             let replacement = was_active

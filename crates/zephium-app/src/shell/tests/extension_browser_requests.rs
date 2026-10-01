@@ -378,3 +378,54 @@ fn extension_history_unavailable_is_not_reported_as_applied() {
         .iter()
         .any(|call| call == &format!("back {tab}")));
 }
+
+#[test]
+fn extension_requests_reach_tabs_in_spaces_no_window_shows() {
+    use super::extension_browser_surface::{activate_profile, install_profile};
+    let (mut shell, engine, _) = setup();
+    let profile = ProfileId::from(53_000);
+    let (shown, other) = (SpaceId::from(53_001), SpaceId::from(53_002));
+    install_profile(&mut shell, profile, &[shown, other]);
+    shell
+        .windows
+        .create(WindowKind::Main, profile, shown, Size::new(1200.0, 800.0));
+    activate_profile(&mut shell, profile);
+    shell.bootstrapped = true;
+    let visible = ItemId::from(53_003);
+    let hidden = ItemId::from(53_004);
+    for (tab, space) in [(visible, shown), (hidden, other)] {
+        assert!(shell.items.insert_tab(
+            tab,
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        ));
+    }
+    shell.windows.focused_mut().unwrap().active = Some(visible);
+
+    shell.handle(Command::Engine(request(
+        profile,
+        1,
+        ExtensionBrowserRequestAction::LoadTabUrl {
+            tab: hidden,
+            url: Arc::from("https://elsewhere.example/"),
+        },
+    )));
+    shell.handle(Command::Engine(request(
+        profile,
+        2,
+        ExtensionBrowserRequestAction::CloseTab { tab: hidden },
+    )));
+
+    let settlements = engine.extension_browser_settlements();
+    assert!(
+        settlements.iter().all(|(_, _, settlement)| matches!(
+            settlement,
+            ExtensionBrowserRequestSettlement::Applied(_)
+        )),
+        "{settlements:?}"
+    );
+    assert!(shell.items.tab(hidden).is_none());
+    assert_eq!(shell.windows.focused().unwrap().active, Some(visible));
+}
