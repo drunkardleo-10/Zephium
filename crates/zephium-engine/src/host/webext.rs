@@ -776,6 +776,17 @@ fn settle_abandoned_auth_flows(profile: ProfileId, open: &std::collections::Hash
     }
 }
 
+fn abandon_auth_flow(tab: &Rc<Cell<Option<ItemId>>>) {
+    let flow = AUTH_FLOWS.with(|flows| {
+        let mut flows = flows.borrow_mut();
+        let index = flows.iter().position(|flow| Rc::ptr_eq(&flow.tab, tab))?;
+        Some(flows.remove(index))
+    });
+    if let Some(flow) = flow {
+        (flow.done)(Err("The sign-in page could not be opened.".into()));
+    }
+}
+
 /// The extension a `chrome-extension://<id>/…` address belongs to.
 fn extension_of(url: &str) -> Option<&str> {
     let rest = url.strip_prefix(concat!("chrome-extension", "://"))?;
@@ -954,8 +965,15 @@ impl Host for Bridge {
                 active: true,
             },
             Box::new(move |result| {
-                if let (Ok(Some(number)), Some(bridge)) = (result, ids.upgrade()) {
-                    tab.set(bridge.item(number));
+                let item = match (result, ids.upgrade()) {
+                    (Ok(Some(number)), Some(bridge)) => bridge.item(number),
+                    _ => None,
+                };
+                match item {
+                    Some(item) => tab.set(Some(item)),
+                    // Abandonment is noticed only for flows with a tab, so a
+                    // flow without one would wait forever.
+                    None => abandon_auth_flow(&tab),
                 }
             }),
         );
