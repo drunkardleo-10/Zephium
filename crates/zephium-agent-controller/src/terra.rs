@@ -62,7 +62,7 @@ use crate::action::AgentBrowserVerifiedTransition;
 mod decision;
 pub use decision::AgentBrowserDecisionProvider;
 // Loopback provider fixture runs a server thread, kept out of the Terra path.
-#[cfg(test)]
+#[cfg(all(test, feature = "probe-harness"))]
 #[path = "terra_decision_tests.rs"]
 mod decision_journal_tests;
 
@@ -4427,6 +4427,7 @@ mod tests {
         .into_transport_input()
     }
 
+    #[cfg(feature = "probe-harness")]
     #[tokio::test]
     async fn decision_calls_preserve_page_allowance_and_refuse_unaffordable_disclosure() {
         for (budget, calls) in [
