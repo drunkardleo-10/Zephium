@@ -1187,7 +1187,7 @@ fn validate_work(work: &str, decision: &str) -> Result<(), String> {
             return Err(format!("Work actor lost boundary: {required}"));
         }
     }
-    let scanned = without_challenge_detector(source)?;
+    let scanned = without_loading_classifier(&without_challenge_detector(source)?)?;
     for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
         "SemanticModelActionQualificationExecution",
         "for_execution_qualification",
@@ -1200,6 +1200,42 @@ fn validate_work(work: &str, decision: &str) -> Result<(), String> {
         }
     }
     validate_work_decision(decision)
+}
+
+// This exact 16-node boolean classifier is the only additional content read.
+// Keep its whole body pinned so a changed bound, phrase or data flow is rejected.
+const LOADING_CLASSIFIER: &str = r#"fn says_loading(observation: &SemanticObservation) -> bool {
+    let nodes = || {
+        observation
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+    };
+    nodes().count() <= 16
+        && nodes().any(|node| {
+            [node.name(), node.text()]
+                .into_iter()
+                .flatten()
+                .map(|words| {
+                    words
+                        .as_str()
+                        .trim()
+                        .trim_end_matches(['…', '.'])
+                        .to_ascii_lowercase()
+                })
+                .any(|words| words == "loading" || words == "loading your workspace")
+        })
+}"#;
+
+fn without_loading_classifier(source: &str) -> Result<String, String> {
+    if source.matches(LOADING_CLASSIFIER).count() != 1 {
+        return Err("Work loading classifier changed its exact bounded content read".to_owned());
+    }
+    Ok(source.replacen(
+        LOADING_CLASSIFIER,
+        &LOADING_CLASSIFIER.replace(".as_str()", ""),
+        1,
+    ))
 }
 
 const CHALLENGE_DETECTOR: &str =
@@ -1317,7 +1353,7 @@ mod tests {
     use super::{
         validate_action, validate_decision_routing, validate_form, validate_manifest,
         validate_probe, validate_root, validate_terra, validate_work,
-        validate_work_actor_qualifier, validate_workflow_qualifier,
+        validate_work_actor_qualifier, validate_workflow_qualifier, LOADING_CLASSIFIER,
     };
 
     const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
@@ -1680,6 +1716,34 @@ mod tests {
             validate_work_actor_qualifier(&format!("{WORK_QUALIFIER}\nimpl AgentBrowserPort"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn loading_classifier_admits_only_the_exact_bounded_boolean_read() {
+        validate_work(WORK, WORK_DECISION).expect("reviewed loading classifier");
+        for changed in [
+            LOADING_CLASSIFIER.replace("nodes().count() <= 16", "nodes().count() <= 17"),
+            LOADING_CLASSIFIER.replace("nodes().count() <= 16", "true"),
+            LOADING_CLASSIFIER.replace(".as_str()", ".as_str().as_str()"),
+            LOADING_CLASSIFIER.replace("words == \"loading\"", "words.contains(\"loading\")"),
+            LOADING_CLASSIFIER.replace(
+                "node.name(), node.text()",
+                "node.name(), node.text(), node.text()",
+            ),
+        ] {
+            assert_ne!(changed, LOADING_CLASSIFIER);
+            assert!(validate_work(
+                &WORK.replacen(LOADING_CLASSIFIER, &changed, 1),
+                WORK_DECISION,
+            )
+            .is_err());
+        }
+        assert!(validate_work(&format!("{WORK}\n{LOADING_CLASSIFIER}"), WORK_DECISION).is_err());
+        assert!(validate_work(
+            &format!("{WORK}\nfn other_read() {{ page.as_str(); }}"),
+            WORK_DECISION
+        )
+        .is_err());
     }
 
     #[test]

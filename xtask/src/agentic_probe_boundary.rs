@@ -422,7 +422,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     )?;
     validate_provider_transport_response_header_boundary(&provider_transport_root)?;
     validate_provider_transport_http2_ingress_boundary(&provider_transport_root)?;
-    validate_provider_transport_shutdown_contract(&provider_transport_root)?;
+    validate_provider_transport_shutdown_contract(
+        &provider_transport_root,
+        &read(repository.join("crates/zephium-agentic/src/provider_transport/lead/keys.rs"))?,
+    )?;
     validate_agentic_no_direct_logging_attribute(
         PROVIDER_TRANSPORT_ROOT,
         &provider_transport_root,
@@ -6076,7 +6079,46 @@ fn validate_provider_transport_http2_ingress_boundary(source: &str) -> Result<()
     Ok(())
 }
 
-fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), String> {
+// These two synchronous login-Keychain loaders each retry Inaccessible once,
+// under the existing process-wide lock. No other thread or sleep is exempted.
+const KEYCHAIN_RETRY_SLEEP: &str = "std::thread::sleep(std::time::Duration::from_millis(40));";
+const KEYCHAIN_LOGIN_LOADER: &str = r#"fn load_keychain_login_credential<P: AgentCredentialBinding>(
+    provider: P,
+    service: &'static str,
+    account: &'static str,
+) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
+    let _turn = keychain_turn();
+    match read_keychain_login_credential(provider, service, account) {
+        Err(MacosAgentProviderCredentialError::Inaccessible) => {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            read_keychain_login_credential(provider, service, account)
+        }
+        loaded => loaded,
+    }
+}"#;
+const LEAD_KEYCHAIN_LOADER: &str = r#"pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
+        let _turn = turn();
+        match read_once(service) {
+            Err(LeadKeyError::Inaccessible) => {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                read_once(service)
+            }
+            read => read,
+        }
+    }"#;
+
+fn without_exact_keychain_retry(source: &str, loader: &str) -> Result<String, String> {
+    let loader = compact(loader);
+    if source.matches(&loader).count() != 1 {
+        return Err("Keychain loader changed its exact single 40 ms retry".to_owned());
+    }
+    Ok(source.replacen(&loader, &loader.replace(KEYCHAIN_RETRY_SLEEP, ""), 1))
+}
+
+fn validate_provider_transport_shutdown_contract(
+    source: &str,
+    lead_keys: &str,
+) -> Result<(), String> {
     let production = source
         .split_once("\n#[cfg(test)]\nmod tests")
         .map_or(source, |(production, _)| production);
@@ -6135,6 +6177,15 @@ fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), Str
         if !source.contains(required) {
             return Err(format!(
                 "agent provider transport lost exact shutdown proof rule {required}"
+            ));
+        }
+    }
+    let source = without_exact_keychain_retry(&source, KEYCHAIN_LOGIN_LOADER)?;
+    let lead_keys = without_exact_keychain_retry(&compact(lead_keys), LEAD_KEYCHAIN_LOADER)?;
+    for forbidden in ["std::thread", "thread::sleep("] {
+        if lead_keys.contains(forbidden) {
+            return Err(format!(
+                "lead Keychain loader acquired forbidden surface {forbidden}"
             ));
         }
     }
@@ -7228,12 +7279,13 @@ fn validate_semantic_execution_contract(
     Ok(())
 }
 
-// The macOS adapter's closed action set: the three native kinds plus Scroll.
+// The macOS adapter's closed action set: Click, Fill, Select, Press and Scroll.
 fn validate_snapshot_action_kinds(provider: &str) -> Result<(), String> {
     if !compact(provider).contains(concat!(
-        "pubconstAGENT_BROWSER_SNAPSHOT_ACTION_KINDS:[crate::SemanticActionKind;4]=[",
+        "pubconstAGENT_BROWSER_SNAPSHOT_ACTION_KINDS:[crate::SemanticActionKind;5]=[",
         "crate::SemanticActionKind::Click,crate::SemanticActionKind::Fill,",
-        "crate::SemanticActionKind::Select,crate::SemanticActionKind::Scroll,];",
+        "crate::SemanticActionKind::Select,crate::SemanticActionKind::Press,",
+        "crate::SemanticActionKind::Scroll,];",
     )) {
         return Err("snapshot action kinds widened beyond the closed native set".to_owned());
     }
@@ -10138,6 +10190,34 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_press_does_not_admit_a_sixth_or_substitute_action() {
+        let provider = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
+        validate_snapshot_action_kinds(provider).expect("five reviewed native actions");
+        for invalid in [
+            provider.replacen(
+                "crate::SemanticActionKind::Press,",
+                "crate::SemanticActionKind::Navigate,",
+                1,
+            ),
+            provider.replacen("crate::SemanticActionKind::Press,", "", 1),
+            provider
+                .replacen(
+                    "crate::SemanticActionKind::Press,",
+                    "crate::SemanticActionKind::Press, crate::SemanticActionKind::Navigate,",
+                    1,
+                )
+                .replacen(
+                    "[crate::SemanticActionKind; 5]",
+                    "[crate::SemanticActionKind; 6]",
+                    1,
+                ),
+        ] {
+            assert_ne!(invalid, provider);
+            assert!(validate_snapshot_action_kinds(&invalid).is_err());
+        }
+    }
+
+    #[test]
     fn work_product_graph_admits_only_its_reviewed_runtime_features() {
         let product = || {
             let graph = metadata(vec![
@@ -13011,7 +13091,9 @@ mod tests {
     #[test]
     fn provider_transport_shutdown_proof_requires_sticky_seal_and_exact_idle() {
         let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
-        validate_provider_transport_shutdown_contract(root)
+        let lead_keys =
+            include_str!("../../crates/zephium-agentic/src/provider_transport/lead/keys.rs");
+        validate_provider_transport_shutdown_contract(root, lead_keys)
             .expect("provider transport shutdown proof boundary");
 
         for (index, invalid) in [
@@ -13055,9 +13137,53 @@ mod tests {
         .enumerate()
         {
             assert!(
-                validate_provider_transport_shutdown_contract(&invalid).is_err(),
+                validate_provider_transport_shutdown_contract(&invalid, lead_keys).is_err(),
                 "provider shutdown proof mutation {index} was not rejected"
             );
+        }
+    }
+
+    #[test]
+    fn keychain_retry_exceptions_are_single_exact_and_loader_local() {
+        let root = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
+        let keys = include_str!("../../crates/zephium-agentic/src/provider_transport/lead/keys.rs");
+        validate_provider_transport_shutdown_contract(root, keys).expect("reviewed retries");
+        for (source, loader, is_lead) in [
+            (root, KEYCHAIN_LOGIN_LOADER, false),
+            (keys, LEAD_KEYCHAIN_LOADER, true),
+        ] {
+            for changed in [
+                loader.replace("from_millis(40)", "from_millis(41)"),
+                loader.replace(
+                    KEYCHAIN_RETRY_SLEEP,
+                    &format!("{KEYCHAIN_RETRY_SLEEP}{KEYCHAIN_RETRY_SLEEP}"),
+                ),
+                loader.replace(
+                    KEYCHAIN_RETRY_SLEEP,
+                    &format!("loop {{ {KEYCHAIN_RETRY_SLEEP} }}"),
+                ),
+                loader.replace("::Inaccessible)", "::Missing)"),
+                loader
+                    .replace("let _turn = keychain_turn();", "")
+                    .replace("let _turn = turn();", ""),
+            ] {
+                assert_ne!(changed, loader);
+                let invalid = source.replacen(loader, &changed, 1);
+                let result = if is_lead {
+                    validate_provider_transport_shutdown_contract(root, &invalid)
+                } else {
+                    validate_provider_transport_shutdown_contract(&invalid, keys)
+                };
+                assert!(result.is_err());
+            }
+            // The identical sleep outside its approved loader is still forbidden.
+            let invalid = format!("fn outside_loader() {{ {KEYCHAIN_RETRY_SLEEP} }}\n{source}");
+            let result = if is_lead {
+                validate_provider_transport_shutdown_contract(root, &invalid)
+            } else {
+                validate_provider_transport_shutdown_contract(&invalid, keys)
+            };
+            assert!(result.is_err());
         }
     }
 
