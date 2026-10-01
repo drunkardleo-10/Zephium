@@ -40,7 +40,11 @@ export async function start(site: BlockerSiteContext, onEnd?: () => void): Promi
   finish();
   const generation = ++lifetime;
   const view = await picker(site, { kind: "start" });
-  if (generation !== lifetime || !view?.active) return false;
+  if (generation !== lifetime) {
+    release(site, view);
+    return false;
+  }
+  if (!view?.active) return false;
   ended = onEnd ?? null;
   owner = site;
   session = view.session;
@@ -81,9 +85,15 @@ async function save(generation: number, site: BlockerSiteContext, pick: string, 
   // element stays hidden in the page until the saved rule replaces it.
   const next = context(owner);
   const view = next ? await picker(next, { kind: "start" }) : null;
-  if (generation !== lifetime) return;
+  if (generation !== lifetime) return release(next, view);
   if (!view?.active) return finish();
   session = view.session;
+}
+
+// A start that lands after hiding ended still put the picker on the page,
+// where it would swallow clicks until it expires.
+function release(site: BlockerSiteContext | null, view: Awaited<ReturnType<typeof picker>>) {
+  if (site && view?.active) void picker(site, { kind: "stop", session: view.session });
 }
 
 export async function undo(): Promise<void> {

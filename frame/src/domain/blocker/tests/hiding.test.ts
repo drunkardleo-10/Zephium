@@ -75,3 +75,13 @@ it("ends when the page stops picking and releases the session on finish", async 
   hiding.finish();
   expect(picker).toHaveBeenLastCalledWith(context, { kind: "stop", session: "s3" });
 });
+
+it("stops a picker that started after hiding ended", async () => {
+  let started!: (value: ReturnType<typeof view>) => void;
+  picker.mockReturnValueOnce(new Promise((resolve) => (started = resolve)));
+  const starting = hiding.start(context);
+  hiding.finish();
+  started(view("late"));
+  expect(await starting).toBe(false);
+  expect(picker).toHaveBeenLastCalledWith(context, { kind: "stop", session: "late" });
+});
