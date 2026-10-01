@@ -495,11 +495,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     if !store.flush() {
         return Err(Error::Runtime);
     }
-    let blocker = zephium_blocker_service::ManagedBlocker::unconfigured(
-        zephium_blocker::CompiledArtifactCacheConfig::new(data.path().join("compiled"))
-            .map_err(|_| Error::Authority)?,
-    )
-    .map_err(|_| Error::Runtime)?;
+    let blocker = super::work_application::seeded_blocker(data.path())?;
     // Credentials never enter Work, model context, diagnostics or serialized reports.
     let planning_key = load_macos_probe_openai_credential().map_err(|_| Error::Keychain)?;
     let browser_keys = (0..if matches!(
