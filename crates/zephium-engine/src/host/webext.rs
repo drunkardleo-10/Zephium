@@ -144,6 +144,8 @@ impl WebextHost {
             .insert((profile, load.extension_id.clone()));
         let entry = self.profile(profile, sink);
         if let Some(install) = entry.installs.remove(&load.install) {
+            // Their views belong to the context being replaced.
+            entry.close_pages(&install.extension_id);
             entry.runtime.unload(&install.extension_id);
         }
         let generation = entry
