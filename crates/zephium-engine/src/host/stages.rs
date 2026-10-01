@@ -399,7 +399,10 @@ impl EngineHost {
         {
             use wry::{MemoryUsageLevel, WebViewExtWindows};
             for (id, view) in &self.views {
-                let off = !tabs.contains(id);
+                // A layout belongs to one window; resource policy belongs to
+                // the whole host. Updating window A must not mark a visible
+                // view in window B hidden or make it eligible for suspension.
+                let off = !self.stages.values().any(|stage| stage.wants_visible(*id));
                 if off == self.hidden.contains(id) {
                     continue;
                 }
@@ -410,7 +413,9 @@ impl EngineHost {
                     self.hidden.remove(id);
                     self.dormant.remove(id);
                     self.desired_dormant.remove(id);
-                    self.suspending.remove(id);
+                    // Keep the in-flight slot until its exact callback settles.
+                    // A rapid show/hide must not issue overlapping TrySuspend
+                    // operations against the same native view.
                     self.suspend_failed.remove(id);
                     let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
                 }
