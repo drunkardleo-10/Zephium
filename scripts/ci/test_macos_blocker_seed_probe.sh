@@ -68,7 +68,7 @@ test "$(
 test "$(grep -Fc 'scripts/ci/probe_macos_blocker_seed.swift' "${workflow}")" -eq 1
 test "$(
   grep -Fc \
-    'const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);' \
+    'const DECLARATIVE_CONTENT_POLICY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);' \
     "${engine_policy}"
 )" -eq 1
 
