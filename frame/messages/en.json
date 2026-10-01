@@ -65,6 +65,8 @@
   "ntp_due_today": "Due today",
   "ntp_trackers_blocked": "Trackers blocked",
   "ntp_today": "Today",
+  "ntp_focused": "Focused",
+  "ntp_focus_goal": "of {goal} goal",
   "ntp_overdue": "{count} overdue",
   "ntp_nothing_overdue": "Nothing overdue",
   "ntp_profile": "Profile",

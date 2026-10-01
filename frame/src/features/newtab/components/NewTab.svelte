@@ -2,6 +2,7 @@
   import { onMount, type Snippet } from "svelte";
   import {
     CheckListIcon,
+    Clock01Icon,
     Settings01Icon,
     Shield01Icon,
     UserCircleIcon,
@@ -15,7 +16,8 @@
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import { greetingFor } from "../lib/greeting";
-  import { clockFace, clockFormat, dayKey, untilNextMinute } from "../lib/clock";
+  import { clockFace, clockFormat, dayKey, focusSpan, untilNextMinute } from "../lib/clock";
+  import { SAMPLE_DAY } from "../lib/figures";
   import { groundPath, notchShape, notchWidth, roundedRect } from "../lib/ground";
   import { layout, type Box } from "../lib/layout";
   import { WORDMARK } from "$shared/lib/wordmark";
@@ -25,6 +27,8 @@
     oncustomize,
     onprofile,
     ontasks,
+    focusMinutes = SAMPLE_DAY.focusMinutes,
+    focusGoalMinutes = SAMPLE_DAY.focusGoalMinutes,
   }: {
     /** The field that hangs in the notch. */
     search: Snippet;
@@ -34,6 +38,9 @@
     onprofile?: () => void;
     /** Opens Tasks. */
     ontasks?: () => void;
+    /** Minutes spent focused today, and the day's aim. */
+    focusMinutes?: number;
+    focusGoalMinutes?: number;
   } = $props();
 
   const id = $props.id();
@@ -64,11 +71,16 @@
     ),
   );
   const number = new Intl.NumberFormat();
+  let focusShare = $derived(
+    focusGoalMinutes > 0 ? Math.min(1, Math.max(0, focusMinutes / focusGoalMinutes)) : 0,
+  );
 
   // The figures a private window shows none of; what is due only while Tasks
   // is wanted here, and the blocked count only once it has been read.
   let figures = $derived(
-    incognito ? [] : [...(blocked === null ? [] : ["trackers"]), ...(showDue ? ["due"] : [])],
+    incognito
+      ? []
+      : [...(blocked === null ? [] : ["trackers"]), "focus", ...(showDue ? ["due"] : [])],
   );
 
   // Read when the page opens and with the minute's redraw while it shows, so
@@ -294,6 +306,24 @@
           <span class="reading">
             <span class="value">{number.format(blocked ?? 0)}</span>
             <span class="foot">{m.ntp_today()}</span>
+          </span>
+        </div>
+      {:else if figure === "focus"}
+        <div class="tile" style={at(tile)}>
+          <span class="label"
+            ><Icon icon={Clock01Icon} size={13} /><span class="name">{m.ntp_focused()}</span><span
+              class="meter"
+              role="meter"
+              aria-label={m.ntp_focus_goal({ goal: focusSpan(focusGoalMinutes) })}
+              aria-valuemin={0}
+              aria-valuemax={focusGoalMinutes}
+              aria-valuenow={Math.min(focusMinutes, focusGoalMinutes)}
+              ><span class="fill" style:transform={`scaleX(${focusShare})`}></span></span
+            ></span
+          >
+          <span class="reading">
+            <span class="value">{focusSpan(focusMinutes)}</span>
+            <span class="foot">{m.ntp_focus_goal({ goal: focusSpan(focusGoalMinutes) })}</span>
           </span>
         </div>
       {:else}
@@ -579,10 +609,31 @@
     color: var(--color-danger);
   }
 
+  /* The day's progress toward the aim, at the far end of the label. */
+  .meter {
+    position: relative;
+    flex: none;
+    inline-size: 36px;
+    margin-inline-start: auto;
+    block-size: 3px;
+    overflow: hidden;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill-strong);
+  }
+
+  .fill {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--color-text);
+    transform-origin: left center;
+  }
+
   /* A card too narrow for the figure and its context keeps the figure on
      screen; the context is still read out. */
   @container tile (inline-size < 148px) {
-    .foot {
+    .foot,
+    .meter {
       position: absolute;
       inline-size: 1px;
       block-size: 1px;

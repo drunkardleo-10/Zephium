@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clockFace, clockFormat, dayKey, untilNextMinute } from "../lib/clock";
+import { clockFace, clockFormat, dayKey, focusSpan, untilNextMinute } from "../lib/clock";
 
 const evening = new Date(2026, 8, 28, 21, 7);
 const morning = new Date(2026, 8, 28, 9, 41);
@@ -52,5 +52,13 @@ describe("dayKey", () => {
   it("is the local calendar day", () => {
     expect(dayKey(new Date(2026, 8, 28, 23, 59))).toBe("2026-09-28");
     expect(dayKey(new Date(2026, 0, 5, 0, 0))).toBe("2026-01-05");
+  });
+});
+
+describe("focusSpan", () => {
+  it("reads as hours and minutes, dropping whichever part is empty", () => {
+    expect(focusSpan(134)).toBe("2h 14m");
+    expect(focusSpan(45)).toBe("45m");
+    expect(focusSpan(240)).toBe("4h");
   });
 });
