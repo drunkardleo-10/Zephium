@@ -34,6 +34,13 @@ afterEach(() => {
   delete document.documentElement.dataset.theme;
 });
 
+/** The field hangs in a notch whose height it fills, as on the page. */
+async function mount(props: { tabId: string }) {
+  const screen = await render(NewTabSearch, props);
+  screen.container.style.blockSize = "50px";
+  return screen;
+}
+
 const search = (title: string): SearchResult => ({
   kind: "search",
   title,
@@ -84,12 +91,18 @@ async function replyToNew(
   return reply(query, results, completion);
 }
 
-test("keeps the capsule, and the anchored list carries no launcher chrome", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+test("the field is set into the notch and its results drop below it, best match first", async () => {
+  const screen = await mount({ tabId: "tab" });
   const input = screen.getByRole("combobox");
   await expect.element(input).toHaveFocus();
-  expect(screen.container.querySelector('.ui-search[data-size="page"]')).not.toBeNull();
-  expect(screen.container.querySelector(".dropdown")).toBeNull();
+  // The notch is the field's box, so the field draws none of its own, and it
+  // speaks at the launcher's size rather than a form's.
+  const field = screen.container.querySelector<HTMLElement>(".bar .ui-search")!;
+  expect(getComputedStyle(field).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(getComputedStyle(field.querySelector("input")!).fontSize).toBe("15px");
+  await userEvent.hover(field);
+  expect(getComputedStyle(field).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(screen.container.querySelector(".sheet")).toBeNull();
 
   await input.fill("rust");
   await reply("rust", [
@@ -98,15 +111,21 @@ test("keeps the capsule, and the anchored list carries no launcher chrome", asyn
     { ...search("Rust Book"), kind: "history", detail: "https://doc.rust-lang.org/book/" },
   ]);
   await expect.element(screen.getByRole("option", { name: /Rust docs/u })).toBeInTheDocument();
-
-  // The filter toolbar is gone: a popup under the field is not the place for
-  // a row of chrome, and its buttons wrote "@tabs " into the user's query.
   expect(screen.getByRole("button", { name: "Tabs", exact: true }).elements()).toHaveLength(0);
-  expect(getComputedStyle(screen.container.querySelector(".dropdown")!).position).toBe("absolute");
+
+  const sheet = screen.container.querySelector<HTMLElement>(".sheet")!;
+  expect(getComputedStyle(sheet).position).toBe("absolute");
+  expect(sheet.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+    field.getBoundingClientRect().bottom,
+  );
+  // Read from the field downward: the typed search is the row against it.
+  const options = [...screen.container.querySelectorAll('[role="option"]')];
+  expect(options[0]!.textContent!.trim()).toMatch(/^rust/u);
+  expect(options[0]!.getAttribute("aria-posinset")).toBe("1");
 
   await page.viewport(800, 600);
   screen.container.style.cssText =
-    "width:560px;height:400px;padding:20px;background:var(--color-canvas)";
+    "width:620px;block-size:50px;padding:20px 20px 360px;background:var(--color-canvas)";
   document.documentElement.dataset.theme = "dark";
   await page
     .elementLocator(screen.container)
@@ -118,7 +137,7 @@ test("keeps the capsule, and the anchored list carries no launcher chrome", asyn
 });
 
 test("the list sizes itself to its content and does not scroll when it fits", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("rust");
   await reply("rust", [search("rust"), tab("Rust docs")]);
   const scroll = screen.container.querySelector<HTMLElement>(".scroll")!;
@@ -129,7 +148,7 @@ test("the list sizes itself to its content and does not scroll when it fits", as
 });
 
 test("Enter runs what was typed even when a local match exists", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("rust");
   // Native already orders the typed action first; the surface must not
   // re-point Enter at a local row just because one matched well.
@@ -141,7 +160,7 @@ test("Enter runs what was typed even when a local match exists", async () => {
 });
 
 test("selection moves without wrapping and returns to the typed action", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("rust");
   const context = await reply("rust", [search("rust"), tab("Rust docs"), tab("Rust book", "two")]);
 
@@ -163,7 +182,7 @@ test("selection moves without wrapping and returns to the typed action", async (
 });
 
 test("a late-arriving result keeps the row the user aimed at", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("rust");
   const context = await reply("rust", [search("rust"), tab("Rust docs")]);
   await userEvent.keyboard("{ArrowDown}");
@@ -180,7 +199,7 @@ test("a late-arriving result keeps the row the user aimed at", async () => {
 });
 
 test("a click placed before the answer arrives runs when it does", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   const input = screen.getByRole("combobox");
   await input.fill("rust");
   await reply("rust", [search("rust"), tab("Rust docs")]);
@@ -199,14 +218,14 @@ test("a click placed before the answer arrives runs when it does", async () => {
 });
 
 test("Escape puts the list away, then clears the field", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   const input = screen.getByRole("combobox");
   await input.fill("rust");
   await reply("rust", [search("rust")]);
-  expect(screen.container.querySelector(".dropdown")).not.toBeNull();
+  expect(screen.container.querySelector(".sheet")).not.toBeNull();
 
   await userEvent.keyboard("{Escape}");
-  expect(screen.container.querySelector(".dropdown")).toBeNull();
+  expect(screen.container.querySelector(".sheet")).toBeNull();
   await expect.element(input).toHaveValue("rust");
 
   await userEvent.keyboard("{Escape}");
@@ -214,7 +233,7 @@ test("Escape puts the list away, then clears the field", async () => {
 });
 
 test("the empty state waits for every provider before claiming nothing matched", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("zzz");
   await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe("zzz"));
   const context = native.search.mock.calls.at(-1)![1];
@@ -237,7 +256,7 @@ test("the empty state waits for every provider before claiming nothing matched",
 });
 
 test("Enter opens the completed host rather than searching the fragment typed", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   const input = screen.getByRole("combobox");
   await input.fill("not");
   const context = await reply(
@@ -261,7 +280,7 @@ test("Enter opens the completed host rather than searching the fragment typed", 
 });
 
 test("backspace removes the completion instead of having it re-applied", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   const input = screen.getByRole("combobox");
   const element = input.element() as HTMLInputElement;
   await input.fill("you");
@@ -298,7 +317,7 @@ test("backspace removes the completion instead of having it re-applied", async (
 });
 
 test("an offered host completes the field and the appended part stays selected", async () => {
-  const screen = await render(NewTabSearch, { tabId: "tab" });
+  const screen = await mount({ tabId: "tab" });
   const input = screen.getByRole("combobox");
   await input.fill("git");
   await reply("git", [search("git"), tab("GitHub")], "github.com");
