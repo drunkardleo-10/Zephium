@@ -134,16 +134,24 @@
       const state = { fingerprint, sheet, index: new Map(entries), exceptions: new Set(exceptions), seen: new Set(), roots: new Map(), walker: null, first: false, idle: null, observer: null };
       state.observer = new MutationObserver(records => {
         if (generic !== state || document.hidden) return;
-        let admitted = 0;
-        for (const record of records) {
-          if (++admitted > 256 || state.roots.size >= 256) break;
+        const whole = document.documentElement;
+        let admitted = 0, overflow = false;
+        scan: for (const record of records) {
+          if (whole && state.roots.get(whole) === true) break;
+          if (++admitted > 256 || state.roots.size >= 256) { overflow = true; break; }
           if (record.type === "attributes") {
             if (!state.roots.has(record.target)) state.roots.set(record.target, false);
           }
           else for (const node of record.addedNodes) {
-            if (++admitted > 256 || state.roots.size >= 256) break;
+            if (++admitted > 256 || state.roots.size >= 256) { overflow = true; break scan; }
             if (node.nodeType === Node.ELEMENT_NODE) state.roots.set(node, true);
           }
+        }
+        // Too many changes to track one by one (infinite scroll): one idle-
+        // sliced walk of the whole document covers them all instead.
+        if (overflow) {
+          state.roots.clear();
+          if (whole) state.roots.set(whole, true);
         }
         scheduleGeneric();
       });

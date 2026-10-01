@@ -103,6 +103,18 @@ test("generic rules are installed only for observed tokens, including later DOM 
   expect([...win.document.adoptedStyleSheets].flatMap((s) => [...s.cssRules]).length).toBe(2);
 });
 
+test("a mutation burst too large to track still gets scanned", async () => {
+  const { win, update, display } = await fixture();
+  expect(update(1, true)).toBe(true);
+  await expect.poll(() => display(".ad")).toBe("none");
+  // One observer callback with more records than are tracked one by one.
+  for (let i = 0; i < 300; i++) win.document.body.append(win.document.createElement("p"));
+  const late = win.document.createElement("div");
+  late.id = "late";
+  win.document.body.append(late);
+  await expect.poll(() => display("#late")).toBe("none");
+});
+
 test("pause removes subscription rules and stale updates cannot re-enable them", async () => {
   const { win, update, display, api, token, url } = await fixture();
   expect(update(1, true)).toBe(true);
