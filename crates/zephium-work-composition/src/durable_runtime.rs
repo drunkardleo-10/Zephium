@@ -1465,6 +1465,22 @@ impl MacosWorkComposition {
                         intervention_note(intervention.as_ref())
                             .unwrap_or("The page needs a person"),
                     ),
+                    // The person's own app that never finished loading for a
+                    // first look is, in practice, a redirect to its sign-in.
+                    _ if signed_in.is_some()
+                        && matches!(
+                            snapshot.failure,
+                            Some(AgentWorkFailure::Observation(
+                                zephium_agentic::SemanticRuntimePortFailure::Result(
+                                    zephium_agentic::SemanticRuntimeResultError::Runtime(
+                                        zephium_agentic::SemanticRuntimeFault::DocumentLoading,
+                                    ),
+                                ),
+                            ))
+                        ) =>
+                    {
+                        Some("The page asked to sign in")
+                    }
                     _ => Some(
                         snapshot
                             .failure

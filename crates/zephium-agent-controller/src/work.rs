@@ -2392,8 +2392,28 @@ impl AgentWorkController {
         // readiness is waited for by time, not by a count of quick refusals.
         let started = Instant::now();
         let mut delay = Duration::from_millis(50);
+        // A document still parsing is looked at again only a few times, a
+        // second and more apart: each look shows the page, and one that never
+        // settles (a sign-in redirect) is better reported than watched.
+        let mut parsing = 0u32;
         while started.elapsed() < NOT_READY_PATIENCE {
-            match Self::observe_once(state, worker, browser).await {
+            let result = Self::observe_once(state, worker, browser).await;
+            let still_parsing = matches!(
+                result,
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
+                        SemanticRuntimeFault::DocumentLoading
+                    ),)
+                ))
+            );
+            if still_parsing {
+                parsing += 1;
+                if parsing > DOCUMENT_LOADING_LOOKS {
+                    return result;
+                }
+                delay = Duration::from_millis(800) * parsing;
+            }
+            match result {
                 Err(AgentWorkFailure::Observation(
                     SemanticRuntimePortFailure::NotReady
                     | SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
@@ -2408,7 +2428,9 @@ impl AgentWorkController {
                         }
                         () = tokio::time::sleep(delay) => {}
                     }
-                    delay = (delay * 2).min(Duration::from_millis(400));
+                    if !still_parsing {
+                        delay = (delay * 2).min(Duration::from_millis(400));
+                    }
                 }
                 result => return result,
             }
@@ -5163,6 +5185,8 @@ pub enum AgentWorkEventKind {
 /// How long a page waits for its look to become ready (another page's look
 /// holding the presentation, a document still committing).
 const NOT_READY_PATIENCE: Duration = Duration::from_secs(30);
+/// Extra looks at a document still parsing before its first look gives up.
+const DOCUMENT_LOADING_LOOKS: u32 = 3;
 
 /// Refused Navigate proposals one page task may make before it ends.
 const MAX_REFUSED_NAVIGATIONS: u8 = 4;
