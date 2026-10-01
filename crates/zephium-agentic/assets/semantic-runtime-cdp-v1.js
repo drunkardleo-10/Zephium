@@ -41,6 +41,8 @@ const jsonParse = JSON.parse;
 const jsonStringify = JSON.stringify;
 const reflectApply = Reflect.apply;
 const eventTargetAddEventListener = EventTarget.prototype.addEventListener;
+const eventTargetRemoveEventListener = EventTarget.prototype.removeEventListener;
+const eventPreventDefault = Event.prototype.preventDefault;
 const numberIsFinite = Number.isFinite;
 const numberIsSafeInteger = Number.isSafeInteger;
 const mathRound = Math.round;
@@ -1854,7 +1856,8 @@ if (credentialField(element, descriptor, wire.n || "")) {
 wire.v = { k: "redacted" };
 setSensitivity(record, "secret");
 } else if (descriptor.richText === true || descriptor.plainTextEditable === true) {
-addValue(record, richValue(element), state);
+const value = richValue(element, mathMin(2048, mathMax(0, state.request.b.x - state.visited)));
+if (value !== null) addValue(record, value, state);
 record.sink = null;
 } else if (descriptor.plainTextEditable && descriptor.editableEmpty) {
 addValue(record, "", state);
@@ -2736,11 +2739,12 @@ return true;
 } catch (_) { return false; }
 }
 const RICH_TEXT_BLOCKS = ["p", "div", "li", "blockquote", "pre", "h1", "h2", "h3", "ul", "ol"];
-function richValue(host) {
+function richValue(host, limit) {
 const lines = [""];
 const stack = [{ node: host, depth: 0, index: 0 }];
 let seen = 0;
-while (stack.length !== 0 && seen < 2048) {
+while (stack.length !== 0) {
+if (seen >= limit) return null;
 const frame = stack[stack.length - 1];
 const children = read(nodeChildNodesGetter, frame.node);
 if (frame.index >= listLength(children)) {
@@ -2792,9 +2796,10 @@ if (descriptor.contentEditable === true && descriptor.plainTextEditable === true
 if (descriptor.contentEditable === true && descriptor.richText === true) return 4;
 return 0;
 }
-function runRichFill(target, value, revalidate) {
+function runRichFill(target, value, revalidate, settled) {
 if ([htmlElementFocus, documentExecCommand, documentGetSelection, documentCreateRange,
-rangeSelectNodeContents, selectionRemoveAllRanges, selectionAddRange].some(call => typeof call !== "function")) {
+rangeSelectNodeContents, selectionRemoveAllRanges, selectionAddRange, eventTargetAddEventListener,
+eventTargetRemoveEventListener, eventPreventDefault].some(call => typeof call !== "function")) {
 return "unsupported_interaction";
 }
 try {
@@ -2814,38 +2819,42 @@ apply(rangeSetEnd, range, [last, listLength(read(nodeChildNodesGetter, last))]);
 apply(selectionRemoveAllRanges, selection, []);
 apply(selectionAddRange, selection, [range]);
 } catch (_) { return "unsupported_interaction"; }
+let refused = false;
+const guard = event => {
 try {
+if (!revalidate()) { refused = true; apply(eventPreventDefault, event, []); }
+} catch (_) { refused = true; apply(eventPreventDefault, event, []); }
+};
+try {
+apply(eventTargetAddEventListener, target, ["beforeinput", guard]);
 const lines = apply(stringSplit, value, ["\n"]);
 if (value === "") {
 apply(documentExecCommand, document, ["delete", false, null]);
 }
-for (let index = 0; index < lines.length; index += 1) {
+for (let index = 0; index < lines.length && !refused; index += 1) {
 if (index > 0) apply(documentExecCommand, document, ["insertParagraph", false, null]);
+if (refused) break;
 if (lines[index] !== "" && apply(documentExecCommand, document, ["insertText", false, lines[index]]) !== true) {
 return index === 0 ? "unsupported_interaction" : "applied_unverified_mutation";
 }
 }
-} catch (_) { return "applied_unverified_mutation"; }
+} catch (_) {
+return refused ? "applied_unverified_beforeinput_revalidation" : "applied_unverified_mutation";
+} finally {
+try { apply(eventTargetRemoveEventListener, target, ["beforeinput", guard]); } catch (_) {}
+}
+if (refused) return "applied_unverified_beforeinput_revalidation";
+try {
+if (!settled()) return "applied_unverified_postcondition";
+} catch (_) { return "applied_unverified_postcondition"; }
 return "ok";
 }
 function runFixedFill(target, descriptor, request) {
 const value = request.z;
 const kind = fillControlKind(descriptor, value);
-if (kind === 3 || kind === 4) {
-if (!validActionText(value)) return "unsupported_interaction";
-return runRichFill(target, value, () =>
-resolveKeyAtGeneration(request.t, request.g) === target &&
-read(nodeConnectedGetter, target) === true &&
-!disabledState(target, false) &&
-descriptorMatches(request.f, runtimeDescriptor(target, request.g)));
-}
-const valueSetter = kind === 1 ? inputValueSetter :
-kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
-if (valueSetter === null || typeof nativeInputEvent !== "function" ||
-typeof fixedDispatchEvent !== "function" || !validActionText(value)) {
-return "unsupported_interaction";
-}
-const revalidate = () => {
+let parentAtAdmission = null;
+try { parentAtAdmission = read(nodeParentGetter, target); } catch (_) { return "unsupported_interaction"; }
+const sameTarget = () => {
 if (resolveKeyAtGeneration(request.t, request.g) !== target ||
 read(nodeConnectedGetter, target) !== true ||
 apply(nodeGetRoot, target, []) !== document) return false;
@@ -2854,9 +2863,23 @@ if (current === null || fillControlKind(current, value) !== kind ||
 disabledState(target, false) || has(target, "readonly") ||
 lower(attribute(target, "aria-readonly", 16) || "") === "true" ||
 credentialField(target, current, attribute(target, "aria-label", 512) || "")) return false;
-if (kind === 3 && !editingContextMatches(target, request, current.editingContext)) return false;
-return descriptorMatches(request.f, runtimeDescriptor(target, request.g));
+if (kind === 3) return editingContextMatches(target, request, current.editingContext);
+return kind !== 4 || read(nodeParentGetter, target) === parentAtAdmission;
 };
+const revalidate = () => sameTarget() && descriptorMatches(request.f, runtimeDescriptor(target, request.g));
+if (kind === 3 || kind === 4) {
+if (!validActionText(value)) return "unsupported_interaction";
+const label = attribute(target, "aria-label", 512) || "";
+let checks = 0;
+const sameLabeled = () => sameTarget() && (attribute(target, "aria-label", 512) || "") === label;
+return runRichFill(target, value, () => (checks++ < 1 ? revalidate() : sameLabeled()), sameLabeled);
+}
+const valueSetter = kind === 1 ? inputValueSetter :
+kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
+if (valueSetter === null || typeof nativeInputEvent !== "function" ||
+typeof fixedDispatchEvent !== "function" || !validActionText(value)) {
+return "unsupported_interaction";
+}
 let before;
 let input;
 try {

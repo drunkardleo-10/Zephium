@@ -333,22 +333,27 @@ class Selection {
   get rangeCount() { return this.ranges.length; }
   getRangeAt(index) { return this.ranges[index]; }
   removeAllRanges() { this._removals=(this._removals||0)+1; this.ranges = []; }
-  addRange(range) { this.ranges.push(range); }
+  addRange(range) { this.ranges.push(range); this._typed = false; }
 }
 Document.prototype.createRange = function () { return new Range(); };
 Document.prototype.getSelection = function () { return this._selection ||= new Selection(); };
 const commandModelDispatch = EventTarget.prototype.dispatchEvent;
+// A minimal editor: the first command after a selection replaces the
+// selected contents, and later ones continue where typing left off.
 Document.prototype.execCommand = function (command, ui, value) {
-  assert(command === 'insertText' && ui === false, 'nonfixed command');
+  assert(['insertText', 'insertParagraph', 'delete'].includes(command) && ui === false, 'nonfixed command');
   this._commands = (this._commands || 0) + 1;
-  const target = this._selection.getRangeAt(0).node;
+  const selection = this._selection;
+  const target = selection.getRangeAt(0).node;
   if (target._commandFalse) return false;
-  const before = new InputEvent('beforeinput', {cancelable:true,data:value});
+  const data = command === 'insertText' ? value : command === 'insertParagraph' ? '\n' : null;
+  const before = new InputEvent('beforeinput', {cancelable:true,data});
   if (!commandModelDispatch.call(target,before)) return true;
   if (target._commandThrow) throw Error('engine exception after beforeinput');
   if (target._commandReplace) return true;
-  target.textContent = value;
-  commandModelDispatch.call(target,new InputEvent('input', {data:value}));
+  target.textContent = (selection._typed ? target.textContent : '') + (data || '');
+  selection._typed = true;
+  commandModelDispatch.call(target,new InputEvent('input', {data}));
   return true;
 };
 Element.prototype.focus = function () { document._active = this; commandModelDispatch.call(this,new Event('focus')); };
@@ -449,6 +454,16 @@ const implicitEditable = new Element("div", { contenteditable: "plaintext-only",
 implicitEditable.append(new CharacterData("  Implicit "));
 implicitEditable.append(new Element("span")).append(new CharacterData("editable"));
 implicitEditable.append(new CharacterData(" value\n"));
+const controlEditable = new Element("div", { contenteditable: "true", "aria-label": "Editable with control" });
+controlEditable.append(new CharacterData("Draft "));
+controlEditable.append(new Element("button", { "aria-label": "Inline control" }));
+const mediaEditable = new Element("div", { contenteditable: "true", "aria-label": "Editable with media" });
+mediaEditable.append(new CharacterData("Caption "));
+mediaEditable.append(new Element("img", { alt: "inline picture" }));
+const deepEditable = new Element("div", { contenteditable: "true", "aria-label": "Deeply nested editable" });
+let deepest = deepEditable;
+for (let depth = 0; depth < 10; depth += 1) deepest = deepest.append(new Element("span"));
+deepest.append(new CharacterData("deep words"));
 const credentialEditable = new Element("div", { contenteditable: "true", role: "textbox", "aria-label": "API key" });
 credentialEditable.append(new CharacterData("never-cross-editable-bridge"));
 const password = new HTMLInputElement(
@@ -598,6 +613,9 @@ for (const combo of [editableCombobox, readonlyCombobox, roleOnlyCombobox,
 main.append(textarea);
 main.append(contentEditable);
 main.append(implicitEditable);
+main.append(controlEditable);
+main.append(mediaEditable);
+main.append(deepEditable);
 main.append(credentialEditable);
 main.append(new Element("div", { role: "textbox", "aria-label": "Noneditable ARIA textbox" }));
 main.append(password);
@@ -712,8 +730,12 @@ assert(initial.n.some(node => node.n === "Implicit editable" && node.r === "text
   "implicit contenteditable div was filtered before classification");
 assert(initial.n.some(node => node.n === "Noneditable ARIA textbox" && (node.o & 2) === 0),
   "a textbox role alone advertised a nonexistent fill capability");
-assert(initial.n.some(node => node.n === "Implicit editable" && (node.o & 2) === 0),
-  "an editable host with inline markup advertised destructive plain-text fill");
+assert(initial.n.some(node => node.n === "Implicit editable" && (node.o & 2) !== 0),
+  "a bounded rich editor of formatting elements lost its fill capability");
+for (const name of ["Editable with control", "Editable with media", "Deeply nested editable"]) {
+  assert(!initial.n.some(node => node.n === name && (node.o & 2) !== 0),
+    `an editable host holding controls, media or unbounded nesting advertised fill: ${name}`);
+}
 const languageNode = initial.n.find((node) => node.n === "Language");
 assert(languageNode && languageNode.r === "combobox", "visible native select missing");
 assert(languageNode.o === 13 && languageNode.v?.k === "ordinal" && languageNode.fs !== 1,
@@ -1190,16 +1212,26 @@ async function finish() {
     `fill targets missing: ${transported.n.map((node) => `${node.r}:${node.n || ""}`).join("|")}`
   );
 
-  for (const [target, name, value, attempt] of [
-    [editableCombobox, "Editable suggestions", "next query", 40],
-    [editableComboboxHost, "Editable suggestion host", "next host query", 41]
+  for (const [target, name, value, attempt, editing] of [
+    [editableCombobox, "Editable suggestions", "next query", 40, false],
+    [editableComboboxHost, "Editable suggestion host", "next host query", 41, true]
   ]) {
     const combo = actionNode(name);
     document._hit = target;
+    const commandsBefore = document._commands || 0;
     const result = JSON.parse(await runtime.invoke(fillRequest(combo, value, attempt)));
     assert(result.a === attempt && result.b === "fixed_semantic_recipe" && result.r === "form",
       "proven editable combobox failed fixed fill/postcondition verification");
-    assertInputEvent(target, value);
+    if (editing) {
+      // An editable host is filled through the browser's own editing command.
+      const events = fillEvents.get(target);
+      assert((document._commands || 0) === commandsBefore + 1 && events.length === 2 &&
+        events[0].type === "beforeinput" && events[1].type === "input" && events[1].data === value &&
+        target.textContent === value, "editable combobox host was not filled through browser editing");
+    } else {
+      assert((document._commands || 0) === commandsBefore, "a native field entered the editing command");
+      assertInputEvent(target, value);
+    }
   }
   for (const [target, name, error] of [
     [readonlyCombobox, "Readonly suggestions", "target_disabled"],
@@ -1254,14 +1286,21 @@ async function finish() {
       contentEditable.textContent === editableValue,
     "contenteditable did not pass exact-value fixed fill verification"
   );
-  assertInputEvent(contentEditable, editableValue);
+  {
+    const events = fillEvents.get(contentEditable);
+    const lines = editableValue.split("\n").length;
+    assert(events.length === 2 * (2 * lines - 1) && events.every((event, index) =>
+      event.type === (index % 2 === 0 ? "beforeinput" : "input")),
+      "a multi-line editor fill was not typed as text and paragraphs through browser editing");
+    events.length = 0;
+  }
   contentEditable.textContent = "Original editable value";
-  const addedMarkup = new Element("span", { hidden: "" });
-  contentEditable._markupAfterBeforeInput = addedMarkup;
-  assert(await runtime.invoke(fillRequest(editableNode, "must not erase markup", 32)) ===
-    "E2:applied_unverified_beforeinput_revalidation", "beforeinput markup was overwritten");
-  assert(contentEditable._children.values.includes(addedMarkup), "unapproved child structure was erased");
-  contentEditable._markupAfterBeforeInput = null;
+  contentEditable._commandReplace = true;
+  const ignored = await runtime.invoke(fillRequest(editableNode, "editor ignores this", 32));
+  assert(ignored.startsWith("E2:") && contentEditable.textContent === "Original editable value",
+    `an editor that ignored the typing was reported as filled or rewritten by the runtime: ${ignored}`);
+  contentEditable._commandReplace = false;
+  fillEvents.get(contentEditable).length = 0;
   contentEditable.textContent = editableValue;
 
   textInput._value = "fixture text";
@@ -2054,7 +2093,7 @@ async function finish() {
     if (reason === 2) delete host.attributes.contenteditable;
     if (reason === 3) host._nativeEditableFalse = true;
     if (reason === 6) for (let i = 0; i < 128; i++) host.append(new CharacterData("x"));
-    if (reason === 7) host.append(new Element("span"));
+    if (reason === 7) host.append(new Element("button"));
     if (reason === 8) host.append(new Node(8));
     if (reason === 9) host._nativeEditableThrows = true;
     if (reason === 10) host.attributes["aria-readonly"] = "true";
@@ -2078,6 +2117,15 @@ async function finish() {
         "editable-parent refusal concealed rich child shape or granted Fill");
     }
     if (reason === 6) assert(JSON.stringify(projected.es) === "[129,1,false]", "child inspection was not capped");
+  }
+  {
+    // Formatting-only markup is a rich editor: supported, and filled through browser editing.
+    main._children = new NodeList();
+    const host = main.append(new Element("div", { role: "textbox", "aria-label": "Fill diagnostic", contenteditable: "true" }));
+    host.append(new CharacterData("rich "));
+    host.append(new Element("strong")).append(new CharacterData("diagnostic"));
+    const rich = JSON.parse(invoke(190, 190, { k: "initial" })).n.find(node => node.n === "Fill diagnostic");
+    assert(rich && rich.fs === 1 && (rich.o & 2) !== 0, `formatting-only editor lost Fill: ${rich && rich.fs}`);
   }
 
   // A nested leaf never inherits write authority over its editor. A fresh
@@ -2208,7 +2256,7 @@ async function finish() {
       ...(mode === "private" ? { autocomplete: "email" } : {})
     }));
     if (mode === "empty-text") host.append(new CharacterData(""));
-    if (mode === "markup") host.append(new Element("span"));
+    if (mode === "markup") host.append(new Element("img"));
     if (mode === "over-limit") for (let count = 0; count < 129; count++) host.append(new CharacterData(""));
     if (mode === "partial") { host.append(new CharacterData("")); host.append(new CharacterData("unvisited nonempty value")); }
     const capture = () => JSON.parse(invoke(++emptyGeneration, emptyGeneration, { k: "initial" }, mode === "partial" ? { n: 3, x: 3 } : {}));
