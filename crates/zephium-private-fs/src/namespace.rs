@@ -3100,7 +3100,12 @@ fn replace_published_directory_identity_for_test(
         .core
         .path
         .join(format!(".{}.identity-race", destination.as_str()));
+    // macOS 15 refuses to rename a `0500` directory even within one parent.
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o700))
+        .map_err(|_| PrivateFsError::Io)?;
     fs::rename(&installed, &recovery).map_err(|_| PrivateFsError::Io)?;
+    fs::set_permissions(&recovery, fs::Permissions::from_mode(0o500))
+        .map_err(|_| PrivateFsError::Io)?;
     private_directory_builder()
         .create(&installed)
         .map_err(|_| PrivateFsError::Io)?;
@@ -3529,6 +3534,16 @@ mod tests {
         (parent, namespace)
     }
 
+    /// Moves a sealed directory aside as an external actor would. macOS 15
+    /// requires write permission on the moved directory even for a
+    /// same-parent rename, so the `0500` mode is lifted and then restored.
+    fn rename_sealed_directory(from: &Path, to: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(from, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(from, to).unwrap();
+        fs::set_permissions(to, fs::Permissions::from_mode(0o500)).unwrap();
+    }
+
     fn transition_error_while_pinned<T, S>(
         lease: &Arc<NamespaceLease>,
         transition: impl FnOnce() -> Result<T, PrivateFsTransitionError<S>>,
@@ -3671,11 +3686,10 @@ mod tests {
                 .unwrap()
                 .seal()
                 .unwrap();
-            fs::rename(
-                parent.path().join("stale-pinned-unseal-test/child"),
-                parent.path().join("stale-pinned-unseal-test/moved"),
-            )
-            .unwrap();
+            rename_sealed_directory(
+                &parent.path().join("stale-pinned-unseal-test/child"),
+                &parent.path().join("stale-pinned-unseal-test/moved"),
+            );
             let lease = Arc::clone(&child.lease);
             let error = transition_error_while_pinned(&lease, || child.unseal());
             assert_terminal_identity_ambiguity(error);
@@ -3696,15 +3710,14 @@ mod tests {
                 .unwrap()
                 .seal()
                 .unwrap();
-            fs::rename(
-                parent
+            rename_sealed_directory(
+                &parent
                     .path()
                     .join("stale-pinned-publish-test/objects/source"),
-                parent
+                &parent
                     .path()
                     .join("stale-pinned-publish-test/objects/moved"),
-            )
-            .unwrap();
+            );
             let lease = Arc::clone(&child.lease);
             let error = transition_error_while_pinned(&lease, || {
                 child.publish_noreplace(&container, &PrivateComponent::new("installed").unwrap())
@@ -3748,11 +3761,10 @@ mod tests {
                 .unwrap()
                 .seal()
                 .unwrap();
-            fs::rename(
-                parent.path().join("stale-pinned-sealed-remove-test/child"),
-                parent.path().join("stale-pinned-sealed-remove-test/moved"),
-            )
-            .unwrap();
+            rename_sealed_directory(
+                &parent.path().join("stale-pinned-sealed-remove-test/child"),
+                &parent.path().join("stale-pinned-sealed-remove-test/moved"),
+            );
             let lease = Arc::clone(&child.lease);
             let error = transition_error_while_pinned(&lease, || child.remove_empty());
             assert_terminal_identity_ambiguity(error);
