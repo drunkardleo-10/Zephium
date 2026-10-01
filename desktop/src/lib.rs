@@ -109,6 +109,7 @@ macro_rules! diagnostic {
 // what rendered as a detached band along the edge.
 const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px;background:transparent}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}::-webkit-scrollbar-button{display:none}";
 
+static APP_STARTED: OnceLock<std::time::Instant> = OnceLock::new();
 static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
 static AUTH_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NAVIGATION_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
@@ -346,6 +347,12 @@ impl UiStartupGate {
                 format_args!("could not show initialized main window: {error}"),
             );
         } else {
+            if let Some(started) = APP_STARTED.get() {
+                diagnostic!(
+                    "startup: main document initialized and window shown after {} ms",
+                    started.elapsed().as_millis()
+                );
+            }
             on_main_window_mapped(window);
         }
     }
@@ -4034,6 +4041,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    APP_STARTED.get_or_init(std::time::Instant::now);
     #[cfg(target_os = "macos")]
     let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
         Ok(advisory) => advisory,
