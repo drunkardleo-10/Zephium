@@ -22,6 +22,8 @@ targets = [
 ]
 
 [features]
+# Explicit non-shipping native failure qualification.
+windows-cleanup-qualification = []
 default = ["protocol", "os-webview", "x11"]
 serde = ["dpi/serde"]
 protocol = []

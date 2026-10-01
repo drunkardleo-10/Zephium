@@ -15,6 +15,9 @@ use super::{ExtensionBrowserSurfaceGeneration, ExtensionRuntimeInstance};
 
 /// One snapshot carries at most one action per installed extension.
 pub const MAX_EXTENSION_INSTALLS_PER_PROFILE: usize = 8;
+/// Stable settlement reason used to retry Windows admission after a slot opens.
+pub const WINDOWS_EXTENSION_CAPACITY_MESSAGE: &str =
+    "This Windows build supports eight running extensions.";
 
 /// Toolbar icons are rasterized once at the exact size consumed by privileged
 /// chrome. Fixed-size RGBA avoids retaining native image graphs or accepting

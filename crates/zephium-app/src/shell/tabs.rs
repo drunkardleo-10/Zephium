@@ -421,6 +421,10 @@ impl Shell {
     /// User-facing Close retains its focused-scope authorization above.
     pub(super) fn close_owned_native_tab(&mut self, child: ItemId) {
         let Some(opener) = self.native_openers.remove(&child) else {
+            #[cfg(target_os = "windows")]
+            if self.extension_document_may_close(child) {
+                self.close_in_any_space(child);
+            }
             return;
         };
         if self.item_in_focused_scope(child) {

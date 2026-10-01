@@ -450,6 +450,31 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn load_web_extension(
+        &self,
+        profile: ProfileId,
+        load: zephium_core::ports::engine::WebExtensionLoad,
+    ) -> NativeDispatch {
+        self.log(format!("extension-load {profile} {}", load.install));
+        NativeDispatch::Scheduled
+    }
+    fn unload_web_extension(
+        &self,
+        profile: ProfileId,
+        install: zephium_core::ids::ExtensionInstallId,
+    ) -> NativeDispatch {
+        self.log(format!("extension-unload {profile} {install}"));
+        NativeDispatch::Scheduled
+    }
+    fn remove_web_extension(
+        &self,
+        profile: ProfileId,
+        load: zephium_core::ports::engine::WebExtensionLoad,
+    ) -> NativeDispatch {
+        self.log(format!("extension-remove {profile} {}", load.install));
+        NativeDispatch::Scheduled
+    }
+
     fn element_picker(
         &self,
         _profile: ProfileId,
@@ -1756,3 +1781,6 @@ mod window_layout;
 mod zoom;
 
 mod blocker_sites;
+
+#[cfg(target_os = "windows")]
+mod webext_windows;
