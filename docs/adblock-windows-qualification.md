@@ -15,9 +15,9 @@ Hidden on this site), the sidebar hiding bar (Undo, Done), the rail's native
 More menu (Block Ads and Trackers, Hide Elements…) and the new tab counter.
 Do not fork the frame; fix Windows behavior underneath it.
 
-Protection defaults to on for every profile. Until this qualification passes,
-the user decides whether Windows ships with it on; report the evidence that
-decision needs.
+Protection defaults to on for every profile, on Windows as on macOS. The first
+qualification pass and its open items are in
+[windows-protection-performance.md](windows-protection-performance.md).
 
 Implementations are in `platform/windows/content_filter.rs`,
 shared `host/content_styles.rs`, `host/style_worker.rs`,
@@ -68,8 +68,8 @@ under those existing failures.
 
 ## Required behavior
 
-Use a local fixture plus representative daily-use pages; retain raw results and
-screenshots with the report. EasyList deliberately has generic-hide exceptions
+Use a local fixture plus representative daily-use pages. Keep raw results and
+screenshots under `target/`; commit only concise results and reproducible tooling. EasyList deliberately has generic-hide exceptions
 for localhost and 127.0.0.1. Use IPv6 loopback or an explicitly controlled test
 hostname when checking generic cosmetics. Verify selectors against the shipped
 list. A script path such as `/ads/cbr.js` is present in the current network list.
