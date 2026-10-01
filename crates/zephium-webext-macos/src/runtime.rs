@@ -448,6 +448,25 @@ impl Runtime {
         }
     }
 
+    /// [`Self::bind_view`] for many tabs at once, such as every tab after a
+    /// publish.
+    pub fn bind_views<'a>(&self, views: impl IntoIterator<Item = (u64, Option<&'a WKWebView>)>) {
+        let tabs: HashMap<u64, Retained<Tab>> = self
+            .shared
+            .graph
+            .borrow()
+            .windows
+            .iter()
+            .flat_map(|window| window.tabs())
+            .map(|tab| (tab.id(), tab))
+            .collect();
+        for (id, view) in views {
+            if let Some(tab) = tabs.get(&id) {
+                tab.set_webview(view);
+            }
+        }
+    }
+
     /// Tabs showing one of an extension's own pages, which keep its process
     /// running until they close.
     pub fn tabs_showing(&self, id: &str) -> Vec<u64> {

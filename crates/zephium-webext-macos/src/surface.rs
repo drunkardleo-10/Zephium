@@ -249,8 +249,12 @@ impl Tab {
     }
 
     pub(crate) fn set_webview(&self, view: Option<&WKWebView>) {
+        let current = self.webview();
+        if current.as_deref().map(std::ptr::from_ref) == view.map(std::ptr::from_ref) {
+            return;
+        }
         if crate::tracing() {
-            let had = self.webview().is_some();
+            let had = current.is_some();
             if had != view.is_some() {
                 eprintln!(
                     "webext-trace: tab {} view {}",
@@ -418,17 +422,20 @@ impl Window {
     }
 
     pub(crate) fn active_tab(&self) -> Option<Retained<Tab>> {
-        let active = self.active_id()?;
-        self.ivars()
-            .tabs
-            .borrow()
-            .iter()
-            .find(|tab| tab.id() == active)
-            .cloned()
+        self.tab(self.active_id()?)
     }
 
     pub(crate) fn tabs(&self) -> Vec<Retained<Tab>> {
         self.ivars().tabs.borrow().clone()
+    }
+
+    pub(crate) fn tab(&self, id: u64) -> Option<Retained<Tab>> {
+        self.ivars()
+            .tabs
+            .borrow()
+            .iter()
+            .find(|tab| tab.id() == id)
+            .cloned()
     }
 
     pub(crate) fn set_tabs(&self, tabs: Vec<Retained<Tab>>, active: Option<u64>) {
@@ -454,10 +461,7 @@ pub(crate) struct Graph {
 
 impl Graph {
     pub(crate) fn tab(&self, id: u64) -> Option<Retained<Tab>> {
-        self.windows
-            .iter()
-            .flat_map(|window| window.tabs())
-            .find(|tab| tab.id() == id)
+        self.windows.iter().find_map(|window| window.tab(id))
     }
 
     pub(crate) fn window(&self, id: u64) -> Option<Retained<Window>> {

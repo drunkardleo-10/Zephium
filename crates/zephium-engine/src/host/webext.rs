@@ -288,6 +288,7 @@ impl WebextHost {
         settle_abandoned_auth_flows(surface.profile(), &open);
         // The engine's own views are the truth for residency; the shell's flag
         // trails view creation and would unbind a view bound on insertion.
+        let mut views = Vec::new();
         for tab in surface.tabs() {
             let id = entry.bridge.ids.borrow_mut().tab(tab.id());
             // Extension pages are not engine views; without this, every
@@ -307,8 +308,11 @@ impl WebextHost {
                     tab.url().map(|u| u.split('?').next().unwrap_or(u))
                 );
             }
-            entry.runtime.bind_view(id, view.as_deref());
+            views.push((id, view));
         }
+        entry
+            .runtime
+            .bind_views(views.iter().map(|(id, view)| (*id, view.as_deref())));
         entry.surface = Some(surface.clone());
     }
 
