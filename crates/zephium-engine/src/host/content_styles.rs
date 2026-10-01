@@ -82,6 +82,19 @@ impl DocumentStyleState {
     fn lock(&self) -> MutexGuard<'_, StyleState> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
+
+    /// Ends one delivery; true when a newer change waited on it (a URL change
+    /// in place, say), which nothing else would ever deliver.
+    fn settle(&self, sequence: u64) -> bool {
+        let mut state = self.lock();
+        state.in_flight -= 1;
+        if state.active != Some(sequence) {
+            return false;
+        }
+        state.active = None;
+        state.pending_key = None;
+        std::mem::take(&mut state.dirty)
+    }
 }
 
 struct Delivery {
@@ -102,19 +115,13 @@ struct Delivery {
 impl Drop for Delivery {
     fn drop(&mut self) {
         DELIVERY_BYTES.fetch_sub(self.charged_bytes, Ordering::Relaxed);
-        let mut state = self.state.lock();
-        state.in_flight -= 1;
-        if state.active == Some(self.sequence) {
-            state.active = None;
-            state.pending_key = None;
-            // Dropped unfinished while a newer change waited on it (a URL
-            // change in place, say): nothing else would ever deliver that.
-            if std::mem::take(&mut state.dirty) {
-                let id = self.id;
-                let _ = (self.dispatch)(Box::new(move || {
-                    let _ = with_document_style(id, move |host| host.refresh_document_styles(id));
-                }));
-            }
+        // The dispatch runs inline on the main thread, where the refresh takes
+        // this lock again: `settle` returns with it released.
+        if self.state.settle(self.sequence) {
+            let id = self.id;
+            let _ = (self.dispatch)(Box::new(move || {
+                let _ = with_document_style(id, move |host| host.refresh_document_styles(id));
+            }));
         }
     }
 }
@@ -555,6 +562,22 @@ mod tests {
         assert!(!reuse.contains(".site-ad"));
         assert!(reuse.contains(".personal"));
         assert!(reuse.contains("reuseSubscription"));
+    }
+    #[test]
+    fn a_settled_delivery_releases_the_lock_before_redelivering() {
+        let state = DocumentStyleState::default();
+        {
+            let mut inner = state.lock();
+            inner.in_flight = 1;
+            inner.active = Some(7);
+            inner.dirty = true;
+        }
+        assert!(state.settle(7));
+        let inner = state
+            .0
+            .try_lock()
+            .expect("redelivery would deadlock on the style lock");
+        assert!(inner.active.is_none() && !inner.dirty && inner.in_flight == 0);
     }
     #[test]
     fn subscription_identity_is_bounded_and_nullable() {
