@@ -4198,7 +4198,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     if dependencies
         .get("psl")
         .and_then(toml::Value::as_str)
-        .is_none_or(|version| version != "=2.1.230")
+        .is_none_or(|version| version != "=2.1.220")
     {
         return Err("zephium-agentic suffix data must remain an exact plain pin".to_owned());
     }
@@ -12584,7 +12584,7 @@ mod tests {
             base64 = "0.22"
             crc32fast = "1"
             futures-util = { version = "1", optional = true }
-            psl = "=2.1.230"
+            psl = "=2.1.220"
             reqwest = { version = "1", optional = true }
             rig-core = { version = "1", optional = true }
             serde = "1"
@@ -12621,7 +12621,7 @@ mod tests {
                 "dirs = { version = \"1\", optional = true }",
                 "dirs = \"1\"",
             ),
-            ("psl = \"=2.1.230\"", "psl = \"2\""),
+            ("psl = \"=2.1.220\"", "psl = \"2\""),
         ] {
             assert!(validate_manifest(&manifest.replace(optional, eager)).is_err());
         }

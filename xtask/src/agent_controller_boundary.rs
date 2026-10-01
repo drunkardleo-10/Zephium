@@ -251,11 +251,12 @@ fn validate_account_refresh(
         // Pinned across the actor's two files; new admission paths (discovery,
         // waits, screenshots, decisions, a site's whole first look, the whole
         // look a consent press is made on, an app view's look and each
-        // landmark it opens) each sample once more.
+        // landmark it opens, and each view an app read switches to) each sample
+        // once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 26
+            != 28
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -1604,6 +1605,27 @@ mod tests {
             POLICY
         )
         .is_err());
+    }
+
+    #[test]
+    fn app_view_admissions_each_retain_their_account_sample() {
+        validate_account_refresh(TERRA, WORK, WORK_DECISION, POLICY)
+            .expect("28 reviewed admission samples");
+        for (start, end) in [
+            ("async fn read_app_rows(", "async fn open_app_view("),
+            ("async fn open_app_view(", "async fn read_app_look("),
+        ] {
+            let begin = WORK.find(start).expect("admission function");
+            let finish = begin + WORK[begin..].find(end).expect("next function");
+            let path = &WORK[begin..finish];
+            // The last sample in each function is the one introduced for
+            // successive view observations by 2f873db4 and kept by 8249cf5c.
+            let sample = "state.refresh_account(worker, browser)?;";
+            let at = begin + path.rfind(sample).expect("new view sample");
+            let mut invalid = WORK.to_owned();
+            invalid.replace_range(at..at + sample.len(), "");
+            assert!(validate_account_refresh(TERRA, &invalid, WORK_DECISION, POLICY).is_err());
+        }
     }
 
     #[test]
