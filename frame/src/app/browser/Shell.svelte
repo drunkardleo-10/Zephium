@@ -297,8 +297,10 @@
   {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
       {m.browser_nav_failed()}
     </div>{/if}
-  {#if !tabs.activeTab()?.url && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
+  {#if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
     <!--
+      A tab opened straight to an address is loading before it has a URL; it
+      goes to its page rather than flashing the new tab first.
       Occupies exactly the rect a content WebView would, so moving between a
       page and the new tab never changes the window's shape. The inline start
       inset matches the core layout gap between chrome and content.

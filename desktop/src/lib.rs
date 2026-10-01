@@ -1770,7 +1770,7 @@ pub(crate) fn restore_browser_chrome(
         const host = active.url ? new URL(active.url).host : '';
         if (address.value !== host) {{ address.value = host; address.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
         if (address.value !== host) return '';
-        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url)) return '';
+        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url && !active.loading)) return '';
       }}
       void document.documentElement.getBoundingClientRect();
       return {expected};
@@ -6133,7 +6133,7 @@ mod tests {
         assert!(shell.contains(r#"data-zephium-active-tab={tabs.activeId() ?? ""}"#));
         assert_eq!(shell.matches("data-zephium-new-tab").count(), 1);
         assert!(
-            shell.contains("{#if !tabs.activeTab()?.url && (tabs.activeTab()?.content ?? \"web\") === \"web\" && browserPage.currentPage() === null}")
+            shell.contains("{#if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? \"web\") === \"web\" && browserPage.currentPage() === null}")
         );
         assert!(shell.contains("data-zephium-surface="));
         assert!(!shell.contains("transition:"));
