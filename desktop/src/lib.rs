@@ -4890,7 +4890,11 @@ pub fn run() {
                 );
             }
 
-            let overlay = overlay::Overlay::new(panel_window.clone());
+            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
+            let overlay = overlay::Overlay::new(
+                panel_window.clone(),
+                cfg!(target_os = "windows").then(|| panel_url.clone()),
+            );
             let main_focus_overlay = overlay.clone();
             window.on_window_event(move |event| { if matches!(event, tauri::WindowEvent::Focused(_)) { main_focus_overlay.focus_changed(); } });
             let blur_overlay = overlay.clone();
@@ -4977,7 +4981,7 @@ pub fn run() {
                 )
                 .into());
             }
-            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
+            #[cfg(not(target_os = "windows"))]
             panel_window.navigate(panel_url)?;
             if shutdown.terminal_started() {
                 return Err(std::io::Error::other(
