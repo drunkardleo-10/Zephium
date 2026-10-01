@@ -462,6 +462,8 @@ pub(crate) fn install(
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
+            styles_missed: std::collections::HashSet::new(),
             #[cfg(not(target_os = "macos"))]
             web_contexts: HashMap::new(),
             #[cfg(all(unix, not(target_os = "macos")))]

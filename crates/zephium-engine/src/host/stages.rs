@@ -398,6 +398,7 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         {
             use wry::{MemoryUsageLevel, WebViewExtWindows};
+            let mut woken = Vec::new();
             for (id, view) in &self.views {
                 // A layout belongs to one window; resource policy belongs to
                 // the whole host. Updating window A must not mark a visible
@@ -418,7 +419,11 @@ impl EngineHost {
                     // operations against the same native view.
                     self.suspend_failed.remove(id);
                     let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
+                    woken.push(*id);
                 }
+            }
+            for id in woken {
+                self.refresh_missed_styles(id);
             }
         }
         true

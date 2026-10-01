@@ -187,6 +187,7 @@ impl EngineHost {
                     crate::platform::imp::resume(view);
                 }
                 self.dormant.remove(&id);
+                self.refresh_missed_styles(id);
             }
             self.suspend_failed.retain(|id| next.contains(id));
             self.desired_dormant = next;
@@ -216,6 +217,7 @@ impl EngineHost {
             // clears this marker, so a later hide cycle can retry.
             self.suspend_failed.insert(id);
         }
+        self.refresh_missed_styles(id);
         self.pump_suspends();
     }
 
@@ -254,6 +256,7 @@ impl EngineHost {
                 if self.desired_dormant.contains(&id) {
                     self.suspend_failed.insert(id);
                 }
+                self.refresh_missed_styles(id);
             }
         }
     }

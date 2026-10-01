@@ -94,6 +94,7 @@ impl EngineHost {
             self.desired_dormant.remove(&id);
             self.suspending.remove(&id);
             self.suspend_failed.remove(&id);
+            self.styles_missed.remove(&id);
         }
         for stage in self.stages.values() {
             stage.remove_view(id);

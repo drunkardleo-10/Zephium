@@ -513,6 +513,9 @@ pub(crate) struct EngineHost {
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     suspend_failed: std::collections::HashSet<ItemId>,
+    // Dormant views that skipped a cosmetic refresh, owed one when they wake.
+    #[cfg(target_os = "windows")]
+    styles_missed: std::collections::HashSet<ItemId>,
     #[cfg(not(target_os = "macos"))]
     web_contexts: HashMap<ProfileId, wry::WebContext>,
     // Native managers outlive every associated view/context until a profile

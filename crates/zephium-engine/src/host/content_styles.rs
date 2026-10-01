@@ -166,6 +166,17 @@ impl EngineHost {
         }
     }
 
+    /// Delivers the refresh a dormant view skipped, once it is awake again.
+    #[cfg(target_os = "windows")]
+    pub(super) fn refresh_missed_styles(&mut self, id: ItemId) {
+        if !self.dormant.contains(&id)
+            && !self.suspending.contains(&id)
+            && self.styles_missed.remove(&id)
+        {
+            self.refresh_document_styles(id);
+        }
+    }
+
     pub(super) fn refresh_document_styles(&mut self, id: ItemId) {
         #[cfg(not(target_os = "windows"))]
         if self.shutdown_completion.is_some() {
@@ -173,6 +184,7 @@ impl EngineHost {
         }
         #[cfg(target_os = "windows")]
         if self.dormant.contains(&id) || self.suspending.contains(&id) {
+            self.styles_missed.insert(id);
             return;
         }
         let Some(profile) = self.partitions.get(&id).map(|p| p.profile()) else {
