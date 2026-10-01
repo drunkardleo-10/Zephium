@@ -2384,16 +2384,22 @@ impl AgentWorkController {
         {
             return Self::observe_once(state, worker, browser).await;
         }
-        // Only an explicit pre-dispatch NotReady receipt can start another
-        // read-only readiness check. Never retry a mutation, stale reference,
-        // replaced document, malformed callback or provider turn. Another
+        // Only an explicit pre-dispatch NotReady receipt, or the runtime's own
+        // "still parsing" refusal (a sign-in redirect in flight), can start
+        // another read-only readiness check. Never retry a mutation, stale
+        // reference, replaced document, malformed callback or provider turn. Another
         // page's look holds the one presentation for up to its own budget, so
         // readiness is waited for by time, not by a count of quick refusals.
         let started = Instant::now();
         let mut delay = Duration::from_millis(50);
         while started.elapsed() < NOT_READY_PATIENCE {
             match Self::observe_once(state, worker, browser).await {
-                Err(AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)) => {
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::NotReady
+                    | SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
+                        SemanticRuntimeFault::DocumentLoading,
+                    )),
+                )) => {
                     tokio::select! {
                         biased;
                         event = state.native.next_event(worker, browser) => {
