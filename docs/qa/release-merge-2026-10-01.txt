@@ -1,10 +1,33 @@
 Zephium release merge handoff — 2026-10-01
 
-STATUS: BLOCKED — this is not a release approval. Required gates are not all green.
+STATUS: BLOCKED — required release gates are not all green.
+Updated after the narrowly approved main-baseline and CI compatibility follow-up.
 Worktree: /Users/crynta/Dev/Zephium-release
 Branch: release/merge-main
 Work parent: 6fe131f52eb0e5738654e78bbb653cf33984b7e7
-Main parent (exact requested revision): 607cd1afc86abb8d94626a2323e5357fae3f4e8e
+Main parent: 607cd1afc86abb8d94626a2323e5357fae3f4e8e
+
+LATEST FOLLOW-UP: UNTOUCHED MAIN EXTENSION BASELINE
+Checkout: /Users/crynta/Dev/Zephium-main-qualification (607cd1afc86abb8d94626a2323e5357fae3f4e8e); Detached, source clean
+All41 CRX packages have identical SHA-256 hashes to the merge-suite inputs.
+33 passed, Keeper known timeout,7 failures. Entire main suite summary is byte-for-byte identical to the original merge suite summary.
+All7 are confirmed known limitations of main607cd1af; no main-pass/merge-fail case found. No extension runtime fixes or suite expectation changes made.
+  ColorZilla: timeout and empty popup
+  Dark Reader: no page effect on example.com
+  Ghostery: chrome.action.getUserSettings missing
+  Google Translate: timeout and empty popup
+  Grammarly: cookie destructuring from null/undefined
+  MetaMask: timeout
+  Zotero Connector: timeout
+Log: /tmp/zephium-main-webext-suite.log
+
+APPROVED FOLLOW-UP CHANGES
+- Snapshot boundary expects exactly Click, Fill, Select, Press, Scroll (five kinds); mutation tests reject a missing/replaced Press or a sixth action.
+- Controller content scanner admits .as_str() only in the exact full 16-node says_loading boolean classifier. Mutation tests reject wider/missing bounds, broader phrases/reads and unrelated content reads.
+- Provider shutdown check admits exactly one40ms Inaccessible retry in each of load_keychain_login_credential and lead/keys.rs read, under their existing lock. Full function shapes are pinned; mutation tests reject changed delay, duplicate/looped/misplaced sleeps, different error arm and removed lock. Other shutdown-proof guards retained.
+- Requested cargo update initially could not resolve against zephium-agentic's exact=2.1.230 requirement. Changed that manifest requirement to exact=2.1.220, then ran cargo update -p psl --precise2.1.220. Cargo.lock changed only psl version/checksum. Fork lock untouched.
+- No production Rust implementation changed in this follow-up; only two boundary-check files, the exact PSL manifest requirement, workspace lock and this report.
+- WebView2 floor and all18 advisory exceptions left unchanged as requested.
 
 COMMITS
 6e51070c merge: main's extensions and ad blocker into Work mode
@@ -12,15 +35,19 @@ COMMITS
 507305bc fix(engine): admit the pinned Work runtime in Windows contexts
 4846366b test(frame): optimize diagram worker before component runs
 5c6a314e fix(wry): preserve declared compiler compatibility for Work hooks
-Documentation commit: recorded separately in the final handoff message.
+4526e087 docs: record release merge validation and blockers
+16827df0 fix(ci): recognize exact Work action and credential boundaries
+85eebb9d fix(deps): align workspace psl with reviewed adblock pin
+Current report-update commit: recorded in the final handoff message.
 
 CONSTRAINTS
-Nothing pushed, rebased, amended, reset or stashed. No other checkout modified.
+Nothing pushed, rebased, amended, reset or stashed. Original checkouts/branches untouched.
+Separate detached main qualification checkout created only after explicit user authorization.
 No live profile database opened or modified. Upgrade tests used fixtures.
-No Tauri application built or launched; requested desktop test targets were compiled and run.
+No Tauri application built or launched; requested desktop tests were compiled and run.
 Cargo target: /Users/crynta/Dev/Zephium/target
-Probe signed after every build; signature verified before Keychain-reading runs.
-Node PATH used as requested; pnpm install completed.
+Probe signed after every build and verified before Keychain-reading runs.
+Requested Node PATH and pnpm install used.
 
 CONFLICT RESOLUTIONS (37 files)
 1. Cargo.lock
@@ -207,9 +234,9 @@ WebExtensionManager CSS: 103000 -> 113336 -> 113400. Combined Work and extension
 WorkEnvironmentWorkspace CSS: 143600 -> 145355 -> 145400. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
 WorkResultInspector JS: 270300 -> 270332 -> 270400. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
 WorkSubjectInspector JS: 214000 -> 214007 -> 214100. Combined Work and extension IPC/style graph; measured merged build, rounded to next100 bytes. Prior reasons preserved.
-Other entries remain the union of both sides with the higher existing ceiling and both reasons. Combined build passed.
+Other entries retain the union, higher ceiling and both reasons. Combined build passed.
 
-GATE RESULTS
+GATE RESULTS (latest result per command; original broader gates retained where unaffected)
 PASS  cargo test -p zephium-core --lib
   290 passed
   Log: /tmp/zephium-core-test.log
@@ -223,8 +250,8 @@ PASS  cargo test -p zephium-app --features work-execution --lib
   Log: /tmp/zephium-app-test.log
 
 PASS  cargo test -p zephium-agentic --features provider-transport,probe-harness --lib
-  929 passed
-  Log: /tmp/zephium-agentic-test.log
+  929 passed with pinned psl2.1.220.
+  Log: /tmp/zephium-agentic-psl220-test.log
 
 PASS  cargo test -p zephium-agent-controller
   Pass; default feature set has no tests. Supplemental provider-transport,probe-harness: 86 unit +6 integration passed
@@ -251,8 +278,8 @@ PASS  cargo test --manifest-path vendor/wry/Cargo.toml --all-targets
   Log: /tmp/zephium-wry-test.log
 
 FAIL  cargo test -p xtask
-  163 passed;3 failed: source checks reject existing Work Press action, exact bounded loading classifier, and Keychain retry sleep. Enforcement unchanged pending approval.
-  Log: /tmp/zephium-xtask-test.log
+  168 passed,1 failed. All3 approved compatibility checks and new mutation tests pass. current_controller_boundary_is_valid now reaches a separate account-refresh check expecting26 sampling calls; existing Work has28. Left unchanged outside narrow approval.
+  Log: /tmp/zephium-xtask-approved-test.log
 
 PASS  cargo clippy --workspace --all-targets --features zephium-app/work-execution,zephium-agentic/provider-transport,zephium-agentic/probe-harness,zephium-work-composition/durable-runtime -- -D warnings
   Log: /tmp/zephium-clippy-final.log
@@ -268,29 +295,38 @@ PASS  cargo fmt --all --check; cargo fmt --manifest-path vendor/wry/Cargo.toml -
   Log: /tmp/zephium-wry-fmt-check.log
 
 PASS  cargo xtask check-agent-model-catalog-boundary
+  Log: /tmp/zephium-approved-check-agent-model-catalog-boundary.log
 
 PASS  cargo xtask check-agent-runtime-boundary
+  Log: /tmp/zephium-approved-check-agent-runtime-boundary.log
 
 FAIL  cargo xtask check-agent-controller-boundary
-  Existing Work says_loading bounded classifier uses .as_str(), rejected by stale source scanner.
+  Loading classifier approved fix passes; separate account-refresh cardinality check expects26 but existing unchanged Work has28 calls. Other sampled-control assertions remain present.
+  Log: /tmp/zephium-approved-check-agent-controller-boundary.log
 
 FAIL  cargo xtask check-agentic-probe-boundary
-  Expects4 snapshot native action kinds; Work Press adds a fifth. xtask shutdown source proof also rejects exact40ms Keychain retry sleep.
+  Approved snapshot/Keychain checks pass their tests. Full command stops at a separate manifest check hard-coding exact psl2.1.230, incompatible with the requested2.1.220 pin. This additional validator expectation was not changed.
+  Log: /tmp/zephium-approved-check-agentic-probe-boundary.log
 
 FAIL  cargo xtask check-security-fork-locks
-  Standalone adblock psl2.1.220 differs from regenerated workspace psl2.1.230.
+  PSL now matches reviewed fork. Comparison advances to a second mismatch: workspace rand0.8.8 versus fork rand0.8.7 at graph row26. No rand or fork-lock change authorized/applied.
+  Log: /tmp/zephium-approved-check-security-fork-locks.log
 
 FAIL  cargo xtask check-blocker-security-fork
-  Same psl dependency graph mismatch.
+  PSL now matches reviewed fork. Comparison advances to a second mismatch: workspace rand0.8.8 versus fork rand0.8.7 at graph row26. No rand or fork-lock change authorized/applied.
+  Log: /tmp/zephium-approved-check-blocker-security-fork.log
 
 FAIL  cargo xtask check-engine-floors
   WebView2 hard/latest152.0.4191.66 review expired2026-09-18. Requires actual upstream review.
+  Log: /tmp/zephium-approved-check-engine-floors.log
 
 FAIL  cargo xtask check-advisory-exceptions
   18 security-owned advisory exceptions expired2026-09-30; first expired entry stops the command.
+  Log: /tmp/zephium-approved-check-advisory-exceptions.log
 
 FAIL  cargo xtask check-release-engine-security
-  Stops at stale agentic-probe boundary; engine-floor/advisory/fork gates also fail independently.
+  Stops at hard-coded agentic PSL expectation; account-refresh count, rand graph mismatch and expired security policies also fail independently.
+  Log: /tmp/zephium-approved-check-release-engine-security.log
 
 PASS  cargo xtask materialize-blocker-seed-webkit --output /tmp/zephium-merged-webkit-rules.json
   Embedded seed202609300903 verified offline,3568061 source bytes; Runtime and WebKit goldens exact.
@@ -337,8 +373,8 @@ PASS_ON_RERUN  ./target/debug/macos-terra-agentic-probe --loopback-site writes
   Log: /tmp/zephium-loopback-writes.log
   Log: /tmp/zephium-loopback-writes-rerun.log
 
-FAIL  cargo xtask webext-suite
-  41 extensions:33 pass,1 predeclared known Keeper timeout,7 fail. Every failure reproduced individually. New webext crates and suite unchanged from607cd1af.
+KNOWN_MAIN_LIMITATIONS  cargo xtask webext-suite
+  41 extensions:33 pass, Keeper predeclared known timeout,7 fail. All7 reproduced on untouched detached main607cd1af with identical packages and identical summary. Suite exits1 on both branches; no new exemptions added.
   ColorZilla: Timeout, empty popup
   Dark Reader: No page effect on example.com
   Ghostery: Missing chrome.action.getUserSettings
@@ -360,9 +396,19 @@ PASS  Signed final probe: --loopback-site leave (isolated rerun)
   Off-site navigation blocked, no landing requests/cookies, expected failed page status. Process exited0 despite diagnostic lost-page count1; combined-suite shutdown failure not reproduced alone.
   Log: /tmp/zephium-loopback-leave-rerun.log
 
+KNOWN_MAIN_LIMITATIONS  cargo xtask webext-suite on detached origin/main607cd1af (run before follow-up edits)
+  33 passed, Keeper known timeout,7 failures. Entire main suite summary is byte-for-byte identical to the original merge suite summary.
+  Log: /tmp/zephium-main-webext-suite.log
+
+PASS  cargo clippy -p xtask -p zephium-agentic --all-targets --features zephium-agentic/provider-transport,zephium-agentic/probe-harness -- -D warnings
+  Log: /tmp/zephium-approved-clippy.log
+
+PASS  cargo fmt --all --check (approved follow-up)
+  Log: /tmp/zephium-approved-fmt.log
+
 WINDOWS PASS
 Windows was not compiled on this Mac.
-Native files imported from main (unchanged against607cd1af), retained for native qualification:
+Native files imported from main (unchanged against607cd1af):
   crates/zephium-engine/src/platform/windows/agent_context.rs
   crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs
   crates/zephium-engine/src/platform/windows/content_filter.rs
@@ -383,14 +429,15 @@ Shared files with merge resolutions/fixups or Windows cfg surfaces:
   vendor/wry/src/lib.rs
   xtask/src/agentic_probe_boundary.rs
 
-QUESTIONS FOR THE LEAD
-1. Approve narrowly scoped updates for stale source-boundary validators (native Press, exact bounded loading classifier, exact Keychain retry) and dependency-lock reconciliation, or keep these failures for the lead?
-2. Who will review and renew the expired WebView2 engine floor and security-owned advisory exceptions? No review dates or exceptions were fabricated.
-3. Seven real-extension failures reproduce individually with the main extension implementation unchanged. These need native extension qualification before release.
-4. The complete writes suite passed on rerun. The all suite still has a recorded content assertion and combined shutdown failure, although Autopost and Leave passed isolated final-probe reruns. Investigate full-suite reliability before release.
-5. Run native Windows compilation/tests for the paths listed; only shared Rust syntax and feature-enabled Mac tests were checked here.
+REMAINING DECISIONS FOR THE LEAD
+1. Next scoped approval: should the account-refresh source check be updated from26 to the existing28 calls, with mutation tests preserving per-admission attestation? Work source is unchanged from6fe131f5.
+2. Next scoped approval: should the separate exact-PSL manifest boundary and its fixture expect=2.1.220, matching the explicitly requested downgrade? It currently still requires=2.1.230.
+3. Next dependency decision: workspace rand0.8.8 versus reviewed fork rand0.8.7 is the next provenance mismatch. No other package pins or fork lock were changed.
+4. WebView2 floor and18 advisory exceptions require the separate real security review requested by the user; their dates remain untouched.
+5. The complete writes suite passed on rerun. Full Work all has a recorded content assertion and combined shutdown failure; Autopost and Leave passed isolated final-probe reruns. Full-suite reliability remains unresolved.
+6. Perform the native Windows compile/test pass listed below; this Mac cannot provide it.
 
-APPROVAL BLOCK
-Automatic approval review rejected changing security-boundary validators and dependency-lock policy because it viewed those changes as altering persistent CI enforcement beyond the granted authorization. Enforcement remains unchanged pending explicit approval.
+APPROVAL STATUS
+The previous automatic approval block was resolved by the user's explicit narrow approval. The3 approved check changes and PSL pin are committed. Additional account-count/PSL-expectation/rand mismatches remain unchanged because they are outside the expressly limited follow-up. No new automatic approval rejection occurred.
 
-Logs are local /tmp evidence; the outcomes above are retained in this tracked report.
+Logs are local /tmp evidence; outcomes above are retained in this tracked report.
