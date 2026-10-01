@@ -455,6 +455,18 @@ struct NativeCleanupDebt {
   last_failure: Option<WebView2CleanupFailure>,
 }
 
+#[cfg(feature = "windows-cleanup-qualification")]
+thread_local! {
+  static FAIL_CLOSE_ONCE: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
+}
+
+/// Injects one controller-Close failure for this exact owned controller on this
+/// apartment. Only explicit native qualification builds contain this hook.
+#[cfg(feature = "windows-cleanup-qualification")]
+pub fn fail_next_webview2_controller_close_for_qualification(controller: &ICoreWebView2Controller) {
+  FAIL_CLOSE_ONCE.with(|slot| *slot.borrow_mut() = Some(controller.clone()));
+}
+
 impl NativeCleanupDebt {
   fn new(hwnd: HWND) -> windows::core::Result<Self> {
     Ok(Self {
@@ -519,7 +531,19 @@ impl NativeCleanupDebt {
         let result = self
           .controller
           .as_ref()
-          .map(|controller| unsafe { controller.Close() })
+          .map(|controller| {
+            #[cfg(feature = "windows-cleanup-qualification")]
+            if FAIL_CLOSE_ONCE.with(|slot| {
+              let mut slot = slot.borrow_mut();
+              if slot.as_ref().is_some_and(|target| target == controller) {
+                slot.take();
+                true
+              } else { false }
+            }) {
+              return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+            }
+            unsafe { controller.Close() }
+          })
           .unwrap_or(Ok(()));
         match result {
           Ok(()) => {

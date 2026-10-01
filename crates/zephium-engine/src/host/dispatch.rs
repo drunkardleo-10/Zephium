@@ -246,6 +246,8 @@ enum HostTaskKey {
     Profile(ProfileId, crate::platform::imp::BrowserProcessGeneration),
     #[cfg(target_os = "windows")]
     Suspend(ItemId),
+    #[cfg(target_os = "windows")]
+    Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
 }
 
 struct QueuedHostTask {
@@ -1034,6 +1036,21 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::Lifecycle, Some(HostTaskKey::View(id)), f)
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn with_extension_lifecycle<F>(
+    runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+    popup: bool,
+    f: F,
+) where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::Extension(runtime, popup)),
+        f,
+    );
 }
 
 #[cfg(target_os = "windows")]

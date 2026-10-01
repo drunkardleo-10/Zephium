@@ -949,11 +949,23 @@ impl EngineHost {
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            if native_popup {
+            if native_popup || cfg!(target_os = "windows") {
                 let closing_item = id.clone();
                 let closing_permit = event_permit.clone();
                 let closing_sink = self.sink.clone();
+                #[cfg(target_os = "windows")]
+                let closing_navigation = navigation.clone();
                 builder = builder.with_page_close_handler(move || {
+                    #[cfg(target_os = "windows")]
+                    if !native_popup
+                        && !closing_navigation
+                            .committed_snapshot()
+                            .is_some_and(|(_, url)| {
+                                closing_permit.allows_extension_document_close(&url)
+                            })
+                    {
+                        return;
+                    }
                     closing_permit.emit(
                         &closing_sink,
                         EngineEvent::NativeTabCloseRequested {

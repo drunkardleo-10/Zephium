@@ -9,11 +9,11 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 function fixture({defaultIcon} = {}) {
   const queries = [], messages = [], window = {};
   const cost = {fetches: 0, decodes: 0, canvases: 0, closes: 0};
-  const state = {icon: null, failFetch: false, snapshots: 0, listener: null, report: null, title: 'Fixture'};
+  const state = {icon: null, perTabIcons: false, failFetch: false, snapshots: 0, listener: null, report: null, title: 'Fixture'};
   const chrome = {
     runtime: {id: 'fixture', getURL: path => `chrome-extension://fixture${path}`,
       getManifest: () => ({name: 'Fixture', action: {default_icon: defaultIcon}}),
-      sendMessage: async () => { state.snapshots++; return state.report ? await state.report() : {icon: state.icon}; },
+      sendMessage: async () => { state.snapshots++; return state.report ? await state.report() : {icon: state.icon, perTabIcons: state.perTabIcons}; },
       onMessage: {addListener: listener => { state.listener = listener; }}},
     tabs: {query: query => new Promise((resolve, reject) => queries.push({query, resolve, reject}))},
     action: {getTitle: async () => state.title, getBadgeText: async () => '',
@@ -121,7 +121,7 @@ test('failed icon reads retry and foreign URLs cannot reuse the cached icon', as
   assert.equal(cost.decodes, 1);
 });
 
-test('metadata refreshes do not keep waking a worker, but changes and tab switches do', async () => {
+test('metadata and global-icon tab switches do not wake a worker; actual changes do', async () => {
   const {refresh, state, readChange} = fixture({defaultIcon: 'first.png'});
   await refresh();
   state.title = 'Native metadata remains live';
@@ -130,7 +130,11 @@ test('metadata refreshes do not keep waking a worker, but changes and tab switch
   await readChange();
   assert.equal(state.snapshots, 2);
   await refresh(20);
-  assert.equal(state.snapshots, 3);
+  assert.equal(state.snapshots, 2);
+  state.perTabIcons = true;
+  await readChange();
+  await refresh(20);
+  assert.equal(state.snapshots, 4);
 });
 
 test('a change during the worker response cannot leave the next icon stale', async () => {
@@ -170,4 +174,13 @@ test('a worker that keeps failing or a broken icon is not woken on every refresh
   state.report = async () => { throw new Error('Worker gone'); };
   for (let i = 0; i < 10; i++) await refresh();
   assert.equal(state.snapshots, 2);
+});
+
+test('missing and broken package icons stay quiet across tab switches after bounded retries', async () => {
+  for (const defaultIcon of [undefined, 'missing.png']) {
+    const {refresh, state} = fixture({defaultIcon});
+    state.failFetch = true;
+    for (let i = 0; i < 50; i++) await refresh(10 + i % 2);
+    assert.equal(state.snapshots, defaultIcon ? 2 : 1);
+  }
 });

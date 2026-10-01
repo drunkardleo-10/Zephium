@@ -33,7 +33,8 @@
   }
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (sender.id === chrome.runtime.id && message?.__zephiumActionSnapshot === true) {
-      reply({icon: icons.get(message.tabId) || icons.get(-1) || null});
+      reply({icon: icons.get(message.tabId) || icons.get(-1) || null,
+        perTabIcons: icons.size > (icons.has(-1) ? 1 : 0)});
     }
   });
 })();

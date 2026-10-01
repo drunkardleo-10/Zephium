@@ -73,6 +73,15 @@ impl EventPermit {
         self
     }
 
+    #[cfg(target_os = "windows")]
+    pub(super) fn allows_extension_document_close(&self, target: &str) -> bool {
+        self.active_token().is_some()
+            && url::Url::parse(target).ok().is_some_and(|url| {
+                zephium_core::navigation::extension_document_id(&url).is_some()
+                    && self.allows_target(target)
+            })
+    }
+
     pub(super) fn allows_target(&self, target: &str) -> bool {
         if navigation::is_allowed_str(target) {
             return true;

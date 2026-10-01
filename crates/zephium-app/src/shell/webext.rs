@@ -38,7 +38,7 @@ impl Shell {
             return;
         }
         let current = self.web_extensions.loaded.entry(profile).or_default();
-        let wanted: HashMap<_, _> = wanted
+        let wanted: std::collections::BTreeMap<_, _> = wanted
             .into_iter()
             .map(|load| (load.install, load))
             .collect();
@@ -59,17 +59,50 @@ impl Shell {
             {
                 continue;
             }
-            current.insert(install, load.clone());
-            self.web_extensions
-                .status
-                .insert(install, WebExtensionStatus::Loading);
-            if self.engine.load_web_extension(profile, load) != NativeDispatch::Scheduled {
-                self.web_extensions.status.insert(
-                    install,
-                    WebExtensionStatus::Failed("The browser could not start it.".into()),
+            #[cfg(target_os = "windows")]
+            let replacing = current.contains_key(&install)
+                && matches!(
+                    self.web_extensions.status.get(&install),
+                    Some(WebExtensionStatus::Loading | WebExtensionStatus::Running(_))
                 );
+            current.insert(install, load.clone());
+            #[cfg(target_os = "windows")]
+            {
+                if replacing {
+                    self.web_extensions
+                        .status
+                        .insert(install, WebExtensionStatus::Loading);
+                    if self.engine.load_web_extension(profile, load) != NativeDispatch::Scheduled {
+                        self.web_extensions.status.insert(
+                            install,
+                            WebExtensionStatus::Failed("The browser could not start it.".into()),
+                        );
+                    }
+                } else {
+                    self.web_extensions.status.insert(
+                        install,
+                        WebExtensionStatus::Failed(
+                            zephium_core::extensions::WINDOWS_EXTENSION_CAPACITY_MESSAGE.into(),
+                        ),
+                    );
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.web_extensions
+                    .status
+                    .insert(install, WebExtensionStatus::Loading);
+                if self.engine.load_web_extension(profile, load) != NativeDispatch::Scheduled {
+                    self.web_extensions.status.insert(
+                        install,
+                        WebExtensionStatus::Failed("The browser could not start it.".into()),
+                    );
+                }
             }
         }
+
+        #[cfg(target_os = "windows")]
+        self.pump_waiting_windows_extensions();
 
         let mut active = zephium_core::extensions::ExtensionActiveProfiles::EMPTY;
         for (profile, installs) in &self.web_extensions.loaded {
@@ -92,6 +125,50 @@ impl Shell {
         let _ = self.refresh_extension_actions(profile);
     }
 
+    #[cfg(target_os = "windows")]
+    fn pump_waiting_windows_extensions(&mut self) {
+        // Admission is global on Windows. Queue in stable profile/install order;
+        // only a capacity failure is retried automatically, never a bad package.
+        let mut waiting: Vec<_> = self
+            .web_extensions
+            .loaded
+            .iter()
+            .flat_map(|(profile, installs)| {
+                installs.iter().filter_map(|(id, load)| {
+                matches!(self.web_extensions.status.get(id), Some(WebExtensionStatus::Failed(error))
+                    if error == zephium_core::extensions::WINDOWS_EXTENSION_CAPACITY_MESSAGE)
+                    .then_some((*profile, *id, load.clone()))
+            })
+            })
+            .collect();
+        waiting.sort_by_key(|(profile, id, _)| (*profile, *id));
+        for (profile, id, load) in waiting {
+            let active = self
+                .web_extensions
+                .status
+                .values()
+                .filter(|status| {
+                    matches!(
+                        status,
+                        WebExtensionStatus::Loading | WebExtensionStatus::Running(_)
+                    )
+                })
+                .count();
+            if active >= zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE {
+                break;
+            }
+            self.web_extensions
+                .status
+                .insert(id, WebExtensionStatus::Loading);
+            if self.engine.load_web_extension(profile, load) != NativeDispatch::Scheduled {
+                self.web_extensions.status.insert(
+                    id,
+                    WebExtensionStatus::Failed("The browser could not start it.".into()),
+                );
+            }
+        }
+    }
+
     pub(super) fn remove_web_extension(&mut self, profile: ProfileId, extension: WebExtensionLoad) {
         if let Some(current) = self.web_extensions.loaded.get_mut(&profile) {
             current.remove(&extension.install);
@@ -103,10 +180,15 @@ impl Shell {
         if self.engine.remove_web_extension(profile, extension) != NativeDispatch::Scheduled {
             crate::diagnostic!("extensions: the browser could not erase a removed extension");
         }
+        #[cfg(target_os = "windows")]
+        self.pump_waiting_windows_extensions();
     }
 
     pub(super) fn apply_deferred_web_extensions(&mut self) {
-        let deferred = std::mem::take(&mut self.web_extensions.deferred);
+        let deferred: std::collections::BTreeMap<_, _> =
+            std::mem::take(&mut self.web_extensions.deferred)
+                .into_iter()
+                .collect();
         for (profile, wanted) in deferred {
             self.set_web_extensions(profile, wanted);
         }
@@ -126,6 +208,10 @@ impl Shell {
         if !still_wanted {
             return;
         }
+        #[cfg(target_os = "windows")]
+        let capacity_failure = result.as_ref().is_err_and(|error| {
+            error == zephium_core::extensions::WINDOWS_EXTENSION_CAPACITY_MESSAGE
+        });
         let status = match result {
             Ok(loaded) => WebExtensionStatus::Running(loaded),
             Err(error) => {
@@ -134,7 +220,38 @@ impl Shell {
             }
         };
         self.web_extensions.status.insert(install, status);
+        #[cfg(target_os = "windows")]
+        if !capacity_failure {
+            self.pump_waiting_windows_extensions();
+        }
         let _ = self.refresh_extension_actions(profile);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn extension_document_may_close(&self, id: ItemId) -> bool {
+        let Some(profile) = self.profile_of_item(id) else {
+            return false;
+        };
+        let Some(extension) = self
+            .items
+            .tab(id)
+            .and_then(|tab| tab.url.as_ref())
+            .and_then(zephium_core::navigation::extension_document_id)
+        else {
+            return false;
+        };
+        self.web_extensions
+            .loaded
+            .get(&profile)
+            .is_some_and(|installs| {
+                installs.iter().any(|(id, load)| {
+                    load.extension_id == extension
+                        && matches!(
+                            self.web_extensions.status.get(id),
+                            Some(WebExtensionStatus::Running(_))
+                        )
+                })
+            })
     }
 
     pub(super) fn web_extension_status(

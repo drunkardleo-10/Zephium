@@ -26,6 +26,7 @@ use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::ports::engine::{EngineEvent, WebExtensionLoad, WebExtensionLoaded};
 
 struct ExtensionView {
+    crash_observer: Option<crate::platform::imp::CrashObserver>,
     view: wry::WebView,
     resource: NativeResourceLease,
     alive: Rc<Cell<bool>>,
@@ -33,11 +34,37 @@ struct ExtensionView {
 
 #[derive(Default)]
 struct Action {
+    recovery: HostRecovery,
     binding: Option<(ItemId, i64)>,
     state: Option<ExtensionActionState>,
     popup: Option<String>,
     native_tab: Option<i64>,
     open_request: Option<(ItemId, std::time::Instant, u8)>,
+}
+
+#[derive(Default)]
+struct HostRecovery {
+    started: Option<std::time::Instant>,
+    attempts: usize,
+    pending: bool,
+}
+impl HostRecovery {
+    fn next(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        if self.pending {
+            return None;
+        }
+        if self
+            .started
+            .is_none_or(|at| now.saturating_duration_since(at).as_secs() >= 60)
+        {
+            self.started = Some(now);
+            self.attempts = 0;
+        }
+        let millis = *[250, 1000, 4000].get(self.attempts)?;
+        self.attempts += 1;
+        self.pending = true;
+        Some(std::time::Duration::from_millis(millis))
+    }
 }
 
 /// An enabled environment cannot be confused with an ordinary cached one.
@@ -126,7 +153,7 @@ pub(super) struct WindowsExtensions {
     generation: u64,
     popup: Option<Popup>,
     // A failed explicit child close must not destroy its native parent first.
-    retained_popup_window: Option<popup::PopupWindow>,
+    retained_popup_window: Option<std::rc::Weak<popup::PopupWindow>>,
     // Consume an anchor click that first deactivated the popup, so the same
     // click's later toolbar IPC dismisses instead of reopening it.
     dismissed_action: Option<(ExtensionRuntimeInstance, ItemId, std::time::Instant)>,
@@ -169,6 +196,125 @@ struct Install {
 }
 
 impl super::EngineHost {
+    fn observe_extension_crashes(
+        &self,
+        view: &wry::WebView,
+        runtime: ExtensionRuntimeInstance,
+        alive: Rc<Cell<bool>>,
+        popup_view: bool,
+    ) -> Result<crate::platform::imp::CrashObserver, String> {
+        let profile = runtime.profile();
+        let observer = self
+            .browser_process_exit_observers
+            .get(&profile)
+            .ok_or("Extension browser process observer unavailable.")?;
+        let process_id = observer.expected_process_id();
+        let generation = observer.generation();
+        if crate::platform::imp::browser_process(view)
+            .map_err(|e| e.to_string())?
+            .id()
+            != process_id
+        {
+            return Err("Extension controller process identity mismatch.".into());
+        }
+        crate::platform::imp::install_crash_handler(view, move |failure| {
+            if !alive.get() {
+                return;
+            }
+            match failure {
+                crate::platform::imp::ProcessFailure::Browser => {
+                    super::dispatch::with_profile_exit(profile, generation, move |host| {
+                        host.on_profile_process_exit(profile, process_id, generation);
+                    });
+                }
+                crate::platform::imp::ProcessFailure::Renderer => {
+                    let alive = alive.clone();
+                    super::dispatch::with_extension_lifecycle(runtime, popup_view, move |host| {
+                        if !alive.get() {
+                            return;
+                        }
+                        if popup_view {
+                            if host
+                                .windows_extensions
+                                .popup
+                                .as_ref()
+                                .is_some_and(|p| p.runtime == runtime)
+                            {
+                                host.close_windows_extension_popup();
+                            }
+                        } else {
+                            host.extension_host_crashed(runtime);
+                        }
+                    });
+                }
+            }
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    fn extension_host_crashed(&mut self, runtime: ExtensionRuntimeInstance) {
+        let Some(install) = self
+            .windows_extensions
+            .installs
+            .get(&(runtime.profile(), runtime.install_id()))
+            .filter(|install| install.runtime == runtime)
+        else {
+            return;
+        };
+        let delay = {
+            let mut action = install.action.borrow_mut();
+            action.state = None;
+            action.popup = None;
+            action.native_tab = None;
+            action.open_request = None;
+            action.recovery.next(std::time::Instant::now())
+        };
+        self.sink.emit(EngineEvent::ExtensionActionsInvalidated {
+            profile: runtime.profile(),
+        });
+        let Some(delay) = delay else {
+            return;
+        };
+        let dispatch = self.main_dispatch.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("extension-host-recovery".into())
+            .spawn(move || {
+                std::thread::sleep(delay);
+                dispatch(Box::new(move || {
+                    super::dispatch::with_extension_lifecycle(runtime, false, move |host| {
+                        host.reload_extension_host(runtime);
+                    })
+                }));
+            })
+        {
+            install.action.borrow_mut().recovery.pending = false;
+            eprintln!("extensions: could not schedule host recovery: {error}");
+        }
+    }
+
+    fn reload_extension_host(&mut self, runtime: ExtensionRuntimeInstance) {
+        if self.windows_view_admission_blocked(runtime.profile()) {
+            return;
+        }
+        let Some(install) = self
+            .windows_extensions
+            .installs
+            .get(&(runtime.profile(), runtime.install_id()))
+            .filter(|install| install.runtime == runtime && install.bridge.alive.get())
+        else {
+            return;
+        };
+        install.action.borrow_mut().recovery.pending = false;
+        let url = format!(
+            "chrome-extension://{}/{}/host.html",
+            install.id,
+            zephium_webext::windows::HOST_DIRECTORY
+        );
+        if install.bridge.view.load_url(&url).is_err() {
+            self.extension_host_crashed(runtime);
+        }
+    }
+
     pub(super) fn windows_extension_profile_for_erasure(
         &self,
         profile: ProfileId,
@@ -296,7 +442,7 @@ impl super::EngineHost {
                 .installs
                 .contains_key(&(profile, load.install))
         {
-            return Err("This Windows build supports eight running extensions.".into());
+            return Err(zephium_core::extensions::WINDOWS_EXTENSION_CAPACITY_MESSAGE.into());
         }
         let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
             .map_err(|e| e.to_string())?;
@@ -455,11 +601,8 @@ impl super::EngineHost {
     }
 
     pub(crate) fn remove_web_extension(&mut self, profile: ProfileId, load: WebExtensionLoad) {
-        if self.windows_extensions.popup.as_ref().is_some_and(|popup| {
-            popup.runtime.profile() == profile && popup.runtime.install_id() == load.install
-        }) {
-            self.close_windows_extension_popup();
-        }
+        self.close_windows_extension_popup();
+        let mut native_change_started = false;
         let result = (|| -> Result<(), String> {
             if let Some(install) = self
                 .windows_extensions
@@ -469,6 +612,7 @@ impl super::EngineHost {
                 self.windows_extensions
                     .revoke_navigation(profile, &install.id);
                 install.bridge.alive.set(false);
+                native_change_started = true;
                 let result = native::remove(&install.native);
                 self.close_extension_view(profile, install.bridge);
                 return result;
@@ -502,6 +646,7 @@ impl super::EngineHost {
                     if native::extension_id(&item).map_err(|error| error.to_string())?
                         == load.extension_id
                     {
+                        native_change_started = true;
                         native::remove(&item)?;
                     }
                 }
@@ -512,17 +657,21 @@ impl super::EngineHost {
         })();
         if let Err(error) = result {
             eprintln!("extensions: removal failed: {error}");
-            self.quarantine_unverifiable_windows_profile(profile);
+            if native_change_started {
+                self.quarantine_unverifiable_windows_profile(profile);
+            }
         }
     }
 
     fn close_extension_view(&mut self, profile: ProfileId, owned: ExtensionView) {
         let ExtensionView {
+            crash_observer,
             mut view,
             resource,
             alive,
         } = owned;
         alive.set(false);
+        drop(crash_observer);
         if let Err(debt) = view.close() {
             self.retain_windows_cleanup_debt(
                 profile,
@@ -670,11 +819,25 @@ impl super::EngineHost {
                 // the action observer or the extension's native event delivery.
                 // Popups use their own visible controller at the normal level.
                 let _ = view.set_memory_usage_level(wry::MemoryUsageLevel::Low);
-                Ok(ExtensionView {
+                let mut owned = ExtensionView {
+                    crash_observer: None,
                     view,
                     resource,
                     alive,
-                })
+                };
+                match self.observe_extension_crashes(
+                    &owned.view,
+                    runtime,
+                    owned.alive.clone(),
+                    false,
+                ) {
+                    Ok(observer) => owned.crash_observer = Some(observer),
+                    Err(error) => {
+                        self.close_extension_view(profile, owned);
+                        return Err(error);
+                    }
+                }
+                Ok(owned)
             }
             Err(error) => {
                 let mut resource = Some(resource);
@@ -752,17 +915,20 @@ impl super::EngineHost {
         let restore_focus = popup.window.restore_owner_focus();
         drop(popup.escape);
         let ExtensionView {
+            crash_observer,
             mut view,
             resource,
             alive,
         } = popup.view;
         alive.set(false);
+        drop(crash_observer);
         if let Err(debt) = view.close() {
+            let window = Rc::new(popup.window);
+            self.windows_extensions.retained_popup_window = Some(Rc::downgrade(&window));
             self.retain_windows_cleanup_debt(
                 popup.runtime.profile(),
-                super::OwnedWindowsCleanupDebt::new(debt, Some(resource)),
+                super::OwnedWindowsCleanupDebt::new(debt, Some(resource)).with_parent(window),
             );
-            self.windows_extensions.retained_popup_window = Some(popup.window);
         }
         if restore_focus {
             if let Some(view) = self.views.get(&popup.tab) {
@@ -1083,7 +1249,11 @@ impl super::EngineHost {
             return Ok(ExtensionActionSettlement::PopupDismissed);
         }
         self.close_windows_extension_popup();
-        if self.windows_extensions.retained_popup_window.is_some()
+        if self
+            .windows_extensions
+            .retained_popup_window
+            .as_ref()
+            .is_some_and(|window| window.strong_count() != 0)
             || self.windows_view_admission_blocked(profile)
         {
             return Err(ExtensionActionRejection::PopupCapacityExceeded);
@@ -1130,7 +1300,7 @@ impl super::EngineHost {
             .with_browser_extension_startup_gate(move |env, core| startup.authenticate(env, core))
             .with_initialization_script(&initialization)
             .with_initialization_script(zephium_webext::windows::POPUP_SIZE_SCRIPT)
-            .with_url(&url)
+            .with_url("about:blank")
             .with_background_color(popup::BACKGROUND)
             .with_visible(true)
             .with_focused(false)
@@ -1201,18 +1371,22 @@ impl super::EngineHost {
                 alive.set(false);
                 let mut resource = Some(resource);
                 let debts = wry::pending_webview2_cleanup_debts();
+                let window = Rc::new(window);
                 if !debts.is_empty() {
-                    self.windows_extensions.retained_popup_window = Some(window);
+                    self.windows_extensions.retained_popup_window = Some(Rc::downgrade(&window));
                 }
                 for debt in debts {
                     self.retain_windows_cleanup_debt(
                         profile,
-                        super::OwnedWindowsCleanupDebt::new(debt, resource.take()),
+                        super::OwnedWindowsCleanupDebt::new(debt, resource.take())
+                            .with_parent(window.clone()),
                     );
                 }
                 return Err(ExtensionActionRejection::PopupUnavailable);
             }
         };
+        let crash_observer = self.observe_extension_crashes(&view, runtime, alive.clone(), true);
+        let crash_failed = crash_observer.is_err();
         let escape = popup::EscapeRegistration::new(&view, hwnd, alive.clone());
         let escape_failed = escape.is_err();
         self.windows_extensions.popup = Some(Popup {
@@ -1221,12 +1395,26 @@ impl super::EngineHost {
             window,
             escape: escape.ok(),
             view: ExtensionView {
+                crash_observer: crash_observer.ok(),
                 view,
                 resource,
                 alive,
             },
         });
-        if escape_failed {
+        if escape_failed || crash_failed {
+            self.close_windows_extension_popup();
+            return Err(ExtensionActionRejection::PopupUnavailable);
+        }
+        if self
+            .windows_extensions
+            .popup
+            .as_ref()
+            .unwrap()
+            .view
+            .view
+            .load_url(&url)
+            .is_err()
+        {
             self.close_windows_extension_popup();
             return Err(ExtensionActionRejection::PopupUnavailable);
         }
@@ -1250,3 +1438,30 @@ fn valid_extension_url(
         && !value.is_empty())
     .then(|| parsed.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn host_recovery_coalesces_crashes_and_bounds_backoff() {
+        let now = std::time::Instant::now();
+        let mut retry = HostRecovery::default();
+        for millis in [250, 1000, 4000] {
+            assert_eq!(
+                retry.next(now),
+                Some(std::time::Duration::from_millis(millis))
+            );
+            assert_eq!(retry.next(now), None);
+            retry.pending = false;
+        }
+        assert_eq!(retry.next(now), None);
+        assert_eq!(
+            retry.next(now + std::time::Duration::from_secs(60)),
+            Some(std::time::Duration::from_millis(250))
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "webext_windows_qualification.rs"]
+mod qualification;

@@ -198,6 +198,7 @@ struct OwnedWindowsCleanupDebt {
     debt: wry::WebView2CleanupDebt,
     _native_resource: Option<NativeResourceLease>,
     accounted_as_debt: bool,
+    native_parent: Option<Box<dyn std::any::Any>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -213,7 +214,13 @@ impl OwnedWindowsCleanupDebt {
             debt,
             _native_resource: native_resource,
             accounted_as_debt,
+            native_parent: None,
         }
+    }
+
+    fn with_parent(mut self, parent: impl std::any::Any) -> Self {
+        self.native_parent = Some(Box::new(parent));
+        self
     }
 
     fn retry(&mut self) -> Result<(), wry::WebView2CleanupFailure> {
@@ -235,6 +242,9 @@ impl Drop for OwnedWindowsCleanupDebt {
             // the accounting lease as a permanent fail-closed reservation.
             // Releasing it here could authorize a replacement around an
             // unproven controller/HWND teardown.
+            if let Some(parent) = self.native_parent.take() {
+                std::mem::forget(parent);
+            }
             if let Some(native_resource) = self._native_resource.take() {
                 std::mem::forget(native_resource);
             }

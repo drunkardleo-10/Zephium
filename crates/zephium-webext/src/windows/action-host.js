@@ -8,7 +8,7 @@
   // Package files are immutable for this manager's lifetime. Retain only the
   // last decoded path, not a growing per-tab cache. setIcon(imageData) remains live.
   let cachedPath, cachedPixels;
-  let iconDirty = true, iconTab, actionPixels = null, failedReads = 0;
+  let iconDirty = true, iconTab, perTabIcons = false, actionPixels = null, failedReads = 0;
   const iconPath = value => typeof value === 'string' ? value : value?.[32] || value?.[48] || value?.[16];
   async function pixels(icon) {
     const imageData = icon?.data && icon.width > 0 && icon.height > 0 && icon.width <= 128 && icon.height <= 128 && icon.data.length === icon.width * icon.height * 4;
@@ -51,12 +51,12 @@
       if (tabs.length !== 1) throw new Error('Human controller identity unavailable');
       const tabId = tabs[0].id;
       // Native metadata reads need no worker RPC. Reuse the last raster until
-      // its tab changes or the observer reports a change, allowing idle workers
+      // a per-tab icon changes or the observer reports a change, allowing idle workers
       // to sleep between real events. Clear before awaiting so a concurrent
       // notification still invalidates the next queued snapshot. A read that
       // fails (worker restarting, unreadable icon) is retried once, not on
       // every refresh, so a broken icon cannot keep waking the worker.
-      const readIcon = iconDirty || iconTab !== tabId;
+      const readIcon = iconDirty || (perTabIcons && iconTab !== tabId);
       iconDirty = false;
       let failed = false;
       const [title, badge, popup, enabled, report] = await Promise.all([
@@ -66,6 +66,7 @@
           : null
       ]);
       if (readIcon) {
+        if (report) perTabIcons = report.perTabIcons === true;
         actionPixels = null;
         try { actionPixels = await pixels(report?.icon); } catch { failed = true; }
         failedReads = failed ? failedReads + 1 : 0;

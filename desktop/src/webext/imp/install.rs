@@ -148,11 +148,40 @@ async fn review(
 ) -> Result<WebExtensionReview, String> {
     let root = extensions.root.clone();
     let installed = extensions.registry(profile).extensions;
+    #[cfg(target_os = "windows")]
+    let enabled = extensions
+        .profiles()
+        .into_iter()
+        .map(|owner| {
+            extensions
+                .registry(owner)
+                .extensions
+                .iter()
+                .filter(|entry| entry.enabled)
+                .count()
+        })
+        .sum::<usize>();
+    #[cfg(target_os = "windows")]
+    let enabled_ids: Vec<_> = installed
+        .iter()
+        .filter(|entry| entry.enabled)
+        .map(|entry| entry.id.clone())
+        .collect();
     let staged =
         tauri::async_runtime::spawn_blocking(move || stage(&root, source, profile, &installed))
             .await
             .map_err(|_| "Installation failed.")??;
     let review = staged.review.clone();
+    #[cfg(target_os = "windows")]
+    let review = {
+        let mut review = review;
+        if enabled >= zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE
+            && !enabled_ids.contains(&review.id)
+        {
+            review.warnings.push("Windows can run eight extensions at once across all profiles. This extension will wait until you disable or remove another running extension.".into());
+        }
+        review
+    };
     let mut pending = extensions
         .state
         .lock()

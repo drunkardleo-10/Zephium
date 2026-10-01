@@ -7386,6 +7386,7 @@ dependencies = [
 name = "zephium-engine"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "block2",
  "dirs",
  "dispatch2",

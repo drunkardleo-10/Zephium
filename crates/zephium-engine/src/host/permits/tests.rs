@@ -145,3 +145,32 @@ fn a_download_only_view_cannot_regain_page_authority() {
     permit.revoke();
     assert!(!permit.allows_navigation("about:blank"));
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extension_close_requires_own_granted_document_and_live_view() {
+    let token = Arc::new(AtomicBool::new(true));
+    let grants = super::ExtensionNavigationGrants::default();
+    grants
+        .lock()
+        .unwrap()
+        .insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    let permit = EventPermit::bound(&token).with_extensions(grants.clone());
+    let own = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html";
+    assert!(permit.allows_extension_document_close(own));
+    for url in [
+        "https://example.com",
+        "about:blank",
+        "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/options.html",
+    ] {
+        assert!(!permit.allows_extension_document_close(url));
+    }
+    grants.lock().unwrap().clear();
+    assert!(!permit.allows_extension_document_close(own));
+    grants
+        .lock()
+        .unwrap()
+        .insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    permit.revoke();
+    assert!(!permit.allows_extension_document_close(own));
+}
