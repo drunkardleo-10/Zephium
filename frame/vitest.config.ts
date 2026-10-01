@@ -26,6 +26,7 @@ export default defineConfig({
         optimizeDeps: {
           include: [
             "@xyflow/svelte",
+            "elkjs/lib/elk-worker.min.js",
             "@tiptap/core",
             "@tiptap/extension-document",
             "@tiptap/extension-paragraph",
