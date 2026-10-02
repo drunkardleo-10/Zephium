@@ -35,7 +35,10 @@
     list: () => list,
     reorder: () => ({ essential: false }),
     drop: ({ id, x, y, over, before }) => {
-      if (over?.closest("[data-essentials-drop]")) void tabDrag.move(id, true, before);
+      const essential = !!over?.closest("[data-essentials-drop]");
+      if (tabs.inSplit(id) && (essential || over?.closest("[data-tabs-drop]")))
+        void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
+      else if (essential) void tabDrag.move(id, true, before);
       else tabs.dropTab(id, x, y);
     },
   });

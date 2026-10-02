@@ -51,6 +51,13 @@
     // this list among them.
     reorder: () => (variant === "list" && section === "today" ? { essential: false } : null),
     drop: ({ id, x, y, over, before }) => {
+      // A split's tabs share one row, so they never reorder in place; let go
+      // anywhere in the sidebar and the tab leaves its split for there.
+      if (tabs.inSplit(id) && over?.closest("[data-essentials-drop], [data-tabs-drop]")) {
+        const essential = !!over.closest("[data-essentials-drop]");
+        void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
+        return;
+      }
       if (over?.closest("[data-essentials-drop]")) {
         void tabDrag.move(id, true, before);
         return;

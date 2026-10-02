@@ -1171,6 +1171,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::GoForward(_)
             | Command::SplitWith { .. }
             | Command::Unsplit
+            | Command::LeaveSplit(_)
             | Command::DropTab { .. }
             | Command::DividerRelease { .. }
             | Command::Run(_)

@@ -528,3 +528,41 @@ fn native_split_update_cannot_ratify_a_cross_space_tree() {
     assert_eq!(*ratio, 0.5);
     assert_eq!(engine.last_layout(), vec![local.to_string()]);
 }
+
+#[test]
+fn a_tab_leaving_a_split_keeps_the_rest_paired() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "first.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "second.example");
+    shell.handle(Command::Open);
+    let third = active_id(&screen);
+    navigate_and_commit(&mut shell, third, "third.example");
+
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    shell.handle(Command::SplitWith {
+        other: second,
+        axis: Axis::Row,
+    });
+    assert_eq!(last(&screen).split_group.unwrap().members.len(), 3);
+
+    let left = shell.handle_operation(Command::LeaveSplit(first));
+    assert_eq!(left.outcome, OperationOutcome::Deferred);
+    let members = last(&screen).split_group.unwrap().members;
+    assert!(!members.contains(&first.to_string()));
+    assert_eq!(members.len(), 2);
+
+    let again = shell.handle_operation(Command::LeaveSplit(first));
+    assert_eq!(again.outcome, OperationOutcome::NoOp);
+
+    // Two become one: no split remains.
+    shell.handle_operation(Command::LeaveSplit(second));
+    assert!(last(&screen).split_group.is_none());
+    assert_eq!(active_id(&screen), third);
+}

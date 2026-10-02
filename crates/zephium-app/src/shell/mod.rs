@@ -744,6 +744,9 @@ impl Shell {
             Command::Unsplit => {
                 let _ = self.operation_unsplit();
             }
+            Command::LeaveSplit(id) => {
+                let _ = self.operation_leave_split(id);
+            }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {
                     win.size = size;

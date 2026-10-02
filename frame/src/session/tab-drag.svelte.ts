@@ -26,6 +26,26 @@ export function end() {
       if (generation === gesture) failed = true;
     });
 }
+/** Takes a tab out of the split it is in, then places it as `move` would. */
+export async function leaveSplit(
+  value: string,
+  place: { essential: boolean; before: string | null } | null,
+) {
+  if (pending) return;
+  pending = true;
+  failed = false;
+  try {
+    const result = await settle(commands.tabsLeaveSplit(value), 5000);
+    if (result.outcome === "failed" || result.outcome === "rejected") throw new Error("settlement");
+  } catch {
+    failed = true;
+    return;
+  } finally {
+    pending = false;
+  }
+  if (place) await move(value, place.essential, place.before);
+}
+
 export async function move(value: string, essential: boolean, before: string | null = null) {
   if (pending) return;
   pending = true;

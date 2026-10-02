@@ -125,6 +125,7 @@ export const backActive = onActive((id) => void commands.tabsBack(id));
 export const forwardActive = onActive((id) => void commands.tabsForward(id));
 export const split = (other: string) => void commands.tabsSplit(other);
 export const unsplit = () => void commands.tabsUnsplit();
+export const inSplit = (id: string) => state.split_group?.members.includes(id) ?? false;
 export const dragOver = (x: number, y: number) => void commands.tabDragOver(x, y);
 export const dropTab = (id: string, x: number, y: number) => void commands.tabDrop(id, x, y);
 /** Keeps one of onboarding's catalog sites in Essentials, named by its id;

@@ -268,6 +268,8 @@ pub enum Command {
         axis: Axis,
     },
     Unsplit,
+    /// Takes one tab out of the focused split, leaving the rest paired.
+    LeaveSplit(ItemId),
     SetWindowSize(Size),
     /// Whether the OS can currently present the main window. Minimized
     /// windows hide native content views so the engine can lower their memory

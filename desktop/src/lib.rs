@@ -1515,6 +1515,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_pane_hide,
             tabs_split,
             tabs_unsplit,
+            tabs_leave_split,
             extension_action_invoke,
             webext::web_extension_prepare,
             webext::web_extension_confirm,
@@ -2737,6 +2738,24 @@ fn tabs_unsplit(
         return rejected_operation();
     }
     dispatch_operation(caller.app_handle(), &shell, Command::Unsplit)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn tabs_leave_split(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_leave_split")
+        || !bounded(&id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(id) = ItemId::parse(&id) else {
+        return rejected_operation();
+    };
+    dispatch_operation(caller.app_handle(), &shell, Command::LeaveSplit(id))
 }
 
 #[tauri::command]
