@@ -14,6 +14,7 @@ export default defineConfig({
         test: {
           name: "unit",
           environment: "node",
+          setupFiles: ["./vitest.setup.ts"],
           include: ["src/**/*.test.ts", "*.test.ts"],
           exclude: ["**/*.component.test.ts"],
           restoreMocks: true,

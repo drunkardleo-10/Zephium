@@ -6,6 +6,8 @@ import { WorkEnvironmentSession } from "$domain/work-environment";
 import type { WorkCallV1, WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import { tabFixture } from "$shared/testing/fixtures";
 import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.svelte";
+// Compile the lazy renderer before the interaction readiness deadline starts.
+import "../components/WorkCanvas.svelte";
 const native = vi.hoisted(() => ({ call: vi.fn(), preview: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -150,7 +152,9 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
   root.style.width = "1100px";
-  await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
+  await expect
+    .poll(() => screen.container.querySelectorAll(".work-drag-handle").length, { timeout: 8000 })
+    .toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Choose", exact: true }).click();
   await expect
