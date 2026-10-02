@@ -436,9 +436,9 @@
     "description": "A new work's first screen (workflows by what the person does), fetched only when a work is empty so the Workspace chunk does not carry it. Measured 116550 JS and 12231 CSS, most of it the shared Work graph. Round 5 memory: pictures asked for at the width shown: 116726 JS measured. BYOK/connections release: measured 116856 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5b: the tiles wear the real marks of the apps a workflow reads, through the canvas's site glyph and favicon cache, which the Work screen has already loaded: 192547 JS measured in this static graph. Its CSS with the glyph: 13406 measured."
   },
   "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 451500,
+    "js": 451600,
     "css": 113800,
-    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
+    "description": "Importing Essentials and showing each kind's progress add to the shared import graph."
   },
   "lazy:features/blocker/components/ProtectionMenu.svelte": {
     "js": 333900,
@@ -446,9 +446,9 @@
     "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "onboarding": {
-    "js": 197500,
+    "js": 199300,
     "css": 104700,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Importing Essentials and showing each kind's progress add to the shared import graph."
   },
   "lazy:features/bookmarks/components/BookmarksPanel.svelte": {
     "js": 338300,

@@ -3,6 +3,9 @@
 //! the exact raster the favicon store accepts, so seeding one decodes nothing.
 use super::*;
 
+/// Essentials taken from another browser at once; a row, not a library.
+const MAX_IMPORTED_ESSENTIALS: usize = 64;
+
 pub(super) struct KeptSite {
     pub(super) id: &'static str,
     pub(super) title: &'static str,
@@ -77,6 +80,42 @@ impl Shell {
         }
         self.seed_kept_site_mark(profile, &url, site.mark);
         mutation_result(self.commit(Vec::new()))
+    }
+
+    /// Keeps sites another browser kept, after those already kept and without
+    /// repeating one. They wait unloaded, as kept sites do until opened.
+    pub(super) fn keep_imported_sites(
+        &mut self,
+        profile: ProfileId,
+        sites: Vec<crate::ImportedSite>,
+    ) -> u32 {
+        let placement = Placement::Favorites { profile };
+        let mut kept: std::collections::HashSet<url::Url> = self
+            .items
+            .roots(placement)
+            .iter()
+            .filter_map(|existing| self.items.tab(*existing)?.url.clone())
+            .collect();
+        let mut added = 0;
+        for site in sites.into_iter().take(MAX_IMPORTED_ESSENTIALS) {
+            let Some(url) = zephium_core::navigation::external_target(&site.url) else {
+                continue;
+            };
+            if !kept.insert(url.clone()) {
+                continue;
+            }
+            let title = zephium_core::item::sanitize_page_title(&site.title);
+            if (0..8).any(|_| {
+                self.items
+                    .insert_unloaded_tab(ItemId::generate(), placement, url.clone(), &title)
+            }) {
+                added += 1;
+            }
+        }
+        if added > 0 {
+            let _ = self.commit(Vec::new());
+        }
+        added
     }
 
     /// The mark stands in until the site is opened and supplies its own. An

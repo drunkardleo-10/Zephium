@@ -76,7 +76,8 @@ pub enum StoreReadResult {
     Imported { token: u64, added: Option<u32> },
 }
 
-/// Data read from another browser, written in one store transaction.
+/// Data read from another browser. Bookmarks and history are written in one
+/// store transaction; Essentials join the sidebar, which the shell owns.
 #[derive(Clone, Debug)]
 pub enum ImportWork {
     Bookmarks {
@@ -84,6 +85,14 @@ pub enum ImportWork {
         nodes: Vec<zephium_core::bookmarks::ImportNode>,
     },
     History(Vec<zephium_core::ports::store::ImportedVisit>),
+    Essentials(Vec<ImportedSite>),
+}
+
+/// A site another browser kept at the top of its sidebar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedSite {
+    pub url: String,
+    pub title: String,
 }
 
 /// What the shell asks of bookmarks: a call from chrome, or adding the page
@@ -799,6 +808,8 @@ fn run_with(
                         }
                     }
                     ImportWork::History(visits) => store.import_history(profile, visits),
+                    // The shell keeps these itself and never queues them.
+                    ImportWork::Essentials(_) => None,
                 },
             },
             Request::Favicon {

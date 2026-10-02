@@ -31,6 +31,7 @@ pub(crate) fn source(locations: &Locations) -> Option<Source> {
             name: "Safari".into(),
             bookmarks: true,
             history: true,
+            essentials: false,
         }],
         needs_permission,
     })

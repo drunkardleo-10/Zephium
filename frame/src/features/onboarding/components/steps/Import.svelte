@@ -26,8 +26,15 @@
   let failure = $derived(job?.kinds.find((entry) => entry.state === "failed") ?? null);
   let jobBrowser = $derived(sources.find((candidate) => candidate.id === job?.source)?.name ?? "");
   let chosen = $state<string | null>(null);
-  let kinds = $state<ImportKind[]>(["bookmarks", "history"]);
+  let kinds = $state<ImportKind[]>(["essentials", "bookmarks", "history"]);
   let source = $derived(sources.find((candidate) => candidate.id === chosen) ?? null);
+  let offered = $derived(kinds.filter((kind) => source?.kinds.includes(kind)));
+  const kindLabel = (kind: ImportKind) =>
+    kind === "essentials"
+      ? m.import_essentials()
+      : kind === "bookmarks"
+        ? m.onb_import_bookmarks()
+        : m.onb_import_history();
   const number = new Intl.NumberFormat();
   let total = $derived(job ? job.kinds.reduce((sum, entry) => sum + entry.done, 0) : 0);
   let share = $derived.by(() => {
@@ -99,13 +106,12 @@
       >
     {:else if source}
       <div class="kinds">
-        {#each ["bookmarks", "history"] as const as kind (kind)}
+        {#each source.kinds as kind (kind)}
           <button
             type="button"
             class="kind"
             aria-pressed={kinds.includes(kind)}
-            onclick={() => toggle(kind)}
-            >{kind === "bookmarks" ? m.onb_import_bookmarks() : m.onb_import_history()}</button
+            onclick={() => toggle(kind)}>{kindLabel(kind)}</button
           >
         {/each}
       </div>
@@ -122,8 +128,8 @@
           variant="primary"
           size="compact"
           shape="capsule"
-          disabled={!available || kinds.length === 0 || source.running}
-          onclick={() => void browserImport.start(source.id, source.profiles[0]?.id ?? "", kinds)}
+          disabled={!available || offered.length === 0 || source.running}
+          onclick={() => void browserImport.start(source.id, source.profiles[0]?.id ?? "", offered)}
           >{m.onb_import_action()}</Button
         >
       {/if}

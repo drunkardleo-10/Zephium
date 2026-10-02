@@ -83,6 +83,7 @@ pub(crate) fn profiles(root: &Path) -> Vec<Profile> {
                 name,
                 bookmarks,
                 history,
+                essentials: false,
             })
         })
         .collect();

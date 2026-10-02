@@ -1,10 +1,10 @@
 /**
- * Bringing bookmarks and history over from another browser. Native owns it;
+ * Bringing Essentials, bookmarks and history over from another browser. Native owns it;
  * this module is the contract chrome draws against. Until native provides an adapter the port reports itself
  * unavailable, and nothing is claimed that did not happen.
  */
 
-export type ImportKind = "bookmarks" | "history";
+export type ImportKind = "essentials" | "bookmarks" | "history";
 
 type ImportProfile = { id: string; name: string };
 
@@ -100,6 +100,11 @@ export async function start(source: string, profile: string, kinds: ImportKind[]
   } finally {
     starting = false;
   }
+}
+
+/** Puts a finished import away, so the next one starts from a clean slate. */
+export function dismiss() {
+  if (job?.finished) job = null;
 }
 
 export async function cancel() {

@@ -15,9 +15,18 @@ const WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ImportKindView {
+    /// Sites kept at the top of the other browser's sidebar.
+    Essentials,
     Bookmarks,
     History,
 }
+
+/// Kinds in the order an import runs them: what is seen first lands first.
+const KIND_ORDER: [ImportKindView; 3] = [
+    ImportKindView::Essentials,
+    ImportKindView::Bookmarks,
+    ImportKindView::History,
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 pub(crate) struct ImportProfileView {
@@ -110,6 +119,9 @@ pub(crate) async fn import_sources(caller: WebviewWindow) -> Vec<ImportSourceVie
         .into_iter()
         .map(|source| {
             let mut kinds = Vec::new();
+            if source.profiles.iter().any(|profile| profile.essentials) {
+                kinds.push(ImportKindView::Essentials);
+            }
             if source.profiles.iter().any(|profile| profile.bookmarks) {
                 kinds.push(ImportKindView::Bookmarks);
             }
@@ -150,7 +162,7 @@ pub(crate) fn import_start(
         || shutdown_started(&app)
         || !bounded(&profile, MAX_PROFILE_ID_BYTES)
         || kinds.is_empty()
-        || kinds.len() > 2
+        || kinds.len() > KIND_ORDER.len()
     {
         return false;
     }
@@ -171,12 +183,10 @@ pub(crate) fn import_start(
         }
         *running = Some(cancelled.clone());
     }
-    let mut ordered = Vec::new();
-    for kind in [ImportKindView::Bookmarks, ImportKindView::History] {
-        if kinds.contains(&kind) {
-            ordered.push(kind);
-        }
-    }
+    let ordered: Vec<ImportKindView> = KIND_ORDER
+        .into_iter()
+        .filter(|kind| kinds.contains(kind))
+        .collect();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         run(&app, browser, profile, ordered, cancelled).await;
@@ -308,6 +318,18 @@ async fn read(
             .find(|candidate| candidate.id == profile)
             .ok_or(ImportError::Missing)?;
         match kind {
+            ImportKindView::Essentials => {
+                let sites: Vec<zephium_app::ImportedSite> =
+                    zephium_import::essentials(&locations, browser, &profile)?
+                        .into_iter()
+                        .map(|site| zephium_app::ImportedSite {
+                            url: site.url,
+                            title: site.title,
+                        })
+                        .collect();
+                let total = u32::try_from(sites.len()).unwrap_or(u32::MAX);
+                Ok((zephium_app::ImportWork::Essentials(sites), total))
+            }
             ImportKindView::Bookmarks => {
                 let nodes = zephium_import::bookmarks(&locations, browser, &profile)?;
                 let total = links(&nodes);

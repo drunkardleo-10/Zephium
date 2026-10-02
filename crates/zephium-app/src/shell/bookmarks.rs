@@ -223,6 +223,10 @@ impl Shell {
             done.finish(None);
             return;
         };
+        if let ImportWork::Essentials(sites) = work {
+            done.finish(Some(self.keep_imported_sites(profile, sites)));
+            return;
+        }
         if self.bookmarks.imports.len() >= MAX_PENDING_BOOKMARK_CALLS {
             done.finish(None);
             return;

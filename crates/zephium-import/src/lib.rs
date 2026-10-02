@@ -7,8 +7,10 @@
 mod arc;
 mod chromium;
 mod firefox;
+mod mozlz4;
 mod safari;
 mod snapshot;
+mod zen;
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +24,8 @@ pub const MAX_TREE_DEPTH: usize = 48;
 pub const MAX_NODES: usize = 50_000;
 /// How far back history is read.
 pub const HISTORY_DAYS: i64 = 180;
+/// Essentials read from one source; a row of kept sites, not a library.
+pub const MAX_ESSENTIALS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Browser {
@@ -31,12 +35,14 @@ pub enum Browser {
     Firefox,
     Brave,
     Edge,
+    Zen,
 }
 
 impl Browser {
-    pub const ALL: [Browser; 6] = [
+    pub const ALL: [Browser; 7] = [
         Browser::Chrome,
         Browser::Arc,
+        Browser::Zen,
         Browser::Safari,
         Browser::Firefox,
         Browser::Brave,
@@ -51,6 +57,7 @@ impl Browser {
             Browser::Firefox => "firefox",
             Browser::Brave => "brave",
             Browser::Edge => "edge",
+            Browser::Zen => "zen",
         }
     }
 
@@ -66,6 +73,7 @@ impl Browser {
             Browser::Firefox => "Firefox",
             Browser::Brave => "Brave",
             Browser::Edge => "Edge",
+            Browser::Zen => "Zen",
         }
     }
 }
@@ -102,6 +110,15 @@ pub struct Profile {
     pub name: String,
     pub bookmarks: bool,
     pub history: bool,
+    /// Sites kept in the sidebar, which Zephium calls Essentials.
+    pub essentials: bool,
+}
+
+/// A site another browser keeps pinned at the top of its sidebar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Essential {
+    pub title: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +171,11 @@ pub fn discover(locations: &Locations) -> Vec<Source> {
 fn source(locations: &Locations, browser: Browser) -> Option<Source> {
     let (profiles, needs_permission) = match browser {
         Browser::Safari => return safari::source(locations),
-        Browser::Firefox => (firefox::profiles(locations), false),
+        Browser::Firefox => (
+            firefox::profiles(locations, firefox::Family::Firefox),
+            false,
+        ),
+        Browser::Zen => (firefox::profiles(locations, firefox::Family::Zen), false),
         Browser::Arc => (arc::profiles(locations), false),
         _ => (
             chromium::user_data(locations, browser)
@@ -179,7 +200,20 @@ pub fn bookmarks(
     let mut budget = MAX_NODES;
     let nodes = match browser {
         Browser::Safari => safari::bookmarks(locations)?,
-        Browser::Firefox => firefox::bookmarks(&firefox::profile_dir(locations, profile)?)?,
+        Browser::Firefox => firefox::bookmarks(&firefox::profile_dir(
+            locations,
+            firefox::Family::Firefox,
+            profile,
+        )?)?,
+        Browser::Zen => {
+            let dir = firefox::profile_dir(locations, firefox::Family::Zen, profile)?;
+            // The library first, then what each space keeps pinned.
+            let mut nodes = firefox::bookmarks(&dir)?;
+            if zen::has_session(&dir) {
+                nodes.extend(zen::pinned(&dir)?);
+            }
+            nodes
+        }
         Browser::Arc => arc::bookmarks(locations, profile)?,
         _ => chromium::bookmarks(&chromium::profile_dir(locations, browser, profile)?)?,
     };
@@ -197,15 +231,40 @@ pub fn history(
     let limit = zephium_core::ports::store::MAX_IMPORTED_VISITS;
     match browser {
         Browser::Safari => safari::history(locations, since, limit),
-        Browser::Firefox => {
-            firefox::history(&firefox::profile_dir(locations, profile)?, since, limit)
-        }
+        Browser::Firefox => firefox::history(
+            &firefox::profile_dir(locations, firefox::Family::Firefox, profile)?,
+            since,
+            limit,
+        ),
+        Browser::Zen => firefox::history(
+            &firefox::profile_dir(locations, firefox::Family::Zen, profile)?,
+            since,
+            limit,
+        ),
         Browser::Arc => chromium::history(&arc::profile_dir(locations, profile)?, since, limit),
         _ => chromium::history(
             &chromium::profile_dir(locations, browser, profile)?,
             since,
             limit,
         ),
+    }
+}
+
+/// Sites one profile keeps at the top of its sidebar, in its order. Only
+/// browsers with such a row have any.
+pub fn essentials(
+    locations: &Locations,
+    browser: Browser,
+    profile: &str,
+) -> Result<Vec<Essential>, ImportError> {
+    match browser {
+        Browser::Arc => arc::essentials(locations, profile),
+        Browser::Zen => zen::essentials(&firefox::profile_dir(
+            locations,
+            firefox::Family::Zen,
+            profile,
+        )?),
+        _ => Ok(Vec::new()),
     }
 }
 

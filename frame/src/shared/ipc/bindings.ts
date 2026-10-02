@@ -945,7 +945,9 @@ export type ImportKindProgressView = {
 	problem: ImportProblemView | null,
 };
 
-export type ImportKindView = "bookmarks" | "history";
+export type ImportKindView = 
+/**  Sites kept at the top of the other browser's sidebar. */
+"essentials" | "bookmarks" | "history";
 
 /**  Why a kind failed, when chrome can say something useful about it. */
 export type ImportProblemView = 

@@ -81,7 +81,7 @@ pub mod work_context;
 pub use shell::{Shell, WebExtensionStatus, WebExtensionTarget};
 
 #[doc(hidden)]
-pub use store_reads::{ImportWork, StoreReadResult};
+pub use store_reads::{ImportWork, ImportedSite, StoreReadResult};
 
 mod work_authoring;
 mod work_authoring_intent;

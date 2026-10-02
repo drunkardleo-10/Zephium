@@ -2529,5 +2529,14 @@
   "bookmarks_address": "Address",
   "bookmarks_name_optional": "Name (optional)",
   "bookmarks_add_invalid": "Enter a web address, like example.com",
-  "bookmarks_add_failed": "Could not add this bookmark. Try again."
+  "bookmarks_add_failed": "Could not add this bookmark. Try again.",
+  "import_essentials": "Essentials",
+  "import_importing": "Importing from {browser}",
+  "import_imported": "Imported from {browser}",
+  "import_kind_waiting": "Waiting",
+  "import_kind_reading": "Reading…",
+  "import_kind_added": "{count} added",
+  "import_kind_current": "Already here",
+  "import_kind_skipped": "Skipped",
+  "import_dismiss": "Done"
 }

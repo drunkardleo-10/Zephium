@@ -18,6 +18,7 @@ import safari from "../marks/safari.svg";
 import slack from "../marks/slack.svg";
 import spotify from "../marks/spotify.svg";
 import vivaldi from "../marks/vivaldi.svg";
+import zen from "../marks/zen.svg";
 import whatsapp from "../marks/whatsapp.svg";
 import youtube from "../marks/youtube.svg";
 
@@ -75,6 +76,7 @@ export const BROWSER_MARKS: Readonly<Record<string, Mark>> = {
   opera: { light: opera },
   safari: { light: safari },
   vivaldi: { light: vivaldi },
+  zen: { light: zen },
 };
 
 /** The browsers people most often come from, in the order they are offered
@@ -82,6 +84,7 @@ export const BROWSER_MARKS: Readonly<Record<string, Mark>> = {
 export const BROWSERS: readonly (readonly [string, string])[] = [
   ["chrome", "Chrome"],
   ["arc", "Arc"],
+  ["zen", "Zen"],
   ["safari", "Safari"],
   ["firefox", "Firefox"],
   ["brave", "Brave"],

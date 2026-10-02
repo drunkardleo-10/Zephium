@@ -195,3 +195,46 @@ fn the_focused_profile_takes_the_name_it_is_given() {
         .iter()
         .any(|profile| profile.name == "Alex Rivera"));
 }
+
+#[test]
+fn essentials_from_another_browser_join_the_kept_sites_once_each_unloaded() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    shell.handle_operation(Command::KeepSite("slack".into()));
+
+    let site = |url: &str, title: &str| crate::ImportedSite {
+        url: url.into(),
+        title: title.into(),
+    };
+    let (send, receive) = std::sync::mpsc::channel();
+    shell.handle(Command::Import {
+        work: Box::new(crate::ImportWork::Essentials(vec![
+            site("https://mail.example/", "Mail"),
+            site("https://mail.example/", "Mail again"),
+            site("https://app.slack.com/client", "Slack"),
+            site("javascript:alert(1)", "Script"),
+            site("https://board.example/", "Board"),
+        ])),
+        done: crate::ImportCompletion::new(move |added| {
+            let _ = send.send(added);
+        }),
+    });
+    assert_eq!(receive.recv().unwrap(), Some(2));
+    let sites = kept(&shell);
+    assert_eq!(
+        sites
+            .iter()
+            .map(|(_, url)| url.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "https://app.slack.com/client",
+            "https://mail.example/",
+            "https://board.example/"
+        ]
+    );
+    assert!(sites
+        .iter()
+        .all(|(id, _)| !shell.items.tab(*id).unwrap().has_view()));
+    assert_eq!(active_id(&screen), active);
+}

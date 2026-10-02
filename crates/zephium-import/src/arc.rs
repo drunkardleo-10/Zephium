@@ -1,13 +1,14 @@
 //! Arc keeps what its people think of as bookmarks in its sidebar, not in
 //! Chromium's bookmarks file: each space's pinned tabs (with folders) and the
-//! favorites above them, in `StorableSidebar.json`. History is Chromium's.
+//! favorites above them, in `StorableSidebar.json`. Favorites come over as
+//! Essentials, pinned tabs as bookmarks. History is Chromium's.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::{child, ImportError, ImportNode, Locations, Profile};
+use crate::{child, Essential, ImportError, ImportNode, Locations, Profile};
 
 const PROFILE: &str = "Default";
 
@@ -41,20 +42,21 @@ pub(crate) fn profiles(locations: &Locations) -> Vec<Profile> {
     let Some(root) = root(locations) else {
         return Vec::new();
     };
-    let bookmarks = root.join("StorableSidebar.json").is_file();
+    let sidebar = root.join("StorableSidebar.json").is_file();
     let history = root
         .join("User Data")
         .join(PROFILE)
         .join("History")
         .is_file();
-    if !bookmarks && !history {
+    if !sidebar && !history {
         return Vec::new();
     }
     vec![Profile {
         id: PROFILE.into(),
         name: "Arc".into(),
-        bookmarks,
+        bookmarks: sidebar,
         history,
+        essentials: sidebar,
     }]
 }
 
@@ -66,10 +68,7 @@ pub(crate) fn profile_dir(locations: &Locations, profile: &str) -> Result<PathBu
     child(&root.join("User Data"), profile).ok_or(ImportError::Missing)
 }
 
-pub(crate) fn bookmarks(
-    locations: &Locations,
-    profile: &str,
-) -> Result<Vec<ImportNode>, ImportError> {
+fn sidebar(locations: &Locations, profile: &str) -> Result<Sidebar, ImportError> {
     if profile != PROFILE {
         return Err(ImportError::Missing);
     }
@@ -77,8 +76,29 @@ pub(crate) fn bookmarks(
     parse_sidebar(&std::fs::read(root.join("StorableSidebar.json"))?)
 }
 
-/// Favorites first, then one folder per space holding its pinned tabs.
-pub(crate) fn parse_sidebar(bytes: &[u8]) -> Result<Vec<ImportNode>, ImportError> {
+pub(crate) fn bookmarks(
+    locations: &Locations,
+    profile: &str,
+) -> Result<Vec<ImportNode>, ImportError> {
+    Ok(sidebar(locations, profile)?.spaces)
+}
+
+pub(crate) fn essentials(
+    locations: &Locations,
+    profile: &str,
+) -> Result<Vec<Essential>, ImportError> {
+    Ok(sidebar(locations, profile)?.favorites)
+}
+
+/// What the sidebar keeps: favorites, and one folder per space holding its
+/// pinned tabs.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Sidebar {
+    favorites: Vec<Essential>,
+    spaces: Vec<ImportNode>,
+}
+
+pub(crate) fn parse_sidebar(bytes: &[u8]) -> Result<Sidebar, ImportError> {
     let file: Value = serde_json::from_slice(bytes).map_err(|_| ImportError::Unreadable)?;
     let container = file
         .get("sidebar")
@@ -95,16 +115,16 @@ pub(crate) fn parse_sidebar(bytes: &[u8]) -> Result<Vec<ImportNode>, ImportError
         .collect();
     let tree = Tree { items: &items };
     let mut nodes = Vec::new();
-    let favorites: Vec<ImportNode> = marked_ids(container.get("topAppsContainerIDs"), None)
+    let mut seen = HashSet::new();
+    let mut favorites = Vec::new();
+    let kept = marked_ids(container.get("topAppsContainerIDs"), None)
         .into_iter()
-        .flat_map(|id| tree.children(id, &mut HashSet::new()))
-        .collect();
-    if !favorites.is_empty() {
-        nodes.push(ImportNode::Folder {
-            title: "Favorites".into(),
-            children: favorites,
-        });
-    }
+        .flat_map(|id| tree.children(id, &mut HashSet::new()));
+    flatten(kept, &mut |title, url| {
+        if favorites.len() < crate::MAX_ESSENTIALS && seen.insert(url.clone()) {
+            favorites.push(Essential { title, url });
+        }
+    });
     for space in entries(container.get("spaces")) {
         let ids = space
             .get("newContainerIDs")
@@ -126,7 +146,21 @@ pub(crate) fn parse_sidebar(bytes: &[u8]) -> Result<Vec<ImportNode>, ImportError
             children: pinned,
         });
     }
-    Ok(nodes)
+    Ok(Sidebar {
+        favorites,
+        spaces: nodes,
+    })
+}
+
+/// Essentials are a flat row, so a folder among the favorites gives up its
+/// links in order.
+fn flatten(nodes: impl IntoIterator<Item = ImportNode>, keep: &mut impl FnMut(String, String)) {
+    for node in nodes {
+        match node {
+            ImportNode::Link { title, url } => keep(title, url),
+            ImportNode::Folder { children, .. } => flatten(children, keep),
+        }
+    }
 }
 
 /// Arc stores its lists as alternating ids and objects; the objects carry
@@ -211,7 +245,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spaces_become_folders_of_their_pinned_tabs_after_the_favorites() {
+    fn favorites_are_essentials_and_spaces_become_folders_of_their_pinned_tabs() {
         let file = br#"{"sidebar":{"containers":[
           {"global":{}},
           {
@@ -237,24 +271,26 @@ mod tests {
             title: title.into(),
             url: url.into(),
         };
+        let sidebar = parse_sidebar(file).unwrap();
         assert_eq!(
-            parse_sidebar(file).unwrap(),
-            vec![
-                ImportNode::Folder {
-                    title: "Favorites".into(),
-                    children: vec![link("Mail", "https://mail.example/")]
-                },
-                ImportNode::Folder {
-                    title: "Work".into(),
-                    children: vec![
-                        ImportNode::Folder {
-                            title: "Docs".into(),
-                            children: vec![link("Renamed", "https://docs.example/")]
-                        },
-                        link("Board", "https://board.example/"),
-                    ]
-                },
-            ]
+            sidebar.favorites,
+            vec![Essential {
+                title: "Mail".into(),
+                url: "https://mail.example/".into()
+            }]
+        );
+        assert_eq!(
+            sidebar.spaces,
+            vec![ImportNode::Folder {
+                title: "Work".into(),
+                children: vec![
+                    ImportNode::Folder {
+                        title: "Docs".into(),
+                        children: vec![link("Renamed", "https://docs.example/")]
+                    },
+                    link("Board", "https://board.example/"),
+                ]
+            },]
         );
     }
 
@@ -267,8 +303,8 @@ mod tests {
               {"id":"b","title":"B","childrenIds":["a"],"data":{"list":{}}}
             ]
         }]}}"#;
-        let nodes = parse_sidebar(file).unwrap();
-        assert_eq!(nodes.len(), 1);
+        let sidebar = parse_sidebar(file).unwrap();
+        assert_eq!(sidebar.spaces.len(), 1);
         assert!(parse_sidebar(b"{\"sidebar\":{}}").is_err());
     }
 }
