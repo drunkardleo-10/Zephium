@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  browserImport,
-  type DefaultBrowserStatus,
-  type ImportAdapter,
-  type ImportJob,
-} from "$domain/browser-import";
+import { browserImport, type ImportAdapter, type ImportJob } from "$domain/browser-import";
 
 function adapter(overrides: Partial<ImportAdapter> = {}) {
   let listener: ((job: ImportJob) => void) | null = null;
@@ -27,11 +22,6 @@ function adapter(overrides: Partial<ImportAdapter> = {}) {
       return () => (listener = null);
     },
     openPermissionSettings: vi.fn(async () => {}),
-    defaultBrowser: async (): Promise<DefaultBrowserStatus> => ({
-      isDefault: false,
-      canRequest: true,
-    }),
-    requestDefault: vi.fn(async () => {}),
     ...overrides,
   };
   return { port, emit: (job: ImportJob) => listener?.(job) };
@@ -56,12 +46,11 @@ describe("browser import", () => {
     expect(await browserImport.start("chrome:default", "Default", ["history"])).toBe(false);
   });
 
-  it("lists sources and the default-browser answer once native provides them", async () => {
+  it("lists sources once native provides them", async () => {
     browserImport.provide(adapter().port);
     expect(browserImport.available()).toBe(true);
     await browserImport.detect();
     expect(browserImport.found()?.map((source) => source.name)).toEqual(["Google Chrome"]);
-    expect(browserImport.defaultBrowser()).toEqual({ isDefault: false, canRequest: true });
   });
 
   it("follows the job native reports and is busy until it finishes", async () => {
@@ -91,23 +80,6 @@ describe("browser import", () => {
     browserImport.provide(port);
     expect(await browserImport.start("chrome:default", "Default", [])).toBe(false);
     expect(port.start).not.toHaveBeenCalled();
-  });
-
-  it("reads the default back after asking rather than assuming yes", async () => {
-    let answer = false;
-    const { port } = adapter({
-      defaultBrowser: async () => ({ isDefault: answer, canRequest: true }),
-      requestDefault: vi.fn(async () => {
-        answer = false;
-      }),
-    });
-    browserImport.provide(port);
-    await browserImport.detect();
-    await browserImport.requestDefault();
-    expect(browserImport.defaultBrowser()?.isDefault).toBe(false);
-    answer = true;
-    await browserImport.refreshDefault();
-    expect(browserImport.defaultBrowser()?.isDefault).toBe(true);
   });
 
   it("keeps an empty list when native cannot list sources", async () => {

@@ -67,6 +67,7 @@ pub use work::{
 
 mod blocker_service;
 mod browser_credentials;
+mod default_browser;
 mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
@@ -1574,6 +1575,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             keymap::keymap_bind,
             keymap::keymap_reset,
             keymap::keymap_record,
+            default_browser::default_browser_status,
+            default_browser::default_browser_request,
             resource_close_ready,
             tab_drop,
             divider_grab,

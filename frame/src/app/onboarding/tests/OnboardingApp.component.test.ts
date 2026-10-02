@@ -92,8 +92,6 @@ const importer: ImportAdapter = {
     return () => (report = null);
   },
   openPermissionSettings: async () => {},
-  defaultBrowser: async () => ({ isDefault: false, canRequest: true }),
-  requestDefault: async () => {},
 };
 
 beforeEach(async () => {

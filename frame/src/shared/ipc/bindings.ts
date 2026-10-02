@@ -310,6 +310,27 @@ export const commands = {
 	 *  path: a recorded key, Escape, losing focus, and leaving the page.
 	 */
 	keymapRecord: (active: boolean) => __TAURI_INVOKE<boolean>("keymap_record", { active }),
+	defaultBrowserStatus: () => __TAURI_INVOKE<{
+	is_default: boolean,
+	/**
+	 *  Whether asking can do anything here. False for a development build,
+	 *  which the system cannot register.
+	 */
+	can_request: boolean,
+} | null>("default_browser_status"),
+	/**
+	 *  Asks the system to make Zephium the default browser, then reports what is
+	 *  true afterwards. On Windows the answer arrives later, from Settings; chrome
+	 *  reads the status again when the window regains focus.
+	 */
+	defaultBrowserRequest: () => __TAURI_INVOKE<{
+	is_default: boolean,
+	/**
+	 *  Whether asking can do anything here. False for a development build,
+	 *  which the system cannot register.
+	 */
+	can_request: boolean,
+} | null>("default_browser_request"),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -540,6 +561,15 @@ export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_det
 export type ChangedNote = {
 	id: string,
 	revision: string | null,
+};
+
+export type DefaultBrowserStatus = {
+	is_default: boolean,
+	/**
+	 *  Whether asking can do anything here. False for a development build,
+	 *  which the system cannot register.
+	 */
+	can_request: boolean,
 };
 
 /**

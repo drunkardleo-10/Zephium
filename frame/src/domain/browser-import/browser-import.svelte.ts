@@ -1,7 +1,6 @@
 /**
- * Bringing bookmarks and history over from another browser, and becoming the
- * default browser. Native owns both; this module is the contract chrome draws
- * against. Until native provides an adapter the port reports itself
+ * Bringing bookmarks and history over from another browser. Native owns it;
+ * this module is the contract chrome draws against. Until native provides an adapter the port reports itself
  * unavailable, and nothing is claimed that did not happen.
  */
 
@@ -43,12 +42,6 @@ export type ImportJob = {
   cancelled: boolean;
 };
 
-export type DefaultBrowserStatus = {
-  isDefault: boolean;
-  /** Whether asking is possible here; Windows can only open its Settings. */
-  canRequest: boolean;
-};
-
 /** What native provides. Progress arrives through `onProgress` as whole
  *  snapshots of the job, newest last. */
 export type ImportAdapter = {
@@ -57,15 +50,12 @@ export type ImportAdapter = {
   cancel(): Promise<void>;
   onProgress(listener: (job: ImportJob) => void): () => void;
   openPermissionSettings(source: string): Promise<void>;
-  defaultBrowser(): Promise<DefaultBrowserStatus>;
-  requestDefault(): Promise<void>;
 };
 
 let adapter = $state.raw<ImportAdapter | null>(null);
 let sources = $state.raw<ImportSource[] | null>(null);
 let job = $state.raw<ImportJob | null>(null);
 let starting = $state(false);
-let defaultStatus = $state.raw<DefaultBrowserStatus | null>(null);
 let stop: (() => void) | null = null;
 let generation = 0;
 
@@ -75,7 +65,6 @@ export const available = () => adapter !== null;
 export const found = () => sources;
 export const current = () => job;
 export const busy = () => starting || (job !== null && !job.finished);
-export const defaultBrowser = () => defaultStatus;
 
 /** Native installs itself here once it can import; null withdraws it. */
 export function provide(next: ImportAdapter | null) {
@@ -91,10 +80,9 @@ export async function detect() {
   stop ??= port.onProgress((next) => {
     if (adapter === port) job = next;
   });
-  const [listed, status] = await Promise.allSettled([port.sources(), port.defaultBrowser()]);
+  const listed = await port.sources().catch(() => []);
   if (epoch !== generation) return;
-  sources = listed.status === "fulfilled" ? listed.value : [];
-  defaultStatus = status.status === "fulfilled" ? status.value : null;
+  sources = listed;
 }
 
 export async function start(source: string, profile: string, kinds: ImportKind[]) {
@@ -118,27 +106,6 @@ export async function openPermissionSettings(source: string) {
   await adapter?.openPermissionSettings(source).catch(() => {});
 }
 
-/** Asks the system; the answer is read back rather than assumed, because the
- *  person can decline, and Windows only opens its Settings. */
-export async function requestDefault() {
-  const port = adapter;
-  if (!port) return;
-  await port.requestDefault().catch(() => {});
-  await refreshDefault();
-}
-
-export async function refreshDefault() {
-  const port = adapter;
-  if (!port) return;
-  const epoch = generation;
-  try {
-    const status = await port.defaultBrowser();
-    if (epoch === generation) defaultStatus = status;
-  } catch {
-    /* The last known answer stands. */
-  }
-}
-
 function reset() {
   generation++;
   stop?.();
@@ -146,5 +113,4 @@ function reset() {
   sources = null;
   job = null;
   starting = false;
-  defaultStatus = null;
 }

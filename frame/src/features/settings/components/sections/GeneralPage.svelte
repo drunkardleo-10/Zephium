@@ -3,7 +3,6 @@
   import * as settingsState from "../../lib/settings-state.svelte";
   import * as preview from "../../lib/preview.svelte";
   import PreviewNotice from "../PreviewNotice.svelte";
-  import PreviewDialog from "../PreviewDialog.svelte";
   import PreviewSelect from "../PreviewSelect.svelte";
   import PreviewToggle from "../PreviewToggle.svelte";
   import PreviewAction from "../PreviewAction.svelte";
@@ -13,19 +12,46 @@
   import Select from "$shared/ui/Select";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
-  import { Globe02Icon } from "@hugeicons/core-free-icons";
-  let defaultOpen = $state(false);
+  import { Globe02Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+  import { onMount } from "svelte";
+  import { defaultBrowser } from "$domain/default-browser";
+
+  let status = $derived(defaultBrowser.current());
+
+  // Windows answers in its own Settings window; coming back is the moment to
+  // read the answer again.
+  onMount(() => {
+    void defaultBrowser.refresh();
+    const reread = () => void defaultBrowser.refresh();
+    window.addEventListener("focus", reread);
+    return () => window.removeEventListener("focus", reread);
+  });
 </script>
 
 <div class="settings-callout" data-setting="general.default">
-  <span class="settings-callout-icon"><Icon icon={Globe02Icon} size={26} /></span>
-  <div>
-    <h2>{m.general_default_title()}</h2>
-    <p>{m.general_default_body()}</p>
-  </div>
-  <Button variant="primary" onclick={() => (defaultOpen = true)}
-    >{m.general_default_action()}</Button
+  <span class="settings-callout-icon"
+    ><Icon icon={status?.is_default ? Tick02Icon : Globe02Icon} size={26} /></span
   >
+  <div>
+    {#if status?.is_default}
+      <h2>{m.general_default_done_title()}</h2>
+      <p>{m.general_default_done_body()}</p>
+    {:else}
+      <h2>{m.general_default_title()}</h2>
+      <p>
+        {status && !status.can_request
+          ? m.general_default_unavailable()
+          : defaultBrowser.pending()
+            ? m.general_default_asking()
+            : m.general_default_body()}
+      </p>
+    {/if}
+  </div>
+  {#if status && !status.is_default && status.can_request}<Button
+      variant="primary"
+      disabled={defaultBrowser.pending()}
+      onclick={() => void defaultBrowser.request()}>{m.general_default_action()}</Button
+    >{/if}
 </div>
 <PreviewNotice />
 <SettingsGroup title={m.general_startup_title()}
@@ -67,13 +93,3 @@
     /></PreviewAction
   >
 </SettingsGroup>
-<PreviewDialog
-  bind:open={defaultOpen}
-  title={m.general_default_dialog()}
-  description={m.general_default_note()}
-  ><Checkbox
-    label={m.general_default_choice()}
-    checked={preview.get("general.default", false)}
-    onchange={(value) => preview.set("general.default", value)}
-  /></PreviewDialog
->
