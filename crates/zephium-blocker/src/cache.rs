@@ -828,7 +828,7 @@ fn windows_private_directory_acl(path: &Path) -> bool {
     use windows::core::{BOOL, PCWSTR};
     use windows::Win32::Foundation::{GENERIC_ALL, GENERIC_WRITE, HANDLE};
     use windows::Win32::Security::{
-        EqualSid, GetAce, GetFileSecurityW, GetLengthSid, GetSecurityDescriptorDacl,
+        GetAce, GetFileSecurityW, GetLengthSid, GetSecurityDescriptorDacl,
         GetSecurityDescriptorOwner, GetTokenInformation, IsValidSid, TokenUser, ACCESS_ALLOWED_ACE,
         ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
         PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
@@ -945,7 +945,7 @@ fn windows_private_directory_acl(path: &Path) -> bool {
     .is_err()
         || owner.is_invalid()
         || !unsafe { IsValidSid(owner).as_bool() }
-        || unsafe { EqualSid(owner, current_user) }.is_err()
+        || !trusted_windows_cache_owner(owner, current_user, token_handle)
     {
         return false;
     }
@@ -1023,6 +1023,44 @@ fn windows_private_directory_acl(path: &Path) -> bool {
         }
     }
     true
+}
+
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn trusted_windows_cache_owner(
+    owner: windows::Win32::Security::PSID,
+    current_user: windows::Win32::Security::PSID,
+    token: windows::Win32::Foundation::HANDLE,
+) -> bool {
+    use windows::Win32::Security::{
+        EqualSid, GetTokenInformation, IsWellKnownSid, TokenElevation, WinBuiltinAdministratorsSid,
+        TOKEN_ELEVATION,
+    };
+
+    // SAFETY: both SIDs were validated by the caller and remain live.
+    if unsafe { EqualSid(owner, current_user) }.is_ok() {
+        return true;
+    }
+    // Elevated tokens can create Administrators-owned directories by default.
+    // The DACL still admits only the same trusted writers as user-owned roots.
+    // SAFETY: owner remains a valid SID and token is a live query handle.
+    if !unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool() } {
+        return false;
+    }
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut bytes = 0;
+    // SAFETY: the aligned output is sized for TokenElevation and lives for the call.
+    unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&raw mut elevation).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &raw mut bytes,
+        )
+        .is_ok()
+            && elevation.TokenIsElevated != 0
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1463,7 +1501,188 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         }
+        #[cfg(windows)]
+        set_windows_root_security(root.path(), false, false);
         root
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn set_windows_root_security(path: &Path, administrator_owner: bool, public_writer: bool) {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Security::{
+            AddAccessAllowedAceEx, CreateWellKnownSid, GetTokenInformation, InitializeAcl,
+            InitializeSecurityDescriptor, SetFileSecurityW, SetSecurityDescriptorDacl,
+            SetSecurityDescriptorOwner, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+            WinWorldSid, ACL, ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+            OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+        };
+        use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut token = HANDLE::default();
+        // SAFETY: all API outputs below use aligned storage of the declared size;
+        // SIDs, ACL and descriptor stay alive until SetFileSecurityW returns.
+        unsafe {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token).unwrap();
+            let token = OwnedHandle::from_raw_handle(token.0);
+            let mut user = [0usize; 128];
+            let mut bytes = 0;
+            GetTokenInformation(
+                HANDLE(token.as_raw_handle()),
+                TokenUser,
+                Some(user.as_mut_ptr().cast()),
+                std::mem::size_of_val(&user) as u32,
+                &raw mut bytes,
+            )
+            .unwrap();
+            let user_sid = (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+            let mut known = [[0usize; 16]; 3];
+            for (storage, kind) in
+                known
+                    .iter_mut()
+                    .zip([WinBuiltinAdministratorsSid, WinLocalSystemSid, WinWorldSid])
+            {
+                let mut bytes = std::mem::size_of_val(storage) as u32;
+                CreateWellKnownSid(
+                    kind,
+                    None,
+                    Some(PSID(storage.as_mut_ptr().cast())),
+                    &raw mut bytes,
+                )
+                .unwrap();
+            }
+            let mut acl = [0usize; 128];
+            let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
+            InitializeAcl(acl_ptr, std::mem::size_of_val(&acl) as u32, ACL_REVISION).unwrap();
+            for sid in [
+                user_sid,
+                PSID(known[0].as_mut_ptr().cast()),
+                PSID(known[1].as_mut_ptr().cast()),
+            ]
+            .into_iter()
+            .chain(public_writer.then_some(PSID(known[2].as_mut_ptr().cast())))
+            {
+                AddAccessAllowedAceEx(
+                    acl_ptr,
+                    ACL_REVISION,
+                    CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+                    FILE_ALL_ACCESS.0,
+                    sid,
+                )
+                .unwrap();
+            }
+            let mut descriptor = SECURITY_DESCRIPTOR::default();
+            let descriptor = PSECURITY_DESCRIPTOR((&raw mut descriptor).cast());
+            InitializeSecurityDescriptor(descriptor, 1).unwrap();
+            SetSecurityDescriptorOwner(
+                descriptor,
+                Some(if administrator_owner {
+                    PSID(known[0].as_mut_ptr().cast())
+                } else {
+                    user_sid
+                }),
+                false,
+            )
+            .unwrap();
+            SetSecurityDescriptorDacl(descriptor, true, Some(acl_ptr), false).unwrap();
+            let path: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            assert!(SetFileSecurityW(
+                PCWSTR(path.as_ptr()),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+            .as_bool());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cache_rejects_public_writers() {
+        let root = private_root();
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        assert!(PersistentArtifactCache::open(&config).is_ok());
+        set_windows_root_security(root.path(), false, true);
+        assert!(matches!(
+            PersistentArtifactCache::open(&config),
+            Err(CacheError::Unsafe)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[allow(unsafe_code)]
+    fn windows_cache_accepts_administrator_owner_only_when_elevated() {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Security::{
+            CreateWellKnownSid, GetTokenInformation, TokenElevation, WinBuiltinAdministratorsSid,
+            WinWorldSid, PSID, TOKEN_ELEVATION, TOKEN_QUERY,
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let root = private_root();
+        let mut token = HANDLE::default();
+        let mut admin = [0usize; 16];
+        let mut world = [0usize; 16];
+        // SAFETY: every output uses aligned, correctly sized live storage.
+        let elevated = unsafe {
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token).unwrap();
+            let token = OwnedHandle::from_raw_handle(token.0);
+            let token = HANDLE(token.as_raw_handle());
+            for (storage, kind) in [
+                (&mut admin, WinBuiltinAdministratorsSid),
+                (&mut world, WinWorldSid),
+            ] {
+                let mut bytes = std::mem::size_of_val(storage) as u32;
+                CreateWellKnownSid(
+                    kind,
+                    None,
+                    Some(PSID(storage.as_mut_ptr().cast())),
+                    &raw mut bytes,
+                )
+                .unwrap();
+            }
+            let mut elevation = TOKEN_ELEVATION::default();
+            let mut bytes = 0;
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                Some((&raw mut elevation).cast()),
+                std::mem::size_of_val(&elevation) as u32,
+                &raw mut bytes,
+            )
+            .unwrap();
+            let admin = PSID(admin.as_mut_ptr().cast());
+            let world = PSID(world.as_mut_ptr().cast());
+            assert_eq!(
+                trusted_windows_cache_owner(admin, world, token),
+                elevation.TokenIsElevated != 0
+            );
+            assert!(!trusted_windows_cache_owner(world, admin, token));
+            assert!(!trusted_windows_cache_owner(
+                admin,
+                world,
+                HANDLE::default()
+            ));
+            elevation.TokenIsElevated != 0
+        };
+        if elevated {
+            set_windows_root_security(root.path(), true, false);
+            let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+            assert!(PersistentArtifactCache::open(&config).is_ok());
+            set_windows_root_security(root.path(), true, true);
+            assert!(matches!(
+                PersistentArtifactCache::open(&config),
+                Err(CacheError::Unsafe)
+            ));
+        }
     }
 
     #[cfg(feature = "webkit")]
