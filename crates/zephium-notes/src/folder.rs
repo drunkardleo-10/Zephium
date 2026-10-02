@@ -351,6 +351,8 @@ impl Folder {
         if let Ok(target_meta) = fs::symlink_metadata(&target) {
             let same = file_meta(&target_meta).identity.is_some()
                 && file_meta(&target_meta).identity == file_meta(&source_meta).identity;
+            #[cfg(windows)]
+            let same = same || fs::canonicalize(&source)? == fs::canonicalize(&target)?;
             if !same {
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, "name taken"));
             }
