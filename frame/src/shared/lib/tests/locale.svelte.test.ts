@@ -32,8 +32,15 @@ describe("interface language", () => {
     expect(runtime.getLocale()).toBe(runtime.baseLocale);
   });
 
-  it("offers every locale the catalog holds", async () => {
+  it("offers every translated locale among its languages", async () => {
     const { locale, runtime } = await load(["en"]);
-    expect(locale.languages()).toEqual(runtime.locales);
+    for (const translated of runtime.locales) expect(locale.languages()).toContain(translated);
+  });
+
+  it("shows an untranslated language as English, left to right", async () => {
+    const { locale, runtime, root } = await load(["en"]);
+    locale.applyLanguage("ar");
+    expect(runtime.getLocale()).toBe(runtime.baseLocale);
+    expect(root).toMatchObject({ lang: "en", dir: "ltr" });
   });
 });

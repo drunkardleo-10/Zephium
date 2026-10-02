@@ -12,7 +12,7 @@
   import Select from "$shared/ui/Select";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
-  import { Globe02Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+  import { Tick02Icon } from "@hugeicons/core-free-icons";
   import { onMount } from "svelte";
   import { defaultBrowser } from "$domain/default-browser";
 
@@ -29,8 +29,10 @@
 </script>
 
 <div class="settings-callout" data-setting="general.default">
-  <span class="settings-callout-icon"
-    ><Icon icon={status?.is_default ? Tick02Icon : Globe02Icon} size={26} /></span
+  <span class="settings-callout-icon" data-brand
+    ><img src="/zephium-icon.png" alt="" />{#if status?.is_default}<span
+        class="settings-callout-badge"><Icon icon={Tick02Icon} size={12} /></span
+      >{/if}</span
   >
   <div>
     {#if status?.is_default}

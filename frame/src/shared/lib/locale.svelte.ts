@@ -25,6 +25,62 @@ export function applyLanguage(preference: string | null | undefined) {
   const wanted = !preference || preference === "system" ? systemLocale() : preference;
   current = isLocale(wanted) ? wanted : baseLocale;
   document.documentElement.lang = current;
+  // Direction follows the language actually shown, not the one asked for.
+  document.documentElement.dir = RIGHT_TO_LEFT.has(current.split("-")[0]!) ? "rtl" : "ltr";
 }
 
-export const languages = () => locales;
+/** Every language the interface offers, translated or not yet. Mirrors
+ *  `zephium_core::preferences::LANGUAGES`. */
+const INTERFACE_LANGUAGES = [
+  "en",
+  "ar",
+  "bg",
+  "bn",
+  "ca",
+  "cs",
+  "da",
+  "de",
+  "el",
+  "es",
+  "es-419",
+  "et",
+  "fa",
+  "fi",
+  "fil",
+  "fr",
+  "he",
+  "hi",
+  "hr",
+  "hu",
+  "id",
+  "it",
+  "ja",
+  "ko",
+  "lt",
+  "lv",
+  "ms",
+  "nb",
+  "nl",
+  "pl",
+  "pt-BR",
+  "pt-PT",
+  "ro",
+  "ru",
+  "sk",
+  "sl",
+  "sr",
+  "sv",
+  "sw",
+  "ta",
+  "te",
+  "th",
+  "tr",
+  "uk",
+  "vi",
+  "zh-CN",
+  "zh-TW",
+] as const;
+
+const RIGHT_TO_LEFT = new Set(["ar", "fa", "he"]);
+
+export const languages = (): readonly string[] => INTERFACE_LANGUAGES;

@@ -6338,6 +6338,21 @@ mod tests {
         assert!(state.contains("commands.tabMenuPopup(id, x, y, canSplitWith(id))"));
     }
 
+    #[test]
+    fn interface_languages_match_what_native_accepts() {
+        let source = crate::frame_sources::SRC_SHARED_LIB_LOCALE_SVELTE_TS;
+        let list = source
+            .split("const INTERFACE_LANGUAGES = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("frame language list");
+        let frame: Vec<&str> = list
+            .split(',')
+            .map(|entry| entry.trim().trim_matches('"'))
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        assert_eq!(frame, zephium_core::preferences::LANGUAGES[1..]);
+    }
 
     #[test]
     fn native_menu_is_never_positioned_from_the_global_pointer() {

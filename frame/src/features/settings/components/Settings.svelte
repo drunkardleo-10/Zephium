@@ -27,7 +27,6 @@
     shortcuts: () => import("./sections/KeyboardPage.svelte"),
     languages: () => import("./sections/LanguagesPage.svelte"),
     developer: () => import("./sections/DeveloperPage.svelte"),
-    docs: () => import("./sections/DocumentationPage.svelte"),
     focus: () => import("./sections/FocusPage.svelte"),
     work: () => import("./sections/WorkPage.svelte"),
     ai: () => import("./sections/AiPage.svelte"),

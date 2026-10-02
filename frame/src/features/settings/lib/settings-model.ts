@@ -176,13 +176,6 @@ const allSections = [
     icon: Key01Icon,
   },
   {
-    id: "docs",
-    group: "application",
-    title: m.section_docs,
-    description: m.section_docs_description,
-    icon: InformationCircleIcon,
-  },
-  {
     id: "about",
     group: "application",
     title: m.section_about,

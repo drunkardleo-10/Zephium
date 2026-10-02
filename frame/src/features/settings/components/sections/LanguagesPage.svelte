@@ -17,7 +17,9 @@
 
   let options = $derived([
     { value: "system", label: m.language_system() },
-    ...languages().map((code) => ({ value: code, label: name(code) })),
+    ...languages()
+      .map((code) => ({ value: code, label: name(code) }))
+      .sort((a, b) => a.label.localeCompare(b.label)),
   ]);
 </script>
 

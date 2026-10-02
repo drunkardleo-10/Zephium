@@ -26,9 +26,15 @@ pub const KEYS: &[&str] = &[
     "tabs.switch-to-open",
 ];
 
-/// Interface languages, by the locale ids the frame's message catalog uses.
-/// A translation lands by adding its locale here and to `project.inlang`.
-pub const LANGUAGES: &[&str] = &["system", "en"];
+/// Interface languages a person may choose, by BCP 47 tag. One without a
+/// translation yet shows English; a translation lands by adding its locale to
+/// `project.inlang`. Mirrors `INTERFACE_LANGUAGES` in the frame.
+pub const LANGUAGES: &[&str] = &[
+    "system", "en", "ar", "bg", "bn", "ca", "cs", "da", "de", "el", "es", "es-419", "et", "fa",
+    "fi", "fil", "fr", "he", "hi", "hr", "hu", "id", "it", "ja", "ko", "lt", "lv", "ms", "nb",
+    "nl", "pl", "pt-BR", "pt-PT", "ro", "ru", "sk", "sl", "sr", "sv", "sw", "ta", "te", "th", "tr",
+    "uk", "vi", "zh-CN", "zh-TW",
+];
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
