@@ -112,6 +112,35 @@ impl Shell {
         self.tab_metadata(profile, &ids)
     }
 
+    /// Tabs in the order the sidebar reads top to bottom: favorites, pinned
+    /// (folders opened in place), then today. Keyboard selection and cycling
+    /// walk this one list so a pinned tab is never a dead end.
+    pub(super) fn keyboard_tabs(&self, profile: ProfileId, space: SpaceId) -> Vec<ItemId> {
+        let mut ordered = Vec::new();
+        for placement in [
+            Placement::Favorites { profile },
+            Placement::Space {
+                space,
+                section: SpaceSection::Pinned,
+            },
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        ] {
+            let mut pending: Vec<ItemId> =
+                self.items.roots(placement).iter().rev().copied().collect();
+            while let Some(id) = pending.pop() {
+                if self.items.tab(id).is_some() {
+                    ordered.push(id);
+                } else {
+                    pending.extend(self.items.children(id).iter().rev().copied());
+                }
+            }
+        }
+        ordered
+    }
+
     pub(super) fn today_tabs(&self, space: SpaceId) -> Vec<ItemId> {
         self.items
             .roots(Placement::Space {

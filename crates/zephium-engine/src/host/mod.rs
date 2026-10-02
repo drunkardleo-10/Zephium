@@ -491,8 +491,10 @@ pub(crate) struct EngineHost {
     content_rule_cache_gc_removed_in_cycle: bool,
     spare: Option<Spare>,
     user_content: scripts::UserContentRegistry,
+    /// Shared with every live view's key handler, so a rebinding reaches
+    /// open pages without rebuilding them.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    shortcuts: Vec<Shortcut>,
+    shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
     #[cfg(target_os = "macos")]
     stages: HashMap<WindowId, Retained<ContentStage>>,
     #[cfg(not(target_os = "macos"))]

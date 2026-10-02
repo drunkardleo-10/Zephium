@@ -70,6 +70,7 @@ mod browser_credentials;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
 mod intro_sound;
+mod keymap;
 mod launcher_trigger;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
@@ -1568,6 +1569,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             favicon_probe,
             download_call,
             browser_open_url,
+            keymap::keymap_entries,
+            keymap::keymap_bind,
+            keymap::keymap_reset,
+            keymap::keymap_record,
             resource_close_ready,
             tab_drop,
             divider_grab,
@@ -1575,6 +1580,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             divider_release
         ])
         .events(collect_events![
+            keymap::KeymapChanged,
             WorkEnvironmentChanged,
             WorkChanged,
             WorkHumanChanged,
@@ -2925,79 +2931,10 @@ fn operation_acknowledge(
 
 const SETTING_KEYS: &[&str] = zephium_core::preferences::KEYS;
 
-// "CmdOrCtrl+T" style accelerators become native VK shortcuts for platforms
-// where the engine intercepts keys itself (Windows content webviews).
-fn shortcut_table(
-    keymap: &std::collections::HashMap<String, String>,
-) -> Vec<zephium_core::ports::engine::Shortcut> {
-    zephium_core::commands::resolve(keymap)
-        .iter()
-        .filter(|c| c.id != "launcher.toggle")
-        .filter_map(|c| parse_accel(c.id, c.accelerator.as_deref()?))
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn linux_shortcut_table(
-    keymap: &std::collections::HashMap<String, String>,
-    launcher: Option<linux_shortcut::LinuxLauncherShortcut>,
-) -> Vec<zephium_core::ports::engine::Shortcut> {
-    let mut shortcuts: Vec<_> = zephium_core::commands::resolve(keymap)
-        .iter()
-        .filter(|command| command.id != linux_shortcut::LAUNCHER_COMMAND_ID)
-        .filter_map(|command| parse_accel(command.id, command.accelerator.as_deref()?))
-        .collect();
-    if let Some(launcher) = launcher {
-        shortcuts.push(launcher.focused_shortcut());
-    }
-    shortcuts
-}
-
-fn parse_accel(id: &str, accel: &str) -> Option<zephium_core::ports::engine::Shortcut> {
-    let mut shortcut = zephium_core::ports::engine::Shortcut {
-        id: id.to_string(),
-        ctrl: false,
-        shift: false,
-        alt: false,
-        key: 0,
-    };
-    for part in accel.split('+') {
-        match part {
-            "CmdOrCtrl" | "Ctrl" | "Control" | "Cmd" | "Super" => shortcut.ctrl = true,
-            "Shift" => shortcut.shift = true,
-            "Alt" | "Option" => shortcut.alt = true,
-            token => shortcut.key = vk_for(token)?,
-        }
-    }
-    (shortcut.key != 0).then_some(shortcut)
-}
-
-fn vk_for(token: &str) -> Option<u32> {
-    let upper = token.to_ascii_uppercase();
-    let bytes = upper.as_bytes();
-    if bytes.len() == 1 && bytes[0].is_ascii_alphanumeric() {
-        return Some(bytes[0] as u32);
-    }
-    Some(match upper.as_str() {
-        "TAB" => 0x09,
-        "RETURN" | "ENTER" => 0x0D,
-        "ESCAPE" | "ESC" => 0x1B,
-        "SPACE" => 0x20,
-        "," => 0xBC,
-        "-" => 0xBD,
-        "." => 0xBE,
-        "=" => 0xBB,
-        "[" => 0xDB,
-        "]" => 0xDD,
-        _ => return None,
-    })
-}
-
-fn load_keymap() -> std::collections::HashMap<String, String> {
-    APP_STORE
-        .get()
-        .and_then(|store| store.app_setting("keymap"))
-        .and_then(|s| serde_json::from_str(&s).ok())
+/// The person's overrides, for menus built on demand.
+fn keymap_overrides(app: &tauri::AppHandle) -> std::collections::HashMap<String, String> {
+    app.try_state::<keymap::Keymap>()
+        .map(|keymap| keymap.overrides())
         .unwrap_or_default()
 }
 
@@ -3062,7 +2999,11 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     }
     if matches!(
         id,
-        "settings.profiles" | "settings.account" | "settings.newtab" | "settings.ai"
+        "settings.profiles"
+            | "settings.account"
+            | "settings.newtab"
+            | "settings.ai"
+            | "settings.shortcuts"
     ) {
         let section = id.replacen("settings.", "settings.section.", 1);
         let _ = try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &section);
@@ -3099,8 +3040,10 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             rejected_operation()
         };
     }
-    // Capture belongs to the frame, which decides where the new note opens.
-    if id == "note.new" {
+    // Capture belongs to the frame, which decides where the new note opens;
+    // the clipboard write stays in privileged chrome, which holds the
+    // authoritative URL of the page it shows.
+    if matches!(id, "note.new" | "page.copyLink") {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
@@ -3516,8 +3459,8 @@ fn menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> b
     ) else {
         return false;
     };
-    let keymap = load_keymap();
-    let Ok(menu) = build_menu(&app, &keymap) else {
+    let keymap = keymap_overrides(&app);
+    let Ok((menu, _)) = build_menu(&app, &keymap) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -3554,7 +3497,7 @@ fn add_menu_popup(
     ) else {
         return false;
     };
-    let keymap = load_keymap();
+    let keymap = keymap_overrides(&app);
     let Ok(menu) = build_add_menu(&app, &keymap, can_split) else {
         return false;
     };
@@ -3921,7 +3864,7 @@ fn sidebar_menu_popup(
     ) else {
         return false;
     };
-    let keymap = load_keymap();
+    let keymap = keymap_overrides(&app);
     let Ok(menu) = build_sidebar_menu(&app, &keymap, site_protected, can_hide) else {
         return false;
     };
@@ -3951,7 +3894,7 @@ fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
     ) else {
         return false;
     };
-    let keymap = load_keymap();
+    let keymap = keymap_overrides(&app);
     let Ok(menu) = build_profile_menu(&app, &keymap) else {
         return false;
     };
@@ -3981,7 +3924,7 @@ fn tools_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64
     ) else {
         return false;
     };
-    let keymap = load_keymap();
+    let keymap = keymap_overrides(&app);
     let Ok(menu) = build_tools_menu(&app, &keymap) else {
         return false;
     };
@@ -4285,22 +4228,24 @@ fn build_quit_menu_item(
         .build(handle)
 }
 
+/// The application menu: the macOS menu bar, and the "more" popup on Windows
+/// and Linux. Returns the Work pane items, which only the menu bar keeps.
 fn build_menu(
     handle: &tauri::AppHandle,
     overrides: &std::collections::HashMap<String, String>,
-) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
+) -> tauri::Result<(
+    tauri::menu::Menu<tauri::Wry>,
+    Vec<tauri::menu::MenuItem<tauri::Wry>>,
+)> {
+    use tauri::menu::{Menu, SubmenuBuilder};
 
     let resolved = zephium_core::commands::resolve(overrides);
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
 
-    let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
-        .accelerator("CmdOrCtrl+,")
-        .build(handle)?;
     let app_menu = SubmenuBuilder::new(handle, "Zephium")
         .about(None)
         .separator()
-        .item(&settings)
+        .item(&item("browser.settings")?)
         .separator()
         .services()
         .separator()
@@ -4312,11 +4257,10 @@ fn build_menu(
         .build()?;
     let file = SubmenuBuilder::new(handle, "File")
         .item(&item("tab.new")?)
-        .item(
-            &MenuItemBuilder::with_id("note.new", "New Note")
-                .accelerator("CmdOrCtrl+Alt+N")
-                .build(handle)?,
-        )
+        .item(&item("note.new")?)
+        .item(&item("split.choose")?)
+        .separator()
+        .item(&item("page.print")?)
         .separator()
         .item(&item("tab.close")?)
         .build()?;
@@ -4329,6 +4273,8 @@ fn build_menu(
         .copy()
         .paste()
         .select_all()
+        .separator()
+        .item(&item("page.copyLink")?)
         .build()?;
     let appearance = SubmenuBuilder::new(handle, "Appearance")
         .item(&item("theme.system")?)
@@ -4343,6 +4289,7 @@ fn build_menu(
         .item(&item("zoom.out")?)
         .item(&item("zoom.reset")?)
         .separator()
+        .item(&item("sidebar.toggleCompact")?)
         .item(&appearance)
         .separator()
         .item(&item("url.focus")?)
@@ -4352,11 +4299,7 @@ fn build_menu(
         .item(&item("nav.forward")?)
         .separator()
         .item(&item("tab.reopen")?)
-        .item(
-            &MenuItemBuilder::with_id("browser.history", "Show All History")
-                .accelerator("CmdOrCtrl+Y")
-                .build(handle)?,
-        )
+        .item(&item("browser.history")?)
         .build()?;
     let window = SubmenuBuilder::new(handle, "Window")
         .minimize()
@@ -4364,6 +4307,10 @@ fn build_menu(
         .separator()
         .item(&item("tab.next")?)
         .item(&item("tab.previous")?)
+        .separator()
+        .item(&item("tool.downloads")?)
+        .item(&item("browser.tasks")?)
+        .item(&item("browser.notes")?)
         .build()?;
     // Page keystrokes never reach privileged chrome, so the pane's dismissal
     // keys live in the menu and are enabled exactly while a pane is shown.
@@ -4374,28 +4321,31 @@ fn build_menu(
         .item(&pane_close)
         .item(&pane_open)
         .build()?;
-    handle.manage(WorkPaneMenu {
-        items: vec![pane_close, pane_open],
-    });
+    let help = SubmenuBuilder::new(handle, "Help")
+        .item(&item("settings.shortcuts")?)
+        .build()?;
 
-    Menu::with_items(
+    let menu = Menu::with_items(
         handle,
-        &[&app_menu, &file, &edit, &view, &history, &work, &window],
-    )
+        &[
+            &app_menu, &file, &edit, &view, &history, &work, &window, &help,
+        ],
+    )?;
+    Ok((menu, vec![pane_close, pane_open]))
 }
 
-struct WorkPaneMenu {
-    items: Vec<tauri::menu::MenuItem<tauri::Wry>>,
-}
-
-impl WorkPaneMenu {
-    fn set_shown(&self, shown: bool) {
-        for item in &self.items {
-            if item.set_enabled(shown).is_err() {
-                diagnostic!("menu: work pane binding state was not applied");
-            }
-        }
+/// Installs (or reinstalls, after a rebinding) the macOS menu bar.
+#[cfg(target_os = "macos")]
+fn install_menu_bar(
+    app: &tauri::AppHandle,
+    overrides: &std::collections::HashMap<String, String>,
+) -> tauri::Result<()> {
+    let (menu, work_items) = build_menu(app, overrides)?;
+    app.set_menu(menu)?;
+    if let Some(keymap) = app.try_state::<keymap::Keymap>() {
+        keymap.adopt_work_menu_items(work_items);
     }
+    Ok(())
 }
 
 fn build_add_menu(
@@ -4519,26 +4469,24 @@ fn build_tab_menu(
 /// Identity and browser destinations use a native menu at every sidebar width.
 fn build_tools_menu(
     handle: &tauri::AppHandle,
-    _overrides: &std::collections::HashMap<String, String>,
+    overrides: &std::collections::HashMap<String, String>,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let resolved = zephium_core::commands::resolve(overrides);
+    let item = |id: &str| build_command_menu_item(handle, &resolved, id);
     let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
     let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
     let activity = MenuItemBuilder::with_id("tool.time", "Activity").build(handle)?;
     let ai = MenuItemBuilder::with_id("tool.ai", "Ask").build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
-    let downloads = MenuItemBuilder::with_id("tool.downloads", "Downloads").build(handle)?;
+    let downloads = item("tool.downloads")?;
     let second = PredefinedMenuItem::separator(handle)?;
     // The panel is the quick way in; the full destination is its own entry, the
     // same shape as Show All History.
-    let all_tasks = MenuItemBuilder::with_id("browser.tasks", "Show All Tasks")
-        .accelerator("CmdOrCtrl+Shift+T")
-        .build(handle)?;
-    let all_notes = MenuItemBuilder::with_id("browser.notes", "Show All Notes").build(handle)?;
-    let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
-        .accelerator("CmdOrCtrl+,")
-        .build(handle)?;
+    let all_tasks = item("browser.tasks")?;
+    let all_notes = item("browser.notes")?;
+    let settings = item("browser.settings")?;
     Menu::with_items(
         handle,
         &[
@@ -4550,13 +4498,15 @@ fn build_tools_menu(
 
 fn build_profile_menu(
     handle: &tauri::AppHandle,
-    _overrides: &std::collections::HashMap<String, String>,
+    overrides: &std::collections::HashMap<String, String>,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let resolved = zephium_core::commands::resolve(overrides);
+    let item = |id: &str| build_command_menu_item(handle, &resolved, id);
     let profile = MenuItemBuilder::with_id("settings.profiles", "Profile…").build(handle)?;
     let account = MenuItemBuilder::with_id("settings.account", "Account…").build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
-    let new_tab = MenuItemBuilder::with_id("tab.new", "New Tab").build(handle)?;
+    let new_tab = item("tab.new")?;
     let split = MenuItemBuilder::with_id("split.choose", "Split View…").build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
     let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
@@ -4564,12 +4514,10 @@ fn build_profile_menu(
     let ai = MenuItemBuilder::with_id("tool.ai", "AI Chat").build(handle)?;
     let time = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
     let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
-    let downloads = MenuItemBuilder::with_id("tool.downloads", "Downloads").build(handle)?;
+    let downloads = item("tool.downloads")?;
     let extensions = MenuItemBuilder::with_id("extensions.manage", "Extensions…").build(handle)?;
     let third = PredefinedMenuItem::separator(handle)?;
-    let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
-        .accelerator("CmdOrCtrl+,")
-        .build(handle)?;
+    let settings = item("browser.settings")?;
     let quit = build_quit_menu_item(handle)?;
     Menu::with_items(
         handle,
@@ -5113,15 +5061,29 @@ pub fn run() {
             app.manage(operation_ledger.clone());
             app.manage(TabMenuTarget::default());
 
-            let keymap = load_keymap();
+            app.manage(keymap::Keymap::load());
+            let keymap = keymap_overrides(&handle);
             // Windows and Linux get the same menu as a popup from the sidebar
             // "more" button instead of a persistent bar.
             #[cfg(target_os = "macos")]
-            app.set_menu(build_menu(&handle, &keymap)?)?;
+            install_menu_bar(&handle, &keymap)?;
             app.on_menu_event(|app, event| {
                 let _ = execute_command(app, event.id().0.as_str());
             });
-            engine.set_shortcuts(shortcut_table(&keymap));
+            let keys_engine = engine.clone();
+            app.state::<keymap::Keymap>()
+                .attach_engine(Box::new(move |table| keys_engine.set_shortcuts(table)));
+            #[cfg(target_os = "macos")]
+            {
+                let shortcut_app = handle.clone();
+                platform::imp::install_key_monitor(
+                    &window,
+                    app.state::<keymap::Keymap>().key_table(),
+                    move |id| {
+                        let _ = execute_command(&shortcut_app, id);
+                    },
+                );
+            }
             #[cfg(target_os = "linux")]
             let global_registration = linux_shortcut_portal::GlobalRegistration::default();
             #[cfg(target_os = "linux")]
@@ -5143,12 +5105,15 @@ pub fn run() {
                 shortcut
             };
             #[cfg(target_os = "linux")]
+            let window_shortcuts =
+                app.state::<keymap::Keymap>().window_table(linux_launcher_shortcut);
+            #[cfg(target_os = "linux")]
             {
                 let focused_registration = global_registration.clone();
                 let shortcut_app = handle.clone();
                 platform::imp::install_shortcuts(
                     &window,
-                    linux_shortcut_table(&keymap, linux_launcher_shortcut),
+                    window_shortcuts.clone(),
                     focused_shortcut_presses.clone(),
                     move |id| {
                         if id == linux_shortcut::LAUNCHER_COMMAND_ID
@@ -5159,13 +5124,6 @@ pub fn run() {
                         let _ = execute_command(&shortcut_app, id);
                     },
                 );
-            }
-            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
-            {
-                let shortcut_app = handle.clone();
-                platform::imp::install_shortcuts(&window, shortcut_table(&keymap), move |id| {
-                    let _ = execute_command(&shortcut_app, id);
-                });
             }
 
             app.manage(overlay::ContextCache::default());
@@ -5245,8 +5203,8 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, if results.context.as_ref().is_some_and(|context| context.session_id.starts_with("newtab:")) { MAIN_LABEL } else { overlay::PANEL_LABEL }, EVENT_SEARCH, &results)
                 }
                 Projection::Layout(layout) => {
-                    if let Some(menu) = emit_handle.try_state::<WorkPaneMenu>() {
-                        menu.set_shown(layout.work_pane.is_some());
+                    if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
+                        keymap.set_work_pane_shown(layout.work_pane.is_some());
                     }
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
@@ -5650,7 +5608,7 @@ pub fn run() {
                 let shortcut_app = handle.clone();
                 platform::imp::install_shortcuts(
                     &panel_window,
-                    linux_shortcut_table(&keymap, linux_launcher_shortcut),
+                    window_shortcuts,
                     focused_shortcut_presses,
                     move |id| {
                         if id == linux_shortcut::LAUNCHER_COMMAND_ID
@@ -5692,11 +5650,14 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             {
                 app.manage(launcher_trigger::Trigger::default());
-                let keymap_override = zephium_core::commands::resolve(&keymap)
-                    .into_iter()
-                    .find(|command| command.id == "launcher.toggle")
-                    .and_then(|command| command.accelerator)
-                    .filter(|accelerator| accelerator != launcher_trigger::DEFAULT);
+                // Honoured for a profile that stored one before the launcher
+                // had its own recorder; the keymap no longer rebinds it.
+                let keymap_override = keymap
+                    .get("launcher.toggle")
+                    .filter(|accelerator| {
+                        !accelerator.is_empty() && *accelerator != launcher_trigger::DEFAULT
+                    })
+                    .cloned();
                 launcher_trigger::install(&handle, keymap_override);
             }
             #[cfg(target_os = "linux")]
@@ -6033,7 +5994,7 @@ mod tests {
             .next()
             .unwrap();
         assert!(native_menu.contains(r#"with_id("split.choose", "Split View…")"#));
-        assert!(native_menu.contains(r#"with_id("tab.new", "New Tab")"#));
+        assert!(native_menu.contains(r#"item("tab.new")"#));
         assert!(sidebar.contains(r#"command.id === "split.choose""#));
         assert!(sidebar.contains("splitting = true"));
         assert!(!sidebar.contains("onclick={tabs.open}"));

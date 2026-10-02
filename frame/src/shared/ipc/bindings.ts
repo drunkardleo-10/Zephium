@@ -296,6 +296,20 @@ export const commands = {
 	 *  surfaces have no tab id to navigate, and must not be given one.
 	 */
 	browserOpenUrl: (url: string, newTab: boolean) => __TAURI_INVOKE<OperationAdmission>("browser_open_url", { url, newTab }),
+	keymapEntries: () => __TAURI_INVOKE<KeymapEntry[]>("keymap_entries"),
+	/**
+	 *  Binds `id` to `accelerator`, or unbinds it when null. A conflict is
+	 *  reported, never resolved silently: the person decides what loses its key,
+	 *  and `replace` takes it from the other command in the same change.
+	 */
+	keymapBind: (id: string, accelerator: string | null, replace: boolean) => __TAURI_INVOKE<KeymapOutcome>("keymap_bind", { id, accelerator, replace }),
+	/**  Restores one command's default, or every default when `id` is null. */
+	keymapReset: (id: string | null) => __TAURI_INVOKE<boolean>("keymap_reset", { id }),
+	/**
+	 *  Starts or ends recording in Keyboard settings. Chrome ends it on every exit
+	 *  path: a recorded key, Escape, losing focus, and leaving the page.
+	 */
+	keymapRecord: (active: boolean) => __TAURI_INVOKE<boolean>("keymap_record", { active }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -326,6 +340,7 @@ export const events = {
 	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
+	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
 	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
 	zephiumWorkModelsChanged: makeEvent<WorkModelsChanged>("zephium:work-models-changed"),
@@ -825,6 +840,32 @@ export type ItemsState = {
 	active: string | null,
 	split_group: SplitGroupView | null,
 };
+
+/**  The keymap changed; read it again. */
+export type KeymapChanged = {
+	version: number,
+};
+
+export type KeymapEntry = {
+	id: string,
+	title: string,
+	group: KeymapGroup,
+	/**  Canonical text for this platform, or null when unbound. */
+	accelerator: string | null,
+	default_accelerator: string | null,
+	customizable: boolean,
+	customized: boolean,
+};
+
+export type KeymapGroup = "app" | "file" | "edit" | "view" | "history" | "window" | "help" | "keys" | "global" | "work";
+
+export type KeymapOutcome = { kind: "applied" } | 
+/**  Already bound to `command`; nothing changed. */
+{ kind: "conflict"; command: string } | { kind: "invalid" } | 
+/**  Needs Command or Control, or would type text. */
+{ kind: "unbindable" } | 
+/**  Owned by the system or by text editing. */
+{ kind: "reserved" } | { kind: "fixed" } | { kind: "unavailable" };
 
 export type LauncherTrigger = {
 	shortcut: string,

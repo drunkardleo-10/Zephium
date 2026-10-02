@@ -1566,13 +1566,10 @@ impl Drop for AcceleratorRegistration {
 
 pub fn install_accelerators(
     view: &wry::WebView,
-    shortcuts: Vec<Shortcut>,
+    shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
     sink: Arc<dyn Fn(EngineEvent) + Send + Sync>,
     item: impl Fn() -> zephium_core::ids::ItemId + 'static,
 ) -> windows_core::Result<Option<AcceleratorRegistration>> {
-    if shortcuts.is_empty() {
-        return Ok(None);
-    }
     let controller = view.controller();
     let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_controller, args| {
         let Some(args) = args else {
@@ -1592,13 +1589,16 @@ pub fn install_accelerators(
         let shift = down(VK_SHIFT.0 as i32);
         let alt = down(VK_MENU.0 as i32);
         let hit = shortcuts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .find(|s| s.key == key && s.ctrl == ctrl && s.shift == shift && s.alt == alt);
-        if let Some(shortcut) = hit {
+            .find(|s| s.key == key && s.ctrl == ctrl && s.shift == shift && s.alt == alt)
+            .map(|shortcut| shortcut.id.clone());
+        if let Some(command) = hit {
             unsafe { args.SetHandled(true)? };
             sink(EngineEvent::ShortcutPressed {
                 item: item(),
-                command: shortcut.id.clone(),
+                command,
             });
         }
         Ok(())

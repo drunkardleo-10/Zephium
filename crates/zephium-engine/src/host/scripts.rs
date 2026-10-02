@@ -944,8 +944,10 @@ impl EngineHost {
     }
 
     pub(crate) fn set_shortcuts(&mut self, shortcuts: Vec<Shortcut>) {
-        self.shortcuts = shortcuts;
-        self.spare = None;
+        *self
+            .shortcuts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = shortcuts;
     }
 }
 

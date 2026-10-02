@@ -443,7 +443,7 @@ pub(crate) fn install(
             content_rule_cache_gc_removed_in_cycle: false,
             spare: None,
             user_content,
-            shortcuts: Vec::new(),
+            shortcuts: Arc::default(),
             stages: HashMap::new(),
             native_terminal_failure,
             #[cfg(not(target_os = "windows"))]

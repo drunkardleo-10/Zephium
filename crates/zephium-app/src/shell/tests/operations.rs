@@ -1005,3 +1005,100 @@ fn browser_settings_return_to_the_last_browsing_tab_after_chrome_ack() {
     shell.browser_chrome_restored(revision, true);
     assert_eq!(active_id(&screen), recent);
 }
+
+#[test]
+fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() {
+    let profile = ProfileId::from(51_001);
+    let space = SpaceId::from(52_001);
+    let favorite = ItemId::from(53_001);
+    let pinned_folder = ItemId::from(53_002);
+    let pinned_child = ItemId::from(53_003);
+    let today_first = ItemId::from(53_004);
+    let today_last = ItemId::from(53_005);
+    let item = |id, parent, placement, kind| PersistedItem {
+        id,
+        parent,
+        placement,
+        kind,
+    };
+    let page = |host: &str| PersistedKind::Tab {
+        url: format!("https://{host}/"),
+        title: host.into(),
+        zoom: 1.0,
+    };
+    let pinned = Placement::Space {
+        space,
+        section: SpaceSection::Pinned,
+    };
+    let today = Placement::Space {
+        space,
+        section: SpaceSection::Today,
+    };
+    let store = Arc::new(FakeStore {
+        saved: Mutex::new(Some(SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "Personal".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![PersistedSpace {
+                id: space,
+                profile,
+                name: "Main".into(),
+            }],
+            items: vec![
+                item(
+                    favorite,
+                    None,
+                    Placement::Favorites { profile },
+                    page("favorite.example"),
+                ),
+                item(
+                    pinned_folder,
+                    None,
+                    pinned,
+                    PersistedKind::Folder {
+                        name: "Work".into(),
+                    },
+                ),
+                item(
+                    pinned_child,
+                    Some(pinned_folder),
+                    pinned,
+                    page("pinned.example"),
+                ),
+                item(today_first, None, today, page("first.example")),
+                item(today_last, None, today, page("last.example")),
+            ],
+            active_space: Some(space),
+            active_item: Some(today_first),
+            splits: None,
+            recently_closed: Vec::new(),
+        })),
+        ..Default::default()
+    });
+    let (mut shell, _engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+
+    shell.handle(Command::Run("tab.select.1".into()));
+    assert_eq!(active_id(&screen), favorite);
+    shell.handle(Command::Run("tab.select.2".into()));
+    assert_eq!(active_id(&screen), pinned_child);
+    shell.handle(Command::Run("tab.select.last".into()));
+    assert_eq!(active_id(&screen), today_last);
+
+    // Cycling continues from a pinned tab instead of stopping there.
+    shell.handle(Command::Run("tab.select.2".into()));
+    shell.handle(Command::Run("tab.next".into()));
+    assert_eq!(active_id(&screen), today_first);
+    shell.handle(Command::Run("tab.previous".into()));
+    shell.handle(Command::Run("tab.previous".into()));
+    assert_eq!(active_id(&screen), favorite);
+
+    // A position past the end, or outside the registry, changes nothing.
+    let beyond = shell.handle_operation(Command::Run("tab.select.8".into()));
+    assert_eq!(beyond.outcome, OperationOutcome::NoOp);
+    let bogus = shell.handle_operation(Command::Run("tab.select.0".into()));
+    assert_eq!(bogus.outcome, OperationOutcome::Rejected);
+    assert_eq!(active_id(&screen), favorite);
+}

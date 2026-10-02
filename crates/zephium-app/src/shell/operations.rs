@@ -644,6 +644,28 @@ impl Shell {
                     mutation_result(native)
                 },
             ),
+            "tab.select.last" => self.operation_select_tab(None),
+            id if id.starts_with("tab.select.") => id["tab.select.".len()..]
+                .parse::<usize>()
+                .ok()
+                .filter(|position| (1..=8).contains(position))
+                .map_or_else(
+                    || {
+                        operation_result(
+                            OperationOutcome::Rejected,
+                            OperationReason::UnsupportedCommand,
+                        )
+                    },
+                    |position| self.operation_select_tab(Some(position)),
+                ),
+            "page.print" => active.map_or_else(
+                || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
+                |id| {
+                    let mut native = NativeWork::default();
+                    native.record(self.engine.print(id));
+                    mutation_result(native)
+                },
+            ),
             "zoom.in" => self.operation_adjust_zoom(Some(0.1)),
             "zoom.out" => self.operation_adjust_zoom(Some(-0.1)),
             "zoom.reset" => self.operation_adjust_zoom(None),
@@ -681,7 +703,7 @@ impl Shell {
         let Some(active) = win.active else {
             return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
         };
-        let tabs = self.today_tabs(win.space);
+        let tabs = self.keyboard_tabs(win.profile, win.space);
         let Some(position) = tabs.iter().position(|id| *id == active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
@@ -690,6 +712,23 @@ impl Shell {
         }
         let next = (position as isize + step).rem_euclid(tabs.len() as isize) as usize;
         self.operation_activate(tabs[next])
+    }
+
+    /// Selects by sidebar position, counting from one. `None` is the last tab,
+    /// however many there are.
+    fn operation_select_tab(&mut self, position: Option<usize>) -> OperationDisposition {
+        let Some(win) = self.windows.focused() else {
+            return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
+        };
+        let tabs = self.keyboard_tabs(win.profile, win.space);
+        let target = match position {
+            Some(position) => position.checked_sub(1).and_then(|index| tabs.get(index)),
+            None => tabs.last(),
+        };
+        match target {
+            Some(id) if win.active != Some(*id) => self.operation_activate(*id),
+            _ => operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged),
+        }
     }
 
     fn operation_adjust_zoom(&mut self, delta: Option<f64>) -> OperationDisposition {

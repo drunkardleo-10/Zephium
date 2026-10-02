@@ -153,7 +153,15 @@ export function copyMenuTargetLink() {
   const id = menuTarget;
   menuTarget = null;
   if (id === null) return;
-  const url = state.tabs.find((tab) => tab.id === id)?.url;
+  copyLink(state.tabs.find((tab) => tab.id === id)?.url);
+}
+
+/** Copies the address of the page in front, for the Copy Link command. */
+export function copyActiveLink() {
+  copyLink(activeTab()?.url);
+}
+
+function copyLink(url: string | null | undefined) {
   if (!url) return;
   void navigator.clipboard.writeText(url).catch(() => {
     // A denied clipboard is a user-visible no-op, never a chrome failure.

@@ -23,6 +23,8 @@
   import * as motion from "$session/motion.svelte";
   import * as tools from "$session/tools.svelte";
   import { preferences } from "$domain/preferences";
+  import { keymap } from "$domain/keymap";
+  import { acceleratorFrom } from "$shared/lib/accelerator";
   import Shell from "./Shell.svelte";
 
   // Follows the stored preference and nothing else. Adopting reads the
@@ -46,60 +48,19 @@
     pagePermissionPrompt !== null || webext.review() !== null || webext.accessRequest() !== null,
   );
 
-  type ChromeShortcut = {
-    matches: (event: KeyboardEvent) => boolean;
-    command: string;
-  };
-
-  const chromeShortcuts: ChromeShortcut[] = [
-    {
-      matches: (event) => event.ctrlKey && !event.shiftKey && event.key === "Tab",
-      command: "tab.next",
-    },
-    {
-      matches: (event) => event.ctrlKey && event.shiftKey && event.key === "Tab",
-      command: "tab.previous",
-    },
-  ];
-
-  if (!IS_MAC) {
-    const primaryShortcuts: ReadonlyArray<readonly [string, string]> = [
-      ["t", "tab.new"],
-      ["w", "tab.close"],
-      ["r", "nav.reload"],
-      ["l", "url.focus"],
-      ["=", "zoom.in"],
-      ["-", "zoom.out"],
-      ["0", "zoom.reset"],
-      ["[", "nav.back"],
-      ["]", "nav.forward"],
-      [".", "nav.stop"],
-    ];
-
-    for (const [key, command] of primaryShortcuts) {
-      chromeShortcuts.push({
-        matches: (event) =>
-          event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === key,
-        command,
-      });
-    }
-  }
-
+  // Page keystrokes are matched natively (menu bar, engine key tables, the
+  // GTK window handler); these are the same keys while chrome has focus,
+  // read from the one resolved keymap.
   function handleKeydown(event: KeyboardEvent) {
     // The native content stage is suppressed while this browser-owned modal
     // is active. Keep chrome shortcuts from mutating tabs behind it as well.
-    if (consentActive) return;
-    if ((event.metaKey || event.ctrlKey) && event.key === ",") {
-      event.preventDefault();
-      void browserPage.open("settings");
-      return;
-    }
-    for (const shortcut of chromeShortcuts) {
-      if (!shortcut.matches(event)) continue;
-      event.preventDefault();
-      void commands.runCommand(shortcut.command);
-      return;
-    }
+    if (consentActive || event.defaultPrevented) return;
+    const pressed = acceleratorFrom(event, IS_MAC);
+    if (pressed === null) return;
+    const command = keymap.commandFor(event, IS_MAC, pressed);
+    if (command === null) return;
+    event.preventDefault();
+    void commands.runCommand(command);
   }
 
   onMount(installCloseService);
@@ -135,6 +96,7 @@
     const tabsReady = tabs.init();
     const sidebarReady = sidebar.init();
     const uiEventsReady = ui.init();
+    void keymap.init();
     void operations.init();
     void blocker.init();
     if (!IS_MAC) void layout.init();
@@ -189,6 +151,7 @@
       favicons.dispose();
       tabs.dispose();
       ui.dispose();
+      keymap.dispose();
       if (!IS_MAC) layout.dispose();
       document.removeEventListener("keydown", handleKeydown);
     };

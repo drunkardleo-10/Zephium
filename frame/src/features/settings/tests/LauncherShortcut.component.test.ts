@@ -44,7 +44,7 @@ test("records a shortcut, keeps listening after a refusal, and applies the next"
     .mockResolvedValueOnce({ type: "applied", trigger: trigger("Ctrl+Alt+Space") });
   const screen = await render(LauncherShortcut);
   const recorder = screen.getByRole("button", { name: "Record a shortcut" });
-  await expect.element(recorder).toHaveTextContent("⌘⇧Space");
+  await expect.element(recorder).toHaveTextContent("⇧⌘Space");
 
   await recorder.click();
   expect(native.record).toHaveBeenLastCalledWith(true);

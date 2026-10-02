@@ -1,56 +1,135 @@
-const MAC_KEYS: Record<string, string> = {
-  CmdOrCtrl: "⌘",
-  Cmd: "⌘",
-  Command: "⌘",
-  Super: "⌘",
-  Ctrl: "⌃",
-  Control: "⌃",
-  Shift: "⇧",
-  Alt: "⌥",
-  Option: "⌥",
-};
-const OTHER_KEYS: Record<string, string> = {
-  CmdOrCtrl: "Ctrl",
-  Command: "Ctrl",
-  Cmd: "Ctrl",
-  Control: "Ctrl",
-  Option: "Alt",
-  Super: "Win",
-};
-const NAMED: Record<string, string> = {
-  ArrowUp: "↑",
-  ArrowDown: "↓",
-  ArrowLeft: "←",
-  ArrowRight: "→",
-  Enter: "↵",
-  Escape: "Esc",
-  Backquote: "`",
-  Minus: "-",
-  Equal: "=",
-  BracketLeft: "[",
-  BracketRight: "]",
-  Backslash: "\\",
-  Semicolon: ";",
-  Quote: "'",
-  Comma: ",",
-  Period: ".",
-  Slash: "/",
+type Modifier = "Ctrl" | "Alt" | "Shift" | "Meta";
+
+/** The order platforms print modifiers in: ⌃⌥⇧⌘ on macOS, Ctrl+Alt+Shift
+ *  elsewhere. */
+const ORDER: readonly Modifier[] = ["Ctrl", "Alt", "Shift", "Meta"];
+
+const MAC_GLYPHS: Record<Modifier, string> = { Ctrl: "⌃", Alt: "⌥", Shift: "⇧", Meta: "⌘" };
+const OTHER_NAMES: Record<Modifier, string> = {
+  Ctrl: "Ctrl",
+  Alt: "Alt",
+  Shift: "Shift",
+  Meta: "Win",
 };
 
+/** Key names as Rust's canonical text spells them, keyed by every alias a
+ *  stored accelerator or a key event may use. */
+const KEY_ALIASES: Record<string, string> = {
+  Comma: ",",
+  Period: ".",
+  Minus: "-",
+  Equal: "=",
+  Plus: "=",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Semicolon: ";",
+  Quote: "'",
+  Slash: "/",
+  Backslash: "\\",
+  Backquote: "`",
+  ArrowUp: "Up",
+  ArrowDown: "Down",
+  ArrowLeft: "Left",
+  ArrowRight: "Right",
+  Return: "Enter",
+  NumpadEnter: "Enter",
+  Esc: "Escape",
+};
+
+const KEY_LABELS: Record<string, string> = {
+  Up: "↑",
+  Down: "↓",
+  Left: "←",
+  Right: "→",
+  Enter: "↵",
+  Escape: "Esc",
+};
+
+type Parsed = { modifiers: Set<Modifier>; key: string };
+
+function modifierOf(token: string, mac: boolean): Modifier | null {
+  switch (token) {
+    case "CmdOrCtrl":
+    case "CommandOrControl":
+      return mac ? "Meta" : "Ctrl";
+    case "Cmd":
+    case "Command":
+    case "Super":
+    case "Meta":
+      return "Meta";
+    case "Ctrl":
+    case "Control":
+      return "Ctrl";
+    case "Alt":
+    case "Option":
+      return "Alt";
+    case "Shift":
+      return "Shift";
+    default:
+      return null;
+  }
+}
+
+function keyOf(token: string): string {
+  const code = /^(?:Key([A-Za-z])|Digit(\d))$/u.exec(token);
+  if (code) return (code[1] ?? code[2]!).toUpperCase();
+  if (token.length === 1) return token.toUpperCase();
+  return KEY_ALIASES[token] ?? token;
+}
+
+function parse(accelerator: string, mac: boolean): Parsed | null {
+  const text = accelerator.trim();
+  if (!text) return null;
+  // "Ctrl++" names the plus key, which shares its cap with "=".
+  const plus = text.endsWith("++");
+  const tokens = (plus ? text.slice(0, -2) : text).split("+").filter(Boolean);
+  const last = plus ? "=" : tokens.pop();
+  if (last === undefined) return null;
+  const modifiers = new Set<Modifier>();
+  for (const token of tokens) {
+    const modifier = modifierOf(token, mac);
+    if (!modifier) return null;
+    modifiers.add(modifier);
+  }
+  return { modifiers, key: keyOf(last) };
+}
+
 /** An accelerator such as `CmdOrCtrl+Shift+T` or `Alt+KeyK` as the keycaps a
- *  person presses. Every modifier is translated, and key codes read as the
- *  key's own label. */
+ *  person presses, modifiers in the platform's own order and key codes read
+ *  as the key's own label. */
 export function acceleratorKeys(accelerator: string, mac: boolean): string[] {
-  if (!accelerator.trim()) return [];
-  return accelerator
-    .split("+")
-    .filter(Boolean)
-    .map((key) => {
-      const modifier = (mac ? MAC_KEYS : OTHER_KEYS)[key];
-      if (modifier) return modifier;
-      const code = /^(?:Key|Digit)(.)$/u.exec(key);
-      return code ? code[1]! : (NAMED[key] ?? key);
-    });
+  const parsed = parse(accelerator, mac);
+  if (!parsed) return [];
+  const names = mac ? MAC_GLYPHS : OTHER_NAMES;
+  return [
+    ...ORDER.filter((modifier) => parsed.modifiers.has(modifier)).map((m) => names[m]),
+    KEY_LABELS[parsed.key] ?? parsed.key,
+  ];
+}
+
+/** The modifiers a key event holds, as keycaps in the platform's order. */
+export function heldModifiers(event: KeyboardEvent, mac: boolean): string[] {
+  const held: Record<Modifier, boolean> = {
+    Ctrl: event.ctrlKey,
+    Alt: event.altKey,
+    Shift: event.shiftKey,
+    Meta: event.metaKey,
+  };
+  const names = mac ? MAC_GLYPHS : OTHER_NAMES;
+  return ORDER.filter((modifier) => held[modifier]).map((modifier) => names[modifier]);
+}
+
+/** Whether two spellings name the same keys, however each was written. */
+export function sameAccelerator(a: string, b: string, mac: boolean): boolean {
+  const left = parse(a, mac);
+  const right = parse(b, mac);
+  return (
+    left !== null &&
+    right !== null &&
+    left.key === right.key &&
+    left.modifiers.size === right.modifiers.size &&
+    [...left.modifiers].every((modifier) => right.modifiers.has(modifier))
+  );
 }
 
 const MODIFIER_CODES = new Set([

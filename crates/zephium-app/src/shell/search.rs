@@ -433,13 +433,16 @@ impl Shell {
                     // for them; the field offers only places to go.
                     .filter(|_| !self.search_is_newtab())
                     .filter(|_| matches!(scope, SearchScope::All | SearchScope::Commands))
-                    .filter(|c| c.id != "launcher.toggle" && c.group != commands::Group::Work)
+                    .filter(|c| {
+                        c.id != "launcher.toggle"
+                            && !matches!(c.group, commands::Group::Work | commands::Group::Keys)
+                    })
                     .filter(|c| c.title.to_lowercase().contains(&needle))
                     .take(3)
                     .map(|c| SearchResult {
                         kind: "command".into(),
                         title: c.title.into(),
-                        detail: c.accelerator.unwrap_or_default().into(),
+                        detail: c.default_accelerator().unwrap_or_default().into(),
                         icon: None,
                         action: SearchAction::RunCommand { id: c.id.into() },
                     }),

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod accelerator;
 pub mod blocker;
 pub mod commands;
 pub mod downloads;

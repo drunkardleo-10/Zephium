@@ -823,3 +823,114 @@ mod tests {
         assert_eq!(safari_build, webkit_build);
     }
 }
+
+thread_local! {
+    static KEY_MONITOR: RefCell<Option<Retained<objc2::runtime::AnyObject>>> =
+        const { RefCell::new(None) };
+}
+
+/// Keyboard-only commands (Select Tab 1-9) have no menu item to carry their
+/// key equivalent, so a local monitor matches them before the focused web
+/// view sees the keystroke. Only the main window's keys are considered; the
+/// launcher panel keeps its own.
+pub fn install_key_monitor(
+    window: &WebviewWindow,
+    table: Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>,
+    on: impl Fn(&str) + 'static,
+) {
+    use block2::RcBlock;
+    use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
+    use std::ptr::NonNull;
+
+    let Ok(main_window) = window.ns_window() else {
+        return;
+    };
+    let main_window = main_window as usize;
+    let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: AppKit passes a live event for the duration of the block.
+        let event_ref = unsafe { event.as_ref() };
+        let Some(mtm) = MainThreadMarker::new() else {
+            return event.as_ptr();
+        };
+        let in_main = event_ref
+            .window(mtm)
+            .is_some_and(|w| Retained::as_ptr(&w) as usize == main_window);
+        if !in_main {
+            return event.as_ptr();
+        }
+        let flags = event_ref.modifierFlags();
+        let character = event_ref
+            .charactersByApplyingModifiers(NSEventModifierFlags::empty())
+            .map(|text| text.to_string().to_lowercase());
+        let key_code = event_ref.keyCode();
+        let hit = table
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(accelerator, _)| {
+                flags.contains(NSEventModifierFlags::Command) == accelerator.meta
+                    && flags.contains(NSEventModifierFlags::Control) == accelerator.ctrl
+                    && flags.contains(NSEventModifierFlags::Option) == accelerator.alt
+                    && flags.contains(NSEventModifierFlags::Shift) == accelerator.shift
+                    && key_matches(accelerator.key, character.as_deref(), key_code)
+            })
+            .map(|(_, id)| *id);
+        match hit {
+            Some(id) => {
+                if !event_ref.isARepeat() {
+                    on(id);
+                }
+                std::ptr::null_mut()
+            }
+            None => event.as_ptr(),
+        }
+    });
+    // SAFETY: the block returns the event it was given, or null to consume it,
+    // as AppKit requires.
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
+    };
+    KEY_MONITOR.with(|slot| *slot.borrow_mut() = monitor);
+}
+
+/// Printable keys compare by the character they type unmodified, so the
+/// layout decides; the rest compare by macOS virtual key code.
+fn key_matches(key: zephium_core::accelerator::Key, character: Option<&str>, code: u16) -> bool {
+    use zephium_core::accelerator::Key;
+    if let Some(expected) = key.character() {
+        return character.is_some_and(|typed| typed.chars().eq(std::iter::once(expected)));
+    }
+    let expected: u16 = match key {
+        Key::Tab => 48,
+        Key::Space => 49,
+        Key::Enter => 36,
+        Key::Escape => 53,
+        Key::Backspace => 51,
+        Key::Delete => 117,
+        Key::Left => 123,
+        Key::Right => 124,
+        Key::Down => 125,
+        Key::Up => 126,
+        Key::Home => 115,
+        Key::End => 119,
+        Key::PageUp => 116,
+        Key::PageDown => 121,
+        Key::Function(number) => match number {
+            1 => 122,
+            2 => 120,
+            3 => 99,
+            4 => 118,
+            5 => 96,
+            6 => 97,
+            7 => 98,
+            8 => 100,
+            9 => 101,
+            10 => 109,
+            11 => 103,
+            12 => 111,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    code == expected
+}

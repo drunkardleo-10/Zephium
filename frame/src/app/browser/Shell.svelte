@@ -165,6 +165,7 @@
     untrack(() => {
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
+      if (command.id === "page.copyLink") tabs.copyActiveLink();
       if (command.id === "extensions.manage") void browserPage.open("extensions");
       if (command.id === "protection.site") void toggleSiteProtection();
       if (command.id === "protection.hide") void hideElements();

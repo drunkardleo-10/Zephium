@@ -500,7 +500,7 @@ mod native_composition_tests {
 /// AcceleratorKeyPressed hook; the table is the same resolved keymap.
 pub fn install_shortcuts(
     window: &WebviewWindow,
-    shortcuts: Vec<Shortcut>,
+    shortcuts: std::sync::Arc<std::sync::RwLock<Vec<Shortcut>>>,
     presses: FocusedShortcutPresses,
     on: impl Fn(&str) + 'static,
 ) {
@@ -512,21 +512,22 @@ pub fn install_shortcuts(
     gtk_window.connect_key_press_event(move |_, event| {
         let state = event.state();
         let modifiers = observed_shortcut_modifiers(state);
-        let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-        let alt = modifiers.contains(gtk::gdk::ModifierType::MOD1_MASK);
-        if !ctrl && !alt {
-            return glib::Propagation::Proceed;
-        }
         let keyval = normalize_keyval(event.keyval());
-        for s in &shortcuts {
-            if shortcut_modifiers(s) == modifiers && vk_keyval(s.key) == Some(keyval) {
-                if pressed.admit(event.hardware_keycode()) {
-                    on(&s.id);
-                }
-                return glib::Propagation::Stop;
-            }
+        // The table carries a bare key only while it means something (the
+        // Work pane's Escape), so unmodified typing is otherwise untouched.
+        let hit = shortcuts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|s| shortcut_modifiers(s) == modifiers && vk_keyval(s.key) == Some(keyval))
+            .map(|s| s.id.clone());
+        let Some(id) = hit else {
+            return glib::Propagation::Proceed;
+        };
+        if pressed.admit(event.hardware_keycode()) {
+            on(&id);
         }
-        glib::Propagation::Proceed
+        glib::Propagation::Stop
     });
 
     let released = presses.clone();
@@ -723,14 +724,32 @@ fn normalize_keyval(key: gtk::gdk::keys::Key) -> u32 {
 // The shared shortcut table speaks Windows VK codes; translate to keyvals.
 fn vk_keyval(vk: u32) -> Option<u32> {
     Some(match vk {
+        0x08 => 0xff08,
         0x09 => 0xff09,
+        0x0D => 0xff0d,
+        0x1B => 0xff1b,
         0x20 => 0x20,
+        0x21 => 0xff55,
+        0x22 => 0xff56,
+        0x23 => 0xff57,
+        0x24 => 0xff50,
+        0x25 => 0xff51,
+        0x26 => 0xff52,
+        0x27 => 0xff53,
+        0x28 => 0xff54,
+        0x2E => 0xffff,
+        f @ 0x70..=0x7B => 0xffbe + (f - 0x70),
+        0xBA => ';' as u32,
         0xBB => '=' as u32,
         0xBC => ',' as u32,
         0xBD => '-' as u32,
         0xBE => '.' as u32,
+        0xBF => '/' as u32,
+        0xC0 => '`' as u32,
         0xDB => '[' as u32,
+        0xDC => '\\' as u32,
         0xDD => ']' as u32,
+        0xDE => '\'' as u32,
         v @ 0x41..=0x5A => (v as u8).to_ascii_lowercase() as u32,
         v @ 0x30..=0x39 => v,
         _ => return None,
