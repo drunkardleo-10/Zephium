@@ -1299,6 +1299,11 @@ struct UiCommand(String);
 struct SearchChanged(zephium_ipc::SearchResults);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct FindChanged(zephium_ipc::FindResultView);
+
+const EVENT_FIND: &str = "zephium:find";
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct LayoutChanged(zephium_ipc::LayoutState);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1579,6 +1584,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             default_browser::default_browser_status,
             default_browser::default_browser_request,
             bookmark_call,
+            page_find,
             browser_import::import_sources,
             browser_import::import_start,
             browser_import::import_cancel,
@@ -1611,6 +1617,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browser_credentials::BrowserCredentialCapabilityChanged,
             PagePermissionPromptChanged,
             UiCommand,
+            FindChanged,
             SearchChanged,
             LayoutChanged,
             RuntimeStatusChanged,
@@ -3054,7 +3061,10 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     // Capture belongs to the frame, which decides where the new note opens;
     // the clipboard write stays in privileged chrome, which holds the
     // authoritative URL of the page it shows.
-    if matches!(id, "note.new" | "page.copyLink") {
+    if matches!(
+        id,
+        "note.new" | "page.copyLink" | "find.show" | "find.next" | "find.previous"
+    ) {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
@@ -3743,6 +3753,29 @@ async fn history_call(
     }
 }
 
+/// Finds `query` in the page in front, stepping forward or back when it
+/// repeats; no query ends the search. Results arrive as `zephium:find`.
+#[tauri::command]
+#[specta::specta]
+fn page_find(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    query: Option<String>,
+    forward: bool,
+) -> bool {
+    use zephium_core::ports::engine::{FindRequest, MAX_FIND_QUERY_BYTES};
+    if !authorize(&caller, CallerPolicy::Main, "page_find")
+        || query
+            .as_deref()
+            .is_some_and(|query| query.is_empty() || query.len() > MAX_FIND_QUERY_BYTES)
+    {
+        return false;
+    }
+    shell.dispatch(Command::Find(
+        query.map(|query| FindRequest { query, forward }),
+    ))
+}
+
 /// The Bookmarks panel's reads and writes, scoped to the focused profile.
 #[tauri::command]
 #[specta::specta]
@@ -4320,6 +4353,11 @@ fn build_menu(
         .separator()
         .item(&item("tab.close")?)
         .build()?;
+    let find = SubmenuBuilder::new(handle, "Find")
+        .item(&item("find.show")?)
+        .item(&item("find.next")?)
+        .item(&item("find.previous")?)
+        .build()?;
     // Standard Edit selectors keep Cmd+C/V/X working inside every webview.
     let edit = SubmenuBuilder::new(handle, "Edit")
         .undo()
@@ -4330,6 +4368,7 @@ fn build_menu(
         .paste()
         .select_all()
         .separator()
+        .item(&find)
         .item(&item("page.copyLink")?)
         .build()?;
     let appearance = SubmenuBuilder::new(handle, "Appearance")
@@ -5249,6 +5288,9 @@ pub fn run() {
                     EVENT_PAGE_PERMISSION_PROMPT,
                     &prompt,
                 ),
+                Projection::FindResult(result) => {
+                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FIND, &result)
+                }
                 Projection::UiCommand(id) => {
                     if id.starts_with("preference.search.") { search_providers::cancel_all(); }
                     #[cfg(target_os = "macos")]

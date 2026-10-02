@@ -1,6 +1,6 @@
 use zephium_core::ids::ItemId;
 use zephium_core::navigation as navigation_policy;
-use zephium_core::ports::engine::{EngineEvent, ZoomRequestId};
+use zephium_core::ports::engine::{EngineEvent, FindRequest, ZoomRequestId};
 
 use super::scripts::{
     decode_favicon_eval_result, EXTRACT_HTML_JS, FAVICON_JS, MAX_HTML_CHARS, MAX_HTML_RESULT_BYTES,
@@ -111,6 +111,47 @@ impl EngineHost {
                     },
                 );
             });
+        }
+    }
+
+    /// One step of finding text in `id`. Results travel the view's own event
+    /// permit, so a result from a view since replaced is never delivered.
+    pub(crate) fn find(&mut self, id: ItemId, request: Option<FindRequest>) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let sink = self.sink.clone();
+        let permit = view.event_permit.clone();
+        let report = move || -> crate::platform::imp::FindReport {
+            Box::new(move |query, matches, active| {
+                permit.emit(
+                    &sink,
+                    EngineEvent::FindResult {
+                        id,
+                        query,
+                        matches,
+                        active,
+                    },
+                );
+            })
+        };
+        #[cfg(target_os = "macos")]
+        let native = {
+            use wry::WebViewExtMacOS;
+            view.view.webview()
+        };
+        #[cfg(target_os = "windows")]
+        let native = {
+            use wry::WebViewExtWindows;
+            view.view.webview()
+        };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let native = {
+            use wry::WebViewExtUnix;
+            view.view.webview()
+        };
+        if !crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report) {
+            eprintln!("engine: find is unavailable in this web engine");
         }
     }
 

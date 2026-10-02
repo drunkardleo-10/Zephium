@@ -333,6 +333,11 @@ export const commands = {
 } | null>("default_browser_request"),
 	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
 	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
+	/**
+	 *  Finds `query` in the page in front, stepping forward or back when it
+	 *  repeats; no query ends the search. Results arrive as `zephium:find`.
+	 */
+	pageFind: (query: string | null, forward: boolean) => __TAURI_INVOKE<boolean>("page_find", { query, forward }),
 	importSources: () => __TAURI_INVOKE<ImportSourceView[]>("import_sources"),
 	/**
 	 *  Starts importing `kinds` from one profile of one source into the focused
@@ -358,6 +363,7 @@ export const events = {
 	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
 	faviconsChanged: makeEvent<FaviconsChanged>("favicons-changed"),
+	findChanged: makeEvent<FindChanged>("find-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
@@ -849,6 +855,17 @@ export type FaviconsView = {
 	surface: IconSurface,
 	profile_id: string,
 	entries: FaviconEntry[],
+};
+
+export type FindChanged = FindResultView;
+
+/**  Where a find in the page in front landed. */
+export type FindResultView = {
+	/**  The search this answers; chrome ignores results for older text. */
+	query: string,
+	matches: number,
+	/**  One-based position of the current match, when the engine knows it. */
+	active: number | null,
 };
 
 /**

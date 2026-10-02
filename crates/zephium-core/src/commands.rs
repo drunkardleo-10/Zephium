@@ -126,6 +126,19 @@ pub const REGISTRY: &[CommandSpec] = &[
         Keys::same("CmdOrCtrl+W"),
         Group::File,
     ),
+    command("find.show", "Find…", Keys::same("CmdOrCtrl+F"), Group::Edit),
+    command(
+        "find.next",
+        "Find Next",
+        Keys::same("CmdOrCtrl+G"),
+        Group::Edit,
+    ),
+    command(
+        "find.previous",
+        "Find Previous",
+        Keys::same("CmdOrCtrl+Shift+G"),
+        Group::Edit,
+    ),
     command(
         "page.copyLink",
         "Copy Link",

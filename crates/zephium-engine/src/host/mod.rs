@@ -181,6 +181,8 @@ struct ObservedView {
     native_close_attempted: bool,
     #[cfg(target_os = "windows")]
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
+    // Before `view`, so a running search is stopped while its view lives.
+    find: Option<crate::platform::imp::FindSession>,
     view: WebView,
     // Keep this after `view`: fields drop in declaration order, so the native
     // WebView wrapper completes its teardown path before capacity can be

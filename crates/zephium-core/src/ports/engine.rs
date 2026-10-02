@@ -505,6 +505,20 @@ pub enum UserContentSettlement {
     },
 }
 
+/// Longest text one find may search for.
+pub const MAX_FIND_QUERY_BYTES: usize = 1024;
+/// Matches an engine counts before it stops.
+pub const MAX_FIND_MATCHES: u32 = 1000;
+
+/// A find in the page. Repeating the same `query` steps to the next match
+/// (or the previous one when `forward` is false); a different query starts a
+/// new search.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindRequest {
+    pub query: String,
+    pub forward: bool,
+}
+
 /// A resolved keyboard shortcut for platforms where the engine must
 /// intercept keys natively (WebView2 AcceleratorKeyPressed).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -687,8 +701,9 @@ pub trait Engine {
     /// arrives as [`EngineEvent::ZoomSettled`] carrying the same `request`.
     fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch;
     fn set_muted(&self, id: ItemId, muted: bool) -> NativeDispatch;
-    /// `None` clears the current find session.
-    fn find(&self, id: ItemId, query: Option<&str>) -> NativeDispatch;
+    /// One step of finding text in the page; `None` ends the session and
+    /// clears its highlights. Results arrive as `EngineEvent::FindResult`.
+    fn find(&self, id: ItemId, request: Option<FindRequest>) -> NativeDispatch;
     /// Result arrives as `EngineEvent::Captured`.
     fn capture(&self, id: ItemId) -> NativeDispatch;
     /// Result arrives as `EngineEvent::HtmlExtracted`.
@@ -1233,6 +1248,15 @@ pub enum EngineEvent {
         id: ItemId,
         html: String,
         truncated: bool,
+    },
+    /// Where a find in `id` landed. `query` names the search it answers, so a
+    /// result for text since replaced can be told apart.
+    FindResult {
+        id: ItemId,
+        query: String,
+        matches: u32,
+        /// One-based position of the current match, when the engine knows it.
+        active: Option<u32>,
     },
     SplitChanged {
         window: WindowId,

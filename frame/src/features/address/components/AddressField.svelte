@@ -1,6 +1,12 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Alert02Icon } from "@hugeicons/core-free-icons";
+  import {
+    Alert02Icon,
+    ArrowDown01Icon,
+    ArrowUp01Icon,
+    Cancel01Icon,
+    Search01Icon,
+  } from "@hugeicons/core-free-icons";
   import { settle } from "$domain/operations";
   import { extensions } from "$domain/extensions";
   import { webext } from "$domain/webext";
@@ -9,7 +15,9 @@
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
-  import { flushSync, type Snippet } from "svelte";
+  import IconButton from "$shared/ui/IconButton";
+  import * as find from "../lib/find.svelte";
+  import { flushSync, untrack, type Snippet } from "svelte";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import { addressSecurity, editingAddress, restingAddress } from "../lib/address-model";
 
@@ -23,6 +31,25 @@
   } = $props();
 
   let input: HTMLInputElement;
+  let findInput: HTMLInputElement | undefined = $state();
+  let finding = $derived(find.isOpen());
+  let findCount = $derived.by(() => {
+    const matches = find.count();
+    if (matches === null) return "";
+    if (matches === 0) return m.find_none();
+    const at = find.position();
+    return at === null ? String(matches) : m.find_position({ at, of: matches });
+  });
+
+  // Whichever field is mounted takes focus when find asks for it, including
+  // the one that appears when a compact sidebar opens for the search.
+  $effect(() => {
+    if (find.focusRequested() === 0 || !finding || !findInput) return;
+    untrack(() => {
+      findInput?.focus();
+      findInput?.select();
+    });
+  });
   let form: HTMLFormElement;
   let editing = $state(false);
   let pending = $state(false);
@@ -202,8 +229,13 @@
       start, where a long URL has to begin.
     -->
     <span class="address-clip">
+      <!-- Stays mounted and correct while find borrows the field: native
+           verifies the page's address through it before showing the page. -->
       <input
         bind:this={input}
+        class:sr-only={finding}
+        tabindex={finding ? -1 : undefined}
+        aria-hidden={finding || undefined}
         data-zephium-address
         type="text"
         aria-label={m.ui_address_and_search()}
@@ -231,9 +263,59 @@
         style:padding-inline-start={editing ? "0" : "var(--address-centering)"}
         class="min-w-0 flex-1 bg-transparent text-[13.5px] text-label-secondary outline-none placeholder:text-faint focus:text-text"
       />
+      {#if finding}
+        <span class="find-glyph" aria-hidden="true"><Icon icon={Search01Icon} size={14} /></span>
+        <input
+          bind:this={findInput}
+          type="search"
+          class="find-input"
+          aria-label={m.find_placeholder()}
+          placeholder={m.find_placeholder()}
+          autocomplete="off"
+          spellcheck="false"
+          enterkeyhint="search"
+          value={find.text()}
+          oninput={(event) => find.setText(event.currentTarget.value)}
+          onkeydown={(event) => {
+            if (event.isComposing) return;
+            if (event.key === "Enter") {
+              event.preventDefault();
+              find.step(!event.shiftKey, tabs.activeId());
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              find.hide();
+            }
+          }}
+        />
+      {/if}
     </span>
 
-    {#if !compact && trailing}{@render trailing()}{/if}
+    {#if finding}
+      <span class="find-count" role="status" aria-live="polite">{findCount}</span>
+      <IconButton
+        icon={ArrowUp01Icon}
+        label={m.find_previous()}
+        size={14}
+        buttonSize={24}
+        disabled={!find.count()}
+        onclick={() => find.step(false, tabs.activeId())}
+      />
+      <IconButton
+        icon={ArrowDown01Icon}
+        label={m.find_next()}
+        size={14}
+        buttonSize={24}
+        disabled={!find.count()}
+        onclick={() => find.step(true, tabs.activeId())}
+      />
+      <IconButton
+        icon={Cancel01Icon}
+        label={m.find_done()}
+        size={14}
+        buttonSize={24}
+        onclick={() => find.hide()}
+      />
+    {:else if !compact && trailing}{@render trailing()}{/if}
   </div>
   {#if !compact && listedInstalled}
     {#if removing}
@@ -319,6 +401,42 @@
     margin: 8px 0 0;
     color: var(--color-label-secondary);
     font-size: 11px;
+  }
+
+  .find-glyph {
+    display: grid;
+    place-items: center;
+    flex: none;
+    margin-inline-end: 6px;
+    color: var(--color-faint);
+  }
+
+  .find-input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: 13.5px;
+    outline: none;
+    user-select: text;
+  }
+
+  .find-input::placeholder {
+    color: var(--color-faint);
+  }
+
+  .find-input::-webkit-search-cancel-button {
+    display: none;
+  }
+
+  .find-count {
+    flex: none;
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-faint);
+    white-space: nowrap;
   }
 
   /* The input's travel is clipped here rather than by the field, whose tray

@@ -25,6 +25,7 @@
   import { preferences } from "$domain/preferences";
   import { keymap } from "$domain/keymap";
   import { browserImport, nativeImportAdapter } from "$domain/browser-import";
+  import { findInPage } from "$features/address";
   import { acceleratorFrom } from "$shared/lib/accelerator";
   import Shell from "./Shell.svelte";
 
@@ -156,6 +157,7 @@
       tabs.dispose();
       ui.dispose();
       keymap.dispose();
+      findInPage.dispose();
       if (ownsImport) browserImport.provide(null);
       if (!IS_MAC) layout.dispose();
       document.removeEventListener("keydown", handleKeydown);

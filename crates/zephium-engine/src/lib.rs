@@ -1039,6 +1039,7 @@ impl RetirementGate {
             | event @ EngineEvent::DownloadRequested { id, .. }
             | event @ EngineEvent::Captured { id, .. }
             | event @ EngineEvent::HtmlExtracted { id, .. }
+            | event @ EngineEvent::FindResult { id, .. }
             | event @ EngineEvent::ShortcutPressed { item: id, .. } => item_token
                 .as_ref()
                 .is_some_and(|active| self.allows_item_token(id, active))
@@ -2377,8 +2378,18 @@ impl Engine for WebviewEngine {
         NativeDispatch::Unsupported
     }
 
-    fn find(&self, _id: ItemId, _query: Option<&str>) -> NativeDispatch {
-        NativeDispatch::Unsupported
+    fn find(
+        &self,
+        id: ItemId,
+        request: Option<zephium_core::ports::engine::FindRequest>,
+    ) -> NativeDispatch {
+        if request.as_ref().is_some_and(|request| {
+            request.query.is_empty()
+                || request.query.len() > zephium_core::ports::engine::MAX_FIND_QUERY_BYTES
+        }) {
+            return NativeDispatch::Rejected;
+        }
+        self.run_for_active_item(id, move |h| h.find(id, request))
     }
 
     fn capture(&self, _id: ItemId) -> NativeDispatch {
@@ -3207,7 +3218,16 @@ mod tests {
             NativeDispatch::Rejected
         );
         assert_eq!(engine.set_muted(id, true), NativeDispatch::Unsupported);
-        assert_eq!(engine.find(id, Some("secret")), NativeDispatch::Unsupported);
+        assert_eq!(
+            engine.find(
+                id,
+                Some(zephium_core::ports::engine::FindRequest {
+                    query: "secret".into(),
+                    forward: true,
+                })
+            ),
+            NativeDispatch::Rejected
+        );
         assert_eq!(engine.capture(id), NativeDispatch::Unsupported);
         assert_eq!(engine.extract_html(id), NativeDispatch::Rejected);
         assert_eq!(engine.discover_favicon(id), NativeDispatch::Rejected);

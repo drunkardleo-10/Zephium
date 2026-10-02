@@ -438,6 +438,22 @@ impl Shell {
             EngineEvent::Crashed { id } => self.on_crashed(id),
             EngineEvent::Captured { .. } => {}
             EngineEvent::HtmlExtracted { .. } => {}
+            EngineEvent::FindResult {
+                id,
+                query,
+                matches,
+                active,
+            } => {
+                // Only the page being searched may answer; a result from a
+                // page left behind would describe matches no one can see.
+                if self.find_target == Some(id) {
+                    (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                        query,
+                        matches,
+                        active,
+                    }));
+                }
+            }
             EngineEvent::ShortcutPressed { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.crash.presentations.remove(&id);
@@ -593,7 +609,8 @@ impl Shell {
             | EngineEvent::ViewCreationFailed { id }
             | EngineEvent::Crashed { id }
             | EngineEvent::Captured { id, .. }
-            | EngineEvent::HtmlExtracted { id, .. } => self.profile_of_item(*id),
+            | EngineEvent::HtmlExtracted { id, .. }
+            | EngineEvent::FindResult { id, .. } => self.profile_of_item(*id),
             EngineEvent::PermissionRequested { profile, .. }
             | EngineEvent::WorkPageFavicon { profile, .. } => Some(*profile),
             EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),

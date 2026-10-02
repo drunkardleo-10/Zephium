@@ -1129,3 +1129,84 @@ fn links_from_other_apps_wait_for_the_session_then_open_in_new_tabs() {
     assert!(loaded("late.example"));
     assert_ne!(active_id(&screen), early);
 }
+
+#[test]
+fn find_follows_the_page_in_front_and_answers_only_for_it() {
+    let engine = Arc::new(FakeEngine::default());
+    let results: Arc<Mutex<Vec<zephium_ipc::FindResultView>>> = Arc::default();
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }));
+    let (sink, view) = (results.clone(), screen.clone());
+    let mut shell = Shell::new_with_failure(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| match projection {
+            Projection::FindResult(result) => sink.lock().unwrap().push(result),
+            other => apply_projection(&mut view.lock().unwrap(), other),
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Run("tab.new".into()));
+    let second = active_id(&screen);
+    let request = |query: &str, forward| {
+        Some(zephium_core::ports::engine::FindRequest {
+            query: query.into(),
+            forward,
+        })
+    };
+
+    shell.handle(Command::Find(request("apple", true)));
+    shell.handle(Command::Find(request("apple", false)));
+    let result = |id, matches| {
+        Command::Engine(EngineEvent::FindResult {
+            id,
+            query: "apple".into(),
+            matches,
+            active: Some(1),
+        })
+    };
+    shell.handle(result(second, 3));
+
+    // Switching pages ends the search where it was.
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::Find(request("pear", true)));
+    shell.handle(result(second, 9));
+    shell.handle(Command::Find(None));
+
+    let calls = engine.calls();
+    let finds: Vec<&String> = calls
+        .iter()
+        .filter(|call| call.starts_with("find "))
+        .collect();
+    assert_eq!(
+        finds,
+        [
+            &format!("find {second} apple next"),
+            &format!("find {second} apple previous"),
+            &format!("find {second} end"),
+            &format!("find {first} pear next"),
+            &format!("find {first} end"),
+        ]
+    );
+    assert_eq!(
+        results.lock().unwrap().as_slice(),
+        [zephium_ipc::FindResultView {
+            query: "apple".into(),
+            matches: 3,
+            active: Some(1),
+        }]
+    );
+}

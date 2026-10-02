@@ -1803,6 +1803,7 @@ impl EngineHost {
             native_close_attempted: false,
             #[cfg(target_os = "windows")]
             native_terminal_failure: self.native_terminal_failure.clone(),
+            find: None,
             view,
             native_resource: None,
         })

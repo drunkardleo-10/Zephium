@@ -199,6 +199,34 @@ impl Shell {
 
     /// Opens an address in a new tab of the focused window without selecting
     /// it, as a modified click on a link does.
+    /// Finds in the page in front. Moving to another page ends the search in
+    /// the one before, so its highlights never linger out of sight.
+    pub(super) fn find_in_page(
+        &mut self,
+        request: Option<zephium_core::ports::engine::FindRequest>,
+    ) {
+        let page = if self.active_browser_page().is_some() {
+            self.work_pane_tab()
+        } else {
+            self.windows.focused().and_then(|window| window.active)
+        };
+        if let Some(previous) = self
+            .find_target
+            .filter(|previous| Some(*previous) != page || request.is_none())
+        {
+            let _ = self.engine.find(previous, None);
+            self.find_target = None;
+        }
+        let (Some(page), Some(request)) = (page, request) else {
+            return;
+        };
+        if self.engine.find(page, Some(request))
+            != zephium_core::ports::engine::NativeDispatch::Rejected
+        {
+            self.find_target = Some(page);
+        }
+    }
+
     /// Opens what another application handed over, each in its own tab and
     /// the last one in front, the way a clicked link opens elsewhere.
     pub(super) fn open_external(&mut self, urls: Vec<String>) {

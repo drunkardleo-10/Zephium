@@ -20,6 +20,8 @@ mod agentic_semantic_probe;
 #[allow(dead_code)]
 mod cdp;
 mod content_filter;
+mod find;
+pub(crate) use find::{find, FindReport, FindSession};
 #[cfg(feature = "agentic-browser")]
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.

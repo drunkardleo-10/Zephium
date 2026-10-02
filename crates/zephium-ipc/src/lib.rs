@@ -505,6 +505,16 @@ pub enum HistoryError {
     Capacity,
 }
 
+/// Where a find in the page in front landed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FindResultView {
+    /// The search this answers; chrome ignores results for older text.
+    pub query: String,
+    pub matches: u32,
+    /// One-based position of the current match, when the engine knows it.
+    pub active: Option<u32>,
+}
+
 /// Bookmark ids are store row ids; they cross as decimal strings, like
 /// history ids, so JavaScript never parses a Rust i64.
 pub fn bookmark_id(id: &str) -> Option<i64> {
@@ -1172,6 +1182,7 @@ pub enum Projection {
     PagePermissionPrompt(PagePermissionPromptView),
     WebExtensionAccessRequest(WebExtensionAccessRequestView),
     UiCommand(String),
+    FindResult(FindResultView),
     Search(SearchResults),
     OpenNote { profile: String, id: String },
     Layout(LayoutState),

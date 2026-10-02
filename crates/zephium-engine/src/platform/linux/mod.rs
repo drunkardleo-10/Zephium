@@ -2,6 +2,7 @@
 //! composition root; the stage positions them and draws the drop indicator.
 
 mod content_filter;
+mod find;
 mod stage;
 
 pub(crate) use content_filter::{
@@ -11,6 +12,7 @@ pub(crate) use content_filter::{
     ContentPolicyCacheMaintenanceCancellation, ContentPolicyCachePage,
     ContentPolicyCompilationCancellation, ContentPolicyRegistration, NativeContentPolicy,
 };
+pub(crate) use find::{find, FindReport, FindSession};
 pub use stage::Stage;
 
 use std::cell::RefCell;

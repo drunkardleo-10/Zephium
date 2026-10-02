@@ -8,7 +8,7 @@
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadSettings } from "$features/settings";
   import { EssentialTile } from "$features/essentials";
-  import { AddressField } from "$features/address";
+  import { AddressField, findInPage } from "$features/address";
   import { Dock } from "$features/dock";
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
@@ -167,6 +167,9 @@
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
       if (command.id === "page.copyLink") tabs.copyActiveLink();
+      if (command.id === "find.show") findInPage.show(tabs.activeId());
+      if (command.id === "find.next") findInPage.step(true, tabs.activeId());
+      if (command.id === "find.previous") findInPage.step(false, tabs.activeId());
       if (command.id.startsWith("bookmark.added=")) {
         bookmarkReveal.request(command.id.slice("bookmark.added=".length));
         toolHost.open("bookmarks");
@@ -174,6 +177,13 @@
       if (command.id === "extensions.manage") void browserPage.open("extensions");
       if (command.id === "protection.site") void toggleSiteProtection();
       if (command.id === "protection.hide") void hideElements();
+    });
+  });
+  // A search belongs to the page it runs in; moving to another page ends it.
+  $effect(() => {
+    const active = tabs.activeId();
+    untrack(() => {
+      if (findInPage.isOpen() && findInPage.searching() !== active) findInPage.hide();
     });
   });
   function selectTab(id: string) {

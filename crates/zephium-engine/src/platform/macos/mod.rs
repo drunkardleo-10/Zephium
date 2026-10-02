@@ -27,6 +27,7 @@ mod agentic_semantic_probe;
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod content_filter;
 mod credentials;
+mod find;
 mod native;
 mod navigation;
 #[cfg(feature = "agentic-browser")]
@@ -52,6 +53,7 @@ pub(crate) use work_observation_presentation::{PresentationState, WorkObservatio
 mod stage;
 mod webext_action_icon;
 
+pub(crate) use find::{find, FindReport, FindSession};
 pub(crate) use webext_action_icon::rasterize_action_icon;
 
 #[cfg(feature = "agentic-browser")]

@@ -227,6 +227,8 @@ pub struct Shell {
     crash: CrashState,
     bootstrapped: bool,
     pending_external: Vec<String>,
+    /// The page a find is running in, so its results and its end go there.
+    find_target: Option<ItemId>,
     native_openers: std::collections::HashMap<ItemId, NativeOpener>,
     #[cfg(debug_assertions)]
     bootstrap_started: Option<std::time::Instant>,
@@ -440,6 +442,7 @@ impl Shell {
             crash: CrashState::default(),
             bootstrapped: false,
             pending_external: Vec::new(),
+            find_target: None,
             native_openers: std::collections::HashMap::new(),
             #[cfg(debug_assertions)]
             bootstrap_started: None,
@@ -1011,6 +1014,7 @@ impl Shell {
                 let _ = self.operation_open_url(input, new_tab);
             }
             Command::OpenExternal(urls) => self.open_external(urls),
+            Command::Find(request) => self.find_in_page(request),
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
             }

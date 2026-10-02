@@ -680,8 +680,20 @@ impl Engine for FakeEngine {
     fn set_muted(&self, _id: ItemId, _muted: bool) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
-    fn find(&self, _id: ItemId, _query: Option<&str>) -> NativeDispatch {
-        NativeDispatch::Unsupported
+    fn find(
+        &self,
+        id: ItemId,
+        request: Option<zephium_core::ports::engine::FindRequest>,
+    ) -> NativeDispatch {
+        match request {
+            Some(request) => self.log(format!(
+                "find {id} {} {}",
+                request.query,
+                if request.forward { "next" } else { "previous" }
+            )),
+            None => self.log(format!("find {id} end")),
+        }
+        self.native_admission()
     }
     fn capture(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
@@ -1502,6 +1514,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::Favicons(_) => {}
         Projection::PanelOwner(_) => {}
         Projection::UiCommand(_) => {}
+        Projection::FindResult(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
         Projection::RuntimeStatus(_) => {}
