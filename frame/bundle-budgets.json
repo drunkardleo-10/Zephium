@@ -112,14 +112,14 @@
     "css": 4500
   },
   "lazy:features/notes/components/Notes.svelte": {
-    "js": 292900,
+    "js": 293000,
     "css": 19300,
-    "description": "The download card and list gain extension badges, a time-left estimate and inline actions."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:features/tasks/components/Tasks.svelte": {
-    "js": 339500,
+    "js": 339600,
     "css": 31800,
-    "description": "The download card and list gain extension badges, a time-left estimate and inline actions."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:app/browser/WorkWorkspace.svelte": {
     "js": 975000,
@@ -166,9 +166,9 @@
     "description": "The download card and list gain extension badges, a time-left estimate and inline actions."
   },
   "lazy:features/tasks/components/TaskDetail.svelte": {
-    "js": 354300,
+    "js": 354400,
     "css": 39500,
-    "description": "The download card and list gain extension badges, a time-left estimate and inline actions."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:features/tasks/components/TaskBoard.svelte": {
     "js": 348600,
@@ -186,9 +186,9 @@
     "description": "The download card and list gain extension badges, a time-left estimate and inline actions."
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
-    "js": 571100,
+    "js": 571200,
     "css": 16500,
-    "description": "The download card and list gain extension badges, a time-left estimate and inline actions."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:features/notes/components/NotesPage.svelte": {
     "js": 313300,
@@ -286,9 +286,9 @@
     "description": "Measured 4911 JS bytes: d3-quadtree, which LayerChart's tooltip loads only for its quadtree modes; the app's charts never ask for it."
   },
   "lazy:shared/ui/data/Code/CodeBlock.svelte": {
-    "js": 97700,
+    "js": 97800,
     "css": 6000,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:features/work/index.ts": {
     "js": 149500,
@@ -296,9 +296,9 @@
     "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149380 measured; the board adds a few bytes to the shared runtime)."
   },
   "lazy:features/work/components/parts/ComputerPart.svelte": {
-    "js": 125000,
+    "js": 125100,
     "css": 8400,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:features/work/components/parts/ConnectionPart.svelte": {
     "js": 125800,
@@ -381,9 +381,9 @@
     "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
   },
   "lazy:features/work/components/objects/Folder.svelte": {
-    "js": 87700,
+    "js": 87800,
     "css": 5700,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:features/work/components/objects/Project.svelte": {
     "js": 167800,
@@ -411,9 +411,9 @@
     "description": "Measured 306623 JS and 19667 CSS bytes. Settings \u2192 Connections: detected command-line tools and MCP servers with their editor. BYOK/connections release: measured 312205 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 312332 JS measured."
   },
   "lazy:features/settings/components/sections/MemoryPage.svelte": {
-    "js": 181500,
+    "js": 181600,
     "css": 11700,
-    "description": "The download card and list gain extension badges, a time-left estimate and inline actions."
+    "description": "Settings gate placeholders and fold downloads into General."
   },
   "lazy:features/settings/components/sections/SitesPage.svelte": {
     "js": 172800,

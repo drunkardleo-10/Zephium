@@ -37,7 +37,10 @@
     account: () => import("./sections/AccountPage.svelte"),
     about: () => import("./sections/AboutPage.svelte"),
   };
-  let current = $derived(sections.find((section) => section.id === state.section())!);
+  // A section this build does not offer opens the first one instead.
+  let current = $derived(
+    sections.find((section) => section.id === state.section()) ?? sections[0]!,
+  );
   let loader = $derived(current.id in loaders ? loaders[current.id as keyof typeof loaders] : null);
   let results = $derived(searchSettings(state.query()));
   let content: HTMLElement;
