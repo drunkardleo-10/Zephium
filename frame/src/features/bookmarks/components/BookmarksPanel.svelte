@@ -560,18 +560,18 @@
     color: var(--color-faint);
   }
 
-  /* Present but unseen until the row is in hand, so revealing them never
-     moves what the pointer is on. */
+  /* Present but faded until the row is in hand, so revealing them never
+     moves what the pointer is on and the keyboard can still reach them. */
   .actions {
     display: flex;
     gap: 2px;
     padding-inline-end: 6px;
-    visibility: hidden;
+    opacity: 0;
   }
 
   .row:hover .actions,
   .row:focus-within .actions {
-    visibility: visible;
+    opacity: 1;
   }
 
   .row:hover .detail,

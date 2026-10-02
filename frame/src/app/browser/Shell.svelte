@@ -240,14 +240,15 @@
               {/snippet}
             </AddressField>
             <HidingBar />
-            {#if tabs.profile()?.id}<DownloadStatus
-                profile={tabs.profile()!.id}
-                onopen={() => toolHost.open("downloads")}
-              />{/if}
             {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
                 {m.choose_split()}
               </p>{/if}
             <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
+            <!-- Downloads in progress sit at the foot of the column, by the dock. -->
+            {#if tabs.profile()?.id}<DownloadStatus
+                profile={tabs.profile()!.id}
+                onopen={() => toolHost.open("downloads")}
+              />{/if}
           {/if}
         </div>{/key}
     {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact tools={!inWork}>

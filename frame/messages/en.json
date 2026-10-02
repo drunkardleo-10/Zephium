@@ -2538,5 +2538,10 @@
   "import_kind_added": "{count} added",
   "import_kind_current": "Already here",
   "import_kind_skipped": "Skipped",
-  "import_dismiss": "Done"
+  "import_dismiss": "Done",
+  "download_of": "{received} of {total}",
+  "download_time_left": "{time} left",
+  "download_more_active": "+{count} more",
+  "download_dismiss": "Dismiss",
+  "download_open_named": "Open {name}"
 }

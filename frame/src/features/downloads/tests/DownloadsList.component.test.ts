@@ -59,12 +59,13 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
   });
   const screen = await render(DownloadsList, { profile });
   await expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  await expect.element(page.getByText("10 B of 100 B", { exact: true })).toBeVisible();
   await expect
-    .element(page.getByRole("button", { name: "Open", exact: true }))
+    .element(page.getByRole("button", { name: "Open fixture.txt", exact: true }))
     .not.toBeInTheDocument();
   entry = { ...entry, revision: "00000002", state: "cancelling" };
   native.listener?.({ payload: { profile } });
-  await expect.element(page.getByText("Cancelling…", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Cancelling… · example.com", { exact: true })).toBeVisible();
   await expect
     .element(page.getByRole("button", { name: "Cancel", exact: true }))
     .not.toBeInTheDocument();
@@ -73,11 +74,15 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
     .not.toBeInTheDocument();
   entry = { ...entry, revision: "00000003", state: "completed", received: "100" };
   native.listener?.({ payload: { profile } });
-  await expect.element(page.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+  const open = page.getByRole("button", { name: "Open fixture.txt", exact: true });
+  await expect.element(open).toBeVisible();
+  await expect
+    .element(page.getByRole("button", { name: "Show in folder", exact: true }))
+    .toBeInTheDocument();
   await expect
     .element(page.getByRole("button", { name: "Cancel", exact: true }))
     .not.toBeInTheDocument();
-  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await open.click();
   expect(native.call).toHaveBeenCalledWith(profile, { kind: "open", id: entry.id });
   await screen.unmount();
   expect(native.listener).toBeNull();
