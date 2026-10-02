@@ -239,17 +239,31 @@ impl Shell {
         let window = self
             .windows
             .create(WindowKind::Main, profile, space, self.pending_size);
+        // Starting with a new tab keeps every restored tab where it was and
+        // loads none of them. A link that launched the browser is its own
+        // new tab, and a blank tab left in front already is one.
+        let start_fresh = self.tab_preferences.start_with_new_tab
+            && self.pending_external.is_empty()
+            && active_item
+                .is_some_and(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some()));
         let mut fx = Vec::new();
         if let Some(tree) = splits {
-            for leaf in tree.tabs() {
-                fx.extend(self.items.ensure_view(leaf));
-                self.touch(leaf);
+            if !start_fresh {
+                for leaf in tree.tabs() {
+                    fx.extend(self.items.ensure_view(leaf));
+                    self.touch(leaf);
+                }
             }
             if let Some(win) = self.windows.get_mut(window) {
                 win.splits = Some(tree);
             }
         }
-        match active_item.or_else(|| self.today_tabs(space).first().copied()) {
+        let restored = if start_fresh {
+            None
+        } else {
+            active_item.or_else(|| self.today_tabs(space).first().copied())
+        };
+        match restored {
             Some(item) => fx.extend(self.focus_tab(item)),
             None => fx.extend(self.open_tab()),
         }

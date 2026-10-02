@@ -23,7 +23,6 @@
     search: () => import("./sections/SearchPage.svelte"),
     privacy: () => import("./sections/PrivacyPage.svelte"),
     passwords: () => import("./sections/PasswordsPage.svelte"),
-    downloads: () => import("./sections/DownloadsPage.svelte"),
     shortcuts: () => import("./sections/KeyboardPage.svelte"),
     languages: () => import("./sections/LanguagesPage.svelte"),
     developer: () => import("./sections/DeveloperPage.svelte"),

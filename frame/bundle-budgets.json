@@ -28,11 +28,6 @@
     "css": 279804,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
-  "lazy:features/settings/components/sections/DownloadsPage.svelte": {
-    "js": 1251285,
-    "css": 298728,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
     "js": 343000,
     "css": 104700,

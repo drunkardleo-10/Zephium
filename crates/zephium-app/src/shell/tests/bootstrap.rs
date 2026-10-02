@@ -52,6 +52,52 @@ fn restart_preserves_ids_actives_and_splits() {
 }
 
 #[test]
+fn starting_with_a_new_tab_keeps_every_tab_and_loads_none_of_them() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "github.com");
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.startup".into(),
+        value: "new-tab".into(),
+    });
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.startup".into(), "new-tab".into());
+
+    let (mut shell2, engine2, screen2) = setup_with(store);
+    shell2.handle(Command::Bootstrap);
+    let after = last(&screen2);
+    let fresh = active_id(&screen2);
+    assert!(![first, second].contains(&fresh));
+    assert!(after.tabs.iter().any(|tab| tab.id == first.to_string()));
+    assert!(after.tabs.iter().any(|tab| tab.id == second.to_string()));
+    assert_eq!(
+        after
+            .tabs
+            .iter()
+            .find(|tab| tab.id == fresh.to_string())
+            .unwrap()
+            .url,
+        None
+    );
+    assert!(engine2
+        .calls()
+        .iter()
+        .all(|call| !call.contains(&first.to_string()) && !call.contains(&second.to_string())));
+}
+
+#[test]
 fn qa_settings_tab_is_dropped_and_first_bootstrap_opens_a_usable_new_tab() {
     let profile = ProfileId::from(9200);
     let space = SpaceId::from(9201);

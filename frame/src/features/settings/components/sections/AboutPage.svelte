@@ -1,5 +1,6 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
+  import { showPreviews } from "../../lib/settings-model";
   import * as preview from "../../lib/preview.svelte";
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
@@ -38,38 +39,40 @@
   <p>{m.settings_about_body()}</p>
   <span class="version-pill">{m.settings_version()} {version}</span>
 </div>
-<PreviewNotice />
-<SettingsGroup title={m.updates_title()}
-  ><PreviewAction id="updates.check" actionLabel={m.updates_check()}
-    ><Select
-      label={m.updates_preview_state()}
-      value={status}
-      options={statuses.map((item) => ({ value: item.value, label: item.label() }))}
-      onchange={(value) => preview.set("updates.status", value)}
-    />
-    <div class="update-state">
-      <span
-        ><Icon
-          icon={status === "current"
-            ? Tick02Icon
+{#if showPreviews}
+  <PreviewNotice />
+  <SettingsGroup title={m.updates_title()}
+    ><PreviewAction id="updates.check" actionLabel={m.updates_check()}
+      ><Select
+        label={m.updates_preview_state()}
+        value={status}
+        options={statuses.map((item) => ({ value: item.value, label: item.label() }))}
+        onchange={(value) => preview.set("updates.status", value)}
+      />
+      <div class="update-state">
+        <span
+          ><Icon
+            icon={status === "current"
+              ? Tick02Icon
+              : status === "available"
+                ? Download01Icon
+                : Refresh01Icon}
+            size={26}
+          /></span
+        >
+        <h3>{statuses.find((item) => item.value === status)?.label()}</h3>
+        <p>
+          {status === "current"
+            ? m.updates_current_body()
             : status === "available"
-              ? Download01Icon
-              : Refresh01Icon}
-          size={26}
-        /></span
-      >
-      <h3>{statuses.find((item) => item.value === status)?.label()}</h3>
-      <p>
-        {status === "current"
-          ? m.updates_current_body()
-          : status === "available"
-            ? m.updates_available_body()
-            : m.updates_failed_body()}
-      </p>
-      <small>{m.updates_note()}</small>
-    </div></PreviewAction
-  ><PreviewToggle id="updates.automatic" /><PreviewSelect id="updates.channel" /></SettingsGroup
->
+              ? m.updates_available_body()
+              : m.updates_failed_body()}
+        </p>
+        <small>{m.updates_note()}</small>
+      </div></PreviewAction
+    ><PreviewToggle id="updates.automatic" /><PreviewSelect id="updates.channel" /></SettingsGroup
+  >
+{/if}
 <SettingsGroup title={m.settings_application()}
   ><SettingsRow title={m.settings_version()}>{version}</SettingsRow><PreviewAction
     id="about.diagnostics"

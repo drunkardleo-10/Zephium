@@ -25,6 +25,8 @@ pub(super) struct TabPreferences {
     pub(super) after_close: AfterClose,
     /// Opening an address already open in this space goes to that tab.
     pub(super) switch_to_open: bool,
+    /// Launch puts a new tab in front instead of the one left there.
+    pub(super) start_with_new_tab: bool,
 }
 
 impl Default for TabPreferences {
@@ -33,6 +35,7 @@ impl Default for TabPreferences {
             new_position: NewTabPosition::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
+            start_with_new_tab: false,
         }
     }
 }
@@ -44,6 +47,7 @@ impl TabPreferences {
             "tabs.new-position",
             "tabs.after-close",
             "tabs.switch-to-open",
+            "tabs.startup",
         ] {
             if let Some(value) = store.app_setting(key) {
                 preferences.apply(key, &value);
@@ -63,6 +67,7 @@ impl TabPreferences {
             ("tabs.after-close", "previous") => self.after_close = AfterClose::Previous,
             ("tabs.after-close", "recent") => self.after_close = AfterClose::Recent,
             ("tabs.switch-to-open", value) => self.switch_to_open = value == "true",
+            ("tabs.startup", value) => self.start_with_new_tab = value == "new-tab",
             _ => {}
         }
     }

@@ -1,4 +1,4 @@
-import type { SettingsSection } from "./settings-model";
+import { sections, type SettingsSection } from "./settings-model";
 let revision = $state(0);
 export const selectionRevision = () => revision;
 let current = $state<SettingsSection>("general");
@@ -13,6 +13,11 @@ export function setQuery(value: string) {
 }
 export function select(value: SettingsSection, field: string | null = null) {
   if (value === "account") value = "ai";
+  // A section this build does not offer opens the first one instead.
+  if (!sections.some((offered) => offered.id === value)) {
+    value = "general";
+    field = null;
+  }
   revision++;
   current = value;
   search = "";

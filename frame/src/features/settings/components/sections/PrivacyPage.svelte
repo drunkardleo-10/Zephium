@@ -1,5 +1,6 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
+  import { showPreviews } from "../../lib/settings-model";
   import type { HistoryRange } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
@@ -25,20 +26,22 @@
 </script>
 
 <ProtectionControls />
-<PreviewNotice />
-<SettingsGroup title={m.settings_site_permissions()}
-  ><PreviewSelect id="privacy.camera" /><PreviewSelect id="privacy.microphone" /><PreviewSelect
-    id="privacy.location"
-  /><PreviewSelect id="privacy.notifications" /></SettingsGroup
->
-<SettingsGroup title={m.privacy_media_group()}
-  ><PreviewSelect id="privacy.popups" /><PreviewSelect id="privacy.clipboard" /><PreviewSelect
-    id="privacy.automatic-downloads"
-  /><PreviewSelect id="privacy.sound" /></SettingsGroup
->
-<SiteExceptions />
+{#if showPreviews}
+  <PreviewNotice />
+  <SettingsGroup title={m.settings_site_permissions()}
+    ><PreviewSelect id="privacy.camera" /><PreviewSelect id="privacy.microphone" /><PreviewSelect
+      id="privacy.location"
+    /><PreviewSelect id="privacy.notifications" /></SettingsGroup
+  >
+  <SettingsGroup title={m.privacy_media_group()}
+    ><PreviewSelect id="privacy.popups" /><PreviewSelect id="privacy.clipboard" /><PreviewSelect
+      id="privacy.automatic-downloads"
+    /><PreviewSelect id="privacy.sound" /></SettingsGroup
+  >
+  <SiteExceptions />
+{/if}
 <SettingsGroup title={m.settings_browsing_data()}
-  ><PreviewToggle id="privacy.cleanup" /><PreviewAction
+  >{#if showPreviews}<PreviewToggle id="privacy.cleanup" />{/if}<PreviewAction
     id="privacy.clear"
     valid={["history", "cookies", "cache"].some((key) => preview.get(`clear.${key}`, false))}
     onapply={() => void clear()}

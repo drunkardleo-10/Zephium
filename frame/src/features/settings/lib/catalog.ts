@@ -1,48 +1,42 @@
 import * as m from "$shared/i18n/messages";
 export const fields = {
-  "general.pages": {
-    section: "general",
-    label: m.general_startup_pages,
-    description: m.general_startup_pages_help,
-    initial: "",
-  },
-  "search.open-new": {
-    section: "search",
-    label: m.search_open_new,
-    description: m.search_open_new_help,
-    initial: false,
-  },
   "privacy.cleanup": {
+    preview: true,
     section: "privacy",
     label: m.privacy_on_exit,
     description: m.privacy_on_exit_help,
     initial: false,
   },
   "developer.confirm": {
+    preview: true,
     section: "developer",
     label: m.developer_confirm,
     description: m.developer_confirm_help,
     initial: true,
   },
   "developer.local": {
+    preview: true,
     section: "developer",
     label: m.developer_local,
     description: m.developer_local_help,
     initial: false,
   },
   "updates.automatic": {
+    preview: true,
     section: "about",
     label: m.updates_automatic,
     description: m.updates_automatic_help,
     initial: true,
   },
   "updates.check": {
+    preview: true,
     section: "about",
     label: m.updates_check,
     description: m.updates_note,
     initial: "",
   },
   "privacy.popups": {
+    preview: true,
     section: "privacy",
     label: m.permission_popups,
     description: m.privacy_popups_help,
@@ -54,6 +48,7 @@ export const fields = {
     ],
   },
   "privacy.clipboard": {
+    preview: true,
     section: "privacy",
     label: m.permission_clipboard,
     description: m.privacy_clipboard_help,
@@ -65,6 +60,7 @@ export const fields = {
     ],
   },
   "privacy.automatic-downloads": {
+    preview: true,
     section: "privacy",
     label: m.permission_automatic_downloads,
     description: m.privacy_downloads_help,
@@ -76,6 +72,7 @@ export const fields = {
     ],
   },
   "privacy.sound": {
+    preview: true,
     section: "privacy",
     label: m.permission_sound,
     description: m.privacy_sound_help,
@@ -87,6 +84,7 @@ export const fields = {
     ],
   },
   "updates.channel": {
+    preview: true,
     section: "about",
     label: m.updates_channel,
     description: m.updates_channel_help,
@@ -137,11 +135,10 @@ export const fields = {
     section: "general",
     label: m.pref_general_startup,
     description: m.pref_general_startup_help,
-    initial: "Continue where I left off",
+    initial: "continue",
     options: [
-      { value: "Continue where I left off", label: m.pref_general_startup_option_0 },
-      { value: "Open New Tab", label: m.pref_general_startup_option_1 },
-      { value: "Open specific pages", label: m.pref_general_startup_option_2 },
+      { value: "continue", label: m.pref_general_startup_option_0 },
+      { value: "new-tab", label: m.pref_general_startup_option_1 },
     ],
   },
   "general.import": {
@@ -151,6 +148,7 @@ export const fields = {
     initial: "",
   },
   "general.export": {
+    preview: true,
     section: "general",
     label: m.pref_general_export,
     description: m.pref_general_export_help,
@@ -229,6 +227,7 @@ export const fields = {
     initial: true,
   },
   "tabs.archive": {
+    preview: true,
     section: "tabs",
     label: m.pref_tabs_archive,
     description: m.pref_tabs_archive_help,
@@ -241,12 +240,14 @@ export const fields = {
     ],
   },
   "profiles.name": {
+    preview: true,
     section: "profiles",
     label: m.pref_profiles_name,
     description: m.pref_profiles_name_help,
     initial: "",
   },
   "profiles.icon": {
+    preview: true,
     section: "profiles",
     label: m.pref_profiles_icon,
     description: m.pref_profiles_icon_help,
@@ -287,12 +288,6 @@ export const fields = {
     description: m.pref_search_engines_help,
     initial: "",
   },
-  "search.shortcuts": {
-    section: "search",
-    label: m.pref_search_shortcuts,
-    description: m.pref_search_shortcuts_help,
-    initial: "",
-  },
   "privacy.blocking": {
     section: "privacy",
     label: m.pref_privacy_blocking,
@@ -300,6 +295,7 @@ export const fields = {
     initial: true,
   },
   "privacy.camera": {
+    preview: true,
     section: "privacy",
     label: m.pref_privacy_camera,
     description: m.pref_privacy_camera_help,
@@ -310,6 +306,7 @@ export const fields = {
     ],
   },
   "privacy.microphone": {
+    preview: true,
     section: "privacy",
     label: m.pref_privacy_microphone,
     description: m.pref_privacy_microphone_help,
@@ -320,6 +317,7 @@ export const fields = {
     ],
   },
   "privacy.location": {
+    preview: true,
     section: "privacy",
     label: m.pref_privacy_location,
     description: m.pref_privacy_location_help,
@@ -330,6 +328,7 @@ export const fields = {
     ],
   },
   "privacy.notifications": {
+    preview: true,
     section: "privacy",
     label: m.pref_privacy_notifications,
     description: m.pref_privacy_notifications_help,
@@ -340,6 +339,7 @@ export const fields = {
     ],
   },
   "privacy.exceptions": {
+    preview: true,
     section: "privacy",
     label: m.pref_privacy_exceptions,
     description: m.pref_privacy_exceptions_help,
@@ -352,57 +352,44 @@ export const fields = {
     initial: "",
   },
   "passwords.offer": {
+    preview: true,
     section: "passwords",
     label: m.pref_passwords_offer,
     description: m.pref_passwords_offer_help,
     initial: true,
   },
   "passwords.fill": {
+    preview: true,
     section: "passwords",
     label: m.pref_passwords_fill,
     description: m.pref_passwords_fill_help,
     initial: true,
   },
   "passwords.addresses": {
+    preview: true,
     section: "passwords",
     label: m.pref_passwords_addresses,
     description: m.pref_passwords_addresses_help,
     initial: "",
   },
   "passwords.entries": {
+    preview: true,
     section: "passwords",
     label: m.pref_passwords_entries,
     description: m.pref_passwords_entries_help,
     initial: "",
   },
   "downloads.path": {
-    section: "downloads",
+    section: "general",
     label: m.pref_downloads_path,
     description: m.pref_downloads_path_help,
     initial: "Downloads",
   },
   "downloads.ask": {
-    section: "downloads",
+    section: "general",
     label: m.pref_downloads_ask,
     description: m.pref_downloads_ask_help,
     initial: false,
-  },
-  "downloads.notify": {
-    section: "downloads",
-    label: m.pref_downloads_notify,
-    description: m.pref_downloads_notify_help,
-    initial: true,
-  },
-  "downloads.clear": {
-    section: "downloads",
-    label: m.pref_downloads_clear,
-    description: m.pref_downloads_clear_help,
-    initial: "Manually",
-    options: [
-      { value: "Manually", label: m.pref_downloads_clear_option_0 },
-      { value: "When Zephium closes", label: m.pref_downloads_clear_option_1 },
-      { value: "After 7 days", label: m.pref_downloads_clear_option_2 },
-    ],
   },
   "accessibility.text": {
     section: "shortcuts",
@@ -428,12 +415,14 @@ export const fields = {
     initial: "system",
   },
   "focus.track": {
+    preview: true,
     section: "focus",
     label: m.pref_focus_track,
     description: m.pref_focus_track_help,
     initial: false,
   },
   "focus.retention": {
+    preview: true,
     section: "focus",
     label: m.pref_focus_retention,
     description: m.pref_focus_retention_help,
@@ -445,24 +434,28 @@ export const fields = {
     ],
   },
   "focus.exclusions": {
+    preview: true,
     section: "focus",
     label: m.pref_focus_exclusions,
     description: m.pref_focus_exclusions_help,
     initial: "",
   },
   "focus.rules": {
+    preview: true,
     section: "focus",
     label: m.pref_focus_rules,
     description: m.pref_focus_rules_help,
     initial: "",
   },
   "performance.sleep": {
+    preview: true,
     section: "performance",
     label: m.pref_performance_sleep,
     description: m.pref_performance_sleep_help,
     initial: true,
   },
   "performance.after": {
+    preview: true,
     section: "performance",
     label: m.pref_performance_after,
     description: m.pref_performance_after_help,
@@ -475,6 +468,7 @@ export const fields = {
     ],
   },
   "performance.memory": {
+    preview: true,
     section: "performance",
     label: m.pref_performance_memory,
     description: m.pref_performance_memory_help,
@@ -486,6 +480,7 @@ export const fields = {
     ],
   },
   "performance.exceptions": {
+    preview: true,
     section: "performance",
     label: m.pref_performance_exceptions,
     description: m.pref_performance_exceptions_help,
@@ -498,6 +493,7 @@ export const fields = {
     initial: "recommended",
   },
   "about.diagnostics": {
+    preview: true,
     section: "about",
     label: m.pref_about_diagnostics,
     description: m.pref_about_diagnostics_help,

@@ -24,6 +24,7 @@ pub const KEYS: &[&str] = &[
     "tabs.new-position",
     "tabs.after-close",
     "tabs.switch-to-open",
+    "tabs.startup",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -50,6 +51,8 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "ui.text-size" => matches!(value, "small" | "default" | "large"),
         "tabs.new-position" => matches!(value, "end" | "after-current"),
         "tabs.after-close" => matches!(value, "next" | "previous" | "recent"),
+        // A new tab in front at launch; everything restored stays in the sidebar.
+        "tabs.startup" => matches!(value, "continue" | "new-tab"),
         // Native writes `pending` on a fresh install; chrome only ever
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
@@ -81,6 +84,8 @@ mod tests {
         assert!(value_allowed("ui.newtab-tasks", "false"));
         assert!(value_allowed("ui.language", "en"));
         assert!(value_allowed("tabs.after-close", "recent"));
+        assert!(value_allowed("tabs.startup", "new-tab"));
+        assert!(!value_allowed("tabs.startup", "pages"));
         assert!(value_allowed("ui.text-size", "large"));
         assert!(value_allowed("ui.tab-layout", "horizontal"));
         assert!(value_allowed("onboarding", "done"));

@@ -1,5 +1,6 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
+  import { showPreviews } from "../../lib/settings-model";
   import PreviewNotice from "../PreviewNotice.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import PreviewSelect from "../PreviewSelect.svelte";
@@ -13,5 +14,7 @@
     preference="tabs.after-close"
   /><PreferenceSwitch id="tabs.duplicates" preference="tabs.switch-to-open" /></SettingsGroup
 >
-<PreviewNotice />
-<SettingsGroup title={m.settings_spaces()}><PreviewSelect id="tabs.archive" /></SettingsGroup>
+{#if showPreviews}
+  <PreviewNotice />
+  <SettingsGroup title={m.settings_spaces()}><PreviewSelect id="tabs.archive" /></SettingsGroup>
+{/if}

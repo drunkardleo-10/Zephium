@@ -9,7 +9,6 @@ import {
   Search01Icon,
   Shield01Icon,
   Key01Icon,
-  Download01Icon,
   KeyboardIcon,
   Globe02Icon,
   SparklesIcon,
@@ -76,13 +75,6 @@ const allSections = [
     title: m.section_passwords,
     description: m.section_passwords_description,
     icon: Key01Icon,
-  },
-  {
-    id: "downloads",
-    group: "browser",
-    title: m.section_downloads,
-    description: m.section_downloads_description,
-    icon: Download01Icon,
   },
   {
     id: "shortcuts",
@@ -184,7 +176,14 @@ const allSections = [
   },
 ] as const;
 export type SettingsSection = (typeof allSections)[number]["id"];
-export const sections = allSections.filter((section) => section.id !== "account");
+/** Placeholder settings, made to review a design before it works, appear
+ *  only in development builds. A release offers only what works. */
+export const showPreviews = import.meta.env.DEV;
+/** Sections that hold nothing but placeholders today. */
+const previewSections = new Set<SettingsSection>(["profiles", "performance", "focus", "developer"]);
+export const sections = allSections.filter(
+  (section) => section.id !== "account" && (showPreviews || !previewSections.has(section.id)),
+);
 export const groups = [
   { id: "browser", label: m.settings_browser },
   { id: "personalize", label: m.settings_personalize },
@@ -195,9 +194,12 @@ export const emptySections = new Set<SettingsSection>(["plugins"]);
 export function searchSettings(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));
+  const shown = new Set<string>(sections.map((section) => section.id));
   const preferences = Object.entries(fields)
     .filter(
       ([, field]) =>
+        shown.has(field.section) &&
+        (showPreviews || !("preview" in field)) &&
         !emptySections.has(field.section as SettingsSection) &&
         matches(field.label() + " " + field.description()),
     )
@@ -230,7 +232,7 @@ export function searchSections(query: string) {
         section.title(),
         section.description(),
         ...Object.values(fields)
-          .filter((f) => f.section === section.id)
+          .filter((f) => f.section === section.id && (showPreviews || !("preview" in f)))
           .flatMap((f) => [f.label(), f.description()]),
       ]
         .join(" ")

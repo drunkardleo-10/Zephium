@@ -27,6 +27,7 @@ const defaults = {
   "tabs.new-position": "end",
   "tabs.after-close": "next",
   "tabs.switch-to-open": "true",
+  "tabs.startup": "continue",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
