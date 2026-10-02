@@ -38,6 +38,7 @@
   import { SettingsNavigation } from "$features/settings";
   import { loadLibraryPage } from "$features/library";
   import { loadHistoryPage } from "$features/history";
+  import { bookmarkReveal } from "$features/bookmarks";
   import { loadTasksPage } from "$features/tasks";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
@@ -166,6 +167,10 @@
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
       if (command.id === "page.copyLink") tabs.copyActiveLink();
+      if (command.id.startsWith("bookmark.added=")) {
+        bookmarkReveal.request(command.id.slice("bookmark.added=".length));
+        toolHost.open("bookmarks");
+      }
       if (command.id === "extensions.manage") void browserPage.open("extensions");
       if (command.id === "protection.site") void toggleSiteProtection();
       if (command.id === "protection.hide") void hideElements();

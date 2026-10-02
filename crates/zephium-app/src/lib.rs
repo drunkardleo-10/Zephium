@@ -121,6 +121,6 @@ mod work_synthesis;
 #[cfg(any(feature = "work-execution", feature = "work-runtime"))]
 pub mod work_trace;
 pub use api::{
-    FaviconProber, FaviconProberAttachment, HistoryCompletion, NoteCompletion, NotesAttachment,
-    ResourceCompletion,
+    BookmarkCompletion, FaviconProber, FaviconProberAttachment, HistoryCompletion, NoteCompletion,
+    NotesAttachment, ResourceCompletion,
 };

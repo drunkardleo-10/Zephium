@@ -1,0 +1,97 @@
+import { afterEach, expect, test, vi } from "vitest";
+import { render } from "vitest-browser-svelte";
+import { page, userEvent } from "vitest/browser";
+import "$styles/global.css";
+import type { BookmarkCall, BookmarkResponse, BookmarkView } from "$shared/ipc/bindings";
+import * as reveal from "../lib/reveal.svelte";
+import BookmarksPanel from "../components/BookmarksPanel.svelte";
+
+const view = (id: string, title: string, url: string | null, children = 0): BookmarkView => ({
+  id,
+  title,
+  url,
+  icon: null,
+  children,
+});
+
+const top = [
+  view("1", "Reading", null, 2),
+  view("2", "Zephium", "https://zephium.app/"),
+  view("3", "Rust docs", "https://doc.rust-lang.org/std/"),
+];
+const reading = [view("4", "Long read", "https://essay.example/a")];
+
+const native = vi.hoisted(() => ({
+  call: vi.fn(),
+  open: vi.fn(async () => ({ operation_id: null, accepted: true })),
+}));
+vi.mock("$shared/ipc/bindings", async () => {
+  const { mockBindings } = await import("$shared/testing/bindings");
+  return mockBindings({ bookmarkCall: native.call, browserOpenUrl: native.open });
+});
+
+function answer(call: BookmarkCall): BookmarkResponse {
+  if (call.kind === "list" && call.folder === "1") {
+    return { kind: "listing", folder: "1", path: [{ id: "1", title: "Reading" }], items: reading };
+  }
+  if (call.kind === "reveal") return { kind: "listing", folder: null, path: [], items: top };
+  if (call.kind === "list") return { kind: "listing", folder: null, path: [], items: top };
+  return { kind: "saved", id: null };
+}
+
+afterEach(() => {
+  vi.clearAllMocks();
+  reveal.take();
+});
+
+test("browses folders, opens links, and renames in place", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => answer(call));
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await expect.element(screen.getByRole("button", { name: /Zephium/u })).toBeVisible();
+
+  await screen.getByRole("button", { name: /Zephium/u }).click();
+  expect(native.open).toHaveBeenLastCalledWith("https://zephium.app/", false);
+
+  await screen
+    .getByRole("button", { name: /Reading/u })
+    .first()
+    .click();
+  await expect.element(screen.getByRole("button", { name: /Long read/u })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Reading" }).last())
+    .toHaveAttribute("aria-current", "location");
+
+  await screen.getByRole("button", { name: "Rename" }).click();
+  const field = screen.getByRole("textbox", { name: "Rename" });
+  await userEvent.clear(field);
+  await userEvent.type(field, "Essay{Enter}");
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", { kind: "rename", id: "4", title: "Essay" }),
+  );
+});
+
+test("a folder with contents asks for a second press before it goes", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => answer(call));
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  const remove = screen.getByRole("button", { name: "Delete" }).first();
+  await remove.click();
+  expect(native.call).not.toHaveBeenCalledWith("p", { kind: "remove", id: "1" });
+  await screen.getByRole("button", { name: "Delete this folder and its 2 items" }).click();
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", { kind: "remove", id: "1" }),
+  );
+});
+
+test("a requested bookmark opens where it lives, drawn apart", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => answer(call));
+  reveal.request("2");
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", { kind: "reveal", id: "2" }),
+  );
+  await expect.element(screen.getByRole("listitem").nth(1)).toHaveClass(/lit/u);
+  document.documentElement.dataset.theme = "dark";
+  await page.viewport(336, 360);
+  await page.screenshot({ path: "../../../../../target/bookmarks-panel.png" });
+  delete document.documentElement.dataset.theme;
+});

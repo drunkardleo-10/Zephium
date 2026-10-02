@@ -1,7 +1,7 @@
 import { surface as browser } from "$domain/surface";
 import { setPanelExtent } from "./sidebar-mode.svelte";
 import { events } from "$shared/ipc/native-events";
-export type ToolKind = "notes" | "tasks" | "ai" | "time" | "history" | "downloads";
+export type ToolKind = "notes" | "tasks" | "ai" | "time" | "history" | "downloads" | "bookmarks";
 let tool = $state<ToolKind | null>(null);
 let queued: ToolKind | null = null;
 let stop: (() => void) | null = null;
@@ -36,7 +36,7 @@ async function initialize(owner: number) {
     const kind = payload.slice(5);
     if (
       payload.startsWith("tool.") &&
-      ["notes", "tasks", "ai", "time", "history", "downloads"].includes(kind)
+      ["notes", "tasks", "ai", "time", "history", "downloads", "bookmarks"].includes(kind)
     )
       open(kind as ToolKind);
     if (payload === "browser.return" && queued) {

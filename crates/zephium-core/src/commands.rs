@@ -12,6 +12,7 @@ pub enum Group {
     Edit,
     View,
     History,
+    Bookmarks,
     Window,
     Help,
     /// Keyboard only: never in a menu or the launcher, listed in Keyboard
@@ -191,6 +192,18 @@ pub const REGISTRY: &[CommandSpec] = &[
         "Show All History",
         split("CmdOrCtrl+Y", "Ctrl+H"),
         Group::History,
+    ),
+    command(
+        "bookmark.add",
+        "Bookmark This Page",
+        Keys::same("CmdOrCtrl+D"),
+        Group::Bookmarks,
+    ),
+    command(
+        "tool.bookmarks",
+        "Show Bookmarks",
+        split("CmdOrCtrl+Alt+B", "Ctrl+Shift+O"),
+        Group::Bookmarks,
     ),
     command(
         "tab.next",

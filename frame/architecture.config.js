@@ -46,7 +46,7 @@ export const architecture = {
               to: {
                 element: {
                   type: "features",
-                  captured: { module: ["notes", "tasks", "history", "downloads"] },
+                  captured: { module: ["notes", "tasks", "history", "downloads", "bookmarks"] },
                 },
               },
             },

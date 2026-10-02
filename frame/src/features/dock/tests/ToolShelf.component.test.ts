@@ -53,7 +53,15 @@ test("the records follow the tools, and the whole list is a secondary click away
   const names = [...screen.container.querySelectorAll(".shelf-item")].map((item) =>
     item.textContent?.trim(),
   );
-  expect(names).toEqual(["Notes", "Tasks", "Activity", "Ask", "History", "Downloads"]);
+  expect(names).toEqual([
+    "Notes",
+    "Tasks",
+    "Activity",
+    "History",
+    "Downloads",
+    "Bookmarks",
+    "Settings",
+  ]);
 
   await tools.click({ button: "right" });
   expect(native.toolsMenu).toHaveBeenCalledOnce();

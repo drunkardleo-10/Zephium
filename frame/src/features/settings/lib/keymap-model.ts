@@ -26,6 +26,8 @@ const TITLES: Record<string, () => string> = {
   "tab.next": m.command_tab_next,
   "tab.previous": m.command_tab_previous,
   "tool.downloads": m.command_tool_downloads,
+  "bookmark.add": m.command_bookmark_add,
+  "tool.bookmarks": m.command_tool_bookmarks,
   "browser.tasks": m.command_browser_tasks,
   "browser.notes": m.command_browser_notes,
   "settings.shortcuts": m.command_settings_shortcuts,
@@ -50,7 +52,7 @@ const SECTIONS: { id: string; title: () => string; holds: (entry: KeymapEntry) =
     id: "browser",
     title: m.keymap_group_browser,
     holds: (entry) =>
-      ["app", "file", "edit", "help"].includes(entry.group) ||
+      ["app", "file", "edit", "bookmarks", "help"].includes(entry.group) ||
       (entry.group === "window" && !tabCommand(entry)),
   },
   {

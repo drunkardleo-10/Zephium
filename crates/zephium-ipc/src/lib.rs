@@ -298,6 +298,7 @@ pub enum ToolKind {
     Ai,
     History,
     Downloads,
+    Bookmarks,
     Time,
 }
 
@@ -499,6 +500,133 @@ pub enum HistoryResponse {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryError {
+    Invalid,
+    Unavailable,
+    Capacity,
+}
+
+/// Bookmark ids are store row ids; they cross as decimal strings, like
+/// history ids, so JavaScript never parses a Rust i64.
+pub fn bookmark_id(id: &str) -> Option<i64> {
+    id.parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0 && value.to_string() == id)
+}
+
+/// Raw title input chrome may send; the store trims and bounds what it keeps.
+pub const MAX_BOOKMARK_TITLE_INPUT_BYTES: usize = 2048;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BookmarkCall {
+    /// A folder's contents and the folders above it; no `folder` is the top
+    /// level.
+    List {
+        folder: Option<String>,
+    },
+    /// The listing of whichever folder holds `id`, so it can be shown in place.
+    Reveal {
+        id: String,
+    },
+    Search {
+        query: String,
+    },
+    AddFolder {
+        parent: Option<String>,
+        title: String,
+    },
+    Rename {
+        id: String,
+        title: String,
+    },
+    /// Moves `id` into `parent` at `index` among its new siblings.
+    Move {
+        id: String,
+        parent: Option<String>,
+        index: u32,
+    },
+    /// Removes a bookmark, or a folder with everything in it.
+    Remove {
+        id: String,
+    },
+}
+
+impl BookmarkCall {
+    pub fn validate(&self) -> bool {
+        let id = |id: &str| bookmark_id(id).is_some();
+        let parent = |parent: &Option<String>| parent.as_deref().is_none_or(id);
+        let title =
+            |title: &str| !title.trim().is_empty() && title.len() <= MAX_BOOKMARK_TITLE_INPUT_BYTES;
+        match self {
+            Self::List { folder } => parent(folder),
+            Self::Reveal { id: target } => id(target),
+            Self::Search { query } => {
+                !query.trim().is_empty() && query.len() <= zephium_core::bookmarks::MAX_QUERY_BYTES
+            }
+            Self::AddFolder {
+                parent: at,
+                title: name,
+            } => parent(at) && title(name),
+            Self::Rename {
+                id: target,
+                title: name,
+            } => id(target) && title(name),
+            Self::Move {
+                id: target,
+                parent: at,
+                ..
+            } => id(target) && parent(at),
+            Self::Remove { id: target } => id(target),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BookmarkView {
+    pub id: String,
+    pub title: String,
+    /// Absent for a folder.
+    pub url: Option<String>,
+    pub icon: Option<IconRef>,
+    /// Direct children, for a folder.
+    pub children: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct BookmarkCrumb {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BookmarkResponse {
+    Listing {
+        folder: Option<String>,
+        /// Folders from the top level down to `folder`, `folder` last.
+        path: Vec<BookmarkCrumb>,
+        items: Vec<BookmarkView>,
+    },
+    Results {
+        items: Vec<BookmarkView>,
+    },
+    /// A write applied; `id` names what an add created.
+    Saved {
+        id: Option<String>,
+    },
+    Error {
+        error: BookmarkError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BookmarkError {
+    Missing,
+    /// The profile holds the maximum, or the folder is nested too deep.
+    Full,
+    /// A folder cannot move into itself.
+    Cycle,
     Invalid,
     Unavailable,
     Capacity,
@@ -1097,4 +1225,50 @@ pub struct BlockerStatsView {
     pub last_seven_days: u64,
     #[specta(type = Vec<f64>)]
     pub days: [u64; 7],
+}
+
+#[cfg(test)]
+mod bookmark_tests {
+    use super::*;
+
+    #[test]
+    fn bookmark_calls_admit_only_canonical_ids_and_bounded_text() {
+        assert_eq!(bookmark_id("42"), Some(42));
+        for id in ["0", "-1", "042", "4.2", "", "x"] {
+            assert_eq!(bookmark_id(id), None, "{id}");
+        }
+        let valid = [
+            BookmarkCall::List { folder: None },
+            BookmarkCall::Reveal { id: "3".into() },
+            BookmarkCall::Search {
+                query: "docs".into(),
+            },
+            BookmarkCall::AddFolder {
+                parent: Some("3".into()),
+                title: "Reading".into(),
+            },
+            BookmarkCall::Move {
+                id: "4".into(),
+                parent: None,
+                index: 9,
+            },
+        ];
+        assert!(valid.iter().all(BookmarkCall::validate));
+        let invalid = [
+            BookmarkCall::List {
+                folder: Some("top".into()),
+            },
+            BookmarkCall::Search { query: "  ".into() },
+            BookmarkCall::Rename {
+                id: "3".into(),
+                title: "a".repeat(MAX_BOOKMARK_TITLE_INPUT_BYTES + 1),
+            },
+            BookmarkCall::AddFolder {
+                parent: None,
+                title: " ".into(),
+            },
+            BookmarkCall::Remove { id: "0".into() },
+        ];
+        assert!(!invalid.iter().any(BookmarkCall::validate));
+    }
 }

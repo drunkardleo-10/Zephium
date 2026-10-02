@@ -4,6 +4,7 @@ import {
   CheckListIcon,
   Download01Icon,
   HistoryIcon,
+  Bookmark02Icon,
   Note01Icon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
@@ -21,14 +22,19 @@ const PRESENTATION: Record<ToolKind, { icon: IconSvgElement; label: () => string
   ai: { icon: SparklesIcon, label: m.panel_ai },
   history: { icon: HistoryIcon, label: m.menu_history },
   downloads: { icon: Download01Icon, label: m.menu_downloads },
+  bookmarks: { icon: Bookmark02Icon, label: m.tool_bookmarks },
 };
 
 export const toolPresentation = (kind: ToolKind) => PRESENTATION[kind];
 
 /**
  * The shelf's two groups, in the native menu's own order so the stack and the
- * menu never disagree: first the things you make or ask for, then the record
- * of what happened.
+ * menu never disagree: first the things you make, then what you keep and what
+ * happened. Settings closes the second group as a destination of its own.
  */
-export const SHELF_TOOLS = ["notes", "tasks", "time", "ai"] as const satisfies readonly ToolKind[];
-export const RECORD_TOOLS = ["history", "downloads"] as const satisfies readonly ToolKind[];
+export const SHELF_TOOLS = ["notes", "tasks", "time"] as const satisfies readonly ToolKind[];
+export const RECORD_TOOLS = [
+  "history",
+  "downloads",
+  "bookmarks",
+] as const satisfies readonly ToolKind[];

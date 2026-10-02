@@ -211,6 +211,11 @@ pub enum Command {
         call: Box<zephium_ipc::HistoryCall>,
         done: HistoryCompletion,
     },
+    BookmarkCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_ipc::BookmarkCall>,
+        done: BookmarkCompletion,
+    },
     /// Hands the shell its notes service, once, after startup.
     AttachNotes(NotesAttachment),
     NoteCall {
@@ -659,6 +664,28 @@ impl HistoryCompletion {
         if let Some(done) = done {
             done(response);
         }
+    }
+}
+#[derive(Clone)]
+pub struct BookmarkCompletion(Completion<zephium_ipc::BookmarkResponse>);
+impl BookmarkCompletion {
+    pub fn new(done: impl FnOnce(zephium_ipc::BookmarkResponse) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, response: zephium_ipc::BookmarkResponse) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(response);
+        }
+    }
+}
+impl fmt::Debug for BookmarkCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BookmarkCompletion")
     }
 }
 impl fmt::Debug for HistoryCompletion {

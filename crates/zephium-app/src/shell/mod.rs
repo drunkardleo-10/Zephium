@@ -3,6 +3,7 @@
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
+mod bookmarks;
 mod bootstrap;
 mod effects;
 mod engine_events;
@@ -205,6 +206,7 @@ pub struct Shell {
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,
+    bookmarks: bookmarks::BookmarkState,
     search: SearchState,
     presentation: PresentationState,
     zoom: ZoomState,
@@ -409,6 +411,7 @@ impl Shell {
             pending_size: Size::default(),
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
+            bookmarks: bookmarks::BookmarkState::default(),
             search: SearchState {
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
                 engine: store
@@ -821,6 +824,11 @@ impl Shell {
                 call,
                 done,
             } => self.history_call(expected_profile, *call, done),
+            Command::BookmarkCall {
+                expected_profile,
+                call,
+                done,
+            } => self.bookmark_call(expected_profile, *call, done),
             Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment.0),
             Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
             Command::FaviconProbed {
@@ -1515,6 +1523,7 @@ impl Shell {
                 self.discard_blocker_inbox_for_shutdown();
                 self.finish_pending_blocker_operations_for_shutdown();
                 self.fail_pending_history_calls();
+                self.fail_pending_bookmark_calls();
             }))
             .is_ok();
         if !post_store_coordination_clean {
@@ -1813,6 +1822,11 @@ impl Shell {
                 next,
                 removed,
             } => self.on_history_surface_read(token, profile, visits, next, removed),
+            StoreReadResult::Bookmarks {
+                token,
+                profile,
+                reply,
+            } => self.on_bookmarks_read(token, profile, reply),
         }
     }
 }

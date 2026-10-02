@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+use zephium_core::bookmarks::{BookmarkFailure, BookmarkNode, BookmarkReply, BookmarkRequest};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_core::item::sanitize_page_title;
 use zephium_core::ports::store::HistoryHit;
@@ -17,7 +18,8 @@ use crate::{CallbackHandle, Command, SharedStore};
 
 const MAX_PENDING_FAVICON_READS: usize = 64;
 const MAX_PENDING_FAVICON_PROBE_READS: usize = 8;
-const MAX_PENDING_HISTORY_CALLS: usize = 8;
+/// Pending history and bookmark surface calls, together.
+const MAX_PENDING_SURFACE_CALLS: usize = 8;
 const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 pub(crate) const FAVICON_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
 
@@ -65,6 +67,31 @@ pub enum StoreReadResult {
         next: Option<i64>,
         removed: Option<u32>,
     },
+    Bookmarks {
+        token: u64,
+        profile: ProfileId,
+        reply: BookmarkSurfaceReply,
+    },
+}
+
+/// What the shell asks of bookmarks: a call from chrome, or adding the page
+/// in front, whose address only the shell may name.
+#[derive(Clone, Debug)]
+pub enum BookmarkWork {
+    Surface(zephium_ipc::BookmarkCall),
+    AddPage { url: String, title: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BookmarkSurfaceReply {
+    Listing {
+        folder: Option<i64>,
+        path: Vec<BookmarkNode>,
+        nodes: Vec<BookmarkNode>,
+    },
+    Results(Vec<BookmarkNode>),
+    Saved(Option<i64>),
+    Failed(BookmarkFailure),
 }
 
 enum Request {
@@ -95,6 +122,11 @@ enum Request {
         profile: ProfileId,
         call: zephium_ipc::HistoryCall,
     },
+    Bookmarks {
+        token: u64,
+        profile: ProfileId,
+        work: BookmarkWork,
+    },
 }
 
 struct State {
@@ -102,7 +134,7 @@ struct State {
     stopped: bool,
     in_flight: bool,
     history: Option<Request>,
-    history_calls: VecDeque<Request>,
+    surface_calls: VecDeque<Request>,
     favicon_batch: Option<Request>,
     favicons: HashMap<ItemId, Request>,
     favicon_order: VecDeque<ItemId>,
@@ -116,7 +148,7 @@ impl Default for State {
             stopped: false,
             in_flight: false,
             history: None,
-            history_calls: VecDeque::new(),
+            surface_calls: VecDeque::new(),
             favicon_batch: None,
             favicons: HashMap::new(),
             favicon_order: VecDeque::new(),
@@ -189,14 +221,45 @@ impl StoreReadQueue {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.stopped
             || !state.accepting
-            || state.history_calls.len() >= MAX_PENDING_HISTORY_CALLS
+            || state.surface_calls.len() >= MAX_PENDING_SURFACE_CALLS
         {
             return false;
         }
-        state.history_calls.push_back(Request::HistorySurface {
+        state.surface_calls.push_back(Request::HistorySurface {
             token,
             profile,
             call,
+        });
+        self.inner.ready.notify_one();
+        true
+    }
+
+    /// Queues one bookmark request; like history calls, each carries a
+    /// completion and shares their bound.
+    pub(crate) fn request_bookmarks(
+        &self,
+        token: u64,
+        profile: ProfileId,
+        work: BookmarkWork,
+    ) -> bool {
+        if matches!(&work, BookmarkWork::Surface(call) if !call.validate()) {
+            return false;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.stopped
+            || !state.accepting
+            || state.surface_calls.len() >= MAX_PENDING_SURFACE_CALLS
+        {
+            return false;
+        }
+        state.surface_calls.push_back(Request::Bookmarks {
+            token,
+            profile,
+            work,
         });
         self.inner.ready.notify_one();
         true
@@ -360,7 +423,7 @@ impl StoreReadQueue {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.accepting = false;
         state.history = None;
-        state.history_calls.clear();
+        state.surface_calls.clear();
         state.favicon_batch = None;
         state.favicons.clear();
         state.favicon_order.clear();
@@ -404,7 +467,7 @@ impl StoreReadQueue {
         state.stopped = true;
         state.accepting = false;
         state.history = None;
-        state.history_calls.clear();
+        state.surface_calls.clear();
         state.favicon_batch = None;
         state.favicons.clear();
         state.favicon_order.clear();
@@ -417,7 +480,7 @@ fn pop_browser_read(state: &mut State) -> Option<Request> {
     state
         .history
         .take()
-        .or_else(|| state.history_calls.pop_front())
+        .or_else(|| state.surface_calls.pop_front())
         .or_else(|| state.favicon_batch.take())
         .or_else(|| {
             while let Some(id) = state.favicon_order.pop_front() {
@@ -476,6 +539,96 @@ pub(crate) fn run_for_test(
 /// searches and already-open tabs can be filtered out without leaving the
 /// history section short.
 const HISTORY_READ_LIMIT: u32 = 10;
+
+fn bookmark_work(
+    store: &dyn zephium_core::ports::store::Store,
+    profile: ProfileId,
+    work: BookmarkWork,
+) -> BookmarkSurfaceReply {
+    use zephium_ipc::{bookmark_id, BookmarkCall};
+    let nodes = |reply: BookmarkReply| match reply {
+        BookmarkReply::Nodes(nodes) => Ok(nodes),
+        BookmarkReply::Failed(failure) => Err(failure),
+        BookmarkReply::Added(_) | BookmarkReply::Done => Err(BookmarkFailure::Unavailable),
+    };
+    let saved = |reply: BookmarkReply| match reply {
+        BookmarkReply::Added(id) => BookmarkSurfaceReply::Saved(Some(id)),
+        BookmarkReply::Done => BookmarkSurfaceReply::Saved(None),
+        BookmarkReply::Failed(failure) => BookmarkSurfaceReply::Failed(failure),
+        BookmarkReply::Nodes(_) => BookmarkSurfaceReply::Failed(BookmarkFailure::Unavailable),
+    };
+    // Ids were validated at admission; a parse that fails here is a bug, and
+    // reads as a missing bookmark rather than the top level.
+    let parent = |parent: Option<String>| match parent {
+        None => Ok(None),
+        Some(id) => bookmark_id(&id).map(Some).ok_or(BookmarkFailure::Missing),
+    };
+    let id = |id: String| bookmark_id(&id).ok_or(BookmarkFailure::Missing);
+    let call = match work {
+        BookmarkWork::AddPage { url, title } => {
+            return saved(store.bookmarks(
+                profile,
+                BookmarkRequest::AddLink {
+                    parent: None,
+                    title,
+                    url,
+                    if_absent: true,
+                },
+            ))
+        }
+        BookmarkWork::Surface(call) => call,
+    };
+    let result = match call {
+        BookmarkCall::List { folder } => parent(folder).and_then(|folder| {
+            let listed =
+                nodes(store.bookmarks(profile, BookmarkRequest::Children { parent: folder }))?;
+            let path = match folder {
+                Some(id) => nodes(store.bookmarks(profile, BookmarkRequest::Path { id }))?,
+                None => Vec::new(),
+            };
+            Ok(BookmarkSurfaceReply::Listing {
+                folder,
+                path,
+                nodes: listed,
+            })
+        }),
+        BookmarkCall::Reveal { id: target } => id(target).and_then(|id| {
+            let mut path = nodes(store.bookmarks(profile, BookmarkRequest::Path { id }))?;
+            // The path ends at `id` itself; what holds it is the one above.
+            path.pop();
+            let folder = path.last().map(|holder| holder.id);
+            let listed =
+                nodes(store.bookmarks(profile, BookmarkRequest::Children { parent: folder }))?;
+            Ok(BookmarkSurfaceReply::Listing {
+                folder,
+                path,
+                nodes: listed,
+            })
+        }),
+        BookmarkCall::Search { query } => {
+            nodes(store.bookmarks(profile, BookmarkRequest::Search { query }))
+                .map(BookmarkSurfaceReply::Results)
+        }
+        BookmarkCall::AddFolder { parent: at, title } => parent(at).map(|parent| {
+            saved(store.bookmarks(profile, BookmarkRequest::AddFolder { parent, title }))
+        }),
+        BookmarkCall::Rename { id: target, title } => id(target)
+            .map(|id| saved(store.bookmarks(profile, BookmarkRequest::Rename { id, title }))),
+        BookmarkCall::Move {
+            id: target,
+            parent: at,
+            index,
+        } => id(target).and_then(|id| {
+            parent(at).map(|parent| {
+                saved(store.bookmarks(profile, BookmarkRequest::Move { id, parent, index }))
+            })
+        }),
+        BookmarkCall::Remove { id: target } => {
+            id(target).map(|id| saved(store.bookmarks(profile, BookmarkRequest::Remove { id })))
+        }
+    };
+    result.unwrap_or_else(BookmarkSurfaceReply::Failed)
+}
 
 pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackHandle) {
     run_with(store, queue, move |result| {
@@ -558,6 +711,15 @@ fn run_with(
                         removed: Some(store.clear_history(profile, since)),
                     }
                 }
+            },
+            Request::Bookmarks {
+                token,
+                profile,
+                work,
+            } => StoreReadResult::Bookmarks {
+                token,
+                profile,
+                reply: bookmark_work(&*store, profile, work),
             },
             Request::Favicon {
                 generation,

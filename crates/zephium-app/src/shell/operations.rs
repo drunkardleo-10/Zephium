@@ -674,6 +674,7 @@ impl Shell {
                     },
                     |position| self.operation_select_tab(Some(position)),
                 ),
+            "bookmark.add" => self.operation_bookmark_page(),
             "page.print" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| {

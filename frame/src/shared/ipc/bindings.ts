@@ -331,6 +331,8 @@ export const commands = {
 	 */
 	can_request: boolean,
 } | null>("default_browser_request"),
+	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
+	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -542,6 +544,46 @@ export type BlockerStatusView = {
 	can_enable: boolean,
 	/**  Authoritative refresh admission capability for the active supply mode. */
 	can_refresh_sources: boolean,
+};
+
+export type BookmarkCall = 
+/**
+ *  A folder's contents and the folders above it; no `folder` is the top
+ *  level.
+ */
+{ kind: "list"; folder: string | null } | 
+/**  The listing of whichever folder holds `id`, so it can be shown in place. */
+{ kind: "reveal"; id: string } | { kind: "search"; query: string } | { kind: "add_folder"; parent: string | null; title: string } | { kind: "rename"; id: string; title: string } | 
+/**  Moves `id` into `parent` at `index` among its new siblings. */
+{ kind: "move"; id: string; parent: string | null; index: number } | 
+/**  Removes a bookmark, or a folder with everything in it. */
+{ kind: "remove"; id: string };
+
+export type BookmarkCrumb = {
+	id: string,
+	title: string,
+};
+
+export type BookmarkError = "missing" | 
+/**  The profile holds the maximum, or the folder is nested too deep. */
+"full" | 
+/**  A folder cannot move into itself. */
+"cycle" | "invalid" | "unavailable" | "capacity";
+
+export type BookmarkResponse = { kind: "listing"; folder: string | null; 
+/**  Folders from the top level down to `folder`, `folder` last. */
+path: BookmarkCrumb[]; items: BookmarkView[] } | { kind: "results"; items: BookmarkView[] } | 
+/**  A write applied; `id` names what an add created. */
+{ kind: "saved"; id: string | null } | { kind: "error"; error: BookmarkError };
+
+export type BookmarkView = {
+	id: string,
+	title: string,
+	/**  Absent for a folder. */
+	url: string | null,
+	icon: IconRef | null,
+	/**  Direct children, for a folder. */
+	children: number,
 };
 
 export type BrowserCredentialCapabilityChanged = BrowserCredentialCapabilityView;
@@ -887,7 +929,7 @@ export type KeymapEntry = {
 	customized: boolean,
 };
 
-export type KeymapGroup = "app" | "file" | "edit" | "view" | "history" | "window" | "help" | "keys" | "global" | "work";
+export type KeymapGroup = "app" | "file" | "edit" | "view" | "history" | "bookmarks" | "window" | "help" | "keys" | "global" | "work";
 
 export type KeymapOutcome = { kind: "applied" } | 
 /**  Already bound to `command`; nothing changed. */
@@ -1717,7 +1759,7 @@ export type TaskStep = {
  */
 export type TaskView = "inbox" | "today" | "upcoming" | "all" | "completed" | "trash";
 
-export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "time";
+export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "bookmarks" | "time";
 
 export type TriggerChange = { type: "applied"; trigger: LauncherTrigger } | { type: "rejected"; reason: Rejection; trigger: LauncherTrigger };
 

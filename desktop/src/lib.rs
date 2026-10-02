@@ -1577,6 +1577,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             keymap::keymap_record,
             default_browser::default_browser_status,
             default_browser::default_browser_request,
+            bookmark_call,
             resource_close_ready,
             tab_drop,
             divider_grab,
@@ -3062,6 +3063,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             | "tool.time"
             | "tool.history"
             | "tool.downloads"
+            | "tool.bookmarks"
             | "extensions.manage"
     ) {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
@@ -3735,6 +3737,50 @@ async fn history_call(
     }
 }
 
+/// The Bookmarks panel's reads and writes, scoped to the focused profile.
+#[tauri::command]
+#[specta::specta]
+async fn bookmark_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: zephium_ipc::BookmarkCall,
+) -> zephium_ipc::BookmarkResponse {
+    use zephium_ipc::{BookmarkError, BookmarkResponse};
+    let failed = |error| BookmarkResponse::Error { error };
+    if !authorize(&caller, CallerPolicy::Main, "bookmark_call") || shutdown_started(&app) {
+        return failed(BookmarkError::Unavailable);
+    }
+    if !call.validate() {
+        return failed(BookmarkError::Invalid);
+    }
+    let Some(expected_profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(BookmarkError::Invalid);
+    };
+    let shell = app.state::<Handle>().inner().clone();
+    static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let Ok(permit) = ADMISSION.try_acquire() else {
+        return failed(BookmarkError::Capacity);
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    if !shell.dispatch(Command::BookmarkCall {
+        expected_profile,
+        call: Box::new(call),
+        done: zephium_app::BookmarkCompletion::new(move |response| {
+            let _permit = permit;
+            let _ = send.send(response);
+        }),
+    }) {
+        return failed(BookmarkError::Unavailable);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
+        Ok(Ok(response)) => response,
+        _ => failed(BookmarkError::Unavailable),
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
@@ -4305,6 +4351,10 @@ fn build_menu(
         .item(&item("tab.reopen")?)
         .item(&item("browser.history")?)
         .build()?;
+    let bookmarks = SubmenuBuilder::new(handle, "Bookmarks")
+        .item(&item("bookmark.add")?)
+        .item(&item("tool.bookmarks")?)
+        .build()?;
     let window = SubmenuBuilder::new(handle, "Window")
         .minimize()
         .fullscreen()
@@ -4332,7 +4382,7 @@ fn build_menu(
     let menu = Menu::with_items(
         handle,
         &[
-            &app_menu, &file, &edit, &view, &history, &work, &window, &help,
+            &app_menu, &file, &edit, &view, &history, &bookmarks, &work, &window, &help,
         ],
     )?;
     Ok((menu, vec![pane_close, pane_open]))
@@ -4481,10 +4531,10 @@ fn build_tools_menu(
     let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
     let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
     let activity = MenuItemBuilder::with_id("tool.time", "Activity").build(handle)?;
-    let ai = MenuItemBuilder::with_id("tool.ai", "Ask").build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
     let downloads = item("tool.downloads")?;
+    let bookmarks = item("tool.bookmarks")?;
     let second = PredefinedMenuItem::separator(handle)?;
     // The panel is the quick way in; the full destination is its own entry, the
     // same shape as Show All History.
@@ -4494,8 +4544,8 @@ fn build_tools_menu(
     Menu::with_items(
         handle,
         &[
-            &notes, &tasks, &activity, &ai, &first, &history, &downloads, &second, &all_notes,
-            &all_tasks, &settings,
+            &notes, &tasks, &activity, &first, &history, &downloads, &bookmarks, &second,
+            &all_notes, &all_tasks, &settings,
         ],
     )
 }
@@ -4515,10 +4565,10 @@ fn build_profile_menu(
     let second = PredefinedMenuItem::separator(handle)?;
     let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
     let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
-    let ai = MenuItemBuilder::with_id("tool.ai", "AI Chat").build(handle)?;
     let time = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
     let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
     let downloads = item("tool.downloads")?;
+    let bookmarks = item("tool.bookmarks")?;
     let extensions = MenuItemBuilder::with_id("extensions.manage", "Extensions…").build(handle)?;
     let third = PredefinedMenuItem::separator(handle)?;
     let settings = item("browser.settings")?;
@@ -4534,10 +4584,10 @@ fn build_profile_menu(
             &second,
             &notes,
             &tasks,
-            &ai,
             &time,
             &history,
             &downloads,
+            &bookmarks,
             &extensions,
             &third,
             &settings,

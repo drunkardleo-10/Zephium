@@ -7,6 +7,7 @@ import {
   Activity03Icon,
   HistoryIcon,
   Download01Icon,
+  Bookmark02Icon,
 } from "@hugeicons/core-free-icons";
 export const tools = {
   notes: {
@@ -43,6 +44,13 @@ export const tools = {
     empty: m.browser_downloads_empty,
     icon: Download01Icon,
     load: () => import("./previews/DownloadsView.svelte"),
+  },
+  bookmarks: {
+    title: m.tool_bookmarks,
+    description: m.tool_bookmarks_help,
+    empty: m.bookmarks_empty,
+    icon: Bookmark02Icon,
+    load: () => import("./previews/BookmarksView.svelte"),
   },
   time: {
     title: m.tool_time,

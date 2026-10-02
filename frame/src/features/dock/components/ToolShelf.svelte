@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import * as m from "$shared/i18n/messages";
-  import { ToolCaseIcon } from "@hugeicons/core-free-icons";
+  import { Settings02Icon, ToolCaseIcon } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
   import Disclosure from "$shared/ui/Disclosure";
@@ -11,7 +11,8 @@
   let { compact = false, extensions }: { compact?: boolean; extensions?: Snippet } = $props();
 
   const groups = [SHELF_TOOLS, RECORD_TOOLS] as const;
-  const count = SHELF_TOOLS.length + RECORD_TOOLS.length;
+  // Settings closes the stack nearest the case, after the tools.
+  const count = SHELF_TOOLS.length + RECORD_TOOLS.length + 1;
 
   function pick(kind: (typeof SHELF_TOOLS)[number] | (typeof RECORD_TOOLS)[number]) {
     if (tools.activeTool() === kind) tools.close();
@@ -73,6 +74,18 @@
         </button>
       {/each}
     {/each}
+    <button
+      type="button"
+      role="menuitem"
+      class="ui-menu-item shelf-item"
+      style:--step={0}
+      title={compact ? m.command_browser_settings() : undefined}
+      aria-label={compact ? m.command_browser_settings() : undefined}
+      onclick={() => void commands.runCommand("browser.settings")}
+    >
+      <span class="ui-menu-icon"><Icon icon={Settings02Icon} size={16} /></span>
+      {#if !compact}<span>{m.command_browser_settings()}</span>{/if}
+    </button>
   </Disclosure>
 </div>
 
