@@ -67,6 +67,7 @@ pub use work::{
 
 mod blocker_service;
 mod browser_credentials;
+mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
 mod intro_sound;
@@ -4561,6 +4562,11 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     if matches!(&event, tauri::RunEvent::Exit) {
         linux_global_shortcuts::shutdown(app);
     }
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Opened { urls } = &event {
+        external_links::hand_off(app, urls.iter().map(|url| url.to_string()), true);
+        return;
+    }
     let tauri::RunEvent::ExitRequested { code, api, .. } = event else {
         return;
     };
@@ -4698,11 +4704,9 @@ pub fn run() {
         // Must register first: a second launch (file association, dock, a
         // stale instance holding the global hotkey and the profile dbs)
         // focuses the running window and exits.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            external_links::bring_forward(app);
+            external_links::hand_off(app, argv.into_iter().skip(1), true);
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
@@ -5315,6 +5319,7 @@ pub fn run() {
                 return Err(error.into());
             }
             notes::install(app.handle(), &data_dir, store.clone(), &shell);
+            external_links::adopt(app.handle());
             #[cfg(feature = "work-product")]
             favicon_probe::install(&shell);
             let web_extensions = webext::WebExtensions::new(&data_dir);
@@ -6688,7 +6693,7 @@ mod tests {
         for exact in [
             "Name=Zephium",
             "StartupWMClass=app.zephium",
-            "Exec={{exec}}",
+            "Exec={{exec}} %U",
             "Icon={{icon}}",
         ] {
             assert_eq!(template.lines().filter(|line| *line == exact).count(), 1);

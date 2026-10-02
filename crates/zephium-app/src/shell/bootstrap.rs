@@ -264,6 +264,8 @@ impl Shell {
         self.project_browser_page();
         self.bootstrapped = true;
         self.apply_deferred_web_extensions();
+        let waiting = std::mem::take(&mut self.pending_external);
+        self.open_external(waiting);
         if !retired_settings.is_empty() {
             self.schedule_persist();
         }

@@ -121,6 +121,21 @@ pub fn is_allowed_str(url: &str) -> bool {
     Url::parse(url).map(|u| is_allowed(&u)).unwrap_or(false)
 }
 
+/// Addresses one hand-off from another application may carry.
+pub const MAX_EXTERNAL_TARGETS: usize = 16;
+
+/// An address handed to Zephium by another application: a clicked link, or
+/// the command line of a launch. Only ordinary web pages are admitted, so a
+/// hand-off can never open an internal page, run script, or read a file.
+pub fn external_target(argument: &str) -> Option<Url> {
+    if argument.len() > MAX_URL_BYTES {
+        return None;
+    }
+    Url::parse(argument.trim())
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https") && is_allowed(url))
+}
+
 /// Syntactic browser-tab target. Windows extension documents additionally
 /// require the engine's live, profile-specific installation grant. This is not
 /// permission to load an extension or to expose its resources to web pages.
@@ -306,5 +321,34 @@ mod tests {
         fn classify_never_panics(s in "\\PC*") {
             let _ = classify(&s);
         }
+    }
+
+    #[test]
+    fn hand_offs_admit_only_ordinary_web_pages() {
+        assert_eq!(
+            external_target(" https://example.com/a?b=1 ").map(|url| url.to_string()),
+            Some("https://example.com/a?b=1".into())
+        );
+        assert!(external_target("http://example.com").is_some());
+        for refused in [
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "file:///etc/passwd",
+            "about:blank",
+            "zephium://settings",
+            "https://user:pass@example.com/",
+            "/Applications/Zephium.app",
+            "--flag",
+            "",
+        ] {
+            assert_eq!(external_target(refused), None, "{refused}");
+        }
+        assert_eq!(
+            external_target(&format!(
+                "https://example.com/{}",
+                "a".repeat(MAX_URL_BYTES)
+            )),
+            None
+        );
     }
 }

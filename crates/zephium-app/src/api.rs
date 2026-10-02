@@ -406,6 +406,10 @@ pub enum Command {
         input: String,
         new_tab: bool,
     },
+    /// Addresses handed over by another application, already admitted by
+    /// `navigation::external_target`. Each opens in a new tab; any that
+    /// arrive before the session is restored wait for it.
+    OpenExternal(Vec<String>),
     SetAppSetting {
         key: String,
         value: String,

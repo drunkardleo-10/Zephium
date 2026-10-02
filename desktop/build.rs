@@ -286,8 +286,9 @@ fn validate_linux_identity(source: &str, config: &Value, root: &Path) -> io::Res
 
 fn validate_linux_desktop_template(path: &Path) -> io::Result<()> {
     let template = fs::read_to_string(path)?;
+    // `%U` is how the desktop hands a clicked link to the default browser.
     for exact in [
-        "Exec={{exec}}",
+        "Exec={{exec}} %U",
         "StartupWMClass=app.zephium",
         "Icon={{icon}}",
         "Name=Zephium",
@@ -299,6 +300,17 @@ fn validate_linux_desktop_template(path: &Path) -> io::Result<()> {
                 "Linux desktop template must contain exactly one `{exact}` entry"
             )));
         }
+    }
+    let handles_web = template.lines().any(|line| {
+        line.strip_prefix("MimeType=").is_some_and(|types| {
+            let types: Vec<_> = types.split(';').collect();
+            types.contains(&"x-scheme-handler/http") && types.contains(&"x-scheme-handler/https")
+        })
+    });
+    if !handles_web {
+        return Err(io::Error::other(
+            "Linux desktop template must declare the http and https scheme handlers",
+        ));
     }
     if template.contains("Name={{name}}") {
         return Err(io::Error::other(

@@ -224,6 +224,7 @@ pub struct Shell {
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
+    pending_external: Vec<String>,
     native_openers: std::collections::HashMap<ItemId, NativeOpener>,
     #[cfg(debug_assertions)]
     bootstrap_started: Option<std::time::Instant>,
@@ -435,6 +436,7 @@ impl Shell {
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,
+            pending_external: Vec::new(),
             native_openers: std::collections::HashMap::new(),
             #[cfg(debug_assertions)]
             bootstrap_started: None,
@@ -999,6 +1001,7 @@ impl Shell {
             Command::OpenUrl { input, new_tab } => {
                 let _ = self.operation_open_url(input, new_tab);
             }
+            Command::OpenExternal(urls) => self.open_external(urls),
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
             }

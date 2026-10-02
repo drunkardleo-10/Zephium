@@ -1102,3 +1102,30 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
     assert_eq!(bogus.outcome, OperationOutcome::Rejected);
     assert_eq!(active_id(&screen), favorite);
 }
+
+#[test]
+fn links_from_other_apps_wait_for_the_session_then_open_in_new_tabs() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::OpenExternal(vec![
+        "https://early.example/".into(),
+        "javascript:alert(1)".into(),
+    ]));
+    let loaded = |host: &str| {
+        engine.calls().iter().any(|call| {
+            (call.starts_with("create ") || call.starts_with("navigate ")) && call.contains(host)
+        })
+    };
+    assert!(!loaded("early.example"));
+
+    shell.handle(Command::Bootstrap);
+    assert!(loaded("early.example"));
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("javascript")));
+    let early = active_id(&screen);
+
+    shell.handle(Command::OpenExternal(vec!["https://late.example/".into()]));
+    assert!(loaded("late.example"));
+    assert_ne!(active_id(&screen), early);
+}

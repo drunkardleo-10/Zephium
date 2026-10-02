@@ -3,12 +3,10 @@ Categories={{categories}}
 {{#if comment}}
 Comment={{comment}}
 {{/if}}
-Exec={{exec}}
+Exec={{exec}} %U
 StartupWMClass=app.zephium
 Icon={{icon}}
 Name=Zephium
 Terminal=false
 Type=Application
-{{#if mime_type}}
-MimeType={{mime_type}}
-{{/if}}
+MimeType=x-scheme-handler/http;x-scheme-handler/https;{{#if mime_type}}{{mime_type}}{{/if}}

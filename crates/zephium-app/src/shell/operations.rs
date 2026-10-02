@@ -199,6 +199,22 @@ impl Shell {
 
     /// Opens an address in a new tab of the focused window without selecting
     /// it, as a modified click on a link does.
+    /// Opens what another application handed over, each in its own tab and
+    /// the last one in front, the way a clicked link opens elsewhere.
+    pub(super) fn open_external(&mut self, urls: Vec<String>) {
+        let limit = zephium_core::navigation::MAX_EXTERNAL_TARGETS;
+        if !self.bootstrapped {
+            let room = limit.saturating_sub(self.pending_external.len());
+            self.pending_external.extend(urls.into_iter().take(room));
+            return;
+        }
+        for url in urls.into_iter().take(limit) {
+            if zephium_core::navigation::external_target(&url).is_some() {
+                let _ = self.operation_open_url(url, true);
+            }
+        }
+    }
+
     pub(super) fn operation_open_url_background(&mut self, input: String) -> OperationDisposition {
         let Some(input) = self
             .search
