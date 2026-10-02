@@ -42,6 +42,7 @@
   import { loadNewTab } from "$features/newtab";
   import { ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
+  import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
   async function newNote() {
@@ -57,6 +58,18 @@
     handleNativeSection(`settings.section.${section}`);
     void browserPage.open("settings");
   }
+  // The sidebar's own menu stands where the engine would offer Reload.
+  onMount(() =>
+    installChromeMenu((event) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".browser-sidebar")) return;
+      const active = tabs.activeTab();
+      const page =
+        browserPage.currentPage() === null &&
+        (active?.content ?? "web") === "web" &&
+        (active?.url ?? null) !== null;
+      tabs.openChromeMenu(event.clientX, event.clientY, page);
+    }),
+  );
   onMount(() => {
     let disposed = false;
     let stop: (() => void) | undefined;

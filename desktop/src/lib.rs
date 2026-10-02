@@ -1516,6 +1516,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_split,
             tabs_unsplit,
             tabs_leave_split,
+            chrome_menu_popup,
             extension_action_invoke,
             webext::web_extension_prepare,
             webext::web_extension_confirm,
@@ -3982,6 +3983,45 @@ fn sidebar_menu_popup(
     caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
+/// The menu for the browser's own interface, in place of the engine's menu
+/// for a web page. `page` says whether a web page is in front to act on.
+#[tauri::command]
+#[specta::specta]
+fn chrome_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    page: bool,
+    can_split: bool,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "chrome_menu_popup") {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let keymap = keymap_overrides(&app);
+    let Ok(menu) = build_chrome_menu(&app, &keymap, page, can_split) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
+}
+
 #[tauri::command]
 #[specta::specta]
 fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
@@ -4568,6 +4608,36 @@ fn build_sidebar_menu(
         ]);
         Menu::with_items(handle, &items)
     }
+}
+
+fn build_chrome_menu(
+    handle: &tauri::AppHandle,
+    overrides: &std::collections::HashMap<String, String>,
+    page: bool,
+    can_split: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, PredefinedMenuItem};
+    let resolved = zephium_core::commands::resolve(overrides);
+    let item =
+        |id: &str, enabled: bool| build_command_menu_item_enabled(handle, &resolved, id, enabled);
+    let new_tab = item("tab.new", true)?;
+    let reopen = item("tab.reopen", true)?;
+    let first = PredefinedMenuItem::separator(handle)?;
+    let bookmark = item("bookmark.add", page)?;
+    let copy_link = item("page.copyLink", page)?;
+    let second = PredefinedMenuItem::separator(handle)?;
+    let split = item("split.choose", can_split)?;
+    let compact = item(SIDEBAR_COMPACT_COMMAND, true)?;
+    let third = PredefinedMenuItem::separator(handle)?;
+    let bookmarks = item("tool.bookmarks", true)?;
+    let settings = item("browser.settings", true)?;
+    Menu::with_items(
+        handle,
+        &[
+            &new_tab, &reopen, &first, &bookmark, &copy_link, &second, &split, &compact, &third,
+            &bookmarks, &settings,
+        ],
+    )
 }
 
 fn build_tab_menu(
@@ -6267,6 +6337,7 @@ mod tests {
         assert!(list.contains("tabs.openTabMenu(tab.id, event.clientX, event.clientY)"));
         assert!(state.contains("commands.tabMenuPopup(id, x, y, canSplitWith(id))"));
     }
+
 
     #[test]
     fn native_menu_is_never_positioned_from_the_global_pointer() {

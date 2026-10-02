@@ -1,5 +1,6 @@
 <script lang="ts">
   import { installCloseService } from "$shared/lib/close";
+  import { installChromeMenu } from "$shared/lib/chrome-menu";
   import "$styles/global.css";
   import { onMount, tick } from "svelte";
   import { commands } from "$shared/ipc/bindings";
@@ -40,6 +41,7 @@
   }
 
   onMount(installCloseService);
+  onMount(() => installChromeMenu());
   onMount(() => {
     let disposed = false;
     const themeReady = theme.init();

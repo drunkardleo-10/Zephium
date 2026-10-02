@@ -1,5 +1,6 @@
 <script lang="ts">
   import { installCloseService } from "$shared/lib/close";
+  import { installChromeMenu } from "$shared/lib/chrome-menu";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import "$styles/panel.css";
   import { onMount, flushSync } from "svelte";
@@ -32,6 +33,7 @@
     }
   }
   onMount(installCloseService);
+  onMount(() => installChromeMenu());
   onMount(() => {
     let disposed = false;
     let stop: (() => void) | undefined;

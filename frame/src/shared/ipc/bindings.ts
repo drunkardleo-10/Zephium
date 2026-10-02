@@ -121,6 +121,11 @@ export const commands = {
 	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
 	tabsLeaveSplit: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_leave_split", { id }),
+	/**
+	 *  The menu for the browser's own interface, in place of the engine's menu
+	 *  for a web page. `page` says whether a web page is in front to act on.
+	 */
+	chromeMenuPopup: (x: number | null, y: number | null, page: boolean, canSplit: boolean) => __TAURI_INVOKE<boolean>("chrome_menu_popup", { x, y, page, canSplit }),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**
 	 *  Downloads and verifies the extension on the active store page, and

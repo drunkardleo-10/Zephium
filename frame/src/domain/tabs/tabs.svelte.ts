@@ -150,6 +150,11 @@ export function openTabMenu(id: string, x: number, y: number) {
   void commands.tabMenuPopup(id, x, y, canSplitWith(id));
 }
 
+/** The browser interface's own menu; `page` says a web page is in front. */
+export function openChromeMenu(x: number, y: number, page: boolean) {
+  void commands.chromeMenuPopup(x, y, page, canSplitActive());
+}
+
 export function copyMenuTargetLink() {
   const id = menuTarget;
   menuTarget = null;
