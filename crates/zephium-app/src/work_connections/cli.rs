@@ -75,30 +75,91 @@ fn located() -> &'static Mutex<HashMap<&'static str, Option<PathBuf>>> {
     CACHE.get_or_init(Default::default)
 }
 
+#[cfg(unix)]
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-/// Folders a Mac keeps command-line tools in, checked before asking the shell.
+#[cfg(windows)]
+fn executable(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ["exe", "com", "cmd", "bat"]
+                    .iter()
+                    .any(|supported| extension.eq_ignore_ascii_case(supported))
+            })
+}
+
+#[cfg(windows)]
+fn windows_program_names(program: &str, pathext: &str) -> Vec<String> {
+    pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| {
+            [".exe", ".com", ".cmd", ".bat"]
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+        .map(|extension| format!("{program}{extension}"))
+        .collect()
+}
+
+#[cfg(unix)]
+fn program_names(program: &str) -> Vec<String> {
+    vec![program.to_owned()]
+}
+
+#[cfg(windows)]
+fn program_names(program: &str) -> Vec<String> {
+    windows_program_names(
+        program,
+        &std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()),
+    )
+}
+
+/// Native search folders, followed by common per-user tool installations.
 fn usual_folders() -> Vec<PathBuf> {
     let mut folders: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
+    #[cfg(unix)]
     folders.extend(
         ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
             .into_iter()
             .map(PathBuf::from),
     );
+    #[cfg(unix)]
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         for folder in [".local/bin", ".cargo/bin", "bin", ".bun/bin", ".volta/bin"] {
             folders.push(home.join(folder));
         }
     }
+    #[cfg(windows)]
+    {
+        // Do not discover tools through a relative or empty PATH entry.
+        folders.retain(|folder| folder.is_absolute());
+        if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+            for folder in [".local/bin", ".cargo/bin", ".bun/bin", ".volta/bin"] {
+                folders.push(home.join(folder));
+            }
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            folders.push(appdata.join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            folders.push(local.join("Microsoft/WinGet/Links"));
+        }
+        folders.retain(|folder| folder.is_absolute());
+    }
     folders
 }
 
 /// Runs `script` in the person's login shell, within a few seconds.
+#[cfg(unix)]
 fn login_shell(script: &str) -> Option<String> {
     let shell = std::env::var_os("SHELL")
         .map(PathBuf::from)
@@ -130,11 +191,13 @@ fn login_shell(script: &str) -> Option<String> {
     Some(out)
 }
 
+#[cfg(unix)]
 fn shell_is_fish() -> bool {
     std::env::var("SHELL").is_ok_and(|s| s.ends_with("/fish"))
 }
 
 /// The login shell's answer, for tools installed through a version manager.
+#[cfg(unix)]
 fn from_login_shell(program: &str) -> Option<PathBuf> {
     let out = login_shell(&format!("command -v {program}"))?;
     let path = PathBuf::from(out.lines().last()?.trim());
@@ -147,27 +210,31 @@ pub fn locate(cli: Cli) -> Option<PathBuf> {
     if let Some(found) = located().lock().ok().and_then(|c| c.get(program).cloned()) {
         return found;
     }
+    let names = program_names(program);
     let found = usual_folders()
         .into_iter()
-        .map(|folder| folder.join(program))
-        .find(|path| executable(path))
-        .or_else(|| from_login_shell(program));
+        .flat_map(|folder| names.iter().map(move |name| folder.join(name)))
+        .find(|path| executable(path));
+    #[cfg(unix)]
+    let found = found.or_else(|| from_login_shell(program));
     if let Ok(mut cache) = located().lock() {
         cache.insert(program, found.clone());
     }
     found
 }
 
-/// The login shell's PATH, so tools and servers start as they do in Terminal.
+/// Native tool search PATH, including login-shell paths on Unix.
 /// Cached for the process. Blocking.
 pub fn login_path() -> String {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
+        #[cfg(unix)]
         let script = if shell_is_fish() {
             "string join : $PATH"
         } else {
             "printf %s \"$PATH\""
         };
+        #[cfg(unix)]
         let mut folders: Vec<PathBuf> = login_shell(script)
             .map(|text| {
                 text.trim()
@@ -177,6 +244,8 @@ pub fn login_path() -> String {
                     .collect()
             })
             .unwrap_or_default();
+        #[cfg(windows)]
+        let mut folders = Vec::new();
         for folder in usual_folders() {
             if !folders.contains(&folder) {
                 folders.push(folder);
@@ -184,7 +253,16 @@ pub fn login_path() -> String {
         }
         std::env::join_paths(folders)
             .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "/usr/bin:/bin".into())
+            .unwrap_or_else(|_| {
+                #[cfg(unix)]
+                {
+                    "/usr/bin:/bin".into()
+                }
+                #[cfg(windows)]
+                {
+                    std::env::var("PATH").unwrap_or_default()
+                }
+            })
     })
     .clone()
 }
@@ -206,6 +284,8 @@ pub async fn run(
 ) -> Option<(bool, String, String)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
     command
         .args(args)
         .env("NO_COLOR", "1")
@@ -426,6 +506,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_is_bounded_and_feeds_stdin() {
         let (ok, out, _) = run(
@@ -442,6 +523,77 @@ mod tests {
         assert!(run(
             Path::new("/bin/sleep"),
             &["5"],
+            None,
+            None,
+            Duration::from_millis(200)
+        )
+        .await
+        .is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_discovery_respects_native_extensions() {
+        assert_eq!(
+            windows_program_names("codex", ".COM;.EXE;.BAT;.CMD;.PS1;.VBS;../bad"),
+            ["codex.COM", "codex.EXE", "codex.BAT", "codex.CMD"]
+        );
+        let root = tempfile::tempdir().unwrap();
+        let shim = root.path().join("codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        assert!(executable(&shim));
+        let script = root.path().join("codex.ps1");
+        std::fs::write(&script, "").unwrap();
+        assert!(!executable(&script));
+        assert!(!executable(&root.path().join("missing.exe")));
+        let folder = root.path().join("directory.exe");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(!executable(&folder));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn run_accepts_windows_command_shims() {
+        let root = tempfile::tempdir().unwrap();
+        let shim = root.path().join("tool.cmd");
+        std::fs::write(&shim, "@echo off\r\necho %~1\r\n").unwrap();
+        let (ok, out, _) = run(&shim, &["two words"], None, None, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(ok);
+        assert_eq!(out.trim(), "two words");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn run_is_bounded_and_feeds_stdin() {
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let (ok, out, _) = run(
+            &shell,
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.Write([Console]::In.ReadToEnd())",
+            ],
+            None,
+            Some("hello"),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        assert_eq!(out, "hello");
+        assert!(run(
+            &shell,
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 5"
+            ],
             None,
             None,
             Duration::from_millis(200)

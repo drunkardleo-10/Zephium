@@ -1716,20 +1716,23 @@ impl EngineHost {
         let observation_id = id.clone();
         let observation_permit = event_permit.clone();
         let observation_navigation = navigation.clone();
-        let observer = match crate::platform::imp::install_navigation_observer(&view, move |_| {
-            if observation_permit.active_token().is_none() {
-                return;
-            }
-            let Some(epoch) = observation_navigation.current() else {
-                return;
-            };
-            let id = observation_id.get();
-            let queued_permit = observation_permit.clone();
-            let queued_navigation = observation_navigation.clone();
-            with_source_observation(id, move |host| {
-                host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch);
-            });
-        }) {
+        let observer = match crate::platform::imp::install_navigation_observer(
+            &view,
+            move |#[cfg(target_os = "macos")] _| {
+                if observation_permit.active_token().is_none() {
+                    return;
+                }
+                let Some(epoch) = observation_navigation.current() else {
+                    return;
+                };
+                let id = observation_id.get();
+                let queued_permit = observation_permit.clone();
+                let queued_navigation = observation_navigation.clone();
+                with_source_observation(id, move |host| {
+                    host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch);
+                });
+            },
+        ) {
             Ok(observer) => observer,
             Err(error) => {
                 eprintln!("engine: required native navigation observer failed: {error}");

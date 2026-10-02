@@ -950,7 +950,27 @@ mod tests {
             WorkFileError::NotFound
         );
         let link = home.path().join("Documents/project/escape");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(home.path().join(".ssh"), &link).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // A junction exercises directory escapes without symlink privileges.
+            let result = std::process::Command::new("cmd.exe")
+                .args([
+                    "/D",
+                    "/C",
+                    "mklink",
+                    "/J",
+                    "Documents\\project\\escape",
+                    ".ssh",
+                ])
+                .current_dir(home.path())
+                .creation_flags(0x0800_0000)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "junction fixture: {result:?}");
+        }
         assert_eq!(
             grant.list(&link.to_string_lossy()).unwrap_err(),
             WorkFileError::Denied

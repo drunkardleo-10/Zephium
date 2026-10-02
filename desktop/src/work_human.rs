@@ -1,6 +1,10 @@
 use super::*;
 use zephium_ipc::work::*;
 
+#[cfg_attr(
+    not(all(feature = "work-product", target_os = "macos")),
+    allow(dead_code)
+)]
 enum Operation {
     Read,
     Present(WorkHumanPageIdV1, WorkHumanRegionV1),

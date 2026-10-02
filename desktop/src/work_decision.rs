@@ -119,12 +119,12 @@ async fn write_choice(profile: ProfileId, choice: WorkDecisionChoiceV1) -> Resul
 
 /// The preference the next read will run under; a running read keeps the
 /// configuration it was constructed with.
-#[cfg(feature = "work-product")]
+#[cfg(all(feature = "work-product", target_os = "macos"))]
 pub(crate) async fn selected_choice(profile: ProfileId) -> WorkDecisionChoiceV1 {
     read_choice(profile).await
 }
 
-#[cfg(feature = "work-product")]
+#[cfg(all(feature = "work-product", target_os = "macos"))]
 pub(crate) fn composition_preference(
     choice: WorkDecisionChoiceV1,
 ) -> zephium_work_composition::durable_runtime::WorkDecisionPreference {

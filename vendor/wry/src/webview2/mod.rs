@@ -538,9 +538,13 @@ impl NativeCleanupDebt {
               if slot.as_ref().is_some_and(|target| target == controller) {
                 slot.take();
                 true
-              } else { false }
+              } else {
+                false
+              }
             }) {
-              return Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+              return Err(windows::core::Error::from(
+                windows::Win32::Foundation::E_FAIL,
+              ));
             }
             unsafe { controller.Close() }
           })

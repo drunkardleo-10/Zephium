@@ -5,9 +5,12 @@
 //! Bounded admission for native requests that outlive their initiating callback.
 
 use std::{
-  collections::{HashSet, VecDeque},
+  collections::HashSet,
   sync::{Arc, Mutex, TryLockError},
 };
+
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
+use std::collections::VecDeque;
 
 /// Custom-protocol handlers are privileged and asynchronous. A modest ceiling
 /// leaves ample room for normal asset/IPC concurrency while preventing a
@@ -18,6 +21,7 @@ pub(crate) const CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT: usize = 32;
 /// module import stays failed until its document reloads, and a lazy view's
 /// static graph routinely arrives as one burst larger than the ceiling. The
 /// wait list is bounded as well, so only a flood beyond both is refused.
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
 pub(crate) const CUSTOM_PROTOCOL_WAITING_LIMIT: usize = 512;
 pub(crate) const CUSTOM_PROTOCOL_OVERFLOW_STATUS: http::StatusCode =
   http::StatusCode::SERVICE_UNAVAILABLE;
@@ -128,12 +132,14 @@ impl InFlightAdmission {
 /// Requests waiting for an in-flight slot, in arrival order within each pool.
 /// A pool is one admission scope (one scheme of one webview); a full pool never
 /// holds back another, and within a pool nothing overtakes an earlier arrival.
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
 #[derive(Debug)]
 pub(crate) struct WaitList<K, T> {
   entries: VecDeque<(K, T)>,
   limit: usize,
 }
 
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
 impl<K: PartialEq, T> WaitList<K, T> {
   pub(crate) const fn new(limit: usize) -> Self {
     Self {

@@ -1386,6 +1386,7 @@ impl Shell {
         crate::work_commands::shutdown();
         #[cfg(feature = "work-execution")]
         let lane = self.page_lane();
+        #[cfg(feature = "work-execution")]
         for mut page in std::mem::take(&mut self.queued_pages) {
             page.refuse(
                 crate::work_resources::product::RetainedRefusal::Discarded,

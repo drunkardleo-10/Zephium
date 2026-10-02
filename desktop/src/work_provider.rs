@@ -2,7 +2,9 @@
 //! admitted user operation; no model selects credentials, configuration or ports.
 use std::sync::Arc;
 use zephium_core::{ids::ProfileId, work::WorkError};
-use zephium_ipc::work::{WorkOperationStateV1, WorkOperationV1, WorkReplyV1, WorkResponseV1};
+use zephium_ipc::work::{WorkOperationStateV1, WorkOperationV1};
+#[cfg(target_os = "macos")]
+use zephium_ipc::work::{WorkReplyV1, WorkResponseV1};
 
 #[cfg(target_os = "macos")]
 #[path = "work_lead_run.rs"]
@@ -97,9 +99,10 @@ impl WorkProviders {
         profile: ProfileId,
         input: WorkOperationV1,
     ) -> Result<WorkOperationStateV1, WorkError> {
+        #[cfg(target_os = "macos")]
+        use zephium_agentic::OpenAiWorkSynthesizer;
         use zephium_agentic::{
             AgentProviderTransport, AgentProviderTransportConfig, OpenAiWorkPlanner,
-            OpenAiWorkSynthesizer,
         };
         use zephium_app::{
             work_execution::WorkExecutionService, work_planning::WorkPlanningService,
@@ -525,6 +528,7 @@ fn planning_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkEr
 // An agent turn discloses a bounded 48KiB context: objective, steps, sources
 // and canvas objects. Each turn is separately capped by the run's remaining
 // limits; this ceiling only bounds one call.
+#[cfg(target_os = "macos")]
 fn agent_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
     const MAX_TURN_INPUT_TOKENS: u32 = 32_768;
     zephium_agentic::WorkPlanningConfig::try_new(
@@ -538,6 +542,7 @@ fn agent_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError
 // Synthesis consumes a bounded 32KiB semantic context plus schema/instructions.
 // Its token ceiling is separate from planning; exact provider counting and the
 // original attempt's token/cost limits still decide whether generation starts.
+#[cfg(target_os = "macos")]
 fn synthesis_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
     const MAX_SYNTHESIS_INPUT_TOKENS: u32 = 32_768;
     zephium_agentic::WorkPlanningConfig::try_new(
@@ -548,6 +553,7 @@ fn synthesis_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkE
     )
     .map_err(|_| WorkError::Unavailable)
 }
+#[cfg(target_os = "macos")]
 async fn configure_search_ranking(
     search: zephium_agentic::OpenAiPublicSearch,
     profile: ProfileId,
@@ -559,6 +565,7 @@ async fn configure_search_ranking(
     search.with_decision_ranking(settings.primary, settings.emulation, settings.diagnostic)
 }
 
+#[cfg(target_os = "macos")]
 struct PublicDecisionSettings {
     primary: Option<zephium_agentic::JevDecisionClient>,
     emulation: zephium_agentic::WorkPlanningConfig,
@@ -566,6 +573,7 @@ struct PublicDecisionSettings {
 }
 
 /// `None` is the person's Off: no typed decisions are configured at all.
+#[cfg(target_os = "macos")]
 async fn public_decision_settings(
     profile: ProfileId,
     transport: zephium_agentic::AgentProviderTransport,

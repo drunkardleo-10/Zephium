@@ -385,7 +385,10 @@ mod tests {
     #[test]
     fn launcher_shortcuts_need_a_real_modifier() {
         assert!(validate(DEFAULT).is_ok());
+        #[cfg(target_os = "macos")]
         assert!(validate("Alt+Space").is_ok());
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(validate("Alt+Space"), Err(Rejection::System));
         assert!(validate("Ctrl+Alt+KeyK").is_ok());
         assert_eq!(validate("Shift+Space"), Err(Rejection::NeedsModifier));
         assert_eq!(validate("Space"), Err(Rejection::NeedsModifier));

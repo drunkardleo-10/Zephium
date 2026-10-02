@@ -221,6 +221,7 @@ impl AgentOwnedView {
         self.semantic()?.pending_for_audit()
     }
 
+    #[cfg(feature = "native-agentic-semantic-probe")]
     pub(crate) fn semantic_work_drained_for_audit(&self) -> Option<bool> {
         self.semantic()?.work_drained_for_audit()
     }

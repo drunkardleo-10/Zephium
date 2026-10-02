@@ -33,6 +33,7 @@ impl WorkActivity {
             stored: Mutex::default(),
         }
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn track(&self, observer: WorkAttemptObserver) {
         let Ok(mut observers) = self.observers.lock() else {
             return;

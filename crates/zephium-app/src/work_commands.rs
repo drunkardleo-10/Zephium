@@ -1,13 +1,15 @@
 //! Bounded command execution. No app credentials or app state are injected.
 pub mod policy;
+#[cfg(any(unix, test))]
 use sha2::{Digest, Sha256};
+#[cfg(any(unix, test))]
+use std::{collections::VecDeque, ffi::OsStr};
+#[cfg(unix)]
 use std::{
-    collections::VecDeque,
-    ffi::{OsStr, OsString},
-    future::Future,
-    path::Path,
+    ffi::OsString,
     time::{Duration, Instant},
 };
+use std::{future::Future, path::Path};
 use zephium_core::work::runtime::*;
 
 pub struct CommandResult {
@@ -15,12 +17,14 @@ pub struct CommandResult {
     pub note: String,
     pub succeeded: bool,
 }
+#[cfg(any(unix, test))]
 struct Output {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     hash: Sha256,
     bytes: u64,
 }
+#[cfg(any(unix, test))]
 impl Output {
     fn new() -> Self {
         Self {
@@ -82,6 +86,7 @@ impl Output {
 }
 
 /// Defense in depth on inherited state. Login startup files are the person's trusted configuration.
+#[cfg(any(unix, test))]
 fn environment_allowed(name: &OsStr, value: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -117,11 +122,13 @@ fn environment_allowed(name: &OsStr, value: &OsStr) -> bool {
         && !value.contains("/library/keychains")
         && !value.contains("app.zephium")
 }
+#[cfg(unix)]
 fn environment() -> Vec<(OsString, OsString)> {
     std::env::vars_os()
         .filter(|(k, v)| environment_allowed(k, v))
         .collect()
 }
+#[cfg(unix)]
 fn shell() -> OsString {
     std::env::var_os("SHELL")
         .filter(|s| {

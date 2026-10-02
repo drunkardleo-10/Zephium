@@ -15,8 +15,7 @@ use zephium_agentic::{
     ContextCookieTransferSettlement, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
     ContextNativeResourceSnapshot, ContextPortFailure, ContextResourceAuditId,
     ContextResourceAuditSettlement, ContextShutdownAuditSettlement, ContextShutdownDispatch,
-    SemanticActionExecutionInstant, SemanticActionNativeCompletion, SemanticActionNativeFailure,
-    SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeCorrelation,
+    SemanticActionNativeCompletion, SemanticActionNativeRequest, SemanticRuntimeCorrelation,
     SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
     SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
     MAX_PENDING_NATIVE_CONTEXT_TASKS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
@@ -28,6 +27,11 @@ use zephium_agentic::{
 };
 #[cfg(any(target_os = "macos", test))]
 use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure};
+
+#[cfg(any(target_os = "macos", test))]
+use zephium_agentic::{
+    SemanticActionExecutionInstant, SemanticActionNativeFailure, SemanticActionNativeSettlement,
+};
 
 use crate::MainThreadDispatch;
 

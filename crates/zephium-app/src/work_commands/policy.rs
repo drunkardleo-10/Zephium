@@ -650,10 +650,10 @@ mod tests {
                 Token::Word("e f".into())
             ]
         );
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
         #[cfg(unix)]
         {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
             std::os::unix::fs::symlink("/etc", root.join("escape")).unwrap();
             assert_eq!(
                 classify("cat escape/passwd", &root, std::slice::from_ref(&root)).0,

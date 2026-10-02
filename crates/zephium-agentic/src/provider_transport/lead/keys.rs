@@ -9,6 +9,7 @@ use zephium_core::work::model::{WorkModelError, WorkModelProvider};
 use super::{LeadCredential, LeadSecret, LeadSecretFuture};
 
 /// Shared with the development OpenAI credential and every older loader.
+#[cfg(target_os = "macos")]
 const ACCOUNT: &str = "development";
 
 /// The Keychain service holding `provider`'s key, if it takes one.
