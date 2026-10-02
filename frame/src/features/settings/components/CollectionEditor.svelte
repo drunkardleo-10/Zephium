@@ -6,8 +6,7 @@
   import SearchField from "$shared/ui/SearchField";
   import Field from "$shared/ui/Field";
   import PreviewDialog from "./PreviewDialog.svelte";
-  let { id, kind = "text" }: { id: FieldId; kind?: "text" | "url" | "shortcut" | "credential" } =
-    $props();
+  let { id, kind = "text" }: { id: FieldId; kind?: "text" | "url" | "credential" } = $props();
   let field = $derived(fields[id]);
   let query = $state("");
   let filtered = $derived(
@@ -34,13 +33,7 @@
   let urlValid = $derived(
     kind !== "url" || /^(https?:\/\/|[a-z0-9][a-z0-9.-]+\.[a-z]{2,})/iu.test(value),
   );
-  let shortcutConflict = $derived(
-    kind === "shortcut" &&
-      preview.entries(id).some((item) => item.id !== entryId && item.value === value),
-  );
-  let valid = $derived(
-    Boolean(name.trim() && value.trim()) && !duplicate && !shortcutConflict && urlValid,
-  );
+  let valid = $derived(Boolean(name.trim() && value.trim()) && !duplicate && urlValid);
   function edit(item?: { id: string; name: string; value: string }) {
     entryId = item?.id ?? crypto.randomUUID();
     name = item?.name ?? "";
@@ -97,25 +90,7 @@
     bind:value
     required
     maxlength={500}
-    error={shortcutConflict
-      ? m.field_shortcut_conflict()
-      : value && !urlValid
-        ? m.field_invalid_url()
-        : undefined}
-    onkeydown={kind === "shortcut"
-      ? (event) => {
-          event.preventDefault();
-          value = [
-            event.metaKey ? "⌘" : "",
-            event.ctrlKey ? "Ctrl" : "",
-            event.altKey ? "Alt" : "",
-            event.shiftKey ? "Shift" : "",
-            event.key.length === 1 ? event.key.toUpperCase() : event.key,
-          ]
-            .filter(Boolean)
-            .join(" + ");
-        }
-      : undefined}
+    error={value && !urlValid ? m.field_invalid_url() : undefined}
   />
   {#if kind === "credential"}<Field
       label={m.preview_passwords()}

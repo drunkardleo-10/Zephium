@@ -4,11 +4,12 @@
   import { commands } from "$shared/ipc/bindings";
   import type { DoubleTap, LauncherTrigger, Rejection } from "$shared/ipc/bindings";
   import { IS_MAC } from "$shared/platform";
-  import { acceleratorFrom, acceleratorKeys } from "$shared/lib/accelerator";
+  import { acceleratorFrom, acceleratorKeys, heldModifiers } from "$shared/lib/accelerator";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Select from "$shared/ui/Select";
   import Button from "$shared/ui/Button";
+  import ShortcutField from "./ShortcutField.svelte";
 
   let trigger = $state<LauncherTrigger | null>(null);
   let recording = $state(false);
@@ -97,21 +98,11 @@
     if (accelerator) {
       rejection = null;
       void apply(accelerator);
-    } else held = modifiersOf(event);
+    } else held = heldModifiers(event, IS_MAC);
   }
 
   function keyup(event: KeyboardEvent) {
-    if (recording) held = modifiersOf(event);
-  }
-
-  function modifiersOf(event: KeyboardEvent) {
-    const parts = [
-      event.ctrlKey && "Ctrl",
-      event.altKey && "Alt",
-      event.shiftKey && "Shift",
-      event.metaKey && (IS_MAC ? "Cmd" : "Super"),
-    ].filter(Boolean) as string[];
-    return acceleratorKeys(parts.join("+"), IS_MAC);
+    if (recording) held = heldModifiers(event, IS_MAC);
   }
 
   async function setDoubleTap(mode: DoubleTap) {
@@ -147,18 +138,16 @@
           onclick={() => trigger && void apply(trigger.default_shortcut)}
           >{m.launcher_shortcut_reset()}</Button
         >{/if}
-      <button
-        type="button"
-        class="recorder"
-        class:recording
-        class:unregistered={!!trigger && !trigger.registered && !recording}
+      <ShortcutField
+        {keys}
+        {held}
+        {recording}
+        prompt={m.launcher_shortcut_press()}
+        warn={!!trigger && !trigger.registered}
         disabled={!trigger?.editable}
-        aria-label={recording ? m.launcher_shortcut_recording() : m.launcher_shortcut_record()}
+        label={recording ? m.launcher_shortcut_recording() : m.launcher_shortcut_record()}
         onclick={() => (recording ? void end() : void begin())}
-      >
-        {#if recording && !held.length}<span class="prompt">{m.launcher_shortcut_press()}</span
-          >{:else}{#each recording ? held : keys as key, i (i)}<kbd>{key}</kbd>{/each}{/if}
-      </button>
+      />
     </div>
   </SettingsRow>
   {#if trigger?.double_tap_supported}
@@ -195,66 +184,5 @@
     align-items: center;
     gap: 8px;
     flex: none;
-  }
-
-  .recorder {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    min-width: 112px;
-    height: 32px;
-    padding: 0 10px;
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius-control);
-    background: var(--color-field);
-    color: var(--color-text);
-    transition:
-      border-color var(--motion-fast) var(--ease-smooth),
-      box-shadow var(--motion-fast) var(--ease-smooth);
-  }
-
-  .recorder:hover:not(:disabled) {
-    background: var(--color-field-hover);
-  }
-
-  .recorder.recording {
-    border-color: var(--color-ring);
-    box-shadow: 0 0 0 3px var(--color-field-ring);
-  }
-
-  .recorder.unregistered {
-    border-color: var(--color-warning);
-  }
-
-  .prompt {
-    font-size: 12.5px;
-    color: var(--color-muted);
-  }
-
-  kbd {
-    display: inline-grid;
-    place-items: center;
-    box-sizing: border-box;
-    min-width: 22px;
-    height: 22px;
-    padding: 0 6px;
-    border-radius: var(--radius-inset);
-    background: var(--color-fill);
-    font-family: var(--font-sans);
-    font-size: 12px;
-    font-weight: 500;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .recorder {
-      transition: none;
-    }
-  }
-
-  @media (forced-colors: active) {
-    .recorder.recording {
-      outline: 2px solid Highlight;
-    }
   }
 </style>

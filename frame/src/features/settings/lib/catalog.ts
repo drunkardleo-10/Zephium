@@ -486,12 +486,6 @@ export const fields = {
     description: m.pref_accessibility_contrast_help,
     initial: false,
   },
-  "shortcuts.editor": {
-    section: "shortcuts",
-    label: m.pref_shortcuts_editor,
-    description: m.pref_shortcuts_editor_help,
-    initial: "",
-  },
   "languages.interface": {
     section: "languages",
     label: m.pref_languages_interface,
