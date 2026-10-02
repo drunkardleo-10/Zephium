@@ -95,3 +95,78 @@ test("a requested bookmark opens where it lives, drawn apart", async () => {
   await page.screenshot({ path: "../../../../../target/bookmarks-panel.png" });
   delete document.documentElement.dataset.theme;
 });
+
+test("adds a page by its address and says when it is not one", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => {
+    if (call.kind === "add_link")
+      return call.url === "not an address"
+        ? { kind: "error", error: "invalid" }
+        : { kind: "saved", id: "9" };
+    return answer(call);
+  });
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await screen.getByRole("button", { name: "Add bookmark" }).click();
+  const address = screen.getByRole("textbox", { name: "Address" });
+  await userEvent.type(address, "not an address{Enter}");
+  await expect.element(screen.getByRole("alert")).toHaveTextContent(/web address/u);
+
+  await userEvent.clear(address);
+  await userEvent.type(address, "example.com");
+  await userEvent.type(screen.getByRole("textbox", { name: "Name (optional)" }), "Example");
+  await screen.getByRole("button", { name: "Add", exact: true }).click();
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", {
+      kind: "add_link",
+      parent: null,
+      title: "Example",
+      url: "example.com",
+    }),
+  );
+  await expect.element(screen.getByRole("form")).not.toBeInTheDocument();
+});
+
+test("dragging a bookmark reorders it, and onto a folder files it there", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => answer(call));
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await expect.element(screen.getByRole("button", { name: /Rust docs/u })).toBeVisible();
+  const row = (name: RegExp) => screen.getByRole("button", { name }).element() as HTMLElement;
+
+  const carry = async (from: HTMLElement, to: HTMLElement, share: number) => {
+    const start = from.getBoundingClientRect();
+    const end = to.getBoundingClientRect();
+    const at = { x: end.left + 20, y: end.top + end.height * share };
+    const pointer = { pointerId: 1, bubbles: true, button: 0 };
+    from.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        ...pointer,
+        clientX: start.left + 20,
+        clientY: start.top + 5,
+      }),
+    );
+    from.dispatchEvent(
+      new PointerEvent("pointermove", { ...pointer, clientX: at.x, clientY: at.y }),
+    );
+    await new Promise(requestAnimationFrame);
+    from.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientX: at.x, clientY: at.y }));
+  };
+
+  await carry(row(/Rust docs/u), row(/Zephium/u), 0.1);
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", {
+      kind: "move",
+      id: "3",
+      parent: null,
+      index: 1,
+    }),
+  );
+
+  await carry(row(/Zephium/u), row(/Reading/u), 0.5);
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", {
+      kind: "move",
+      id: "2",
+      parent: "1",
+      index: 0xffff_ffff,
+    }),
+  );
+});

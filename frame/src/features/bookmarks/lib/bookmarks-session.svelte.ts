@@ -8,6 +8,8 @@ import type {
 import { commands } from "$shared/ipc/bindings";
 
 const SEARCH_DEBOUNCE_MS = 160;
+/** An index past any folder's end: native places the bookmark last. */
+const APPEND = 0xffff_ffff;
 
 /** One profile's Bookmarks panel: the folder in view, or search results, and
  *  the writes made from it. Native owns the tree; every change is read back. */
@@ -129,6 +131,37 @@ export class BookmarksSession {
     const id = await this.write({ kind: "add_folder", parent: this.folder, title });
     if (typeof id === "string") this.highlighted = id;
     return id;
+  }
+
+  /** Adds a page by its address to the folder in view. Says why when the
+   *  address is not one, rather than leaving the panel in an error. */
+  async addLink(url: string, title: string): Promise<"added" | "invalid" | "failed"> {
+    const id = await this.write({ kind: "add_link", parent: this.folder, title, url });
+    if (typeof id === "string") {
+      this.highlighted = id;
+      return "added";
+    }
+    if (this.error === "invalid") {
+      this.error = null;
+      return "invalid";
+    }
+    return "failed";
+  }
+
+  /** Moves `id` among the folder in view, before the bookmark at `at`. */
+  reorder(id: string, at: number) {
+    const from = this.items.findIndex((item) => item.id === id);
+    if (from < 0) return Promise.resolve(null);
+    // Native places it among its siblings with itself taken out.
+    const index = from < at ? at - 1 : at;
+    if (index === from) return Promise.resolve(null);
+    return this.move(id, this.folder, index);
+  }
+
+  /** Moves `id` to the end of `folder`. */
+  file(id: string, folder: string | null) {
+    if (id === folder || folder === this.folder) return Promise.resolve(null);
+    return this.move(id, folder, APPEND);
   }
 
   move(id: string, parent: string | null, index: number) {

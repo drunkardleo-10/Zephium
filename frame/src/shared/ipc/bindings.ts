@@ -575,7 +575,9 @@ export type BookmarkCall =
  */
 { kind: "list"; folder: string | null } | 
 /**  The listing of whichever folder holds `id`, so it can be shown in place. */
-{ kind: "reveal"; id: string } | { kind: "search"; query: string } | { kind: "add_folder"; parent: string | null; title: string } | { kind: "rename"; id: string; title: string } | 
+{ kind: "reveal"; id: string } | { kind: "search"; query: string } | { kind: "add_folder"; parent: string | null; title: string } | 
+/**  A page added by hand; an empty `title` takes the page's site. */
+{ kind: "add_link"; parent: string | null; title: string; url: string } | { kind: "rename"; id: string; title: string } | 
 /**  Moves `id` into `parent` at `index` among its new siblings. */
 { kind: "move"; id: string; parent: string | null; index: number } | 
 /**  Removes a bookmark, or a folder with everything in it. */

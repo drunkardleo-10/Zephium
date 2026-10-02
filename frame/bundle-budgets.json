@@ -64,9 +64,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
-    "js": 307700,
+    "js": 308300,
     "css": 16900,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
     "js": 1064301,
@@ -104,9 +104,9 @@
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
-    "js": 307000,
+    "js": 307600,
     "css": 18000,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
     "js": 292728,
@@ -117,14 +117,14 @@
     "css": 4500
   },
   "lazy:features/notes/components/Notes.svelte": {
-    "js": 290100,
+    "js": 290600,
     "css": 19300,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/tasks/components/Tasks.svelte": {
-    "js": 336600,
+    "js": 337300,
     "css": 31800,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:app/browser/WorkWorkspace.svelte": {
     "js": 975000,
@@ -161,24 +161,24 @@
     "css": 12600
   },
   "lazy:features/library/components/LibraryPage.svelte": {
-    "js": 323300,
+    "js": 323900,
     "css": 99800,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/tasks/components/TasksPage.svelte": {
-    "js": 378900,
+    "js": 379600,
     "css": 42300,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/tasks/components/TaskDetail.svelte": {
-    "js": 351300,
+    "js": 352000,
     "css": 39500,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/tasks/components/TaskBoard.svelte": {
-    "js": 345600,
+    "js": 346300,
     "css": 37200,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/tasks/lib/capture.ts": {
     "js": 181800,
@@ -191,14 +191,14 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (163738 measured over 161433 at 714054aa). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 166054 JS and 5511 CSS. Launcher, onboarding and new tab merge 2026-10-01: tools are hosted in the browser graph, as reviewed on the UI branch (342,000 JS limit); 318,512 measured. Launcher, onboarding and new tab merge 2026-10-01: 100,666 bytes of CSS measured; ceiling rounded to the next 100 bytes."
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
-    "js": 568300,
+    "js": 568800,
     "css": 16500,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/notes/components/NotesPage.svelte": {
-    "js": 310400,
+    "js": 311000,
     "css": 25600,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:domain/notes/index.ts": {
     "js": 165800,
@@ -276,9 +276,9 @@
     "description": "Measured 302457 JS and 83808 CSS bytes: the Decisions control over the shared settings graph and the work-decision session. The local-work commits grow the shared graph to 303111 JS (measured on 236b43c4)."
   },
   "lazy:features/notes/components/NoteHost.svelte": {
-    "js": 176900,
+    "js": 177500,
     "css": 8000,
-    "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
     "js": 532000,
@@ -416,9 +416,9 @@
     "description": "Measured 306623 JS and 19667 CSS bytes. Settings \u2192 Connections: detected command-line tools and MCP servers with their editor. BYOK/connections release: measured 312205 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 312332 JS measured."
   },
   "lazy:features/settings/components/sections/MemoryPage.svelte": {
-    "js": 178700,
+    "js": 179200,
     "css": 11700,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/settings/components/sections/SitesPage.svelte": {
     "js": 172800,
@@ -436,14 +436,14 @@
     "description": "A new work's first screen (workflows by what the person does), fetched only when a work is empty so the Workspace chunk does not carry it. Measured 116550 JS and 12231 CSS, most of it the shared Work graph. Round 5 memory: pictures asked for at the width shown: 116726 JS measured. BYOK/connections release: measured 116856 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5b: the tiles wear the real marks of the apps a workflow reads, through the canvas's site glyph and favicon cache, which the Work screen has already loaded: 192547 JS measured in this static graph. Its CSS with the glyph: 13406 measured."
   },
   "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 451000,
+    "js": 451500,
     "css": 113800,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/blocker/components/ProtectionMenu.svelte": {
-    "js": 333300,
+    "js": 333900,
     "css": 105700,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "onboarding": {
     "js": 197500,
@@ -451,13 +451,13 @@
     "description": "Keymap, find, bookmarks and import join the shared chrome graph; this view only loads inside the browser, which already holds those chunks."
   },
   "lazy:features/bookmarks/components/BookmarksPanel.svelte": {
-    "js": 331800,
-    "css": 103200,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "js": 338300,
+    "css": 104700,
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   },
   "lazy:features/tools/components/previews/BookmarksView.svelte": {
-    "js": 330900,
+    "js": 331500,
     "css": 102200,
-    "description": "The tab menu's availability joins the shared chrome graph; this view only loads inside the browser, which already holds it."
+    "description": "Adding bookmarks by address and moving them by drag join the bookmarks panel."
   }
 }

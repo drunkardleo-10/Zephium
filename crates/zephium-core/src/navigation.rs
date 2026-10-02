@@ -121,6 +121,22 @@ pub fn is_allowed_str(url: &str) -> bool {
     Url::parse(url).map(|u| is_allowed(&u)).unwrap_or(false)
 }
 
+/// Typed text read only as a web address, as when bookmarking one by hand:
+/// `example.com/docs` is the page, while words that would be searched for in
+/// the address field are not an address at all.
+pub fn web_address(input: &str) -> Option<Url> {
+    let input = input.trim();
+    if input.is_empty() || input.len() > MAX_URL_BYTES {
+        return None;
+    }
+    match classify_input(input) {
+        InputKind::Direct(url) if matches!(url.scheme(), "http" | "https") && is_allowed(&url) => {
+            Some(url)
+        }
+        _ => None,
+    }
+}
+
 /// Addresses one hand-off from another application may carry.
 pub const MAX_EXTERNAL_TARGETS: usize = 16;
 
@@ -350,5 +366,23 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn a_typed_web_address_is_never_a_search() {
+        assert_eq!(
+            web_address(" example.com/docs ").map(|url| url.to_string()),
+            Some("https://example.com/docs".into())
+        );
+        assert!(web_address("https://a.example/").is_some());
+        for refused in [
+            "",
+            "what is rust",
+            "about:blank",
+            "file:///etc/hosts",
+            "javascript:1",
+        ] {
+            assert!(web_address(refused).is_none(), "{refused}");
+        }
     }
 }

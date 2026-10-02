@@ -545,6 +545,12 @@ pub enum BookmarkCall {
         parent: Option<String>,
         title: String,
     },
+    /// A page added by hand; an empty `title` takes the page's site.
+    AddLink {
+        parent: Option<String>,
+        title: String,
+        url: String,
+    },
     Rename {
         id: String,
         title: String,
@@ -577,6 +583,16 @@ impl BookmarkCall {
                 parent: at,
                 title: name,
             } => parent(at) && title(name),
+            Self::AddLink {
+                parent: at,
+                title: name,
+                url,
+            } => {
+                parent(at)
+                    && name.len() <= MAX_BOOKMARK_TITLE_INPUT_BYTES
+                    && !url.trim().is_empty()
+                    && url.len() <= zephium_core::bookmarks::MAX_URL_BYTES
+            }
             Self::Rename {
                 id: target,
                 title: name,
@@ -1263,6 +1279,11 @@ mod bookmark_tests {
                 parent: None,
                 index: 9,
             },
+            BookmarkCall::AddLink {
+                parent: None,
+                title: String::new(),
+                url: "example.com".into(),
+            },
         ];
         assert!(valid.iter().all(BookmarkCall::validate));
         let invalid = [
@@ -1279,6 +1300,11 @@ mod bookmark_tests {
                 title: " ".into(),
             },
             BookmarkCall::Remove { id: "0".into() },
+            BookmarkCall::AddLink {
+                parent: None,
+                title: "Docs".into(),
+                url: " ".into(),
+            },
         ];
         assert!(!invalid.iter().any(BookmarkCall::validate));
     }

@@ -654,6 +654,28 @@ fn bookmark_work(
         BookmarkCall::AddFolder { parent: at, title } => parent(at).map(|parent| {
             saved(store.bookmarks(profile, BookmarkRequest::AddFolder { parent, title }))
         }),
+        BookmarkCall::AddLink {
+            parent: at,
+            title,
+            url,
+        } => parent(at).and_then(|parent| {
+            let url =
+                zephium_core::navigation::web_address(&url).ok_or(BookmarkFailure::Invalid)?;
+            let title = if title.trim().is_empty() {
+                url.host_str().unwrap_or_default().to_owned()
+            } else {
+                title
+            };
+            Ok(saved(store.bookmarks(
+                profile,
+                BookmarkRequest::AddLink {
+                    parent,
+                    title,
+                    url: url.to_string(),
+                    if_absent: false,
+                },
+            )))
+        }),
         BookmarkCall::Rename { id: target, title } => id(target)
             .map(|id| saved(store.bookmarks(profile, BookmarkRequest::Rename { id, title }))),
         BookmarkCall::Move {

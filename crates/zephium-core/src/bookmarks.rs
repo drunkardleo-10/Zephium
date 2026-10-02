@@ -11,6 +11,8 @@ pub const MAX_TITLE_BYTES: usize = 512;
 pub const MAX_LISTING: u32 = 5_000;
 pub const MAX_SEARCH_RESULTS: u32 = 100;
 pub const MAX_QUERY_BYTES: usize = 512;
+/// The longest address a bookmark keeps, as the store enforces it.
+pub const MAX_URL_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BookmarkNode {

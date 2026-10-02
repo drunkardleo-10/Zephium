@@ -2524,5 +2524,10 @@
   "command_find_next": "Find next",
   "command_find_previous": "Find previous",
   "language_system": "Match the system",
-  "language_websites_note": "Websites see the languages your system prefers."
+  "language_websites_note": "Websites see the languages your system prefers.",
+  "bookmarks_add": "Add bookmark",
+  "bookmarks_address": "Address",
+  "bookmarks_name_optional": "Name (optional)",
+  "bookmarks_add_invalid": "Enter a web address, like example.com",
+  "bookmarks_add_failed": "Could not add this bookmark. Try again."
 }
