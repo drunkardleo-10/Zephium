@@ -468,6 +468,14 @@ pub trait Store {
     ) -> Vec<HistoryVisit>;
     /// Removes every visit to each address; returns how many rows went.
     fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32;
+    /// One bookmark read or write. Blocking; callers run it off the shell.
+    fn bookmarks(
+        &self,
+        _profile: ProfileId,
+        _request: crate::bookmarks::BookmarkRequest,
+    ) -> crate::bookmarks::BookmarkReply {
+        crate::bookmarks::BookmarkReply::Failed(crate::bookmarks::BookmarkFailure::Unavailable)
+    }
     /// Removes visits at or after `since`, or all of them when it is absent.
     fn load_blocker_statistics(
         &self,

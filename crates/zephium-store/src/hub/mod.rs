@@ -8,6 +8,7 @@ mod agent_audit;
 #[cfg(feature = "work-execution")]
 mod agent_work;
 mod blocker;
+mod bookmarks;
 mod compatibility;
 mod deletion;
 mod downloads;

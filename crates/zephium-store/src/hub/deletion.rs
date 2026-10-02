@@ -540,6 +540,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM download_preferences;
          DELETE FROM downloads;
          DELETE FROM blocker_statistics;
+         DELETE FROM bookmarks;
          DELETE FROM search_queries;
          DELETE FROM history;
          DELETE FROM history_usage;
@@ -672,6 +673,11 @@ mod tests {
         conn.execute("INSERT INTO task_lists(id,title,revision,deleted) VALUES('00000000000000000000000002',?1,1,0)",[PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO task_list_receipts(request_id,digest,list_id,retained) VALUES(?1,?2,'00000000000000000000000002',1)",params![PROFILE_SCRUB_MARKER,vec![2_u8;32]]).unwrap();
         conn.execute(
+            "INSERT INTO bookmarks(parent_id,position,title,url,added_at) VALUES(NULL,0,?1,'https://scrub.example/',1)",
+            [PROFILE_SCRUB_MARKER],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO blocker_statistics VALUES(1,?1)",
             [r#"{"day":700000,"days":[0,0,0,0,0,0,12]}"#],
         )
@@ -695,6 +701,7 @@ mod tests {
             .unwrap();
         let expected_tables = [
             "blocker_statistics",
+            "bookmarks",
             "download_cleanup",
             "download_preferences",
             "downloads",
@@ -755,6 +762,7 @@ mod tests {
 
         for table in [
             "blocker_statistics",
+            "bookmarks",
             "download_cleanup",
             "download_preferences",
             "downloads",

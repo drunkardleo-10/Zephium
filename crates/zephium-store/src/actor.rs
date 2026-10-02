@@ -361,6 +361,11 @@ enum Cmd {
         reply: Sender<Vec<HistoryVisit>>,
     },
     ForgetHistoryUrls(ProfileId, Vec<String>, Sender<u32>),
+    Bookmarks(
+        ProfileId,
+        zephium_core::bookmarks::BookmarkRequest,
+        Sender<zephium_core::bookmarks::BookmarkReply>,
+    ),
     ClearHistory(ProfileId, Option<i64>, Sender<u32>),
     AmendVisitTitle(ProfileId, String, String),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
@@ -1177,6 +1182,24 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn bookmarks(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::bookmarks::BookmarkRequest,
+    ) -> zephium_core::bookmarks::BookmarkReply {
+        use zephium_core::bookmarks::{BookmarkFailure, BookmarkReply};
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::Bookmarks(profile, request, tx))
+            .is_err()
+        {
+            return BookmarkReply::Failed(BookmarkFailure::Unavailable);
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT)
+            .unwrap_or(BookmarkReply::Failed(BookmarkFailure::Unavailable))
+    }
+
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32 {
         let (tx, rx) = mpsc::channel();
         if self
@@ -1622,6 +1645,9 @@ fn actor(
             }
             Some(Cmd::ForgetHistoryUrls(profile, urls, reply)) => {
                 let _ = reply.send(hub.forget_history_urls(profile, &urls));
+            }
+            Some(Cmd::Bookmarks(profile, request, reply)) => {
+                let _ = reply.send(hub.bookmarks(profile, request));
             }
             Some(Cmd::ClearHistory(profile, since, reply)) => {
                 let _ = reply.send(hub.clear_history(profile, since));

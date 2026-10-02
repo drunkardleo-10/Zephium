@@ -2462,6 +2462,28 @@ pub static PROFILE: &[Migration] = &[
         version: 32,
         up: |tx| tx.execute_batch(include_str!("work_personal_v29.sql")),
     },
+    Migration {
+        version: 33,
+        up: |tx| {
+            // Bookmarks, apart from the sidebar's live tabs. Bounds mirror
+            // zephium_core::bookmarks; depth is checked by every write.
+            tx.execute_batch(
+                "CREATE TABLE bookmarks (
+                     id INTEGER PRIMARY KEY,
+                     parent_id INTEGER REFERENCES bookmarks(id) ON DELETE CASCADE,
+                     position INTEGER NOT NULL,
+                     title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 512),
+                     url TEXT CHECK (url IS NULL OR length(CAST(url AS BLOB)) <= 8192),
+                     added_at INTEGER NOT NULL
+                 ) STRICT;
+                 CREATE INDEX idx_bookmarks_parent ON bookmarks(parent_id, position);
+                 CREATE INDEX idx_bookmarks_url ON bookmarks(url) WHERE url IS NOT NULL;
+                 CREATE TRIGGER bookmarks_capacity BEFORE INSERT ON bookmarks
+                 WHEN (SELECT count(*) FROM bookmarks) >= 50000
+                 BEGIN SELECT RAISE(ABORT, 'bookmark capacity'); END;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2547,6 +2569,7 @@ mod tests {
         (30, 0x6f827893a13c3ccb),
         (31, 0x55b58f4944aa33b6),
         (32, 0x6323d1c7efd84e2c),
+        (33, 0x1752b8af32a8a0c1),
     ];
 
     #[test]
@@ -2752,7 +2775,7 @@ mod tests {
         for version in [13, 24, 29] {
             let mut conn = Connection::open_in_memory().unwrap();
             if version == 29 {
-                for migration in PROFILE[..21].iter().chain(PROFILE[24..].iter()) {
+                for migration in PROFILE[..21].iter().chain(PROFILE[24..32].iter()) {
                     let tx = conn.transaction().unwrap();
                     (migration.up)(&tx).unwrap();
                     tx.commit().unwrap();
@@ -2767,7 +2790,7 @@ mod tests {
             assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
             apply(&mut conn, PROFILE).unwrap();
             apply(&mut conn, PROFILE).unwrap();
-            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 32);
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 33);
             assert_eq!(
                 conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
                     .unwrap(),
@@ -2801,7 +2824,7 @@ mod tests {
     #[test]
     fn work_qa_bridge_refuses_an_injected_schema_before_writing() {
         let mut conn = Connection::open_in_memory().unwrap();
-        for migration in PROFILE[..21].iter().chain(PROFILE[24..].iter()) {
+        for migration in PROFILE[..21].iter().chain(PROFILE[24..32].iter()) {
             let tx = conn.transaction().unwrap();
             (migration.up)(&tx).unwrap();
             tx.commit().unwrap();
@@ -4004,7 +4027,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(32));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(33));
     }
 
     #[test]
