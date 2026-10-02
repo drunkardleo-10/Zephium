@@ -122,5 +122,5 @@ mod work_synthesis;
 pub mod work_trace;
 pub use api::{
     BookmarkCompletion, FaviconProber, FaviconProberAttachment, HistoryCompletion,
-    ImportCompletion, NoteCompletion, NotesAttachment, ResourceCompletion,
+    ImportCompletion, NoteCompletion, NotesAttachment, ResourceCompletion, TabAction,
 };

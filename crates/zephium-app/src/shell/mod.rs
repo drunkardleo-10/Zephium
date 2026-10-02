@@ -64,6 +64,7 @@ use crate::actor::{CallbackHandle, CommandQueue};
 #[cfg(feature = "agentic-browser")]
 use crate::api::AgentLifecycle;
 use crate::api::PagePermissionPromptDecision;
+use crate::api::TabAction;
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
     EmitFn, SharedBlocker, SharedChrome, SharedEngine, SharedStore, ShellTerminalFailure,
@@ -746,6 +747,9 @@ impl Shell {
             }
             Command::LeaveSplit(id) => {
                 let _ = self.operation_leave_split(id);
+            }
+            Command::TabAction { id, action } => {
+                let _ = self.operation_tab_action(id, action);
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {

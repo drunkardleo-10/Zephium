@@ -1293,3 +1293,77 @@ fn opening_an_address_already_open_goes_to_its_tab_unless_turned_off() {
     assert_ne!(opened, first);
     assert_ne!(opened, blank);
 }
+
+fn open_order(screen: &Screen) -> Vec<ItemId> {
+    last(screen)
+        .nodes
+        .iter()
+        .filter(|node| node.section == SidebarSectionView::Today && node.parent_id.is_none())
+        .filter_map(|node| ItemId::parse(&node.id))
+        .collect()
+}
+
+#[test]
+fn duplicating_a_tab_opens_its_page_right_after_it() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "https://docs.example/");
+    shell.handle(Command::Run("tab.new".into()));
+    let second = active_id(&screen);
+
+    let duplicated = shell.handle_operation(Command::TabAction {
+        id: first,
+        action: crate::TabAction::Duplicate,
+    });
+    assert_eq!(duplicated.outcome, OperationOutcome::Deferred);
+    let copy = active_id(&screen);
+    assert_eq!(open_order(&screen), vec![first, copy, second]);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|line| line.contains(&copy.to_string()) && line.contains("docs.example")));
+
+    // A tab with no page has nothing to duplicate.
+    let blank = shell.handle_operation(Command::TabAction {
+        id: second,
+        action: crate::TabAction::Duplicate,
+    });
+    assert_eq!(blank.outcome, OperationOutcome::NoOp);
+}
+
+#[test]
+fn closing_other_tabs_or_those_below_keeps_the_chosen_one_in_front() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Run("tab.new".into()));
+    let second = active_id(&screen);
+    shell.handle(Command::Run("tab.new".into()));
+    let third = active_id(&screen);
+    shell.handle(Command::Run("tab.new".into()));
+    let fourth = active_id(&screen);
+    assert_eq!(open_order(&screen), vec![first, second, third, fourth]);
+
+    shell.handle(Command::TabAction {
+        id: second,
+        action: crate::TabAction::CloseBelow,
+    });
+    assert_eq!(open_order(&screen), vec![first, second]);
+    assert_eq!(active_id(&screen), second);
+
+    let nothing_below = shell.handle_operation(Command::TabAction {
+        id: second,
+        action: crate::TabAction::CloseBelow,
+    });
+    assert_eq!(nothing_below.outcome, OperationOutcome::NoOp);
+
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::TabAction {
+        id: second,
+        action: crate::TabAction::CloseOthers,
+    });
+    assert_eq!(open_order(&screen), vec![second]);
+    assert_eq!(active_id(&screen), second);
+    let _ = third;
+}

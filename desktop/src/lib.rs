@@ -131,7 +131,7 @@ use tauri_specta::{collect_commands, collect_events, Event};
 use zephium_app::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command, EmitFn,
     Handle, PagePermissionPromptDecision, SharedChrome, ShellTerminalFailureCallback,
-    ShutdownOutcome,
+    ShutdownOutcome, TabAction,
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
@@ -3205,9 +3205,21 @@ fn execute_tab_menu_action(
     let Some(shell) = app.try_state::<Handle>() else {
         return rejected_operation();
     };
+    let tab_action = |action| Command::TabAction { id, action };
+    let keep = |essential| Command::SetTabEssential {
+        id,
+        essential,
+        before: None,
+    };
     match action {
         "reload" => dispatch_operation(app, &shell, Command::Reload(id)),
         "close" => dispatch_operation(app, &shell, Command::Close(id)),
+        "duplicate" => dispatch_operation(app, &shell, tab_action(TabAction::Duplicate)),
+        "bookmark" => dispatch_operation(app, &shell, tab_action(TabAction::Bookmark)),
+        "closeOthers" => dispatch_operation(app, &shell, tab_action(TabAction::CloseOthers)),
+        "closeBelow" => dispatch_operation(app, &shell, tab_action(TabAction::CloseBelow)),
+        "keep" => dispatch_operation(app, &shell, keep(true)),
+        "unkeep" => dispatch_operation(app, &shell, keep(false)),
         "split" => dispatch_operation(
             app,
             &shell,
@@ -3908,7 +3920,7 @@ fn tab_menu_popup(
     id: String,
     x: f64,
     y: f64,
-    can_split: bool,
+    context: TabMenuContext,
 ) -> bool {
     if !authorize(&caller, CallerPolicy::Main, "tab_menu_popup") || !bounded(&id, MAX_ITEM_ID_BYTES)
     {
@@ -3940,7 +3952,7 @@ fn tab_menu_popup(
     if !target.arm(item) {
         return false;
     }
-    let Ok(menu) = build_tab_menu(&app, can_split) else {
+    let Ok(menu) = build_tab_menu(&app, context) else {
         return false;
     };
     caller.popup_menu_at(&menu, anchor).is_ok()
@@ -4546,12 +4558,32 @@ const SIDEBAR_MENU_COMMAND_IDS: [&str; 4] = [
 const PROTECTION_SITE_COMMAND: &str = "protection.site";
 const PROTECTION_HIDE_COMMAND: &str = "protection.hide";
 
-const TAB_MENU_ACTION_IDS: [&str; 4] = [
+const TAB_MENU_ACTION_IDS: [&str; 10] = [
     "tabmenu.reload",
+    "tabmenu.duplicate",
     "tabmenu.copyLink",
+    "tabmenu.bookmark",
+    "tabmenu.keep",
+    "tabmenu.unkeep",
     "tabmenu.split",
     "tabmenu.close",
+    "tabmenu.closeOthers",
+    "tabmenu.closeBelow",
 ];
+
+/// What the tab menu can offer for the tab it opens on, as the sidebar sees
+/// it. Only availability: the shell checks every action again.
+#[derive(Clone, Copy, Debug, Deserialize, specta::Type)]
+struct TabMenuContext {
+    /// A web page is loaded, so it can be copied, duplicated or bookmarked.
+    page: bool,
+    can_split: bool,
+    essential: bool,
+    /// Other open tabs exist to close.
+    others: bool,
+    /// Open tabs follow this one.
+    below: bool,
+}
 
 /// `site_protected` is the page's protection standing, absent where site
 /// controls do not apply; the frame owns both actions.
@@ -4642,19 +4674,36 @@ fn build_chrome_menu(
 
 fn build_tab_menu(
     handle: &tauri::AppHandle,
-    can_split: bool,
+    context: TabMenuContext,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
-
-    let reload = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[0], "Reload").build(handle)?;
-    let copy_link = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[1], "Copy Link").build(handle)?;
-    let split = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[2], "Open in Split View")
-        .enabled(can_split)
-        .build(handle)?;
-    let close = MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[3], "Close Tab").build(handle)?;
-    let separator = PredefinedMenuItem::separator(handle)?;
-
-    Menu::with_items(handle, &[&reload, &copy_link, &split, &separator, &close])
+    let item = |index: usize, title: &str, enabled: bool| {
+        MenuItemBuilder::with_id(TAB_MENU_ACTION_IDS[index], title)
+            .enabled(enabled)
+            .build(handle)
+    };
+    let reload = item(0, "Reload Tab", true)?;
+    let duplicate = item(1, "Duplicate Tab", context.page)?;
+    let copy_link = item(2, "Copy Link", context.page)?;
+    let bookmark = item(3, "Bookmark Tab", context.page)?;
+    let first = PredefinedMenuItem::separator(handle)?;
+    let keep = if context.essential {
+        item(5, "Remove from Essentials", true)?
+    } else {
+        item(4, "Add to Essentials", context.page)?
+    };
+    let split = item(6, "Open in Split View", context.can_split)?;
+    let second = PredefinedMenuItem::separator(handle)?;
+    let close = item(7, "Close Tab", true)?;
+    let others = item(8, "Close Other Tabs", context.others)?;
+    let below = item(9, "Close Tabs Below", context.below)?;
+    Menu::with_items(
+        handle,
+        &[
+            &reload, &duplicate, &copy_link, &bookmark, &first, &keep, &split, &second, &close,
+            &others, &below,
+        ],
+    )
 }
 
 /// Identity and browser destinations use a native menu at every sidebar width.
@@ -6092,9 +6141,15 @@ mod tests {
             super::TAB_MENU_ACTION_IDS,
             [
                 "tabmenu.reload",
+                "tabmenu.duplicate",
                 "tabmenu.copyLink",
+                "tabmenu.bookmark",
+                "tabmenu.keep",
+                "tabmenu.unkeep",
                 "tabmenu.split",
-                "tabmenu.close"
+                "tabmenu.close",
+                "tabmenu.closeOthers",
+                "tabmenu.closeBelow"
             ]
         );
         // Context-menu actions carry their own target and must never collide
@@ -6335,7 +6390,7 @@ mod tests {
         // stay native and must carry the exact tab it was opened for.
         assert!(list.contains("event.preventDefault()"));
         assert!(list.contains("tabs.openTabMenu(tab.id, event.clientX, event.clientY)"));
-        assert!(state.contains("commands.tabMenuPopup(id, x, y, canSplitWith(id))"));
+        assert!(state.contains("commands.tabMenuPopup(id, x, y, tabMenuContext(id))"));
     }
 
     #[test]

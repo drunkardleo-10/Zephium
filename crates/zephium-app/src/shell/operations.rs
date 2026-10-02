@@ -25,6 +25,7 @@ impl Shell {
             Command::SplitWith { other, axis } => self.operation_split(other, axis),
             Command::Unsplit => self.operation_unsplit(),
             Command::LeaveSplit(id) => self.operation_leave_split(id),
+            Command::TabAction { id, action } => self.operation_tab_action(id, action),
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
@@ -89,6 +90,89 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
         mutation_result(self.commit(Vec::new()))
+    }
+
+    pub(super) fn operation_tab_action(
+        &mut self,
+        id: ItemId,
+        action: TabAction,
+    ) -> OperationDisposition {
+        if !self.item_in_focused_scope(id) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        match action {
+            TabAction::Duplicate => self.operation_duplicate(id),
+            TabAction::Bookmark => self.operation_bookmark_page(Some(id)),
+            TabAction::CloseOthers => self.operation_close_around(id, false),
+            TabAction::CloseBelow => self.operation_close_around(id, true),
+        }
+    }
+
+    fn operation_duplicate(&mut self, id: ItemId) -> OperationDisposition {
+        let Some(url) = self
+            .items
+            .tab(id)
+            .filter(|tab| tab.content == zephium_core::item::TabContent::Web)
+            .and_then(|tab| tab.url.as_ref())
+            .map(ToString::to_string)
+        else {
+            return operation_result(OperationOutcome::NoOp, OperationReason::InvalidInput);
+        };
+        let Some(space) = self.windows.focused().map(|window| window.space) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        let Some((copy, mut effects)) = self.open_tab_with_id() else {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::ItemLimitReached,
+            );
+        };
+        let today = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        let roots = self.items.roots(today);
+        if let Some(at) = roots.iter().position(|root| *root == id) {
+            let before = roots[at + 1..].iter().copied().find(|root| *root != copy);
+            self.items.move_tab_to_root(copy, today, before);
+        }
+        effects.extend(self.items.navigate(copy, &url));
+        mutation_result(self.commit(effects))
+    }
+
+    /// Closes the space's open tabs other than `id`, or only those after it.
+    /// Kept and pinned tabs stay, as they do when a day's tabs are cleared.
+    fn operation_close_around(&mut self, id: ItemId, below: bool) -> OperationDisposition {
+        let Some((space, active)) = self
+            .windows
+            .focused()
+            .map(|window| (window.space, window.active))
+        else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        let today = self.today_tabs(space);
+        let closing: Vec<ItemId> = if below {
+            let Some(at) = today.iter().position(|tab| *tab == id) else {
+                return operation_result(OperationOutcome::NoOp, OperationReason::InvalidScope);
+            };
+            today[at + 1..].to_vec()
+        } else {
+            today.into_iter().filter(|tab| *tab != id).collect()
+        };
+        if closing.is_empty() {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
+        let mut native = NativeWork::default();
+        // Hand the window to the tab that stays first, so closing the one in
+        // front never wakes each of the others in turn on its way out.
+        if active.is_some_and(|active| closing.contains(&active)) {
+            let effects = self.focus_tab(id);
+            native.merge(self.commit(effects));
+        }
+        for tab in closing {
+            native.merge(self.close(tab));
+        }
+        mutation_result(native)
     }
 
     /// A tab dragged out of a split stands alone; a split left with one tab
@@ -729,7 +813,7 @@ impl Shell {
                     },
                     |position| self.operation_select_tab(Some(position)),
                 ),
-            "bookmark.add" => self.operation_bookmark_page(),
+            "bookmark.add" => self.operation_bookmark_page(None),
             "page.print" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| {

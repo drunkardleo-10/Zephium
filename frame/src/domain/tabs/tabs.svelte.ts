@@ -1,6 +1,6 @@
 import { listenAll } from "$shared/lib/lifecycle";
 import { flushSync } from "svelte";
-import type { ItemsState, TabView } from "$shared/ipc/bindings";
+import type { ItemsState, TabMenuContext, TabView } from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -145,9 +145,28 @@ export const canSplitActive = () => state.tabs.length > 1 && (activeTab()?.url ?
 // clipboard action can resolve a URL privileged chrome already projects.
 let menuTarget: string | null = null;
 
+/** What the tab menu can offer for one tab; native checks each action again. */
+function tabMenuContext(id: string): TabMenuContext {
+  const tab = state.tabs.find((candidate) => candidate.id === id);
+  const tabOf = (node: ItemsState["nodes"][number]) =>
+    node.kind.type === "tab" ? node.kind.tab_id : null;
+  const open = state.nodes
+    .filter((node) => node.section === "today" && node.parent_id === null)
+    .map(tabOf)
+    .filter((candidate) => candidate !== null);
+  const at = open.indexOf(id);
+  return {
+    page: (tab?.content ?? "web") === "web" && (tab?.url ?? null) !== null,
+    can_split: canSplitWith(id),
+    essential: state.nodes.some((node) => tabOf(node) === id && node.section === "favorites"),
+    others: open.some((candidate) => candidate !== id),
+    below: at >= 0 && at < open.length - 1,
+  };
+}
+
 export function openTabMenu(id: string, x: number, y: number) {
   menuTarget = id;
-  void commands.tabMenuPopup(id, x, y, canSplitWith(id));
+  void commands.tabMenuPopup(id, x, y, tabMenuContext(id));
 }
 
 /** The browser interface's own menu; `page` says a web page is in front. */

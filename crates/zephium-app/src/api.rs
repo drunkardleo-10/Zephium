@@ -182,6 +182,19 @@ pub enum WorkPaneTarget {
     Url(String),
 }
 
+/// What the tab menu can do to a tab, beyond the commands it shares with the
+/// rest of the browser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabAction {
+    /// Opens the same page in a new tab right after it.
+    Duplicate,
+    Bookmark,
+    /// Closes every open tab of the space but this one.
+    CloseOthers,
+    /// Closes the open tabs listed after this one.
+    CloseBelow,
+}
+
 #[derive(Clone, Debug)]
 pub enum Command {
     WorkDocument(crate::WorkDocumentSubmission),
@@ -270,6 +283,11 @@ pub enum Command {
     Unsplit,
     /// Takes one tab out of the focused split, leaving the rest paired.
     LeaveSplit(ItemId),
+    /// Something the tab menu does to the one tab it was opened on.
+    TabAction {
+        id: ItemId,
+        action: TabAction,
+    },
     SetWindowSize(Size),
     /// Whether the OS can currently present the main window. Minimized
     /// windows hide native content views so the engine can lower their memory

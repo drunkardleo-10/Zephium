@@ -265,7 +265,7 @@ export const commands = {
 	uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
 	menuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("menu_popup", { x, y }),
 	addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
-	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
+	tabMenuPopup: (id: string, x: number | null, y: number | null, context: TabMenuContext) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, context }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
 	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide }),
 	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
@@ -1712,6 +1712,21 @@ export type TabChanged = TabView;
  *  documents can add a separate variant without treating them as page URLs.
  */
 export type TabContentView = "web" | "settings" | "extensions" | "extension_owned";
+
+/**
+ *  What the tab menu can offer for the tab it opens on, as the sidebar sees
+ *  it. Only availability: the shell checks every action again.
+ */
+export type TabMenuContext = {
+	/**  A web page is loaded, so it can be copied, duplicated or bookmarked. */
+	page: boolean,
+	can_split: boolean,
+	essential: boolean,
+	/**  Other open tabs exist to close. */
+	others: boolean,
+	/**  Open tabs follow this one. */
+	below: boolean,
+};
 
 export type TabView = {
 	id: string,
