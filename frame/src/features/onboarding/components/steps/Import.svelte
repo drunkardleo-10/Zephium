@@ -22,6 +22,9 @@
   );
   let available = $derived(browserImport.available());
   let job = $derived(browserImport.current());
+  let nothingFound = $derived(browserImport.found()?.length === 0);
+  let failure = $derived(job?.kinds.find((entry) => entry.state === "failed") ?? null);
+  let jobBrowser = $derived(sources.find((candidate) => candidate.id === job?.source)?.name ?? "");
   let chosen = $state<string | null>(null);
   let kinds = $state<ImportKind[]>(["bookmarks", "history"]);
   let source = $derived(sources.find((candidate) => candidate.id === chosen) ?? null);
@@ -44,6 +47,13 @@
   }
 </script>
 
+<!-- Access granted in System Settings tells nobody; look again on return. -->
+<svelte:window
+  onfocus={() => {
+    if (sources.some((candidate) => candidate.needsPermission)) void browserImport.detect();
+  }}
+/>
+
 <div class="import">
   <div class="browsers" role="radiogroup" aria-label={m.onb_import_from()}>
     {#each sources as candidate, index (candidate.id)}
@@ -65,7 +75,17 @@
   </div>
 
   <div class="next" aria-live="polite">
-    {#if job?.finished}
+    {#if job?.finished && failure}
+      <span class="reading"
+        >{failure.problem === "busy"
+          ? m.onb_import_quit({ browser: jobBrowser })
+          : failure.problem === "permission"
+            ? m.onb_import_permission({ browser: jobBrowser })
+            : failure.problem === "storage"
+              ? m.onb_import_storage()
+              : m.onb_import_failed({ browser: jobBrowser })}</span
+      >
+    {:else if job?.finished}
       <span class="done"
         ><Icon icon={Tick02Icon} size={14} />{m.onb_import_done({
           count: number.format(total),
@@ -109,6 +129,9 @@
       {/if}
     {/if}
   </div>
+  {#if nothingFound}
+    <p class="note">{m.onb_import_none()}</p>
+  {/if}
   {#if source && !job}
     <p class="note">
       {#if !available}{m.onb_import_unavailable()}{:else if source.running}{m.onb_import_quit({

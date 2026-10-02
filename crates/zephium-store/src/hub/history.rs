@@ -3,7 +3,7 @@
 use super::*;
 
 use zephium_core::item::sanitize_page_title;
-use zephium_core::ports::store::{HistoryHit, HistoryVisit};
+use zephium_core::ports::store::{HistoryHit, HistoryVisit, ImportedVisit, MAX_IMPORTED_VISITS};
 
 pub(crate) const MAX_HISTORY_QUERY_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_HISTORY_RESULTS: u32 = 100;
@@ -267,6 +267,63 @@ impl Hub {
                 .collect()
         })
         .unwrap_or_default()
+    }
+
+    /// Keeps visits from another browser with their own times. A visit to the
+    /// same address at the same second is already here, so importing twice
+    /// adds nothing. The usual count and byte budgets apply afterwards.
+    pub(crate) fn import_history(
+        &mut self,
+        profile: ProfileId,
+        visits: &[ImportedVisit],
+    ) -> Option<u32> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+        {
+            return None;
+        }
+        let result = self.profile_conn(profile).and_then(|conn| {
+            let tx = conn.transaction()?;
+            let mut added = 0usize;
+            {
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO history(url, title, visited_at)
+                     SELECT ?1, ?2, ?3
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM history WHERE visited_at = ?3 AND url = ?1
+                     )",
+                )?;
+                for visit in visits.iter().take(MAX_IMPORTED_VISITS) {
+                    if visit.visited_at <= 0 || !navigation::is_allowed_str(&visit.url) {
+                        continue;
+                    }
+                    added += insert.execute(params![
+                        visit.url,
+                        sanitize_page_title(&visit.title),
+                        visit.visited_at
+                    ])?;
+                }
+            }
+            tx.execute(
+                "DELETE FROM history WHERE id IN (
+                     SELECT id FROM history
+                     ORDER BY visited_at DESC, id DESC
+                     LIMIT -1 OFFSET 50000
+                 )",
+                [],
+            )?;
+            enforce_history_budget(&tx)?;
+            tx.commit()?;
+            Ok(added)
+        });
+        match result {
+            Ok(added) => Some(u32::try_from(added).unwrap_or(u32::MAX)),
+            Err(e) => {
+                eprintln!("store: import_history failed for profile {profile}: {e}");
+                None
+            }
+        }
     }
 
     /// Removes every visit to each address. Forgetting one entry in a history

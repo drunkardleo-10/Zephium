@@ -72,6 +72,18 @@ pub enum StoreReadResult {
         profile: ProfileId,
         reply: BookmarkSurfaceReply,
     },
+    /// How many an import added, or None when the profile could not take it.
+    Imported { token: u64, added: Option<u32> },
+}
+
+/// Data read from another browser, written in one store transaction.
+#[derive(Clone, Debug)]
+pub enum ImportWork {
+    Bookmarks {
+        folder: String,
+        nodes: Vec<zephium_core::bookmarks::ImportNode>,
+    },
+    History(Vec<zephium_core::ports::store::ImportedVisit>),
 }
 
 /// What the shell asks of bookmarks: a call from chrome, or adding the page
@@ -126,6 +138,11 @@ enum Request {
         token: u64,
         profile: ProfileId,
         work: BookmarkWork,
+    },
+    Import {
+        token: u64,
+        profile: ProfileId,
+        work: ImportWork,
     },
 }
 
@@ -257,6 +274,27 @@ impl StoreReadQueue {
             return false;
         }
         state.surface_calls.push_back(Request::Bookmarks {
+            token,
+            profile,
+            work,
+        });
+        self.inner.ready.notify_one();
+        true
+    }
+
+    pub(crate) fn request_import(&self, token: u64, profile: ProfileId, work: ImportWork) -> bool {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.stopped
+            || !state.accepting
+            || state.surface_calls.len() >= MAX_PENDING_SURFACE_CALLS
+        {
+            return false;
+        }
+        state.surface_calls.push_back(Request::Import {
             token,
             profile,
             work,
@@ -549,13 +587,17 @@ fn bookmark_work(
     let nodes = |reply: BookmarkReply| match reply {
         BookmarkReply::Nodes(nodes) => Ok(nodes),
         BookmarkReply::Failed(failure) => Err(failure),
-        BookmarkReply::Added(_) | BookmarkReply::Done => Err(BookmarkFailure::Unavailable),
+        BookmarkReply::Added(_) | BookmarkReply::Done | BookmarkReply::Imported(_) => {
+            Err(BookmarkFailure::Unavailable)
+        }
     };
     let saved = |reply: BookmarkReply| match reply {
         BookmarkReply::Added(id) => BookmarkSurfaceReply::Saved(Some(id)),
         BookmarkReply::Done => BookmarkSurfaceReply::Saved(None),
         BookmarkReply::Failed(failure) => BookmarkSurfaceReply::Failed(failure),
-        BookmarkReply::Nodes(_) => BookmarkSurfaceReply::Failed(BookmarkFailure::Unavailable),
+        BookmarkReply::Nodes(_) | BookmarkReply::Imported(_) => {
+            BookmarkSurfaceReply::Failed(BookmarkFailure::Unavailable)
+        }
     };
     // Ids were validated at admission; a parse that fails here is a bug, and
     // reads as a missing bookmark rather than the top level.
@@ -720,6 +762,22 @@ fn run_with(
                 token,
                 profile,
                 reply: bookmark_work(&*store, profile, work),
+            },
+            Request::Import {
+                token,
+                profile,
+                work,
+            } => StoreReadResult::Imported {
+                token,
+                added: match work {
+                    ImportWork::Bookmarks { folder, nodes } => {
+                        match store.bookmarks(profile, BookmarkRequest::Import { folder, nodes }) {
+                            BookmarkReply::Imported(added) => Some(added),
+                            _ => None,
+                        }
+                    }
+                    ImportWork::History(visits) => store.import_history(profile, visits),
+                },
             },
             Request::Favicon {
                 generation,

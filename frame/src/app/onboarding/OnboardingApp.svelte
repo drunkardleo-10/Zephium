@@ -8,6 +8,7 @@
   import { operations } from "$domain/operations";
   import { preferences } from "$domain/preferences";
   import { tabs } from "$domain/tabs";
+  import { browserImport, nativeImportAdapter } from "$domain/browser-import";
   import * as motion from "$session/motion.svelte";
   import { Onboarding } from "$features/onboarding";
   import WindowControls from "$shared/ui/WindowControls";
@@ -44,6 +45,9 @@
     // Bootstraps the shell behind this page, so a kept site or a name lands
     // in the session the browser opens with.
     const tabsReady = tabs.init();
+    // An embedder (a test) may have provided its own port already.
+    const ownsImport = !browserImport.available();
+    if (ownsImport) browserImport.provide(nativeImportAdapter());
 
     void (async () => {
       try {
@@ -71,6 +75,7 @@
       preferences.dispose();
       operations.dispose();
       tabs.dispose();
+      if (ownsImport) browserImport.provide(null);
     };
   });
 </script>

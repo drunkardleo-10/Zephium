@@ -70,6 +70,27 @@ pub enum BookmarkRequest {
     Remove {
         id: i64,
     },
+    /// Merges a tree from another browser into the top-level folder named
+    /// `folder`: subfolders are matched by title, and an address already in
+    /// the folder it would land in is skipped, so importing again adds only
+    /// what is new.
+    Import {
+        folder: String,
+        nodes: Vec<ImportNode>,
+    },
+}
+
+/// A bookmark as another browser kept it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImportNode {
+    Folder {
+        title: String,
+        children: Vec<ImportNode>,
+    },
+    Link {
+        title: String,
+        url: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +98,8 @@ pub enum BookmarkReply {
     Nodes(Vec<BookmarkNode>),
     /// The bookmark added, or the existing one an `if_absent` add found.
     Added(i64),
+    /// Links an import added; folders are not counted.
+    Imported(u32),
     Done,
     Failed(BookmarkFailure),
 }

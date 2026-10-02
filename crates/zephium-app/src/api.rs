@@ -216,6 +216,12 @@ pub enum Command {
         call: Box<zephium_ipc::BookmarkCall>,
         done: BookmarkCompletion,
     },
+    /// Writes what was read from another browser into the focused profile,
+    /// restoring the session first when it has not been yet (onboarding).
+    Import {
+        work: Box<crate::store_reads::ImportWork>,
+        done: ImportCompletion,
+    },
     /// Hands the shell its notes service, once, after startup.
     AttachNotes(NotesAttachment),
     NoteCall {
@@ -681,6 +687,28 @@ impl BookmarkCompletion {
         if let Some(done) = done {
             done(response);
         }
+    }
+}
+#[derive(Clone)]
+pub struct ImportCompletion(Completion<Option<u32>>);
+impl ImportCompletion {
+    pub fn new(done: impl FnOnce(Option<u32>) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, added: Option<u32>) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(added);
+        }
+    }
+}
+impl fmt::Debug for ImportCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ImportCompletion")
     }
 }
 impl fmt::Debug for BookmarkCompletion {

@@ -4,8 +4,8 @@
 
 use super::*;
 
-use crate::api::BookmarkCompletion;
-use crate::store_reads::{BookmarkSurfaceReply, BookmarkWork};
+use crate::api::{BookmarkCompletion, ImportCompletion};
+use crate::store_reads::{BookmarkSurfaceReply, BookmarkWork, ImportWork};
 use zephium_core::bookmarks::{BookmarkFailure, BookmarkNode};
 use zephium_ipc::{
     BookmarkCall, BookmarkCrumb, BookmarkError, BookmarkResponse, BookmarkView, IconSurface,
@@ -23,6 +23,7 @@ enum Pending {
 #[derive(Default)]
 pub(super) struct BookmarkState {
     pending: std::collections::HashMap<u64, Pending>,
+    imports: std::collections::HashMap<u64, ImportCompletion>,
     next_token: u64,
 }
 
@@ -207,9 +208,48 @@ impl Shell {
             .collect()
     }
 
+    pub(super) fn import_into_focused(&mut self, work: ImportWork, done: ImportCompletion) {
+        if !self.bootstrapped {
+            self.bootstrap();
+        }
+        let Some(profile) = self
+            .windows
+            .focused()
+            .map(|window| window.profile)
+            .filter(|profile| self.bookmarks_writable(*profile))
+        else {
+            done.finish(None);
+            return;
+        };
+        if self.bookmarks.imports.len() >= MAX_PENDING_BOOKMARK_CALLS {
+            done.finish(None);
+            return;
+        }
+        let Some(reads) = &self.store_reads else {
+            done.finish(None);
+            return;
+        };
+        self.bookmarks.next_token = self.bookmarks.next_token.wrapping_add(1);
+        let token = self.bookmarks.next_token;
+        if reads.request_import(token, profile, work) {
+            self.bookmarks.imports.insert(token, done);
+        } else {
+            done.finish(None);
+        }
+    }
+
+    pub(super) fn on_import_read(&mut self, token: u64, added: Option<u32>) {
+        if let Some(done) = self.bookmarks.imports.remove(&token) {
+            done.finish(added);
+        }
+    }
+
     /// Every completion is answered, including when the shell is shutting down
     /// and the read queue will never deliver.
     pub(super) fn fail_pending_bookmark_calls(&mut self) {
+        for (_, done) in std::mem::take(&mut self.bookmarks.imports) {
+            done.finish(None);
+        }
         for (_, pending) in std::mem::take(&mut self.bookmarks.pending) {
             if let Pending::Surface(done) = pending {
                 done.finish(BookmarkResponse::Error {

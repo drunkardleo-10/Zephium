@@ -7374,6 +7374,7 @@ dependencies = [
  "zephium-blocker-service",
  "zephium-core",
  "zephium-engine",
+ "zephium-import",
  "zephium-ipc",
  "zephium-notes",
  "zephium-store",
@@ -7420,6 +7421,17 @@ dependencies = [
  "zephium-webext",
  "zephium-webext-macos",
  "zeroize",
+]
+
+[[package]]
+name = "zephium-import"
+version = "0.1.0"
+dependencies = [
+ "plist",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "zephium-core",
 ]
 
 [[package]]

@@ -19,6 +19,18 @@ pub struct HistoryHit {
     pub last_visit: i64,
 }
 
+/// A visit from another browser's history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedVisit {
+    pub url: String,
+    pub title: String,
+    /// Unix seconds.
+    pub visited_at: i64,
+}
+
+/// Visits one import may carry; the history budget prunes the oldest after.
+pub const MAX_IMPORTED_VISITS: usize = 50_000;
+
 /// One recorded visit. Unlike `HistoryHit` these are not deduplicated by
 /// address: a history list shows every time a page was opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -468,6 +480,13 @@ pub trait Store {
     ) -> Vec<HistoryVisit>;
     /// Removes every visit to each address; returns how many rows went.
     fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32;
+    /// Visits from another browser, kept with their own times. A visit
+    /// already present at the same time is skipped, so importing again adds
+    /// only what is new. Returns how many were added, or None when the
+    /// profile cannot take them.
+    fn import_history(&self, _profile: ProfileId, _visits: Vec<ImportedVisit>) -> Option<u32> {
+        None
+    }
     /// One bookmark read or write. Blocking; callers run it off the shell.
     fn bookmarks(
         &self,

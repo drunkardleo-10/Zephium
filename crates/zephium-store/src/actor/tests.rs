@@ -4053,3 +4053,38 @@ fn blocker_statistics_roundtrip_and_clear_with_browsing_data() {
         .save_blocker_statistics(ProfileId::from(999), &statistics)
         .is_err());
 }
+
+#[test]
+fn imported_history_keeps_its_times_and_is_not_added_twice() {
+    use zephium_core::ports::store::ImportedVisit;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let visits = vec![
+        ImportedVisit {
+            url: "https://kept.example/".into(),
+            title: "Kept".into(),
+            visited_at: 1_700_000_000,
+        },
+        ImportedVisit {
+            url: "https://kept.example/".into(),
+            title: "Kept".into(),
+            visited_at: 1_700_000_500,
+        },
+        ImportedVisit {
+            url: "chrome://settings".into(),
+            title: "Settings".into(),
+            visited_at: 1_700_000_000,
+        },
+    ];
+    assert_eq!(hub.import_history(profile, &visits), Some(2));
+    assert_eq!(hub.import_history(profile, &visits), Some(0));
+    let page = hub.history_page(profile, "kept", None, None, 10);
+    assert_eq!(
+        page.iter()
+            .map(|visit| visit.visited_at)
+            .collect::<Vec<_>>(),
+        vec![1_700_000_500, 1_700_000_000]
+    );
+    assert_eq!(hub.import_history(ProfileId::from(99), &visits), None);
+}

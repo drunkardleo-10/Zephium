@@ -24,6 +24,7 @@
   import * as tools from "$session/tools.svelte";
   import { preferences } from "$domain/preferences";
   import { keymap } from "$domain/keymap";
+  import { browserImport, nativeImportAdapter } from "$domain/browser-import";
   import { acceleratorFrom } from "$shared/lib/accelerator";
   import Shell from "./Shell.svelte";
 
@@ -97,6 +98,9 @@
     const sidebarReady = sidebar.init();
     const uiEventsReady = ui.init();
     void keymap.init();
+    // An embedder (a test) may have provided its own port already.
+    const ownsImport = !browserImport.available();
+    if (ownsImport) browserImport.provide(nativeImportAdapter());
     void operations.init();
     void blocker.init();
     if (!IS_MAC) void layout.init();
@@ -152,6 +156,7 @@
       tabs.dispose();
       ui.dispose();
       keymap.dispose();
+      if (ownsImport) browserImport.provide(null);
       if (!IS_MAC) layout.dispose();
       document.removeEventListener("keydown", handleKeydown);
     };

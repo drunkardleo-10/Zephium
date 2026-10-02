@@ -333,6 +333,15 @@ export const commands = {
 } | null>("default_browser_request"),
 	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
 	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
+	importSources: () => __TAURI_INVOKE<ImportSourceView[]>("import_sources"),
+	/**
+	 *  Starts importing `kinds` from one profile of one source into the focused
+	 *  profile. Refused while another import runs.
+	 */
+	importStart: (source: string, profile: string, kinds: ImportKindView[]) => __TAURI_INVOKE<boolean>("import_start", { source, profile, kinds }),
+	importCancel: () => __TAURI_INVOKE<boolean>("import_cancel"),
+	/**  Opens the system setting a source needs (Safari: Full Disk Access). */
+	importOpenPermission: (source: string) => __TAURI_INVOKE<boolean>("import_open_permission", { source }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -363,6 +372,7 @@ export const events = {
 	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
+	zephiumImportProgress: makeEvent<ImportJobView>("zephium:import-progress"),
 	zephiumKeymapChanged: makeEvent<KeymapChanged>("zephium:keymap-changed"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
 	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
@@ -892,6 +902,48 @@ export type IconRef = {
  *  cache, so delivery is tracked per surface rather than broadcast.
  */
 export type IconSurface = "chrome" | "panel";
+
+/**  The running import, whole, each time it moves. */
+export type ImportJobView = {
+	source: string,
+	profile: string,
+	kinds: ImportKindProgressView[],
+	finished: boolean,
+	cancelled: boolean,
+};
+
+export type ImportKindProgressView = {
+	kind: ImportKindView,
+	state: ImportStateView,
+	done: number,
+	total: number | null,
+	problem: ImportProblemView | null,
+};
+
+export type ImportKindView = "bookmarks" | "history";
+
+/**  Why a kind failed, when chrome can say something useful about it. */
+export type ImportProblemView = 
+/**  The browser holds its files locked; quitting it lets the import run. */
+"busy" | "permission" | "unreadable" | "missing" | 
+/**  Zephium could not keep what was read. */
+"storage";
+
+export type ImportProfileView = {
+	id: string,
+	name: string,
+};
+
+export type ImportSourceView = {
+	id: string,
+	browser: string,
+	name: string,
+	profiles: ImportProfileView[],
+	kinds: ImportKindView[],
+	needs_permission: boolean,
+};
+
+export type ImportStateView = "queued" | "running" | "done" | "failed" | "skipped";
 
 export type ItemId = string;
 

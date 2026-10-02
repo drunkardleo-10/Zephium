@@ -81,7 +81,7 @@ pub mod work_context;
 pub use shell::{Shell, WebExtensionStatus, WebExtensionTarget};
 
 #[doc(hidden)]
-pub use store_reads::StoreReadResult;
+pub use store_reads::{ImportWork, StoreReadResult};
 
 mod work_authoring;
 mod work_authoring_intent;
@@ -121,6 +121,6 @@ mod work_synthesis;
 #[cfg(any(feature = "work-execution", feature = "work-runtime"))]
 pub mod work_trace;
 pub use api::{
-    BookmarkCompletion, FaviconProber, FaviconProberAttachment, HistoryCompletion, NoteCompletion,
-    NotesAttachment, ResourceCompletion,
+    BookmarkCompletion, FaviconProber, FaviconProberAttachment, HistoryCompletion,
+    ImportCompletion, NoteCompletion, NotesAttachment, ResourceCompletion,
 };

@@ -7,6 +7,7 @@
   import PreviewToggle from "../PreviewToggle.svelte";
   import PreviewAction from "../PreviewAction.svelte";
   import CollectionEditor from "../CollectionEditor.svelte";
+  import ImportBrowserData from "../ImportBrowserData.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import Checkbox from "$shared/ui/Checkbox";
   import Select from "$shared/ui/Select";
@@ -62,20 +63,7 @@
     kind="url"
   />{/if}
 <SettingsGroup title={m.general_data_group()}>
-  <PreviewAction id="general.import" actionLabel={m.general_import_button()}
-    ><Select
-      label={m.preview_import_source()}
-      value={preview.get("import.source", "Safari")}
-      options={["Safari", "Chrome", "Edge", "Firefox", "Arc", "Zen", "Bookmarks HTML"].map(
-        (value) => ({ value, label: value }),
-      )}
-      onchange={(value) => preview.set("import.source", value)}
-    />{#each [{ key: "bookmarks", label: m.preview_bookmarks }, { key: "history", label: m.preview_history }, { key: "passwords", label: m.preview_passwords }] as item (item.key)}<Checkbox
-        label={item.label()}
-        checked={preview.get(`import.${item.key}`, true)}
-        onchange={(value) => preview.set(`import.${item.key}`, value)}
-      />{/each}</PreviewAction
-  >
+  <ImportBrowserData />
   <PreviewAction id="general.export" actionLabel={m.general_export_button()}
     ><Select
       label={m.preview_export_format()}

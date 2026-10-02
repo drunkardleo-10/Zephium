@@ -5,8 +5,8 @@
 use super::*;
 
 use zephium_core::bookmarks::{
-    clean_title, BookmarkFailure, BookmarkNode, BookmarkReply, BookmarkRequest, MAX_BOOKMARKS,
-    MAX_DEPTH, MAX_LISTING, MAX_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    clean_title, BookmarkFailure, BookmarkNode, BookmarkReply, BookmarkRequest, ImportNode,
+    MAX_BOOKMARKS, MAX_DEPTH, MAX_LISTING, MAX_QUERY_BYTES, MAX_SEARCH_RESULTS,
 };
 
 const NODE_COLUMNS: &str = "b.id, b.parent_id, b.url, b.title,
@@ -180,6 +180,30 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
             }
             Ok(moved.map(|()| BookmarkReply::Done))
         }
+        BookmarkRequest::Import { folder, nodes } => {
+            let title = clean_title(&folder);
+            if title.is_empty() {
+                return Ok(Err(Refused(BookmarkFailure::Invalid)));
+            }
+            let tx = conn.transaction()?;
+            let count: i64 =
+                tx.query_row("SELECT count(*) FROM bookmarks", [], |row| row.get(0))?;
+            let mut import = Import {
+                tx: &tx,
+                budget: u32::try_from(i64::from(MAX_BOOKMARKS) - count).unwrap_or(0),
+                added: 0,
+                now: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs() as i64),
+            };
+            let Some(root) = import.folder(None, &title)? else {
+                return Ok(Err(Refused(BookmarkFailure::Full)));
+            };
+            import.merge(root, 1, &nodes)?;
+            let added = import.added;
+            tx.commit()?;
+            Ok(Ok(BookmarkReply::Imported(added)))
+        }
         BookmarkRequest::Remove { id } => {
             // Folder contents go with it through ON DELETE CASCADE.
             let removed = conn.execute("DELETE FROM bookmarks WHERE id = ?1", [id])?;
@@ -189,6 +213,101 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
                 Ok(BookmarkReply::Done)
             })
         }
+    }
+}
+
+/// Merges an imported tree in one transaction, counting against what the
+/// profile may still hold. Depth is tracked as it descends, so each row costs
+/// one insert rather than a walk of its ancestors.
+struct Import<'a> {
+    tx: &'a rusqlite::Transaction<'a>,
+    budget: u32,
+    added: u32,
+    now: i64,
+}
+
+impl Import<'_> {
+    /// The folder titled `title` directly under `parent`, created when absent.
+    /// None once the profile is full.
+    fn folder(&mut self, parent: Option<i64>, title: &str) -> rusqlite::Result<Option<i64>> {
+        let existing = self
+            .tx
+            .prepare_cached(
+                "SELECT id FROM bookmarks WHERE parent_id IS ?1 AND url IS NULL AND title = ?2
+                 ORDER BY position, id LIMIT 1",
+            )?
+            .query_row(params![parent, title], |row| row.get::<_, i64>(0))
+            .optional()?;
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        self.insert(parent, title, None)
+    }
+
+    fn insert(
+        &mut self,
+        parent: Option<i64>,
+        title: &str,
+        url: Option<&str>,
+    ) -> rusqlite::Result<Option<i64>> {
+        if self.budget == 0 {
+            return Ok(None);
+        }
+        self.tx
+            .prepare_cached(
+                "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 VALUES (?1,
+                         (SELECT coalesce(max(position) + 1, 0) FROM bookmarks WHERE parent_id IS ?1),
+                         ?2, ?3, ?4)",
+            )?
+            .execute(params![parent, title, url, self.now])?;
+        self.budget -= 1;
+        Ok(Some(self.tx.last_insert_rowid()))
+    }
+
+    /// `depth` is the level of `parent`, the top level being one. Folders that
+    /// would nest past the limit are opened into the deepest allowed one.
+    fn merge(&mut self, parent: i64, depth: usize, nodes: &[ImportNode]) -> rusqlite::Result<()> {
+        let mut kept: HashSet<String> = self
+            .tx
+            .prepare_cached("SELECT url FROM bookmarks WHERE parent_id = ?1 AND url IS NOT NULL")?
+            .query_map([parent], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for node in nodes {
+            if self.budget == 0 {
+                break;
+            }
+            match node {
+                ImportNode::Link { title, url } => {
+                    if !navigation::is_allowed_str(url) || kept.contains(url) {
+                        continue;
+                    }
+                    let title = match clean_title(title) {
+                        empty if empty.is_empty() => clean_title(url),
+                        title => title,
+                    };
+                    if self.insert(Some(parent), &title, Some(url))?.is_some() {
+                        self.added += 1;
+                        kept.insert(url.clone());
+                    }
+                }
+                ImportNode::Folder { title, children } => {
+                    // The folder sits a level down and its contents one more.
+                    if depth + 2 > MAX_DEPTH {
+                        self.merge(parent, depth, children)?;
+                        continue;
+                    }
+                    let title = match clean_title(title) {
+                        empty if empty.is_empty() => "Folder".to_owned(),
+                        title => title,
+                    };
+                    if let Some(folder) = self.folder(Some(parent), &title)? {
+                        self.merge(folder, depth + 1, children)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -558,6 +677,112 @@ mod tests {
             ),
             BookmarkReply::Done
         );
+    }
+
+    #[test]
+    fn importing_again_adds_only_what_is_new_and_keeps_the_tree() {
+        let (mut hub, profile) = hub();
+        let tree = |extra: bool| {
+            let mut docs = vec![ImportNode::Link {
+                title: "Std".into(),
+                url: "https://doc.rust-lang.org/std/".into(),
+            }];
+            if extra {
+                docs.push(ImportNode::Link {
+                    title: "Book".into(),
+                    url: "https://doc.rust-lang.org/book/".into(),
+                });
+            }
+            vec![
+                ImportNode::Link {
+                    title: "".into(),
+                    url: "https://news.example/".into(),
+                },
+                ImportNode::Link {
+                    title: "Bookmarklet".into(),
+                    url: "javascript:void(0)".into(),
+                },
+                ImportNode::Folder {
+                    title: "Docs".into(),
+                    children: docs,
+                },
+            ]
+        };
+        let import = |hub: &mut Hub, extra| {
+            hub.bookmarks(
+                profile,
+                BookmarkRequest::Import {
+                    folder: "From Chrome".into(),
+                    nodes: tree(extra),
+                },
+            )
+        };
+        assert_eq!(import(&mut hub, false), BookmarkReply::Imported(2));
+        assert_eq!(import(&mut hub, true), BookmarkReply::Imported(1));
+        let BookmarkReply::Nodes(top) =
+            hub.bookmarks(profile, BookmarkRequest::Children { parent: None })
+        else {
+            panic!("top level");
+        };
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].title, "From Chrome");
+        assert_eq!(
+            titles(hub.bookmarks(
+                profile,
+                BookmarkRequest::Children {
+                    parent: Some(top[0].id)
+                }
+            )),
+            vec!["https://news.example/", "Docs"]
+        );
+        assert_eq!(
+            titles(hub.bookmarks(
+                profile,
+                BookmarkRequest::Search {
+                    query: "rust-lang".into()
+                }
+            )),
+            vec!["Book", "Std"]
+        );
+    }
+
+    #[test]
+    fn an_import_nested_past_the_limit_opens_into_the_deepest_folder() {
+        let (mut hub, profile) = hub();
+        let mut node = ImportNode::Link {
+            title: "Deep".into(),
+            url: "https://deep.example/".into(),
+        };
+        for level in 0..(MAX_DEPTH + 4) {
+            node = ImportNode::Folder {
+                title: format!("Level {level}"),
+                children: vec![node],
+            };
+        }
+        assert_eq!(
+            hub.bookmarks(
+                profile,
+                BookmarkRequest::Import {
+                    folder: "Imported".into(),
+                    nodes: vec![node],
+                },
+            ),
+            BookmarkReply::Imported(1)
+        );
+        let BookmarkReply::Nodes(found) = hub.bookmarks(
+            profile,
+            BookmarkRequest::Search {
+                query: "deep.example".into(),
+            },
+        ) else {
+            panic!("search");
+        };
+        let BookmarkReply::Nodes(path) =
+            hub.bookmarks(profile, BookmarkRequest::Path { id: found[0].id })
+        else {
+            panic!("path");
+        };
+        assert_eq!(path.len(), MAX_DEPTH);
     }
 
     #[test]

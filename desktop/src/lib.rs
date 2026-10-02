@@ -67,6 +67,7 @@ pub use work::{
 
 mod blocker_service;
 mod browser_credentials;
+mod browser_import;
 mod default_browser;
 mod external_links;
 #[cfg(feature = "work-product")]
@@ -1578,6 +1579,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             default_browser::default_browser_status,
             default_browser::default_browser_request,
             bookmark_call,
+            browser_import::import_sources,
+            browser_import::import_start,
+            browser_import::import_cancel,
+            browser_import::import_open_permission,
             resource_close_ready,
             tab_drop,
             divider_grab,
@@ -1586,6 +1591,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         ])
         .events(collect_events![
             keymap::KeymapChanged,
+            browser_import::ImportJobView,
             WorkEnvironmentChanged,
             WorkChanged,
             WorkHumanChanged,
@@ -5119,6 +5125,7 @@ pub fn run() {
             app.manage(TabMenuTarget::default());
 
             app.manage(keymap::Keymap::load());
+            app.manage(browser_import::ImportJobs::default());
             let keymap = keymap_overrides(&handle);
             // Windows and Linux get the same menu as a popup from the sidebar
             // "more" button instead of a persistent bar.

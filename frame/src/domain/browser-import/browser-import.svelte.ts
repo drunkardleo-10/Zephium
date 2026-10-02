@@ -8,7 +8,7 @@ export type ImportKind = "bookmarks" | "history";
 
 type ImportProfile = { id: string; name: string };
 
-type ImportSource = {
+export type ImportSource = {
   /** Stable for the life of the process; passed back to `start`. */
   id: string;
   /** The browser's family, which picks its mark: chrome, arc, safari... */
@@ -26,12 +26,16 @@ type ImportSource = {
 
 type KindState = "queued" | "running" | "done" | "failed" | "skipped";
 
+/** Why a kind failed, when there is something the person can do about it. */
+export type ImportProblem = "busy" | "permission" | "unreadable" | "missing" | "storage";
+
 type KindProgress = {
   kind: ImportKind;
   state: KindState;
   done: number;
   /** Unknown until the source has been counted. */
   total: number | null;
+  problem?: ImportProblem | null;
 };
 
 export type ImportJob = {

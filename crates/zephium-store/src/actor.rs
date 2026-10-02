@@ -59,6 +59,7 @@ const MAX_PENDING_VISITS: usize = 2048;
 const MAX_PENDING_SETTINGS: usize = hub::MAX_APP_SETTINGS as usize;
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(8);
 const STORE_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const IMPORT_RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PENDING_USERSCRIPT_MUTATIONS: usize = 4;
 const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
@@ -361,6 +362,11 @@ enum Cmd {
         reply: Sender<Vec<HistoryVisit>>,
     },
     ForgetHistoryUrls(ProfileId, Vec<String>, Sender<u32>),
+    ImportHistory(
+        ProfileId,
+        Vec<zephium_core::ports::store::ImportedVisit>,
+        Sender<Option<u32>>,
+    ),
     Bookmarks(
         ProfileId,
         zephium_core::bookmarks::BookmarkRequest,
@@ -1182,12 +1188,31 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn import_history(
+        &self,
+        profile: ProfileId,
+        visits: Vec<zephium_core::ports::store::ImportedVisit>,
+    ) -> Option<u32> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .try_send(Cmd::ImportHistory(profile, visits, tx))
+            .ok()?;
+        // An import writes many rows in one transaction; give it longer than
+        // an interactive read.
+        rx.recv_timeout(IMPORT_RPC_TIMEOUT).ok().flatten()
+    }
+
     fn bookmarks(
         &self,
         profile: ProfileId,
         request: zephium_core::bookmarks::BookmarkRequest,
     ) -> zephium_core::bookmarks::BookmarkReply {
-        use zephium_core::bookmarks::{BookmarkFailure, BookmarkReply};
+        use zephium_core::bookmarks::{BookmarkFailure, BookmarkReply, BookmarkRequest};
+        let timeout = if matches!(request, BookmarkRequest::Import { .. }) {
+            IMPORT_RPC_TIMEOUT
+        } else {
+            STORE_RPC_TIMEOUT
+        };
         let (tx, rx) = mpsc::channel();
         if self
             .tx
@@ -1196,7 +1221,7 @@ impl Store for SqliteStore {
         {
             return BookmarkReply::Failed(BookmarkFailure::Unavailable);
         }
-        rx.recv_timeout(STORE_RPC_TIMEOUT)
+        rx.recv_timeout(timeout)
             .unwrap_or(BookmarkReply::Failed(BookmarkFailure::Unavailable))
     }
 
@@ -1645,6 +1670,9 @@ fn actor(
             }
             Some(Cmd::ForgetHistoryUrls(profile, urls, reply)) => {
                 let _ = reply.send(hub.forget_history_urls(profile, &urls));
+            }
+            Some(Cmd::ImportHistory(profile, visits, reply)) => {
+                let _ = reply.send(hub.import_history(profile, &visits));
             }
             Some(Cmd::Bookmarks(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks(profile, request));

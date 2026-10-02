@@ -2466,7 +2466,8 @@ pub static PROFILE: &[Migration] = &[
         version: 33,
         up: |tx| {
             // Bookmarks, apart from the sidebar's live tabs. Bounds mirror
-            // zephium_core::bookmarks; depth is checked by every write.
+            // zephium_core::bookmarks. Count and depth are enforced by the
+            // writes: a counting trigger would make an import quadratic.
             tx.execute_batch(
                 "CREATE TABLE bookmarks (
                      id INTEGER PRIMARY KEY,
@@ -2477,10 +2478,7 @@ pub static PROFILE: &[Migration] = &[
                      added_at INTEGER NOT NULL
                  ) STRICT;
                  CREATE INDEX idx_bookmarks_parent ON bookmarks(parent_id, position);
-                 CREATE INDEX idx_bookmarks_url ON bookmarks(url) WHERE url IS NOT NULL;
-                 CREATE TRIGGER bookmarks_capacity BEFORE INSERT ON bookmarks
-                 WHEN (SELECT count(*) FROM bookmarks) >= 50000
-                 BEGIN SELECT RAISE(ABORT, 'bookmark capacity'); END;",
+                 CREATE INDEX idx_bookmarks_url ON bookmarks(url) WHERE url IS NOT NULL;",
             )
         },
     },
@@ -2569,7 +2567,7 @@ mod tests {
         (30, 0x6f827893a13c3ccb),
         (31, 0x55b58f4944aa33b6),
         (32, 0x6323d1c7efd84e2c),
-        (33, 0x1752b8af32a8a0c1),
+        (33, 0x101002bc7ceb482a),
     ];
 
     #[test]

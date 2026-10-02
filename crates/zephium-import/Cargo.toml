@@ -1,0 +1,15 @@
+[package]
+name = "zephium-import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zephium-core.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+plist = { version = "1.10", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
