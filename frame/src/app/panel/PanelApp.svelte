@@ -12,6 +12,7 @@
   import { loadLauncherPanel } from "$features/search";
   import { loadCapture } from "$features/tasks";
   import * as m from "$shared/i18n/messages";
+  import { applyLanguage } from "$shared/lib/locale.svelte";
 
   let presentation = $state<PanelState | null>(null);
   let Launcher = $state<Awaited<ReturnType<typeof loadLauncherPanel>>["default"] | null>(null);
@@ -36,8 +37,13 @@
     let stop: (() => void) | undefined;
     let stopMotion: (() => void) | undefined;
     let liveMotion = false;
+    let liveLanguage = false;
     const motionListener = events.uiCommand.listen(({ payload }) => {
       if (disposed) return;
+      if (payload.startsWith("preference.ui.language=")) {
+        liveLanguage = true;
+        applyLanguage(payload.slice("preference.ui.language=".length));
+      }
       if (
         payload === "preference.ui.reduce-motion=true" ||
         payload === "preference.ui.reduce-motion=false"
@@ -61,9 +67,13 @@
         const [launcher] = await Promise.all([loadLauncherPanel(), theme.init(), faviconsReady]);
         if (disposed) return;
         Launcher = launcher.default;
-        const motion = await commands.settingGet("ui.reduce-motion").catch(() => null);
+        const [motion, language] = await Promise.all([
+          commands.settingGet("ui.reduce-motion").catch(() => null),
+          commands.settingGet("ui.language").catch(() => null),
+        ]);
         if (disposed) return;
         if (!liveMotion) theme.setReducedMotion(motion === "true");
+        if (!liveLanguage) applyLanguage(language);
         void document.documentElement.getBoundingClientRect();
         const initial = await commands.panelReady();
         if (!disposed) {

@@ -622,7 +622,7 @@
   "general_export_button": "Export…",
   "general_data_group": "Bring your browser with you",
   "language_interface_title": "Interface language",
-  "language_interface_help": "Choose a language for the interface. This preview stays in English.",
+  "language_interface_help": "The language Zephium's menus and settings use.",
   "language_preview_notice": "Selected for preview. The interface is still displayed in English.",
   "language_preferred_title": "Preferred website languages",
   "language_preferred_help": "Websites can use this order to choose the language they show.",
@@ -2537,5 +2537,7 @@
   "find_done": "Done",
   "command_find_show": "Find on page",
   "command_find_next": "Find next",
-  "command_find_previous": "Find previous"
+  "command_find_previous": "Find previous",
+  "language_system": "Match the system",
+  "language_websites_note": "Websites see the languages your system prefers."
 }

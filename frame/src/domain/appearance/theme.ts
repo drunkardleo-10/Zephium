@@ -20,7 +20,7 @@ export function setReducedMotion(reduceMotion: boolean) {
   document.documentElement.setAttribute("data-reduce-motion", String(reduceMotion));
 }
 
-export function applyPreview(axes: {
+export function applyLayout(axes: {
   density: "compact" | "comfortable";
   contrast: boolean;
   text: "large" | "small" | "default";

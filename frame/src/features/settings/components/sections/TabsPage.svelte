@@ -2,23 +2,16 @@
   import * as m from "$shared/i18n/messages";
   import PreviewNotice from "../PreviewNotice.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
-  import PreviewToggle from "../PreviewToggle.svelte";
   import PreviewSelect from "../PreviewSelect.svelte";
-  import PreviewSlider from "../PreviewSlider.svelte";
+  import PreferenceSelect from "../PreferenceSelect.svelte";
+  import PreferenceSwitch from "../PreferenceSwitch.svelte";
 </script>
 
-<PreviewNotice />
 <SettingsGroup title={m.section_tabs()}
-  ><PreviewSelect id="tabs.new-position" /><PreviewSelect id="tabs.close" /><PreviewToggle
-    id="tabs.duplicates"
-  /></SettingsGroup
+  ><PreferenceSelect id="tabs.new-position" preference="tabs.new-position" /><PreferenceSelect
+    id="tabs.close"
+    preference="tabs.after-close"
+  /><PreferenceSwitch id="tabs.duplicates" preference="tabs.switch-to-open" /></SettingsGroup
 >
-<SettingsGroup title={m.settings_spaces()}
-  ><PreviewToggle id="tabs.folders" /><PreviewToggle id="tabs.pins" /><PreviewSelect
-    id="tabs.archive"
-  /><PreviewSlider
-    id="tabs.sleep"
-    label={m.pref_tabs_sleep_short()}
-    format={(value) => `${value} min`}
-  /><PreviewToggle id="tabs.splits" /></SettingsGroup
->
+<PreviewNotice />
+<SettingsGroup title={m.settings_spaces()}><PreviewSelect id="tabs.archive" /></SettingsGroup>

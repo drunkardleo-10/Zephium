@@ -1210,3 +1210,86 @@ fn find_follows_the_page_in_front_and_answers_only_for_it() {
         }]
     );
 }
+
+#[test]
+fn tab_preferences_place_new_tabs_and_choose_who_follows_a_close() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-position".into(), "after-current".into());
+    let (mut shell, _engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Run("tab.new".into()));
+    let end = active_id(&screen);
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::Run("tab.new".into()));
+    let middle = active_id(&screen);
+    let order = |screen: &Screen| {
+        last(screen)
+            .nodes
+            .iter()
+            .filter(|node| node.section == SidebarSectionView::Today && node.parent_id.is_none())
+            .filter_map(|node| ItemId::parse(&node.id))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&screen), vec![first, middle, end]);
+
+    // Previous: closing the middle tab lands on the one above it.
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.after-close".into(),
+        value: "previous".into(),
+    });
+    shell.handle(Command::Close(middle));
+    assert_eq!(active_id(&screen), first);
+
+    // Recent: closing goes back to the tab used before, wherever it is.
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.after-close".into(),
+        value: "recent".into(),
+    });
+    shell.handle(Command::Activate(end));
+    shell.handle(Command::Run("tab.new".into()));
+    let newest = active_id(&screen);
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::Activate(newest));
+    shell.handle(Command::Close(newest));
+    assert_eq!(active_id(&screen), first);
+}
+
+#[test]
+fn opening_an_address_already_open_goes_to_its_tab_unless_turned_off() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: first,
+        input: "https://docs.example/".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: first,
+        url: "https://docs.example/".into(),
+    }));
+    shell.handle(Command::Run("tab.new".into()));
+    let blank = active_id(&screen);
+
+    shell.handle(Command::OpenUrl {
+        input: "https://docs.example/".into(),
+        new_tab: true,
+    });
+    assert_eq!(active_id(&screen), first);
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.switch-to-open".into(),
+        value: "false".into(),
+    });
+    shell.handle(Command::OpenUrl {
+        input: "https://docs.example/".into(),
+        new_tab: true,
+    });
+    let opened = active_id(&screen);
+    assert_ne!(opened, first);
+    assert_ne!(opened, blank);
+}

@@ -180,6 +180,11 @@ impl Shell {
         let Some(active) = self.windows.focused().map(|window| window.active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
+        if new_tab && self.tab_preferences.switch_to_open {
+            if let Some(open) = self.open_tab_for(&input) {
+                return self.operation_activate(open);
+            }
+        }
         if let Some(id) = active.filter(|_| !new_tab) {
             // Navigating in place also returns from a browser page, which is
             // what opening a row from the history library should do.
@@ -630,6 +635,10 @@ impl Shell {
             self.search.engine =
                 zephium_core::search::SearchEngine::from_id(&value).unwrap_or_default();
         }
+        if key == "search.history" {
+            self.search.include_history = value == "true";
+        }
+        self.tab_preferences.apply(&key, &value);
         // This projection is downstream of truthful store-queue admission.
         // The desktop composition root applies native theme state from this
         // signal, never optimistically from the IPC request itself.

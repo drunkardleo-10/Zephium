@@ -6,12 +6,6 @@ export const fields = {
     description: m.general_startup_pages_help,
     initial: "",
   },
-  "languages.translate": {
-    section: "languages",
-    label: m.language_translate,
-    description: m.language_translate_help,
-    initial: true,
-  },
   "search.open-new": {
     section: "search",
     label: m.search_open_new,
@@ -23,12 +17,6 @@ export const fields = {
     label: m.privacy_on_exit,
     description: m.privacy_on_exit_help,
     initial: false,
-  },
-  "developer.menu": {
-    section: "developer",
-    label: m.developer_menu,
-    description: m.developer_menu_help,
-    initial: true,
   },
   "developer.confirm": {
     section: "developer",
@@ -156,12 +144,6 @@ export const fields = {
       { value: "Open specific pages", label: m.pref_general_startup_option_2 },
     ],
   },
-  "general.restore": {
-    section: "general",
-    label: m.pref_general_restore,
-    description: m.pref_general_restore_help,
-    initial: true,
-  },
   "general.import": {
     section: "general",
     label: m.pref_general_import,
@@ -178,17 +160,11 @@ export const fields = {
     section: "appearance",
     label: m.pref_appearance_density,
     description: m.pref_appearance_density_help,
-    initial: "Comfortable",
+    initial: "comfortable",
     options: [
-      { value: "Comfortable", label: m.pref_appearance_density_option_0 },
-      { value: "Compact", label: m.pref_appearance_density_option_1 },
+      { value: "comfortable", label: m.pref_appearance_density_option_0 },
+      { value: "compact", label: m.pref_appearance_density_option_1 },
     ],
-  },
-  "appearance.icons": {
-    section: "appearance",
-    label: m.pref_appearance_icons,
-    description: m.pref_appearance_icons_help,
-    initial: true,
   },
   "ntp.greeting": {
     section: "newtab",
@@ -229,33 +205,27 @@ export const fields = {
     section: "tabs",
     label: m.pref_tabs_new_position,
     description: m.pref_tabs_new_position_help,
-    initial: "After current tab",
+    initial: "end",
     options: [
-      { value: "After current tab", label: m.pref_tabs_new_position_option_0 },
-      { value: "End of list", label: m.pref_tabs_new_position_option_1 },
+      { value: "end", label: m.pref_tabs_new_position_option_1 },
+      { value: "after-current", label: m.pref_tabs_new_position_option_0 },
     ],
   },
   "tabs.close": {
     section: "tabs",
     label: m.pref_tabs_close,
     description: m.pref_tabs_close_help,
-    initial: "Previously active tab",
+    initial: "next",
     options: [
-      { value: "Previously active tab", label: m.pref_tabs_close_option_0 },
-      { value: "Next tab", label: m.pref_tabs_close_option_1 },
-      { value: "Previous tab", label: m.pref_tabs_close_option_2 },
+      { value: "next", label: m.pref_tabs_close_option_1 },
+      { value: "previous", label: m.pref_tabs_close_option_2 },
+      { value: "recent", label: m.pref_tabs_close_option_0 },
     ],
   },
   "tabs.duplicates": {
     section: "tabs",
     label: m.pref_tabs_duplicates,
     description: m.pref_tabs_duplicates_help,
-    initial: true,
-  },
-  "tabs.folders": {
-    section: "tabs",
-    label: m.pref_tabs_folders,
-    description: m.pref_tabs_folders_help,
     initial: true,
   },
   "tabs.archive": {
@@ -269,25 +239,6 @@ export const fields = {
       { value: "After 7 days", label: m.pref_tabs_archive_option_2 },
       { value: "After 30 days", label: m.pref_tabs_archive_option_3 },
     ],
-  },
-  "tabs.sleep": {
-    section: "tabs",
-    label: m.pref_tabs_sleep,
-    description: m.pref_tabs_sleep_help,
-    initial: "30",
-    range: { min: 5, max: 120, step: 5 },
-  },
-  "tabs.pins": {
-    section: "tabs",
-    label: m.pref_tabs_pins,
-    description: m.pref_tabs_pins_help,
-    initial: true,
-  },
-  "tabs.splits": {
-    section: "tabs",
-    label: m.pref_tabs_splits,
-    description: m.pref_tabs_splits_help,
-    initial: true,
   },
   "profiles.name": {
     section: "profiles",
@@ -346,22 +297,6 @@ export const fields = {
     section: "privacy",
     label: m.pref_privacy_blocking,
     description: m.pref_privacy_blocking_help,
-    initial: true,
-  },
-  "privacy.cookies": {
-    section: "privacy",
-    label: m.pref_privacy_cookies,
-    description: m.pref_privacy_cookies_help,
-    initial: "Block",
-    options: [
-      { value: "Block", label: m.pref_privacy_cookies_option_0 },
-      { value: "Allow", label: m.pref_privacy_cookies_option_1 },
-    ],
-  },
-  "privacy.https": {
-    section: "privacy",
-    label: m.pref_privacy_https,
-    description: m.pref_privacy_https_help,
     initial: true,
   },
   "privacy.camera": {
@@ -473,11 +408,11 @@ export const fields = {
     section: "shortcuts",
     label: m.pref_accessibility_text,
     description: m.pref_accessibility_text_help,
-    initial: "Default",
+    initial: "default",
     options: [
-      { value: "Small", label: m.pref_accessibility_text_option_0 },
-      { value: "Default", label: m.pref_accessibility_text_option_1 },
-      { value: "Large", label: m.pref_accessibility_text_option_2 },
+      { value: "small", label: m.pref_accessibility_text_option_0 },
+      { value: "default", label: m.pref_accessibility_text_option_1 },
+      { value: "large", label: m.pref_accessibility_text_option_2 },
     ],
   },
   "accessibility.contrast": {
@@ -490,31 +425,7 @@ export const fields = {
     section: "languages",
     label: m.pref_languages_interface,
     description: m.pref_languages_interface_help,
-    initial: "English",
-    options: [{ value: "English", label: m.pref_languages_interface_option_0 }],
-  },
-  "languages.spelling": {
-    section: "languages",
-    label: m.pref_languages_spelling,
-    description: m.pref_languages_spelling_help,
-    initial: true,
-  },
-  "languages.format": {
-    section: "languages",
-    label: m.pref_languages_format,
-    description: m.pref_languages_format_help,
-    initial: "System",
-    options: [
-      { value: "System", label: m.pref_languages_format_option_0 },
-      { value: "English (United States)", label: m.pref_languages_format_option_1 },
-      { value: "English (United Kingdom)", label: m.pref_languages_format_option_2 },
-    ],
-  },
-  "languages.preferred": {
-    section: "languages",
-    label: m.pref_languages_preferred,
-    description: m.pref_languages_preferred_help,
-    initial: "",
+    initial: "system",
   },
   "focus.track": {
     section: "focus",

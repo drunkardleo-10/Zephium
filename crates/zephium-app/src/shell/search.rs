@@ -22,6 +22,9 @@ pub(super) struct SearchState {
     pub(super) query: String,
     pub(super) custom_url: String,
     pub(super) engine: zephium_core::search::SearchEngine,
+    /// Pages visited before are offered as places to go. An explicit
+    /// history search still reads them.
+    pub(super) include_history: bool,
     pub(super) context: Option<zephium_ipc::SearchContext>,
     pub(super) results: Vec<SearchResult>,
     pub(super) pending: Option<PendingSearch>,
@@ -463,6 +466,7 @@ impl Shell {
             });
             if q.len() > MAX_ASYNC_SEARCH_QUERY_BYTES
                 || !matches!(scope, SearchScope::All | SearchScope::History)
+                || (scope == SearchScope::All && !self.search.include_history)
             {
                 return;
             }

@@ -8,9 +8,8 @@
   import SettingsRow from "$shared/ui/SettingsRow";
   import Switch from "$shared/ui/Switch";
   import Button from "$shared/ui/Button";
-  import PreviewNotice from "../PreviewNotice.svelte";
-  import PreviewToggle from "../PreviewToggle.svelte";
-  import PreviewSelect from "../PreviewSelect.svelte";
+  import PreferenceSelect from "../PreferenceSelect.svelte";
+  import PreferenceSwitch from "../PreferenceSwitch.svelte";
   import LauncherShortcut from "../LauncherShortcut.svelte";
   import ShortcutField from "../ShortcutField.svelte";
   import { commandTitle, keymapSections } from "../../lib/keymap-model";
@@ -179,9 +178,10 @@
     /></SettingsRow
   ></SettingsGroup
 >
-<PreviewNotice /><SettingsGroup title={m.settings_accessibility()}
-  ><PreviewSelect id="accessibility.text" /><PreviewToggle
+<SettingsGroup title={m.settings_accessibility()}
+  ><PreferenceSelect id="accessibility.text" preference="ui.text-size" /><PreferenceSwitch
     id="accessibility.contrast"
+    preference="ui.contrast"
   /></SettingsGroup
 >
 

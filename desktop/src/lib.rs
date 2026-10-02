@@ -1961,9 +1961,12 @@ pub(crate) fn restore_browser_chrome(
 
 fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
     emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
-    // The launcher follows appearance and motion only; anything else would
+    // The launcher follows appearance, motion and language only; anything else would
     // wake its hidden WebView for a command it ignores.
-    if id.starts_with("theme.") || id.starts_with("preference.ui.reduce-motion=") {
+    if id.starts_with("theme.")
+        || id.starts_with("preference.ui.reduce-motion=")
+        || id.starts_with("preference.ui.language=")
+    {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
     }
 }

@@ -8,6 +8,7 @@
   import Button from "$shared/ui/Button";
   import Switch from "$shared/ui/Switch";
   import { untrack } from "svelte";
+  import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let customUrl = $state(untrack(() => preferences.value("search.custom-url")));
   let editing = $state(false);
@@ -75,6 +76,7 @@
     />
   </SettingsRow>
 
+  <PreferenceSwitch id="search.history" preference="search.history" />
   <SettingsRow
     settingId="search.engines"
     title={m.search_custom()}

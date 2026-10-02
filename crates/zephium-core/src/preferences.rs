@@ -16,7 +16,19 @@ pub const KEYS: &[&str] = &[
     "onboarding",
     "ai.enabled",
     "work.enabled",
+    "ui.language",
+    "ui.density",
+    "ui.text-size",
+    "ui.contrast",
+    "search.history",
+    "tabs.new-position",
+    "tabs.after-close",
+    "tabs.switch-to-open",
 ];
+
+/// Interface languages, by the locale ids the frame's message catalog uses.
+/// A translation lands by adding its locale here and to `project.inlang`.
+pub const LANGUAGES: &[&str] = &["system", "en"];
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
@@ -27,11 +39,25 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "ui.accent" => matches!(value, "graphite" | "sky" | "sage" | "rose"),
         "ui.newtab-clock-format" => matches!(value, "system" | "12h" | "24h"),
         "ui.tab-layout" => matches!(value, "vertical" | "horizontal"),
+        "ui.language" => LANGUAGES.contains(&value),
+        "ui.density" => matches!(value, "comfortable" | "compact"),
+        "ui.text-size" => matches!(value, "small" | "default" | "large"),
+        "tabs.new-position" => matches!(value, "end" | "after-current"),
+        "tabs.after-close" => matches!(value, "next" | "previous" | "recent"),
         // Native writes `pending` on a fresh install; chrome only ever
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
-        "search.suggestions" | "ui.reduce-motion" | "ui.newtab-greeting" | "ui.newtab-name"
-        | "ui.newtab-clock" | "ui.newtab-tasks" | "ai.enabled" | "work.enabled" => {
+        "search.suggestions"
+        | "ui.reduce-motion"
+        | "ui.newtab-greeting"
+        | "ui.newtab-name"
+        | "ui.newtab-clock"
+        | "ui.newtab-tasks"
+        | "ai.enabled"
+        | "work.enabled"
+        | "ui.contrast"
+        | "search.history"
+        | "tabs.switch-to-open" => {
             matches!(value, "true" | "false")
         }
         _ => false,
@@ -47,6 +73,9 @@ mod tests {
         assert!(value_allowed("ui.accent", "sage"));
         assert!(value_allowed("ui.newtab-clock-format", "24h"));
         assert!(value_allowed("ui.newtab-tasks", "false"));
+        assert!(value_allowed("ui.language", "en"));
+        assert!(value_allowed("tabs.after-close", "recent"));
+        assert!(value_allowed("ui.text-size", "large"));
         assert!(value_allowed("ui.tab-layout", "horizontal"));
         assert!(value_allowed("onboarding", "done"));
         for key in ["ai.enabled", "work.enabled"] {
@@ -65,6 +94,10 @@ mod tests {
             ("ui.newtab-greeting", "yes"),
             ("ui.newtab-logo", "true"),
             ("appearance", "sepia"),
+            ("ui.language", "klingon"),
+            ("ui.density", "tight"),
+            ("tabs.new-position", "start"),
+            ("tabs.switch-to-open", "maybe"),
             ("ui.tab-layout", "diagonal"),
             ("onboarding", "skipped"),
         ] {

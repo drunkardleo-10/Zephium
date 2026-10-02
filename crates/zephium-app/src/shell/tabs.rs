@@ -2,6 +2,72 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum NewTabPosition {
+    #[default]
+    End,
+    AfterCurrent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum AfterClose {
+    #[default]
+    Next,
+    Previous,
+    /// The tab used most recently before the closed one.
+    Recent,
+}
+
+/// The person's choices about how tabs open and close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TabPreferences {
+    pub(super) new_position: NewTabPosition,
+    pub(super) after_close: AfterClose,
+    /// Opening an address already open in this space goes to that tab.
+    pub(super) switch_to_open: bool,
+}
+
+impl Default for TabPreferences {
+    fn default() -> Self {
+        Self {
+            new_position: NewTabPosition::default(),
+            after_close: AfterClose::default(),
+            switch_to_open: true,
+        }
+    }
+}
+
+impl TabPreferences {
+    pub(super) fn load(store: &dyn zephium_core::ports::store::Store) -> Self {
+        let mut preferences = Self::default();
+        for key in [
+            "tabs.new-position",
+            "tabs.after-close",
+            "tabs.switch-to-open",
+        ] {
+            if let Some(value) = store.app_setting(key) {
+                preferences.apply(key, &value);
+            }
+        }
+        preferences
+    }
+
+    /// Takes a validated value; anything else leaves the choice as it was.
+    pub(super) fn apply(&mut self, key: &str, value: &str) {
+        match (key, value) {
+            ("tabs.new-position", "end") => self.new_position = NewTabPosition::End,
+            ("tabs.new-position", "after-current") => {
+                self.new_position = NewTabPosition::AfterCurrent
+            }
+            ("tabs.after-close", "next") => self.after_close = AfterClose::Next,
+            ("tabs.after-close", "previous") => self.after_close = AfterClose::Previous,
+            ("tabs.after-close", "recent") => self.after_close = AfterClose::Recent,
+            ("tabs.switch-to-open", value) => self.switch_to_open = value == "true",
+            _ => {}
+        }
+    }
+}
+
 impl Shell {
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
         self.open_tab_with_id()
@@ -19,15 +85,23 @@ impl Shell {
         }
         let win = self.windows.focused_mut()?;
         let space = win.space;
+        let current = win.active;
         let id = ItemId::generate();
-        if !self.items.insert_tab(
-            id,
-            Placement::Space {
-                space,
-                section: SpaceSection::Today,
-            },
-        ) {
+        let today = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        if !self.items.insert_tab(id, today) {
             return None;
+        }
+        if self.tab_preferences.new_position == NewTabPosition::AfterCurrent {
+            let roots = self.items.roots(today);
+            if let Some(at) =
+                current.and_then(|current| roots.iter().position(|root| *root == current))
+            {
+                let before = roots.get(at + 1).copied().filter(|next| *next != id);
+                self.items.move_tab_to_root(id, today, before);
+            }
         }
         Some((id, self.focus_tab(id)))
     }
@@ -114,11 +188,12 @@ impl Shell {
             win.splits = tree.remove(id);
         }
         let space = win.space;
+        let profile = win.profile;
         let was_active = win.active == Some(id);
         if was_active {
             win.active = None;
         }
-        let tabs_before = self.today_tabs(space);
+        let tabs_before = self.keyboard_tabs(profile, space);
         let pos = tabs_before.iter().position(|x| *x == id);
         let mut fx = self.items.remove(id);
         if let Some(closed) = closed {
@@ -128,12 +203,42 @@ impl Shell {
             self.recently_closed.push(closed);
         }
         if was_active {
-            let tabs = self.today_tabs(space);
-            if let (Some(pos), false) = (pos, tabs.is_empty()) {
-                fx.extend(self.focus_tab(tabs[pos.min(tabs.len() - 1)]));
+            if let Some(next) = self.successor(profile, space, pos) {
+                fx.extend(self.focus_tab(next));
             }
         }
         self.commit(fx)
+    }
+
+    /// Which tab takes over from a closed active one, by the person's choice.
+    /// `at` is where the closed tab stood in the sidebar's order.
+    fn successor(&self, profile: ProfileId, space: SpaceId, at: Option<usize>) -> Option<ItemId> {
+        let tabs = self.keyboard_tabs(profile, space);
+        if tabs.is_empty() {
+            return None;
+        }
+        let at = at.unwrap_or(tabs.len());
+        match self.tab_preferences.after_close {
+            AfterClose::Next => Some(tabs[at.min(tabs.len() - 1)]),
+            AfterClose::Previous => Some(tabs[at.saturating_sub(1).min(tabs.len() - 1)]),
+            AfterClose::Recent => tabs
+                .iter()
+                .copied()
+                .max_by_key(|id| (self.residency.last_focus.get(id).copied(), *id)),
+        }
+    }
+
+    /// The tab in this space already showing exactly `url`, if any.
+    pub(super) fn open_tab_for(&self, url: &str) -> Option<ItemId> {
+        let window = self.windows.focused()?;
+        self.keyboard_tabs(window.profile, window.space)
+            .into_iter()
+            .find(|id| {
+                self.items.tab(*id).is_some_and(|tab| {
+                    tab.content == zephium_core::item::TabContent::Web
+                        && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
+                })
+            })
     }
 
     /// Folds a trusted native guest teardown back into the logical tab tree.

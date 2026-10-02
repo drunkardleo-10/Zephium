@@ -3,7 +3,6 @@
   // Dynamic like the panel's own path to Notes, so the feature's entry is
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
-  import { theme } from "$domain/appearance";
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadSettings } from "$features/settings";
@@ -27,7 +26,6 @@
   import { blocker } from "$domain/blocker";
   import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
-  import { preview } from "$features/settings";
   import { onMount } from "svelte";
   import { events } from "$shared/ipc/native-events";
   import { handleNativeSection } from "$features/settings";
@@ -87,15 +85,6 @@
       stop?.();
       void noteListener.then((stop) => stop());
     };
-  });
-  $effect(() => {
-    const text = preview.get("accessibility.text", "Default");
-    theme.applyPreview({
-      density:
-        preview.get("appearance.density", "Comfortable") === "Compact" ? "compact" : "comfortable",
-      contrast: preview.get("accessibility.contrast", false),
-      text: text === "Large" ? "large" : text === "Small" ? "small" : "default",
-    });
   });
   let splitting = $state(false);
   let inWork = $derived(browserPage.currentPage() === "work");

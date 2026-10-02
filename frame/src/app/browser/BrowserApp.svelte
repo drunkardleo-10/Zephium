@@ -27,6 +27,7 @@
   import { browserImport, nativeImportAdapter } from "$domain/browser-import";
   import { findInPage } from "$features/address";
   import { acceleratorFrom } from "$shared/lib/accelerator";
+  import { applyLanguage } from "$shared/lib/locale.svelte";
   import Shell from "./Shell.svelte";
 
   // Follows the stored preference and nothing else. Adopting reads the
@@ -43,6 +44,17 @@
       preferences.value("ui.accent"),
       preferences.value("ui.reduce-motion") === "true",
     );
+  });
+
+  $effect(() => applyLanguage(preferences.value("ui.language")));
+
+  $effect(() => {
+    const text = preferences.value("ui.text-size");
+    theme.applyLayout({
+      density: preferences.value("ui.density") === "compact" ? "compact" : "comfortable",
+      contrast: preferences.value("ui.contrast") === "true",
+      text: text === "large" || text === "small" ? text : "default",
+    });
   });
 
   let pagePermissionPrompt = $derived(pagePermissions.prompt());

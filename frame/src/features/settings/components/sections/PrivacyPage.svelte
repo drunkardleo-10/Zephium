@@ -26,9 +26,6 @@
 
 <ProtectionControls />
 <PreviewNotice />
-<SettingsGroup title="Other privacy preferences"
-  ><PreviewSelect id="privacy.cookies" /><PreviewToggle id="privacy.https" /></SettingsGroup
->
 <SettingsGroup title={m.settings_site_permissions()}
   ><PreviewSelect id="privacy.camera" /><PreviewSelect id="privacy.microphone" /><PreviewSelect
     id="privacy.location"

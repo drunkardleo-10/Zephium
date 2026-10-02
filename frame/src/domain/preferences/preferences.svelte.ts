@@ -19,6 +19,14 @@ const defaults = {
   "ui.tab-layout": "vertical",
   "ai.enabled": "true",
   "work.enabled": "true",
+  "ui.language": "system",
+  "ui.density": "comfortable",
+  "ui.text-size": "default",
+  "ui.contrast": "false",
+  "search.history": "true",
+  "tabs.new-position": "end",
+  "tabs.after-close": "next",
+  "tabs.switch-to-open": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });

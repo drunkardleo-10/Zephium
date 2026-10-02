@@ -4,7 +4,6 @@
   import * as preview from "../../lib/preview.svelte";
   import PreviewNotice from "../PreviewNotice.svelte";
   import PreviewSelect from "../PreviewSelect.svelte";
-  import PreviewToggle from "../PreviewToggle.svelte";
   import PreviewAction from "../PreviewAction.svelte";
   import CollectionEditor from "../CollectionEditor.svelte";
   import ImportBrowserData from "../ImportBrowserData.svelte";
@@ -56,7 +55,7 @@
 </div>
 <PreviewNotice />
 <SettingsGroup title={m.general_startup_title()}
-  ><PreviewSelect id="general.startup" /><PreviewToggle id="general.restore" /></SettingsGroup
+  ><PreviewSelect id="general.startup" /></SettingsGroup
 >
 {#if preview.get("general.startup", "Continue where I left off") === "Open specific pages" || settingsState.highlighted() === "general.pages"}<CollectionEditor
     id="general.pages"

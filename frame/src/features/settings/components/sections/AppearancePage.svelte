@@ -1,12 +1,10 @@
 <script lang="ts">
+  import PreferenceSelect from "../PreferenceSelect.svelte";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
   import SegmentedControl from "$shared/ui/SegmentedControl";
   import Select from "$shared/ui/Select";
   import Switch from "$shared/ui/Switch";
-  import PreviewNotice from "../PreviewNotice.svelte";
-  import PreviewSelect from "../PreviewSelect.svelte";
-  import PreviewToggle from "../PreviewToggle.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Icon from "$shared/ui/Icon";
@@ -135,6 +133,6 @@
   >
 </SettingsGroup>
 
-<PreviewNotice /><SettingsGroup title={m.settings_layout()}
-  ><PreviewSelect id="appearance.density" /><PreviewToggle id="appearance.icons" /></SettingsGroup
+<SettingsGroup title={m.settings_layout()}
+  ><PreferenceSelect id="appearance.density" preference="ui.density" /></SettingsGroup
 >

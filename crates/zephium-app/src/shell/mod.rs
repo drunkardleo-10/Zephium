@@ -208,6 +208,7 @@ pub struct Shell {
     history: history::HistoryState,
     bookmarks: bookmarks::BookmarkState,
     search: SearchState,
+    tab_preferences: tabs::TabPreferences,
     presentation: PresentationState,
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
@@ -421,8 +422,12 @@ impl Shell {
                     .as_deref()
                     .and_then(zephium_core::search::SearchEngine::from_id)
                     .unwrap_or_default(),
+                include_history: store
+                    .app_setting("search.history")
+                    .is_none_or(|value| value != "false"),
                 ..SearchState::default()
             },
+            tab_preferences: tabs::TabPreferences::load(&*store),
             presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
