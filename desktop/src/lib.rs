@@ -73,6 +73,7 @@ mod default_browser;
 mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
+mod focus_alerts;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
@@ -5616,6 +5617,9 @@ pub fn run() {
                     if let Some(value) = id.strip_prefix("preference.ui.reduce-motion=") {
                         panel::set_reduce_motion(value == "true");
                     }
+                    if let Some(alert) = id.strip_prefix("focus.alert=") {
+                        focus_alerts::phase_ended(&emit_handle, alert);
+                    }
                     if let Some(mode) = id.strip_prefix("theme.") {
                         if matches!(mode, "system" | "light" | "dark") {
                             apply_native_theme(&emit_handle, mode);
@@ -5640,6 +5644,9 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_BLOCKER_STATUS, &status)
                 }
                 Projection::Focus(status) => {
+                    if status.session.is_some() {
+                        focus_alerts::session_started();
+                    }
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FOCUS, &status)
                 }
                 Projection::OperationProcessed(disposition) => {
@@ -6871,8 +6878,10 @@ mod tests {
         assert_eq!(shell.matches("data-zephium-active-tab").count(), 1);
         assert!(shell.contains(r#"data-zephium-active-tab={tabs.activeId() ?? ""}"#));
         assert_eq!(shell.matches("data-zephium-new-tab").count(), 1);
+        // The focus cover, when there is one, stands in the same chain ahead
+        // of New Tab, so the two never render together.
         assert!(
-            shell.contains("{#if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? \"web\") === \"web\" && browserPage.currentPage() === null}")
+            shell.contains("{:else if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? \"web\") === \"web\" && browserPage.currentPage() === null}")
         );
         assert!(shell.contains("data-zephium-surface="));
         assert!(!shell.contains("transition:"));
