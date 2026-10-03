@@ -169,7 +169,7 @@ export type SettingsSection = (typeof allSections)[number]["id"];
  *  only in development builds. A release offers only what works. */
 export const showPreviews = import.meta.env.DEV;
 /** Sections that hold nothing but placeholders today. */
-const previewSections = new Set<SettingsSection>(["profiles", "performance", "focus"]);
+const previewSections = new Set<SettingsSection>(["profiles", "performance"]);
 export const sections = allSections.filter(
   (section) => section.id !== "account" && (showPreviews || !previewSections.has(section.id)),
 );

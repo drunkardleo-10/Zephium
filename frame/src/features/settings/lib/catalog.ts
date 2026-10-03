@@ -347,38 +347,53 @@ export const fields = {
     description: m.pref_languages_interface_help,
     initial: "system",
   },
-  "focus.track": {
-    preview: true,
+  "time.track": {
     section: "focus",
     label: m.pref_focus_track,
     description: m.pref_focus_track_help,
-    initial: false,
+    initial: true,
   },
-  "focus.retention": {
-    preview: true,
+  "time.retention": {
     section: "focus",
     label: m.pref_focus_retention,
     description: m.pref_focus_retention_help,
-    initial: "30 days",
+    initial: "90",
     options: [
-      { value: "7 days", label: m.pref_focus_retention_option_0 },
-      { value: "30 days", label: m.pref_focus_retention_option_1 },
-      { value: "90 days", label: m.pref_focus_retention_option_2 },
+      { value: "30", label: m.pref_focus_retention_option_0 },
+      { value: "90", label: m.pref_focus_retention_option_1 },
+      { value: "365", label: m.pref_focus_retention_option_2 },
     ],
   },
-  "focus.exclusions": {
-    preview: true,
+  "focus.goal": {
     section: "focus",
-    label: m.pref_focus_exclusions,
-    description: m.pref_focus_exclusions_help,
-    initial: "",
+    label: m.pref_focus_goal,
+    description: m.pref_focus_goal_help,
+    initial: "120",
+    options: [
+      { value: "30", label: m.pref_focus_goal_option_30 },
+      { value: "60", label: m.pref_focus_goal_option_60 },
+      { value: "120", label: m.pref_focus_goal_option_120 },
+      { value: "180", label: m.pref_focus_goal_option_180 },
+      { value: "240", label: m.pref_focus_goal_option_240 },
+      { value: "360", label: m.pref_focus_goal_option_360 },
+    ],
   },
-  "focus.rules": {
-    preview: true,
+  "focus.minutes": {
     section: "focus",
-    label: m.pref_focus_rules,
-    description: m.pref_focus_rules_help,
-    initial: "",
+    label: m.pref_focus_minutes,
+    description: m.pref_focus_minutes_help,
+    initial: "25",
+    options: [
+      { value: "25", label: m.pref_focus_minutes_option_25 },
+      { value: "50", label: m.pref_focus_minutes_option_50 },
+      { value: "90", label: m.pref_focus_minutes_option_90 },
+    ],
+  },
+  "focus.breaks": {
+    section: "focus",
+    label: m.pref_focus_breaks,
+    description: m.pref_focus_breaks_help,
+    initial: false,
   },
   "performance.sleep": {
     preview: true,

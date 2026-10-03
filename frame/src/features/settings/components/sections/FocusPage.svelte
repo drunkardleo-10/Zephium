@@ -1,13 +1,37 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import PreviewNotice from "../PreviewNotice.svelte";
+  import { loadShutSites } from "$features/time";
+  import LazyView from "$shared/ui/LazyView";
   import SettingsGroup from "$shared/ui/SettingsGroup";
-  import PreviewToggle from "../PreviewToggle.svelte";
-  import PreviewSelect from "../PreviewSelect.svelte";
-  import CollectionEditor from "../CollectionEditor.svelte";
+  import PreferenceSelect from "../PreferenceSelect.svelte";
+  import PreferenceSwitch from "../PreferenceSwitch.svelte";
 </script>
 
-<PreviewNotice />
-<SettingsGroup title={m.section_focus()}
-  ><PreviewToggle id="focus.track" /><PreviewSelect id="focus.retention" /></SettingsGroup
-><CollectionEditor id="focus.exclusions" kind="url" /><CollectionEditor id="focus.rules" />
+<SettingsGroup title={m.time_title()} description={m.time_local_only()}
+  ><PreferenceSwitch id="time.track" preference="time.track" /><PreferenceSelect
+    id="time.retention"
+    preference="time.retention"
+  /></SettingsGroup
+>
+<SettingsGroup title={m.focus_title()}
+  ><PreferenceSelect id="focus.minutes" preference="focus.minutes" /><PreferenceSwitch
+    id="focus.breaks"
+    preference="focus.breaks"
+  /><PreferenceSelect id="focus.goal" preference="focus.goal" /></SettingsGroup
+>
+<SettingsGroup title={m.focus_shut_title()} description={m.focus_shut_help()}>
+  <div class="shut">
+    <LazyView
+      loader={loadShutSites}
+      loadingLabel={m.surface_loading()}
+      failureLabel={m.surface_render_failed()}
+      retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+    >
+  </div>
+</SettingsGroup>
+
+<style>
+  .shut {
+    padding: 14px 16px;
+  }
+</style>
