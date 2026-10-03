@@ -46,10 +46,17 @@ export const architecture = {
               to: {
                 element: {
                   type: "features",
-                  captured: { module: ["notes", "tasks", "history", "downloads", "bookmarks"] },
+                  captured: {
+                    module: ["notes", "tasks", "history", "downloads", "bookmarks", "time"],
+                  },
                 },
               },
             },
+          },
+          // Settings edits the sites focus shuts with the same control as Time.
+          {
+            from: { element: { type: "features", captured: { module: "settings" } } },
+            allow: { to: { element: { type: "features", captured: { module: "time" } } } },
           },
           {
             from: { element: { type: "features", captured: { module: "library" } } },

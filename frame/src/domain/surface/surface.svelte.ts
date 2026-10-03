@@ -5,7 +5,7 @@ import { settle } from "$domain/operations";
 import { events } from "$shared/ipc/native-events";
 
 export type BrowserPage =
-  "settings" | "extensions" | "history" | "downloads" | "work" | "tasks" | "notes";
+  "settings" | "extensions" | "history" | "downloads" | "work" | "tasks" | "notes" | "time";
 let page = $state<BrowserPage | null>(null);
 let error = $state(false);
 let generation = 0;
@@ -41,7 +41,8 @@ async function initialize(epoch: number) {
               destination === "history" ||
               destination === "downloads" ||
               destination === "tasks" ||
-              destination === "notes"
+              destination === "notes" ||
+              destination === "time"
             ? destination
             : undefined;
       if (confirmed !== undefined) {

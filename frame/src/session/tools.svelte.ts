@@ -52,6 +52,7 @@ async function initialize(owner: number) {
         "browser.downloads",
         "browser.tasks",
         "browser.notes",
+        "browser.time",
       ].includes(payload)
     ) {
       tool = null;

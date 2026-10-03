@@ -39,6 +39,7 @@
   import { loadHistoryPage } from "$features/history";
   import { bookmarkReveal } from "$features/bookmarks";
   import { loadTasksPage } from "$features/tasks";
+  import { loadTimePage } from "$features/time";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
   import { ModeTabs, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
@@ -346,6 +347,7 @@
               oncustomize={() => openSettings("newtab")}
               onprofile={() => openSettings("profiles")}
               ontasks={() => void browserPage.open("tasks")}
+              ontime={() => void browserPage.open("time")}
               >{#snippet search()}{#key tabs.activeId()}<LazyView
                     loader={loadNewTabSearch}
                     loadingLabel={m.surface_loading()}
@@ -406,6 +408,14 @@
                 failureLabel={m.surface_render_failed()}
                 retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
               >
+            {:else if browserPage.currentPage() === "time"}
+              {#key tabs.profile()?.id}<LazyView
+                  loader={loadTimePage}
+                  loadingLabel={m.surface_loading()}
+                  failureLabel={m.surface_render_failed()}
+                  retryLabel={m.surface_retry()}
+                  >{#snippet children(View)}<View />{/snippet}</LazyView
+                >{/key}
             {:else if browserPage.currentPage() === "history"}
               <LazyView
                 loader={loadHistoryPage}
