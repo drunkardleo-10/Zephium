@@ -3057,6 +3057,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             | "settings.account"
             | "settings.newtab"
             | "settings.ai"
+            | "settings.focus"
             | "settings.shortcuts"
     ) {
         let section = id.replacen("settings.", "settings.section.", 1);
