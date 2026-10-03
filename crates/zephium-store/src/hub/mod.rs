@@ -20,6 +20,7 @@ mod page_permissions;
 mod resources;
 mod session;
 mod settings;
+mod time;
 mod userscripts;
 mod work_document;
 

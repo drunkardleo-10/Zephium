@@ -540,6 +540,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM download_preferences;
          DELETE FROM downloads;
          DELETE FROM blocker_statistics;
+         DELETE FROM time_spent;
          DELETE FROM bookmarks;
          DELETE FROM search_queries;
          DELETE FROM history;
@@ -682,6 +683,11 @@ mod tests {
             [r#"{"day":700000,"days":[0,0,0,0,0,0,12]}"#],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO time_spent(hour,place,spent_ms,opens) VALUES(1,'scrub.example',1000,1)",
+            [],
+        )
+        .unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -728,6 +734,7 @@ mod tests {
             "sqlite_sequence",
             "task_list_receipts",
             "task_lists",
+            "time_spent",
             "user_resource_receipts",
             "user_resource_usage",
             "user_resources",
@@ -762,6 +769,7 @@ mod tests {
 
         for table in [
             "blocker_statistics",
+            "time_spent",
             "bookmarks",
             "download_cleanup",
             "download_preferences",

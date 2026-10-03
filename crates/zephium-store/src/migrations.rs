@@ -1709,6 +1709,24 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 24,
+        up: |tx| {
+            // Focus belongs to the person, not to a profile. `day` is the
+            // local day a session began, fixed when it is written.
+            tx.execute_batch(
+                "CREATE TABLE focus_sessions (
+                     started_ms INTEGER PRIMARY KEY,
+                     ended_ms INTEGER NOT NULL,
+                     day INTEGER NOT NULL,
+                     focused_ms INTEGER NOT NULL CHECK (focused_ms >= 0),
+                     rounds INTEGER NOT NULL CHECK (rounds >= 0),
+                     completed INTEGER NOT NULL CHECK (completed IN (0, 1))
+                 ) STRICT;
+                 CREATE INDEX idx_focus_sessions_day ON focus_sessions(day);",
+            )
+        },
+    },
 ];
 
 // These statements are the exact extension-branch PROFILE v14 artifact. The
@@ -2482,6 +2500,22 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 34,
+        up: |tx| {
+            // Time per local hour and place. A place is a registrable domain,
+            // or '' for Work; a domain always holds a dot, so they never meet.
+            tx.execute_batch(
+                "CREATE TABLE time_spent (
+                     hour INTEGER NOT NULL,
+                     place TEXT NOT NULL CHECK (length(CAST(place AS BLOB)) <= 253),
+                     spent_ms INTEGER NOT NULL CHECK (spent_ms >= 0),
+                     opens INTEGER NOT NULL CHECK (opens >= 0),
+                     PRIMARY KEY (hour, place)
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2533,6 +2567,7 @@ mod tests {
         (21, 0xfe22_09ee_a55b_a3f5),
         (22, 0x6a156db401738842),
         (23, 0x6a156db401738842),
+        (24, 0xb38257a2cbe5bad8),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2568,6 +2603,7 @@ mod tests {
         (31, 0x55b58f4944aa33b6),
         (32, 0x6323d1c7efd84e2c),
         (33, 0x101002bc7ceb482a),
+        (34, 0x1a93a832df64a4a1),
     ];
 
     #[test]
@@ -2788,7 +2824,7 @@ mod tests {
             assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
             apply(&mut conn, PROFILE).unwrap();
             apply(&mut conn, PROFILE).unwrap();
-            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 33);
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 34);
             assert_eq!(
                 conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
                     .unwrap(),
@@ -4025,7 +4061,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(33));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(34));
     }
 
     #[test]

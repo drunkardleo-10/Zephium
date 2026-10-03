@@ -312,6 +312,19 @@ enum Cmd {
     ),
     LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
     LoadProfileBlockerSites(ProfileId, BlockerSiteLoadDone),
+    RecordTime(ProfileId, Vec<zephium_core::time::HourTally>, i64),
+    TimeReport(
+        ProfileId,
+        zephium_core::time::TimeQuery,
+        Box<dyn FnOnce(Option<zephium_core::time::TimeReport>) + Send>,
+    ),
+    ClearTime(ProfileId, Option<i64>),
+    RecordFocus(zephium_core::time::FocusRecord, i64),
+    FocusDays(
+        i64,
+        u32,
+        Box<dyn FnOnce(Option<Vec<zephium_core::time::FocusDay>>) + Send>,
+    ),
     LoadBlockerStatistics(
         ProfileId,
         Box<dyn FnOnce(Option<zephium_core::blocker::BlockerStatistics>) + Send>,
@@ -419,6 +432,11 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    fn admits_writes(&self) -> bool {
+        let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
+        !lifecycle.terminal_admitted && !self.shutdown_clean.load(Ordering::Acquire)
+    }
+
     /// `dir` is the app data directory; the hub lays out `meta.sqlite` plus
     /// one `profile-<ulid>.sqlite` per profile inside it.
     pub fn open(dir: impl AsRef<Path>) -> rusqlite::Result<Self> {
@@ -831,6 +849,52 @@ impl Store for SqliteStore {
         self.tx
             .try_send(Cmd::SaveBlockerStatistics(profile, statistics, done))
             .is_ok()
+    }
+    fn record_time(
+        &self,
+        profile: ProfileId,
+        tallies: Vec<zephium_core::time::HourTally>,
+        keep_from_hour: i64,
+    ) -> bool {
+        self.admits_writes()
+            && self
+                .tx
+                .try_send(Cmd::RecordTime(profile, tallies, keep_from_hour))
+                .is_ok()
+    }
+    fn time_report(
+        &self,
+        profile: ProfileId,
+        query: zephium_core::time::TimeQuery,
+        done: Box<dyn FnOnce(Option<zephium_core::time::TimeReport>) + Send>,
+    ) -> bool {
+        self.admits_writes()
+            && self
+                .tx
+                .try_send(Cmd::TimeReport(profile, query, done))
+                .is_ok()
+    }
+    fn clear_time(&self, profile: ProfileId, since_hour: Option<i64>) -> bool {
+        self.admits_writes()
+            && self
+                .tx
+                .try_send(Cmd::ClearTime(profile, since_hour))
+                .is_ok()
+    }
+    fn record_focus(&self, record: zephium_core::time::FocusRecord, day: i64) -> bool {
+        self.admits_writes() && self.tx.try_send(Cmd::RecordFocus(record, day)).is_ok()
+    }
+    fn focus_days(
+        &self,
+        from_day: i64,
+        days: u32,
+        done: Box<dyn FnOnce(Option<Vec<zephium_core::time::FocusDay>>) + Send>,
+    ) -> bool {
+        self.admits_writes()
+            && self
+                .tx
+                .try_send(Cmd::FocusDays(from_day, days, done))
+                .is_ok()
     }
     fn load_profile_blocker_sites(&self, profile: ProfileId, done: BlockerSiteLoadDone) -> bool {
         let lifecycle = self
@@ -1523,6 +1587,37 @@ fn actor(
                     }
                 };
                 done(outcome);
+            }
+            Some(Cmd::RecordTime(profile, tallies, keep_from_hour)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    continue;
+                }
+                if let Err(error) = hub.record_time(profile, &tallies, keep_from_hour) {
+                    eprintln!("store: profile {profile} time write failed: {error}");
+                }
+            }
+            Some(Cmd::TimeReport(profile, query, done)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    done(None);
+                    continue;
+                }
+                done(hub.time_report(profile, &query).ok());
+            }
+            Some(Cmd::ClearTime(profile, since_hour)) => {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                    continue;
+                }
+                if let Err(error) = hub.clear_time(profile, since_hour) {
+                    eprintln!("store: profile {profile} time clear failed: {error}");
+                }
+            }
+            Some(Cmd::RecordFocus(record, day)) => {
+                if let Err(error) = hub.record_focus(&record, day) {
+                    eprintln!("store: focus session write failed: {error}");
+                }
+            }
+            Some(Cmd::FocusDays(from_day, days, done)) => {
+                done(hub.focus_days(from_day, days).ok());
             }
             Some(Cmd::LoadBlockerStatistics(profile, done)) => {
                 if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
