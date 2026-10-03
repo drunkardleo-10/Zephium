@@ -4,19 +4,20 @@
 -->
 <script lang="ts">
   import { Add01Icon, Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
+  import type { IconRef } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
-  import { favicons } from "$domain/favicons";
   import { preferences } from "$domain/preferences";
   import { normalizeSite } from "$domain/time";
   import FavIcon from "$shared/ui/FavIcon";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
+  import { siteMark } from "../lib/site-mark";
 
   let {
     suggestions = [],
   }: {
     /** Sites the reader spends time on, most first. */
-    suggestions?: string[];
+    suggestions?: { site: string; icon: IconRef | null }[];
   } = $props();
 
   const MAX_SITES = 256;
@@ -30,8 +31,11 @@
       .filter((site) => site.length > 0),
   );
   let offered = $derived(
-    suggestions.filter((site) => !sites.some((shut) => covers(shut, site))).slice(0, 4),
+    suggestions.filter((entry) => !sites.some((shut) => covers(shut, entry.site))).slice(0, 4),
   );
+  // The site being typed, shown with its icon as soon as one is held.
+  let typed = $derived(normalizeSite(draft));
+  let typedMark = $derived(typed === null ? null : siteMark(typed));
 
   function covers(shut: string, site: string) {
     return site === shut || site.endsWith(`.${shut}`);
@@ -61,7 +65,11 @@
       add(draft);
     }}
   >
+    {#if typedMark}<span class="preview"
+        ><FavIcon image={typedMark.image} tone={typedMark.tone} size={14} lit /></span
+      >{/if}
     <input
+      class:previewed={!!typedMark}
       type="text"
       inputmode="url"
       autocomplete="off"
@@ -86,20 +94,20 @@
     <div class="suggested">
       <span class="caption">{m.focus_suggested()}</span>
       <div class="chips">
-        {#each offered as site (site)}
-          {@const mark = favicons.mark(null, `https://${site}/`)}
+        {#each offered as entry (entry.site)}
+          {@const mark = siteMark(entry.site, entry.icon)}
           <button
             type="button"
             class="chip"
             disabled={preferences.saving()}
-            onclick={() => add(site)}
+            onclick={() => add(entry.site)}
             ><FavIcon
               image={mark?.image ?? null}
               tone={mark?.tone}
               size={14}
               lit
               fallback={Globe02Icon}
-            /><span>{site}</span><Icon icon={Add01Icon} size={12} /></button
+            /><span>{entry.site}</span><Icon icon={Add01Icon} size={12} /></button
           >
         {/each}
       </div>
@@ -109,7 +117,7 @@
   {#if sites.length > 0}
     <ul aria-label={m.focus_shut_title()}>
       {#each sites as site (site)}
-        {@const mark = favicons.mark(null, `https://${site}/`)}
+        {@const mark = siteMark(site)}
         <li>
           <FavIcon
             image={mark?.image ?? null}
@@ -142,8 +150,22 @@
   }
 
   .add {
+    position: relative;
     display: flex;
     gap: 6px;
+  }
+
+  .preview {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 9px;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+  }
+
+  input.previewed {
+    padding-inline-start: 30px;
   }
 
   input {
@@ -267,10 +289,6 @@
     min-height: 36px;
     padding-inline: 8px 4px;
     border-radius: var(--radius-row);
-  }
-
-  li + li {
-    box-shadow: inset 0 1px 0 var(--color-border);
   }
 
   li:hover {

@@ -80,7 +80,6 @@
           label: weekdayLetter(session.period.start + index),
         })),
   );
-  let focusToday = $derived(session.focus.reduce((total, day) => total + day.seconds, 0));
   let changeLabel = $derived.by(() => {
     if (change === null) return null;
     const amount = duration(Math.abs(change));
@@ -138,7 +137,9 @@
       format={duration}
     />
 
-    <FocusCard todaySeconds={span === "day" ? focusToday : 0} onmanage={onopen} />
+    <FocusCard
+      suggestions={(report?.sites ?? []).map((entry) => ({ site: entry.site, icon: entry.icon }))}
+    />
 
     {#if session.failed}
       <p class="quiet">{m.time_unavailable()}</p>

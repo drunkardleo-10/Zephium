@@ -8,7 +8,7 @@
     profile,
     view,
     span = "day",
-  }: { profile: string; view: "panel" | "page"; span?: "day" | "week" } = $props();
+  }: { profile: string; view: "panel" | "page" | "cover"; span?: "day" | "week" } = $props();
 </script>
 
 {#if view === "panel"}

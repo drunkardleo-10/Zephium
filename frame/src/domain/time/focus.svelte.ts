@@ -1,9 +1,9 @@
-import type { FocusControl, FocusStatus, FocusView } from "$shared/ipc/bindings";
+import type { FocusControl, FocusStatus, FocusView, ShutSiteView } from "$shared/ipc/bindings";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { settle } from "$domain/operations";
 
-const EMPTY: FocusStatus = { session: null, blocked: [] };
+const EMPTY: FocusStatus = { session: null, shut: [] };
 
 let state = $state.raw<FocusStatus>(EMPTY);
 let covered = $state<string | null>(null);
@@ -17,6 +17,8 @@ let lifetime = new AbortController();
 
 /** The running session, or null between sessions. */
 export const session = (): FocusView | null => state.session;
+/** Shut sites as native last listed them, with the icons it holds. */
+export const shut = (): ShutSiteView[] => state.shut;
 /** The shut site the current tab would show, while focus covers it. */
 export const cover = () => covered;
 export const busy = () => pending;

@@ -30,8 +30,8 @@
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
     "js": 361200,
-    "css": 106500,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "css": 106900,
+    "description": "The shared tool header style gains its one overflow control."
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
     "js": 1262430,
@@ -44,9 +44,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 361800,
-    "css": 106500,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 465300,
+    "css": 110800,
+    "description": "History's header keeps one control: a menu, shared with Tasks, that opens the full page or closes the panel."
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
     "js": 1267323,
@@ -104,9 +104,9 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
-    "js": 362300,
-    "css": 106400,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 465600,
+    "css": 110800,
+    "description": "Time's header keeps one control: a menu, shared with Tasks, for the page, its settings and closing."
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
     "js": 283200,
@@ -453,8 +453,8 @@
   },
   "lazy:features/tools/components/previews/BookmarksView.svelte": {
     "js": 361700,
-    "css": 106500,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "css": 106900,
+    "description": "The shared tool header style gains its one overflow control."
   },
   "lazy:features/time/components/ShutSites.svelte": {
     "js": 356200,
@@ -462,14 +462,14 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/time/components/TimePage.svelte": {
-    "js": 393900,
-    "css": 122600,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 489800,
+    "css": 124400,
+    "description": "The focus dial chooses its length from the menu shared with Tasks."
   },
   "lazy:features/time/components/TimePanel.svelte": {
-    "js": 382400,
-    "css": 118200,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 482400,
+    "css": 122500,
+    "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place."
   },
   "lazy:features/time/components/FocusCover.svelte": {
     "js": 356600,

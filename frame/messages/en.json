@@ -2623,5 +2623,8 @@
   "focus_cover_allow": "Allow 5 minutes",
   "focus_cover_end": "End focus",
   "focus_cover_left": "left in this round",
-  "focus_shut_notice": "{site} is shut during focus"
+  "focus_shut_notice": "{site} is shut during focus",
+  "time_settings": "Time settings",
+  "tool_more": "More",
+  "history_page_open": "Open History"
 }

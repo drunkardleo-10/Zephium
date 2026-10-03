@@ -1,52 +1,49 @@
 <!--
-  Focus at rest offers a length and a start; running, it becomes a ring that
-  empties toward the end of the phase. The second hand only ticks while the
-  card is on screen and the window visible.
+  Focus is one dial. At rest its centre is the length, which opens the
+  choices; running, it empties toward the end of the phase. The layout stays
+  put between the two, so starting reads as the dial coming alive.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Target02Icon } from "@hugeicons/core-free-icons";
+  import { ArrowDown01Icon } from "@hugeicons/core-free-icons";
+  import type { IconRef } from "$shared/ipc/bindings";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
-  import { breakMinutes, countdown, duration, focus } from "$domain/time";
+  import { countdown, focus } from "$domain/time";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
+  import Menu, { type MenuEntry } from "$shared/ui/Menu";
   import Ring from "$shared/ui/data/Ring";
-  import SegmentedControl from "$shared/ui/SegmentedControl";
-  import Switch from "$shared/ui/Switch";
+  import ShutSites from "./ShutSites.svelte";
 
   let {
-    todaySeconds = 0,
     size = "panel",
+    suggestions = [],
     onmanage,
   }: {
-    /** Focus already finished today, not counting a running session. */
-    todaySeconds?: number;
     size?: "panel" | "page";
-    /** Opens the list of sites focus shuts. */
+    /** Sites to offer for shutting, from the reader's own time. */
+    suggestions?: { site: string; icon: IconRef | null }[];
+    /** Where the shut sites are managed; without it they open in place. */
     onmanage?: () => void;
   } = $props();
 
-  const LENGTHS = ["25", "50", "90"];
+  const LENGTHS = [15, 25, 30, 45, 50, 60, 90];
 
   let now = $state(Date.now());
   let confirming = $state(false);
+  let editing = $state(false);
   let session = $derived(focus.session());
+  let minutes = $derived(Number(preferences.value("focus.minutes")) || 25);
+  let breaks = $derived(preferences.value("focus.breaks") === "true");
+  let resting = $derived(session !== null && session.phase !== "focus");
+  let dial = $derived(size === "page" ? 148 : 112);
   let shut = $derived(
     preferences
       .value("focus.blocked")
       .split("\n")
       .filter((site) => site.length > 0).length,
   );
-  let minutes = $derived(
-    LENGTHS.includes(preferences.value("focus.minutes"))
-      ? preferences.value("focus.minutes")
-      : "25",
-  );
-  let breaks = $derived(preferences.value("focus.breaks") === "true");
-  let rest = $derived(breakMinutes(Number(minutes)));
-  let resting = $derived(session !== null && session.phase !== "focus");
-  let ringSize = $derived(size === "page" ? 168 : 132);
   let ends = $derived(
     session?.phase_ends_at
       ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(
@@ -63,8 +60,22 @@
           ? m.focus_phase_break()
           : m.focus_phase_long_break(),
   );
-  let focusedToday = $derived(
-    todaySeconds + (session === null ? 0 : focus.focusedSeconds(session, now)),
+  let choices = $derived<MenuEntry[]>([
+    ...LENGTHS.map((length) => ({
+      kind: "item" as const,
+      id: String(length),
+      label: m.focus_minutes({ minutes: String(length) }),
+      checked: length === minutes,
+    })),
+    { kind: "separator" },
+    { kind: "item", id: "breaks", label: m.focus_breaks(), checked: breaks },
+  ]);
+  let shutLabel = $derived(
+    shut === 0
+      ? m.focus_none_shut()
+      : shut === 1
+        ? m.focus_shut_one()
+        : m.focus_shut_count({ count: shut }),
   );
 
   onMount(() => {
@@ -79,6 +90,16 @@
     };
   });
 
+  function choose(id: string) {
+    if (id === "breaks") void preferences.set("focus.breaks", String(!breaks));
+    else void preferences.set("focus.minutes", id);
+  }
+
+  function manage() {
+    if (onmanage) onmanage();
+    else editing = !editing;
+  }
+
   function end() {
     if (!confirming) {
       confirming = true;
@@ -89,83 +110,68 @@
   }
 </script>
 
-<section class="focus" class:page={size === "page"} class:running={session !== null}>
-  <header>
-    <span class="mark"><Icon icon={Target02Icon} size={15} /></span>
-    <h3>{m.focus_title()}</h3>
-    {#if focusedToday >= 60}
-      <span class="today">{m.focus_today({ duration: duration(focusedToday) })}</span>
-    {/if}
-  </header>
-
-  {#if session === null}
-    <p class="lede">{m.focus_idle()}</p>
-    <div class="choose">
-      <SegmentedControl
-        label={m.focus_length()}
-        full
-        value={minutes}
-        options={LENGTHS.map((value) => ({
-          value,
-          label: m.focus_minutes({ minutes: value }),
-        }))}
-        onchange={(value) => void preferences.set("focus.minutes", value)}
-      />
-      <div class="option">
-        <span>
-          <span class="option-title">{m.focus_breaks()}</span>
-          {#if breaks}<span class="option-detail"
-              >{m.focus_breaks_detail({
-                short: String(rest.short),
-                long: String(rest.long),
-              })}</span
-            >{/if}
-        </span>
-        <Switch
-          label={m.focus_breaks()}
-          labelHidden
-          checked={breaks}
-          disabled={preferences.saving()}
-          onchange={(value) => void preferences.set("focus.breaks", String(value))}
-        />
-      </div>
-    </div>
-    <footer>
-      <button type="button" class="shut" onclick={onmanage} disabled={!onmanage}>
-        {shut === 0
-          ? m.focus_none_shut()
-          : shut === 1
-            ? m.focus_shut_one()
-            : m.focus_shut_count({ count: shut })}
-      </button>
-      <Button
-        variant="primary"
-        shape="capsule"
-        pending={focus.busy()}
-        onclick={() => void focus.start(Number(minutes), breaks)}>{m.focus_start()}</Button
-      >
-    </footer>
-  {:else}
-    <div class="live">
-      <Ring
-        value={1 - focus.progress(session, now)}
-        size={ringSize}
-        stroke={size === "page" ? 9 : 7}
-        tone={resting ? "rest" : "lead"}
-        label={phaseLabel}
-      >
-        <span class="clock">{countdown(focus.remaining(session, now))}</span>
-        <span class="phase">{phaseLabel}</span>
-      </Ring>
-      <div class="facts">
-        <span class="round"
-          >{m.focus_round({ round: String(session.rounds + (resting ? 0 : 1)) })}</span
+<section class="focus" class:page={size === "page"} aria-label={m.focus_title()}>
+  <div class="body">
+    {#if session === null}
+      <div class="dial">
+        <Ring value={0} size={dial} stroke={size === "page" ? 8 : 6} />
+        <Menu
+          label={m.focus_length()}
+          entries={choices}
+          side="bottom"
+          align="start"
+          triggerClass="focus-length"
+          onselect={choose}
         >
-        <span class="until">{m.focus_until({ time: ends })}</span>
+          {#snippet trigger()}<span class="length">{minutes}</span><span class="unit"
+              >min<Icon icon={ArrowDown01Icon} size={11} /></span
+            >{/snippet}
+        </Menu>
+      </div>
+      <div class="facts">
+        <h3>{m.focus_title()}</h3>
+        <button
+          type="button"
+          class="shut"
+          aria-expanded={onmanage ? undefined : editing}
+          onclick={manage}>{shutLabel}</button
+        >
+        <div class="actions">
+          <Button
+            variant="primary"
+            shape="capsule"
+            size={size === "page" ? "regular" : "compact"}
+            pending={focus.busy()}
+            onclick={() => void focus.start(minutes, breaks)}>{m.focus_start()}</Button
+          >
+        </div>
+      </div>
+    {:else}
+      <div class="dial live">
+        <Ring
+          value={1 - focus.progress(session, now)}
+          size={dial}
+          stroke={size === "page" ? 8 : 6}
+          tone={resting ? "rest" : "lead"}
+          label={phaseLabel}
+        >
+          <span class="clock">{countdown(focus.remaining(session, now))}</span>
+        </Ring>
+      </div>
+      <div class="facts">
+        <h3>{phaseLabel}</h3>
+        <span class="detail"
+          >{m.focus_round({ round: String(session.rounds + (resting ? 0 : 1)) })} · {m.focus_until({
+            time: ends,
+          })}</span
+        >
         {#if !resting && shut > 0}
-          <button type="button" class="shut" onclick={onmanage} disabled={!onmanage}>
-            {shut === 1 ? m.focus_shut_one() : m.focus_shut_count({ count: shut })}
-          </button>
+          <button
+            type="button"
+            class="shut"
+            aria-expanded={onmanage ? undefined : editing}
+            onclick={manage}>{shutLabel}</button
+          >
         {/if}
         <div class="actions">
           {#if resting}
@@ -176,13 +182,16 @@
           <Button
             size="compact"
             shape="capsule"
-            variant={confirming ? "danger" : "ghost"}
+            variant={confirming ? "danger" : "secondary"}
             onblur={() => (confirming = false)}
             onclick={end}>{confirming ? m.focus_end_confirm() : m.focus_end()}</Button
           >
         </div>
       </div>
-    </div>
+    {/if}
+  </div>
+  {#if editing && !onmanage}
+    <div class="editor"><ShutSites {suggestions} /></div>
   {/if}
   {#if focus.lastFailed()}<p class="failed" role="alert">{m.focus_failed()}</p>{/if}
 </section>
@@ -190,7 +199,7 @@
 <style>
   .focus {
     display: grid;
-    gap: 12px;
+    gap: 14px;
     padding: 14px;
     border-radius: var(--radius-card);
     background: var(--color-card);
@@ -198,85 +207,100 @@
   }
 
   .focus.page {
-    gap: 16px;
     padding: 20px;
   }
 
-  header {
+  .body {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-width: 0;
+    gap: 16px;
   }
 
-  .mark {
-    display: inline-grid;
+  .dial {
+    position: relative;
+    display: grid;
     place-items: center;
-    inline-size: 26px;
-    block-size: 26px;
-    border-radius: var(--radius-inset);
-    background: var(--color-fill);
-    color: var(--color-text);
+    flex: none;
   }
 
-  .running .mark {
-    background: var(--color-lit);
-    color: var(--color-on-lit);
+  .dial > :global(.focus-length) {
+    position: absolute;
+    inset: 50% auto auto 50%;
+    display: grid;
+    justify-items: center;
+    gap: 0;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    cursor: default;
+    translate: -50% -50%;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .dial > :global(.focus-length:hover),
+  .dial > :global(.focus-length[data-state="open"]) {
+    background: var(--color-fill-hover);
+  }
+
+  .dial > :global(.focus-length:focus-visible) {
+    outline: 2px solid var(--color-ring);
+  }
+
+  .length {
+    font-size: 30px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.03em;
+    line-height: 1;
+  }
+
+  .page .length {
+    font-size: 38px;
+  }
+
+  .unit {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+  }
+
+  .clock {
+    font-size: 24px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  .page .clock {
+    font-size: 30px;
+  }
+
+  .live {
+    animation: settle var(--motion-page) var(--ease-emphasized);
+  }
+
+  .facts {
+    display: grid;
+    gap: 3px;
+    justify-items: start;
+    min-width: 0;
   }
 
   h3 {
     margin: 0;
-    font-size: var(--text-body);
+    font-size: var(--text-page-title);
     font-weight: 600;
   }
 
-  .today {
-    margin-inline-start: auto;
+  .detail {
     color: var(--color-muted);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-
-  .lede {
-    margin: -4px 0 0;
-    color: var(--color-muted);
-    font-size: var(--text-label);
-  }
-
-  .choose {
-    display: grid;
-    gap: 10px;
-  }
-
-  .option {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 30px;
-  }
-
-  .option > span {
-    display: grid;
-    gap: 1px;
-    min-width: 0;
-  }
-
-  .option-title {
-    font-size: var(--text-body);
-  }
-
-  .option-detail {
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-  }
-
-  footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
   }
 
   .shut {
@@ -290,68 +314,27 @@
     cursor: pointer;
   }
 
-  .shut:disabled {
-    cursor: default;
-  }
-
   .shut:focus-visible {
     border-radius: 4px;
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
   }
 
-  .shut:hover:not(:disabled) {
+  .shut:hover {
     color: var(--color-text);
-  }
-
-  .live {
-    display: flex;
-    align-items: center;
-    gap: 18px;
-    animation: settle var(--motion-page) var(--ease-emphasized);
-  }
-
-  .clock {
-    font-size: 26px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
-  }
-
-  .page .clock {
-    font-size: 34px;
-  }
-
-  .phase {
-    margin-block-start: 2px;
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-  }
-
-  .facts {
-    display: grid;
-    gap: 4px;
-    min-width: 0;
-    justify-items: start;
-  }
-
-  .round {
-    font-size: var(--text-body);
-    font-weight: 600;
-  }
-
-  .until {
-    color: var(--color-muted);
-    font-size: var(--text-label);
-    font-variant-numeric: tabular-nums;
   }
 
   .actions {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin-block-start: 8px;
+    margin-block-start: 10px;
+  }
+
+  .editor {
+    padding-block-start: 12px;
+    border-block-start: 1px solid var(--color-border);
+    animation: settle var(--motion-slow) var(--ease-out);
   }
 
   .failed {
@@ -368,12 +351,13 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .live {
+    .live,
+    .editor {
       animation: none;
     }
   }
 
-  :global(:root[data-reduce-motion="true"]) .live {
+  :global(:root[data-reduce-motion="true"]) :is(.live, .editor) {
     animation: none;
   }
 </style>

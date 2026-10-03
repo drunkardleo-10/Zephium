@@ -124,7 +124,10 @@ const running: FocusStatus = {
     focused: 1500,
     allowed: [],
   },
-  blocked: ["youtube.com", "x.com"],
+  shut: [
+    { site: "youtube.com", icon: null },
+    { site: "x.com", icon: null },
+  ],
 };
 
 test("the sidebar shows the day, focus and where the time went", async () => {
@@ -132,8 +135,12 @@ test("the sidebar shows the day, focus and where the time went", async () => {
   await expect.element(screen.getByText("github.com")).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Start focus" })).toBeVisible();
   await capture(screen.container, "panel-day");
+  await screen.getByRole("button", { name: "Shuts 2 sites" }).click();
+  await expect.element(screen.getByText("From your time")).toBeVisible();
+  await capture(screen.container, "panel-shut");
+  await screen.getByRole("button", { name: "Shuts 2 sites" }).click();
   emitNativeEvent("focusChanged", running);
-  await expect.element(screen.getByText("Round 2")).toBeVisible();
+  await expect.element(screen.getByText(/Round 2/u)).toBeVisible();
   await capture(screen.container, "panel-focusing");
 });
 

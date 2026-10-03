@@ -118,8 +118,9 @@
       { seconds: 0, sessions: 0, completed: 0 },
     ),
   );
-  let todayFocus = $derived(period.span === "day" && session.current ? focusSum.seconds : 0);
-  let suggestions = $derived((overview?.sites ?? []).map((entry) => entry.site));
+  let suggestions = $derived(
+    (overview?.sites ?? []).map((entry) => ({ site: entry.site, icon: entry.icon })),
+  );
   let siteEntry = $derived(overview?.sites.find((entry) => entry.site === site) ?? null);
   let siteMark = $derived(site ? favicons.mark(siteEntry?.icon, `https://${site}/`) : null);
   let shut = $derived(
@@ -306,7 +307,6 @@
           <aside class="side">
             <FocusCard
               size="page"
-              todaySeconds={todayFocus}
               onmanage={() => shutSection?.scrollIntoView({ behavior: "smooth", block: "start" })}
             />
             {#if session.focus.length > 0}
