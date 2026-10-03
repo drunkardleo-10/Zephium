@@ -322,6 +322,25 @@ pub fn site_covers(site: &str, host: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
+/// What the engine checks before a page loads while a focus round runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FocusGate {
+    pub shut: Vec<String>,
+    /// Sites let through, each until a wall-clock instant in milliseconds.
+    pub allowed: Vec<(String, i64)>,
+}
+
+impl FocusGate {
+    pub fn blocks(&self, host: &str, now_ms: i64) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.shut.iter().any(|site| site_covers(site, &host))
+            && !self
+                .allowed
+                .iter()
+                .any(|(site, until)| *until > now_ms && site_covers(site, &host))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FocusPhase {
@@ -475,6 +494,16 @@ impl FocusSession {
                 .allowances
                 .iter()
                 .any(|(site, until)| *until > now_ms && site_covers(site, host))
+    }
+
+    /// The gate for this moment: shut sites during a round, nothing in a break.
+    pub fn gate(&self, shut: &[String], now_ms: i64) -> Option<FocusGate> {
+        (self.phase == FocusPhase::Focus && now_ms < self.phase_ends_ms && !shut.is_empty()).then(
+            || FocusGate {
+                shut: shut.to_vec(),
+                allowed: self.allowances.clone(),
+            },
+        )
     }
 
     /// Lets `site` through for [`ALLOWANCE_MS`], or until this round ends.
@@ -747,6 +776,24 @@ mod tests {
         assert_eq!(session.phase, FocusPhase::Break);
         assert!(!session.blocks(&blocked, "youtube.com", 26 * MINUTE_MS));
         assert!(!session.allow("youtube.com".into(), 26 * MINUTE_MS));
+    }
+
+    #[test]
+    fn the_gate_holds_only_during_a_round() {
+        let shut = vec!["youtube.com".to_owned()];
+        let plan = FocusPlan {
+            minutes: 25,
+            breaks: true,
+        };
+        let mut session = FocusSession::start(plan, 0);
+        let gate = session.gate(&shut, 1_000).unwrap();
+        assert!(gate.blocks("WWW.YouTube.com.", 1_000));
+        assert!(!gate.blocks("github.com", 1_000));
+        session.allow("youtube.com".into(), 1_000);
+        assert!(!session.gate(&shut, 2_000).unwrap().blocks("youtube.com", 2_000));
+        assert!(session.gate(&[], 2_000).is_none());
+        session.advance(26 * MINUTE_MS);
+        assert!(session.gate(&shut, 26 * MINUTE_MS).is_none());
     }
 
     #[test]

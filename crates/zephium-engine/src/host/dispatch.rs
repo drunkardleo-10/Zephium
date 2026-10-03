@@ -419,6 +419,7 @@ pub(crate) fn install(
             #[cfg(not(target_os = "windows"))]
             preflight_cache_digests: Default::default(),
             blocker_statistics: HashMap::new(),
+            focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
             picker: None,
             next_picker: 0,

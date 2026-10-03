@@ -597,6 +597,11 @@ impl Drop for ContentRuleValidationCompletion {
 }
 
 pub trait Engine {
+    /// Shuts sites to top-level loads while a focus round runs; `None` opens
+    /// everything again.
+    fn set_focus_gate(&self, _gate: Option<crate::time::FocusGate>) {}
+    /// Holds a view's audio and video still while it is covered for focus.
+    fn set_media_suspended(&self, _id: ItemId, _suspended: bool) {}
     fn set_blocker_statistics(
         &self,
         _profile: ProfileId,
@@ -1207,6 +1212,11 @@ pub enum EngineEvent {
     },
     PageOpenBlocked {
         id: ItemId,
+    },
+    /// A top-level load was shut because a focus round is running.
+    FocusBlocked {
+        id: ItemId,
+        url: String,
     },
     LinkedDownloadStarted {
         id: ItemId,

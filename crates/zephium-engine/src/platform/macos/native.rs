@@ -342,6 +342,12 @@ pub fn stop_loading(view: &wry::WebView) {
     unsafe { webkit(view).stopLoading() };
 }
 
+/// Suspension also refuses the page's own attempts to play until it is
+/// lifted, so a covered page cannot start sound behind the focus surface.
+pub fn set_media_suspended(view: &wry::WebView, suspended: bool) {
+    unsafe { webkit(view).setAllMediaPlaybackSuspended_completionHandler(suspended, None) };
+}
+
 /// Cross-check renderer heuristics with WebKit's public media playback and
 /// capture state. Playback is asynchronous; the caller's existing bounded
 /// deadline handles a missing native completion without retaining the view.

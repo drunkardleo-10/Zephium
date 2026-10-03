@@ -636,6 +636,27 @@ impl EngineHost {
         let crash_id = id.clone();
         let navigation_permit = event_permit.clone();
         let policy_navigation = navigation.clone();
+        #[cfg(target_os = "macos")]
+        let (frame_permit, frame_navigation) = (event_permit.clone(), navigation.clone());
+        let focus_shuts = {
+            let gate = self.focus_gate.clone();
+            let permit = event_permit.clone();
+            let sink = self.sink.clone();
+            let item = id.clone();
+            move |target: &str| {
+                let shut = super::focus::focus_shuts(&gate, target);
+                if shut {
+                    permit.emit(
+                        &sink,
+                        EngineEvent::FocusBlocked {
+                            id: item.get(),
+                            url: target.to_owned(),
+                        },
+                    );
+                }
+                shut
+            }
+        };
         let (title_id, load_id) = (id.clone(), id.clone());
         let scripts = self.scripts_for(partition);
         #[cfg(target_os = "windows")]
@@ -900,6 +921,13 @@ impl EngineHost {
                 }
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
+                // WebView2 asks only about top-level loads here; WebKit asks
+                // about frames too, so focus is checked for it below, where
+                // the main frame is known.
+                #[cfg(target_os = "windows")]
+                if admitted && focus_shuts(&target) {
+                    return false;
+                }
                 #[cfg(target_os = "windows")]
                 if admitted {
                     navigation_site_scope.navigating(&target);
@@ -946,6 +974,25 @@ impl EngineHost {
                     }
                 }
             });
+
+        // WebKit consults this in place of the plain handler above and says
+        // which frame is loading, so focus shuts only top-level documents.
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.with_apple_navigation_action_handler(move |target, action| {
+                if super::webext::intercept_auth_redirect(&target) {
+                    return false;
+                }
+                let admitted = frame_permit.allows_navigation(&target)
+                    && frame_navigation.admits_target(&target);
+                if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
+                    return false;
+                }
+                admitted
+            });
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let _ = focus_shuts;
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {

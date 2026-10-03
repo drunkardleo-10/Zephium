@@ -129,8 +129,8 @@ pub(crate) use native::run_page_permission_probe;
 pub(crate) use native::run_principal_isolation_probe;
 pub(crate) use native::webkit as native_webview;
 pub use native::{
-    add_user_script, configure, query_document_activity, stop_loading, user_script_refusal,
-    user_style_refusal,
+    add_user_script, configure, query_document_activity, set_media_suspended, stop_loading,
+    user_script_refusal, user_style_refusal,
 };
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;

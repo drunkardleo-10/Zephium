@@ -1033,6 +1033,7 @@ impl RetirementGate {
             | event @ EngineEvent::NavState { id, .. }
             | event @ EngineEvent::NativeTabCloseRequested { id }
             | event @ EngineEvent::PageOpenBlocked { id }
+            | event @ EngineEvent::FocusBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
@@ -1705,6 +1706,16 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_focus_gate(gate));
+        });
+    }
+    fn set_media_suspended(&self, id: ItemId, suspended: bool) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_media_suspended(id, suspended));
+        });
+    }
     fn set_blocker_statistics(
         &self,
         profile: ProfileId,

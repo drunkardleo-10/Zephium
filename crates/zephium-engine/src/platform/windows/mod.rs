@@ -1654,6 +1654,17 @@ pub fn stop_loading(view: &wry::WebView) {
     }
 }
 
+/// WebView2 has no playback suspension; muting is what it offers, and a
+/// page cannot unmute itself.
+pub fn set_media_suspended(view: &wry::WebView, suspended: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_8;
+    use windows_core::Interface;
+
+    if let Ok(core8) = view.webview().cast::<ICoreWebView2_8>() {
+        let _ = unsafe { core8.SetIsMuted(suspended) };
+    }
+}
+
 /// WebView2's native audio bit cannot be overridden by page JavaScript. API
 /// or COM failure is uncertainty and therefore a discard veto.
 pub fn query_document_activity(view: &wry::WebView, done: impl FnOnce(bool) + 'static) -> bool {

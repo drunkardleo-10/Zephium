@@ -692,6 +692,9 @@ pub fn stop_loading(view: &wry::WebView) {
 /// WebKitGTK exposes renderer audio activity as a native property. A discard
 /// probe must combine this with the DOM report so page-script tampering cannot
 /// make an actually audible document look idle.
+/// Focus does not cover pages on Linux, which is outside the release.
+pub fn set_media_suspended(_view: &wry::WebView, _suspended: bool) {}
+
 pub fn query_document_activity(view: &wry::WebView, done: impl FnOnce(bool) + 'static) -> bool {
     done(!view.webview().is_playing_audio());
     true
