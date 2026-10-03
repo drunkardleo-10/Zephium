@@ -228,22 +228,102 @@ impl<P: AgentCredentialBinding> AgentProviderCredential<P> {
     }
 }
 
-/// Content-free failure while loading one provider credential from macOS Keychain.
-#[cfg(target_os = "macos")]
+/// Content-free failure while loading one provider credential from the OS vault.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum MacosAgentProviderCredentialError {
+pub enum AgentProviderVaultError {
     /// No exact generic-password item exists for the fixed service and account.
-    #[error("agent provider credential is missing from macOS Keychain")]
+    #[error("agent provider credential is missing from the OS vault")]
     Missing,
     /// Keychain access was denied, unavailable, or otherwise failed closed.
-    #[error("agent provider credential is inaccessible in macOS Keychain")]
+    #[error("agent provider credential is inaccessible in the OS vault")]
     Inaccessible,
     /// The stored secret failed the provider credential content contract.
-    #[error("agent provider credential stored in macOS Keychain is invalid")]
+    #[error("agent provider credential stored in the OS vault is invalid")]
     Invalid,
     /// A bounded zeroizing credential copy could not be allocated.
     #[error("agent provider credential memory is unavailable")]
     Capacity,
+}
+
+/// Compatibility name for the macOS credential loader's closed errors.
+#[cfg(target_os = "macos")]
+pub type MacosAgentProviderCredentialError = AgentProviderVaultError;
+
+/// Loads the fixed OpenAI credential through the platform's native vault.
+pub fn load_development_openai_credential(
+) -> Result<AgentProviderCredential, AgentProviderVaultError> {
+    #[cfg(target_os = "macos")]
+    {
+        load_macos_development_openai_credential()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        load_windows_credential(
+            AgentProviderKind::OpenAiResponses,
+            "app.zephium.agent-provider.openai",
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err(AgentProviderVaultError::Inaccessible)
+    }
+}
+
+/// Loads the fixed TypeSafe credential through the platform's native vault.
+pub fn load_development_typesafe_credential(
+) -> Result<AgentProviderCredential<DecisionCredentialProvider>, AgentProviderVaultError> {
+    #[cfg(target_os = "macos")]
+    {
+        load_macos_development_typesafe_credential()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        load_windows_credential(
+            DecisionCredentialProvider::TypeSafe,
+            "app.zephium.agent-provider.typesafe",
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err(AgentProviderVaultError::Inaccessible)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn load_windows_credential<P: AgentCredentialBinding>(
+    provider: P,
+    target: &str,
+) -> Result<AgentProviderCredential<P>, AgentProviderVaultError> {
+    let _turn = keychain_turn();
+    let read = || zephium_credentials::read(target);
+    let loaded = match read() {
+        Err(zephium_credentials::VaultError::Inaccessible) => {
+            std::thread::sleep(Duration::from_millis(40));
+            read()
+        }
+        loaded => loaded,
+    };
+    let secret = loaded.map_err(|error| match error {
+        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
+        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
+        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
+        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
+    })?;
+    AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
+        AgentProviderCredentialError::Content => AgentProviderVaultError::Invalid,
+        AgentProviderCredentialError::Capacity => AgentProviderVaultError::Capacity,
+    })
+}
+
+/// Loads the native OpenAI key for the release-excluded probe.
+#[cfg(feature = "probe-harness")]
+pub fn load_probe_openai_credential() -> Result<AgentProviderCredential, AgentProviderVaultError> {
+    #[cfg(target_os = "macos")]
+    {
+        return load_macos_probe_openai_credential();
+    }
+    #[cfg(not(target_os = "macos"))]
+    load_development_openai_credential()
 }
 
 /// Loads the exact development OpenAI key into a move-only zeroizing credential.
@@ -302,6 +382,11 @@ pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
     TURN.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
+    zephium_credentials::turn()
 }
 
 #[cfg(target_os = "macos")]

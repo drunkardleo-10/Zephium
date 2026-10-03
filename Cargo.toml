@@ -26,6 +26,7 @@ zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default
 zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "=0.1.0", default-features = false }
 zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0.1.0", default-features = false }
 zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
+zephium-credentials = { path = "crates/zephium-credentials", version = "=0.1.0" }
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
 zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
 zephium-notes = { path = "crates/zephium-notes", version = "=0.1.0" }
