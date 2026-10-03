@@ -153,6 +153,11 @@ x11rb = { version = "=0.13.2", features = ["xkb"] }
 xkeysym = "=0.2.1"
 zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# Exercise native parent paint without creating a WebView or user profile.
+tauri = { workspace = true, features = ["unstable"] }
+windows = { version = "0.61", features = ["Win32_Graphics_Gdi"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }
 zephium-blocker = { workspace = true, features = ["runtime"] }

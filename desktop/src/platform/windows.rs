@@ -506,3 +506,7 @@ impl PresentationChrome for ChromeAdapter {
 pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
     None
 }
+
+#[cfg(test)]
+#[path = "windows_startup_tests.rs"]
+mod startup_tests;

@@ -552,7 +552,25 @@ fn on_main_window_mapped(window: &WebviewWindow) {
     linux_global_shortcuts::main_window_mapped(window);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn on_main_window_mapped(window: &WebviewWindow) {
+    // DWM can discard the backdrop installed while the window was hidden.
+    // Restore it at the first reveal, not at some later focus event, and use
+    // the person's saved appearance rather than the operating-system default.
+    let appearance = APP_STORE
+        .get()
+        .and_then(|store| store.app_setting("appearance"))
+        .unwrap_or_else(|| "system".to_owned());
+    let dark = matches!(
+        resolved_native_theme(window, &appearance),
+        tauri::Theme::Dark
+    );
+    if !platform::imp::apply_material(window, dark) {
+        diagnostic!("material: main-window backdrop could not be restored after initial reveal");
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn on_main_window_mapped(_window: &WebviewWindow) {}
 
 fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
@@ -4911,6 +4929,10 @@ pub fn run() {
             let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
             #[cfg(target_os = "windows")]
             let main_builder = main_builder
+                // Seed the native parent's first erase, not just WebView2's
+                // transparent renderer. Otherwise a hidden decorated window
+                // can reveal an unpainted white client surface until redraw.
+                .background_color(tauri::utils::config::Color(0, 0, 0, 0))
                 .data_directory(privileged_runtime.main.clone())
                 // Supplying any explicit value replaces Wry's default, which
                 // also disables msSmartScreenProtection. Keep only the two
@@ -5560,16 +5582,6 @@ pub fn run() {
                         // resize notification. Wake content before it can be
                         // interacted with.
                         resize_shell.dispatch(Command::SetWindowVisible(true));
-                        // DWM occasionally drops the backdrop applied before
-                        // first show; one re-apply on first focus heals it.
-                        #[cfg(target_os = "windows")]
-                        {
-                            static HEALED: AtomicBool = AtomicBool::new(false);
-                            if !HEALED.swap(true, Ordering::SeqCst) {
-                                let dark = matches!(resize_window.theme(), Ok(tauri::Theme::Dark));
-                                platform::imp::apply_material(&resize_window, dark);
-                            }
-                        }
                     }
                     // Losing focus alone does not make a browser tab
                     // background work: audio and timers must continue. Only
