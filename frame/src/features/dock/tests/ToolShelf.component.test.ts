@@ -56,7 +56,7 @@ test("the records follow the tools, and the whole list is a secondary click away
   expect(names).toEqual([
     "Notes",
     "Tasks",
-    "Activity",
+    "Time",
     "History",
     "Downloads",
     "Bookmarks",

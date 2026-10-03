@@ -22,7 +22,7 @@
     filters,
     actions,
     canCompose = false,
-    marked = true,
+    marked = false,
     closable = true,
     caption = true,
     scrolls = true,
@@ -43,7 +43,8 @@
     /** Tool-specific header controls, placed before the shared ones. */
     actions?: Snippet;
     canCompose?: boolean;
-    /** False for a tool whose title is its own control and needs no mark. */
+    /** A glyph before the title. Titles stand alone; the dock already shows
+     *  which tool this is. */
     marked?: boolean;
     /** False where the tool offers closing among its own actions. */
     closable?: boolean;

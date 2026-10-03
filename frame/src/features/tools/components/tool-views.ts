@@ -4,7 +4,7 @@ import {
   Note01Icon,
   CheckListIcon,
   SparklesIcon,
-  Activity03Icon,
+  HourglassIcon,
   HistoryIcon,
   Download01Icon,
   Bookmark02Icon,
@@ -56,7 +56,7 @@ export const tools = {
     title: m.tool_time,
     description: m.tool_time_help,
     empty: m.tool_time_empty,
-    icon: Activity03Icon,
+    icon: HourglassIcon,
     load: () => import("./previews/TimeView.svelte"),
   },
 } satisfies Record<ToolKind, unknown>;

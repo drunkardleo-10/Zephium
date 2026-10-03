@@ -107,7 +107,6 @@
   {...props}
   caption={false}
   scrolls={false}
-  marked={false}
   closable={false}
   searchLabel={m.tool_search_tasks()}
   searchFocus={false}

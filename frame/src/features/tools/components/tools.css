@@ -179,3 +179,32 @@
   flex: none;
   color: var(--color-muted);
 }
+
+/* A tool's one header control: everything else it offers sits in this menu. */
+.tool-overflow {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius-row);
+  background: transparent;
+  color: var(--color-muted);
+  cursor: default;
+  outline: none;
+  transition:
+    background-color var(--motion-instant) var(--ease-smooth),
+    color var(--motion-instant) var(--ease-smooth);
+}
+
+.tool-overflow:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: -2px;
+}
+
+.tool-overflow:hover,
+.tool-overflow[data-state="open"] {
+  background: var(--color-fill-hover);
+  color: var(--color-text);
+}

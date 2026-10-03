@@ -1,6 +1,6 @@
 import * as m from "$shared/i18n/messages";
 import {
-  Activity03Icon,
+  HourglassIcon,
   CheckListIcon,
   Download01Icon,
   HistoryIcon,
@@ -18,7 +18,7 @@ import type { ToolKind } from "$session/tools.svelte";
 const PRESENTATION: Record<ToolKind, { icon: IconSvgElement; label: () => string }> = {
   notes: { icon: Note01Icon, label: m.panel_notes },
   tasks: { icon: CheckListIcon, label: m.panel_tasks },
-  time: { icon: Activity03Icon, label: m.panel_time },
+  time: { icon: HourglassIcon, label: m.panel_time },
   ai: { icon: SparklesIcon, label: m.panel_ai },
   history: { icon: HistoryIcon, label: m.menu_history },
   downloads: { icon: Download01Icon, label: m.menu_downloads },
