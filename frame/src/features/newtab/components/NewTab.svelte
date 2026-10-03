@@ -17,7 +17,7 @@
   import IconButton from "$shared/ui/IconButton";
   import { greetingFor } from "../lib/greeting";
   import { clockFace, clockFormat, dayKey, focusSpan, untilNextMinute } from "../lib/clock";
-  import { SAMPLE_DAY } from "../lib/figures";
+  import { focus, localDay } from "$domain/time";
   import { groundPath, notchShape, notchWidth, roundedRect } from "../lib/ground";
   import { layout, type Box } from "../lib/layout";
   import { WORDMARK } from "$shared/lib/wordmark";
@@ -27,8 +27,7 @@
     oncustomize,
     onprofile,
     ontasks,
-    focusMinutes = SAMPLE_DAY.focusMinutes,
-    focusGoalMinutes = SAMPLE_DAY.focusGoalMinutes,
+    ontime,
   }: {
     /** The field that hangs in the notch. */
     search: Snippet;
@@ -38,9 +37,8 @@
     onprofile?: () => void;
     /** Opens Tasks. */
     ontasks?: () => void;
-    /** Minutes spent focused today, and the day's aim. */
-    focusMinutes?: number;
-    focusGoalMinutes?: number;
+    /** Opens Time. */
+    ontime?: () => void;
   } = $props();
 
   const id = $props.id();
@@ -50,6 +48,7 @@
   let now = $state(new Date());
   let due = $state({ today: 0, overdue: 0 });
   let blocked = $state<number | null>(null);
+  let focusedBefore = $state(0);
 
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   let profile = $derived(tabs.profile()?.id ?? null);
@@ -71,6 +70,11 @@
     ),
   );
   const number = new Intl.NumberFormat();
+  let running = $derived(focus.session());
+  let focusMinutes = $derived(
+    (focusedBefore + (running === null ? 0 : focus.focusedSeconds(running, now.getTime()))) / 60,
+  );
+  let focusGoalMinutes = $derived(Number(preferences.value("focus.goal")) || 120);
   let focusShare = $derived(
     focusGoalMinutes > 0 ? Math.min(1, Math.max(0, focusMinutes / focusGoalMinutes)) : 0,
   );
@@ -96,6 +100,26 @@
     void commands.blockerStats(owner).then(
       (result) => {
         if (live) blocked = result.status === "ok" ? result.data.today : null;
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
+  // Focus finished earlier today; a running session adds to it live.
+  $effect(() => {
+    const owner = profile;
+    const day = localDay(now);
+    void running?.rounds;
+    if (!owner || incognito) {
+      focusedBefore = 0;
+      return;
+    }
+    let live = true;
+    void commands.timeCall(owner, { kind: "focus_days", from_day: day, days: 1 }).then(
+      (result) => {
+        if (live && result.kind === "focus_days") focusedBefore = result.days[0]?.seconds ?? 0;
       },
       () => {},
     );
@@ -309,7 +333,7 @@
           </span>
         </div>
       {:else if figure === "focus"}
-        <div class="tile" style={at(tile)}>
+        <button type="button" class="tile" style={at(tile)} onclick={ontime}>
           <span class="label"
             ><Icon icon={Clock01Icon} size={13} /><span class="name">{m.ntp_focused()}</span><span
               class="meter"
@@ -325,7 +349,7 @@
             <span class="value">{focusSpan(focusMinutes)}</span>
             <span class="foot">{m.ntp_focus_goal({ goal: focusSpan(focusGoalMinutes) })}</span>
           </span>
-        </div>
+        </button>
       {:else}
         <button type="button" class="tile" style={at(tile)} onclick={ontasks}>
           <span class="label"

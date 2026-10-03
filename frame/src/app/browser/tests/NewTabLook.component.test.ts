@@ -30,6 +30,10 @@ vi.mock("$shared/ipc/bindings", async () => {
     newtabSearch: native.search,
     newtabRun: async () => ({ accepted: true, operation_id: null }),
     newtabCancel: async () => true,
+    timeCall: async () => ({
+      kind: "focus_days" as const,
+      days: [{ day: 0, seconds: 134 * 60, sessions: 3, completed: 2 }],
+    }),
     blockerStats: async () => ({
       status: "ok" as const,
       data: { today: 1284, last7Days: 9120, days: [1100, 1250, 1400, 1310, 1380, 1396, 1284] },
@@ -104,7 +108,7 @@ const result = (title: string, kind: SearchResult["kind"] = "tab"): SearchResult
 });
 
 test("the field hangs from the top, the name and the day are cut into the page", async () => {
-  const screen = await setup({ "ui.newtab-clock-format": "12h" });
+  const screen = await setup({ "ui.newtab-clock-format": "12h", "focus.goal": "240" });
   await expect.element(screen.getByRole("img", { name: "Zephium" })).toBeVisible();
   await expect.element(screen.getByText("2:32 PM")).toBeVisible();
   await expect.element(screen.getByText("Monday, September 28")).toBeVisible();
@@ -128,8 +132,8 @@ test("the field hangs from the top, the name and the day are cut into the page",
   const card = screen.container.querySelector(".tile")!.getBoundingClientRect();
   expect(pane.bottom - card.bottom).toBe(28);
 
-  // The figures: what the blocker stopped today, focus time (a stand-in until
-  // it is recorded), and what is due, read from Tasks with the overdue one.
+  // The figures: what the blocker stopped today, focus time against the
+  // day's goal, and what is due, read from Tasks with the overdue one.
   await expect.element(screen.getByText("1,284")).toBeVisible();
   await expect.element(screen.getByText("2h 14m")).toBeVisible();
   await expect.element(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "134");
