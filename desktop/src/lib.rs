@@ -3140,6 +3140,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             "downloads" => Some(zephium_app::BrowserPage::Downloads),
             "tasks" => Some(zephium_app::BrowserPage::Tasks),
             "notes" => Some(zephium_app::BrowserPage::Notes),
+            "time" => Some(zephium_app::BrowserPage::Time),
             "return" => None,
             _ => return rejected_operation(),
         };
@@ -4893,7 +4894,7 @@ fn build_tools_menu(
     let item = |id: &str| build_command_menu_item(handle, &resolved, id);
     let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
     let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
-    let activity = MenuItemBuilder::with_id("tool.time", "Activity").build(handle)?;
+    let activity = MenuItemBuilder::with_id("tool.time", "Time").build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
     let downloads = item("tool.downloads")?;

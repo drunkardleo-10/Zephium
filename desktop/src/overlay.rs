@@ -533,7 +533,7 @@ fn destination(tool: ToolKind) -> &'static str {
         // Bookmarks have no full page; the browser opens its panel.
         ToolKind::Bookmarks => "tool.bookmarks",
         ToolKind::Ai => "tool.ai",
-        ToolKind::Time => "tool.time",
+        ToolKind::Time => "browser.time",
     }
 }
 pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {

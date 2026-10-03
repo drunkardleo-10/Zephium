@@ -238,6 +238,7 @@ pub const REGISTRY: &[CommandSpec] = &[
     ),
     command("browser.tasks", "Show All Tasks", Keys::NONE, Group::Window),
     command("browser.notes", "Show All Notes", Keys::NONE, Group::Window),
+    command("browser.time", "Show Time", Keys::NONE, Group::Window),
     command(
         "settings.shortcuts",
         "Keyboard Shortcuts",

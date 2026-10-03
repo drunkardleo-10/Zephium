@@ -153,6 +153,7 @@ pub enum BrowserPage {
     Downloads,
     Tasks,
     Notes,
+    Time,
 }
 
 impl BrowserPage {
@@ -165,6 +166,7 @@ impl BrowserPage {
             Self::Downloads => "browser.downloads",
             Self::Tasks => "browser.tasks",
             Self::Notes => "browser.notes",
+            Self::Time => "browser.time",
         }
     }
 }
