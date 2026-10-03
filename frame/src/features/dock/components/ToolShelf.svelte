@@ -7,6 +7,7 @@
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
   import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
+  import NoticePip from "./NoticePip.svelte";
 
   let { compact = false, extensions }: { compact?: boolean; extensions?: Snippet } = $props();
 
@@ -48,7 +49,8 @@
     triggerClass={["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
     panelClass="shelf-stack"
   >
-    {#snippet trigger()}<Icon icon={ToolCaseIcon} size={18} />{/snippet}
+    {#snippet trigger()}<Icon icon={ToolCaseIcon} size={18} />{#if compact}<NoticePip
+        />{/if}{/snippet}
     {#if extensions}
       <!-- The web's buttons sit farthest from the case, apart from ours. -->
       <div class="shelf-extensions" style:--step={count}>{@render extensions()}</div>
@@ -99,6 +101,7 @@
   /* The one square at the head of the row, on the same ground as the kept
      sites beside it: ours on one side of the rule, the web's on the other. */
   .shelf :global(.case) {
+    position: relative;
     display: grid;
     place-items: center;
     width: var(--dock-tile);

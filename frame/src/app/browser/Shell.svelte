@@ -9,7 +9,7 @@
   import { EssentialTile } from "$features/essentials";
   import { AddressField, findInPage } from "$features/address";
   import { Dock } from "$features/dock";
-  import { DownloadStatus } from "$features/downloads";
+  import { DownloadPulse, DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionActions, ManageExtensions } from "$features/extensions";
   import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
@@ -187,10 +187,13 @@
       if (command.id === "protection.site") void toggleSiteProtection();
       if (command.id === "protection.hide") void hideElements();
       if (command.id.startsWith("focus.shut="))
-        notices.show(m.focus_shut_notice({ site: command.id.slice("focus.shut=".length) }));
-      if (command.id === "focus.alert=finished") notices.show(m.focus_done_title());
-      if (command.id === "focus.alert=break") notices.show(m.focus_break_title());
-      if (command.id === "focus.alert=focus") notices.show(m.focus_back_title());
+        notices.show(
+          m.focus_shut_notice({ site: command.id.slice("focus.shut=".length) }),
+          "focus",
+        );
+      if (command.id === "focus.alert=finished") notices.show(m.focus_done_title(), "focus");
+      if (command.id === "focus.alert=break") notices.show(m.focus_break_title(), "focus");
+      if (command.id === "focus.alert=focus") notices.show(m.focus_back_title(), "focus");
     });
   });
   // A search belongs to the page it runs in; moving to another page ends it.
@@ -264,7 +267,9 @@
               />{/if}
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact tools={!inWork}>
+    {/snippet}{#snippet dock(compact)}{#if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
+            profile={tabs.profile()?.id ?? ""}
+          />{/if}<Dock compact tools={!inWork}>
           {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
               variant="stack"
             />{/snippet}

@@ -1,5 +1,8 @@
 import { expect, test, vi } from "vitest";
+import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
+import "$styles/global.css";
+import * as notices from "$session/notice.svelte";
 import ToolShelf from "../components/ToolShelf.svelte";
 
 const native = vi.hoisted(() => ({
@@ -65,4 +68,28 @@ test("the records follow the tools, and the whole list is a secondary click away
 
   await tools.click({ button: "right" });
   expect(native.toolsMenu).toHaveBeenCalledOnce();
+});
+
+test("at rail width a notice is its glyph on the case, and then it goes", async () => {
+  const screen = await render(ToolShelf, { compact: true });
+  screen.container.style.cssText = "padding:24px;inline-size:96px;background:var(--color-chrome)";
+  expect(screen.container.querySelector(".pip")).toBeNull();
+
+  notices.show("Link copied");
+  await expect.element(screen.getByRole("status")).toHaveTextContent("Link copied");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await page
+    .elementLocator(screen.container)
+    .screenshot({ path: "../../../../../target/time/pip-link.png" });
+
+  notices.show("Download started", "download");
+  await expect.element(screen.getByRole("status")).toHaveTextContent("Download started");
+  await expect.poll(() => screen.container.querySelector(".pip"), { timeout: 4000 }).toBeNull();
+});
+
+test("expanded, the case carries no glyph; the sidebar's own notice speaks", async () => {
+  const screen = await render(ToolShelf);
+  notices.show("Link copied");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(screen.container.querySelector(".pip")).toBeNull();
 });

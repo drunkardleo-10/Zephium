@@ -2626,5 +2626,7 @@
   "focus_shut_notice": "{site} is shut during focus",
   "time_settings": "Time settings",
   "tool_more": "More",
-  "history_page_open": "Open History"
+  "history_page_open": "Open History",
+  "notice_download_started": "Download started",
+  "notice_download_finished": "Download finished"
 }

@@ -29,9 +29,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
-    "js": 361200,
-    "css": 106900,
-    "description": "The shared tool header style gains its one overflow control."
+    "js": 362000,
+    "css": 108000,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
     "js": 1262430,
@@ -44,8 +44,8 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 465300,
-    "css": 110800,
+    "js": 466800,
+    "css": 111800,
     "description": "History's header keeps one control: a menu, shared with Tasks, that opens the full page or closes the panel."
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
@@ -104,8 +104,8 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
-    "js": 465600,
-    "css": 110800,
+    "js": 467100,
+    "css": 111800,
     "description": "Time's header keeps one control: a menu, shared with Tasks, for the page, its settings and closing."
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
@@ -157,9 +157,9 @@
     "css": 12600
   },
   "lazy:features/library/components/LibraryPage.svelte": {
-    "js": 354100,
-    "css": 104000,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 354900,
+    "css": 104900,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "lazy:features/tasks/components/TasksPage.svelte": {
     "js": 399600,
@@ -182,9 +182,9 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (177236 measured over 174933 at 714054aa). The object renderers' message keys in the shared message chunk add under 0.1 KB JS (177441 measured). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 179552 JS and 3963 CSS."
   },
   "lazy:features/downloads/components/DownloadsList.svelte": {
-    "js": 364700,
-    "css": 108400,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 365500,
+    "css": 109400,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
     "js": 588700,
@@ -212,9 +212,9 @@
     "description": "Measured 512177 JS and 16027 CSS bytes: Work's board loads the kit through loadChart, so this entry carries LayerChart and is bounded by WorkChart's measured graph. The shadcn-svelte chart designs (radial rings with their track, the radar web, line points, area washes, stacked areas, the headline and the overview and tile levels) add 12.5 KB JS and 2.7 KB CSS (524686 and 18703 measured)."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 870300,
-    "css": 148900,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 871000,
+    "css": 149800,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 275400,
@@ -432,14 +432,14 @@
     "description": "A new work's first screen (workflows by what the person does), fetched only when a work is empty so the Workspace chunk does not carry it. Measured 116550 JS and 12231 CSS, most of it the shared Work graph. Round 5 memory: pictures asked for at the width shown: 116726 JS measured. BYOK/connections release: measured 116856 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5b: the tiles wear the real marks of the apps a workflow reads, through the canvas's site glyph and favicon cache, which the Work screen has already loaded: 192547 JS measured in this static graph. Its CSS with the glyph: 13406 measured."
   },
   "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 481800,
-    "css": 116800,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 482600,
+    "css": 117800,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "lazy:features/blocker/components/ProtectionMenu.svelte": {
-    "js": 364200,
-    "css": 108700,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 365000,
+    "css": 109700,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "onboarding": {
     "js": 199800,
@@ -447,14 +447,14 @@
     "description": "Onboarding reads the preference defaults, which gain the time and focus settings."
   },
   "lazy:features/bookmarks/components/BookmarksPanel.svelte": {
-    "js": 371500,
-    "css": 109900,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
+    "js": 372300,
+    "css": 110800,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "lazy:features/tools/components/previews/BookmarksView.svelte": {
-    "js": 361700,
-    "css": 106900,
-    "description": "The shared tool header style gains its one overflow control."
+    "js": 362500,
+    "css": 108000,
+    "description": "Notice, download and tool-menu strings join the shared message catalog."
   },
   "lazy:features/time/components/ShutSites.svelte": {
     "js": 356200,
@@ -462,18 +462,18 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/time/components/TimePage.svelte": {
-    "js": 490000,
-    "css": 124400,
+    "js": 491300,
+    "css": 125500,
     "description": "The focus dial chooses its length from the menu shared with Tasks."
   },
   "lazy:features/time/components/TimePanel.svelte": {
-    "js": 482600,
-    "css": 122500,
+    "js": 484000,
+    "css": 123600,
     "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place."
   },
   "lazy:features/time/components/FocusCover.svelte": {
-    "js": 356600,
-    "css": 105900,
+    "js": 357400,
+    "css": 107000,
     "description": "Stands where a page focus shuts would be: the round's ring, the site, and allow or end."
   }
 }

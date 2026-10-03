@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Link04Icon } from "@hugeicons/core-free-icons";
+  import { Download01Icon, HourglassIcon, Link04Icon } from "@hugeicons/core-free-icons";
   import * as notices from "$session/notice.svelte";
   import Icon from "$shared/ui/Icon";
 
@@ -7,6 +7,8 @@
   const LINGER = 1800;
   /** Matches the exit transition below. */
   const EXIT = 140;
+
+  const GLYPHS = { link: Link04Icon, download: Download01Icon, focus: HourglassIcon };
 
   let current = $derived(notices.notice());
   let leaving = $state(false);
@@ -27,7 +29,7 @@
 {#if current}
   {#key current.id}
     <div class="notice" class:leaving role="status">
-      <span class="glyph" aria-hidden="true"><Icon icon={Link04Icon} size={15} /></span>
+      <span class="glyph" aria-hidden="true"><Icon icon={GLYPHS[current.kind]} size={15} /></span>
       <span class="text">{current.text}</span>
     </div>
   {/key}
