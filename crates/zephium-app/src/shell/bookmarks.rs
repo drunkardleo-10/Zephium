@@ -206,6 +206,7 @@ impl Shell {
                 url: node.url,
                 title: node.title,
                 children: node.children,
+                parent: node.parent.map(|id| id.to_string()),
             })
             .collect();
         self.want_icons(

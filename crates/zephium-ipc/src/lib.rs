@@ -616,6 +616,8 @@ pub struct BookmarkView {
     pub icon: Option<IconRef>,
     /// Direct children, for a folder.
     pub children: u32,
+    /// The folder it lives in; absent at the top level.
+    pub parent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

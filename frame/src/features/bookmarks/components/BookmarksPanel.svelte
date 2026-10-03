@@ -14,6 +14,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { favicons } from "$domain/favicons";
   import { keymap } from "$domain/keymap";
+  import { uiCommands } from "$domain/ui-commands";
   import { IS_MAC } from "$shared/platform";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { createPointerDrag } from "$shared/lib/pointer-drag.svelte";
@@ -38,6 +39,14 @@
   let address = $state("");
   let name = $state("");
   let addProblem = $state<"invalid" | "failed" | null>(null);
+  /** The row a native menu was opened on; the menu is modal, so one at a time. */
+  let menuTarget: BookmarkView | null = null;
+  /** A link just deleted, kept long enough to put it back. */
+  let deleted = $state<{
+    item: { title: string; url: string; parent: string | null };
+    index: number | null;
+  } | null>(null);
+  const UNDO_WINDOW = 6000;
 
   /** Where a carried bookmark would land: before or after a row of the
    *  folder in view, or inside a folder (a row or a crumb; null is the top). */
@@ -171,14 +180,80 @@
     if (keep && title && title !== item.title) await session.rename(item.id, title);
   }
 
+  /** A folder with contents asks first, in its row; a link goes at once and
+   *  can be put back for a few seconds. */
   async function remove(item: BookmarkView) {
-    if (item.url === null && item.children > 0 && confirming !== item.id) {
+    if (item.url === null && item.children > 0) {
       confirming = item.id;
       return;
     }
-    confirming = null;
-    await session.remove(item.id);
+    await erase(item);
   }
+
+  async function erase(item: BookmarkView) {
+    confirming = null;
+    const at = session.items.findIndex((candidate) => candidate.id === item.id);
+    const index = session.searching || at < 0 ? null : at;
+    const outcome = await session.remove(item.id);
+    if (outcome === false || item.url === null) return;
+    deleted = { item: { title: item.title, url: item.url, parent: item.parent }, index };
+  }
+
+  async function undo() {
+    const last = deleted;
+    deleted = null;
+    if (last) await session.restore(last.item, last.index);
+  }
+
+  $effect(() => {
+    if (!deleted) return;
+    const timer = setTimeout(() => (deleted = null), UNDO_WINDOW);
+    return () => clearTimeout(timer);
+  });
+
+  function openMenu(event: MouseEvent, item: BookmarkView) {
+    event.preventDefault();
+    if (renaming !== null) return;
+    menuTarget = item;
+    void commands.bookmarkMenuPopup(event.clientX, event.clientY, item.url === null).catch(() => {
+      menuTarget = null;
+    });
+  }
+
+  function runMenu(action: string) {
+    const item = menuTarget;
+    menuTarget = null;
+    if (!item) return;
+    switch (action) {
+      case "open":
+        if (item.url === null) void session.open(item.id);
+        else void commands.browserOpenUrl(item.url, false);
+        break;
+      case "openNewTab":
+        if (item.url) void commands.browserOpenUrl(item.url, true);
+        break;
+      case "copyLink":
+        if (item.url) void navigator.clipboard.writeText(item.url).catch(() => {});
+        break;
+      case "rename":
+        startRename(item);
+        break;
+      case "remove":
+      case "removeFolder":
+        void remove(item);
+        break;
+    }
+  }
+
+  // Only commands that arrive while the panel is open are its own.
+  let handledCommand = untrack(() => uiCommands.uiCommand().seq);
+  $effect(() => {
+    const command = uiCommands.uiCommand();
+    if (command.seq === handledCommand) return;
+    handledCommand = command.seq;
+    if (command.id.startsWith("bookmark.menu."))
+      untrack(() => runMenu(command.id.slice("bookmark.menu.".length)));
+  });
 
   async function addFolder() {
     const id = await session.addFolder(m.bookmarks_new_folder_name());
@@ -370,6 +445,7 @@
               onauxclick={(event) => {
                 if (event.button === 1) activate(item, event);
               }}
+              oncontextmenu={(event) => openMenu(event, item)}
               onpointerdown={(event) => press(event, item)}
               onpointermove={drag.move}
               onpointerup={drag.end}
@@ -391,34 +467,72 @@
                   : hostOf(item.url ?? "")}</span
               >
             </button>
-            <span class="actions">
-              <IconButton
-                icon={PencilEdit02Icon}
-                label={m.bookmarks_rename()}
-                size={14}
-                buttonSize={22}
-                onclick={() => startRename(item)}
-              />
-              <IconButton
-                icon={Delete02Icon}
-                label={confirming === item.id
-                  ? m.bookmarks_remove_folder_confirm({ count: item.children })
-                  : m.bookmarks_remove()}
-                class={confirming === item.id ? "confirm" : ""}
-                size={14}
-                buttonSize={22}
-                onclick={() => void remove(item)}
-              />
-            </span>
+            {#if confirming === item.id}
+              <!-- Escape only backs out of the question. -->
+              <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+              <span
+                class="confirm"
+                role="group"
+                aria-label={m.bookmarks_remove_folder_confirm({ count: item.children })}
+                onkeydown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.stopPropagation();
+                  confirming = null;
+                }}
+              >
+                <Button size="compact" variant="ghost" onclick={() => (confirming = null)}
+                  >{m.action_cancel()}</Button
+                >
+                <Button size="compact" variant="danger" onclick={() => void erase(item)}
+                  >{item.children === 1
+                    ? m.bookmarks_delete_items_one()
+                    : m.bookmarks_delete_items({ count: item.children })}</Button
+                >
+              </span>
+            {:else}
+              <span class="actions">
+                <IconButton
+                  icon={PencilEdit02Icon}
+                  label={m.bookmarks_rename()}
+                  size={14}
+                  buttonSize={22}
+                  onclick={() => startRename(item)}
+                />
+                <IconButton
+                  icon={Delete02Icon}
+                  label={folder && item.children > 0
+                    ? m.bookmarks_remove_folder_confirm({ count: item.children })
+                    : m.bookmarks_remove()}
+                  size={14}
+                  buttonSize={22}
+                  onclick={() => void remove(item)}
+                />
+              </span>
+            {/if}
           {/if}
         </li>
       {/each}
     </ul>
   {/if}
 </div>
+{#if deleted}
+  <div class="undo" role="status">
+    <span>{m.bookmarks_deleted({ title: deleted.item.title || deleted.item.url })}</span>
+    <Button size="compact" variant="ghost" onclick={() => void undo()}>{m.bookmarks_undo()}</Button>
+  </div>
+{/if}
 {#if drag.item}
+  {@const carried = drag.item}
   <div class="ghost" style:translate={`${drag.at.x + 12}px ${drag.at.y + 8}px`} aria-hidden="true">
-    {drag.item.title}
+    <span class="glyph"
+      >{#if carried.url === null}<Icon icon={Folder01Icon} size={14} />{:else}<FavIcon
+          image={favicons.mark(carried.icon, carried.url)?.image ?? null}
+          tone={favicons.mark(carried.icon, carried.url)?.tone}
+          size={14}
+          lit
+          fallback={Globe02Icon}
+        />{/if}</span
+    ><span class="ghost-title">{carried.title}</span>
   </div>
 {/if}
 
@@ -579,9 +693,47 @@
     visibility: hidden;
   }
 
-  /* A folder's removal waits for a second press; the button says so in red. */
-  .actions :global(.confirm) {
-    color: var(--color-danger);
+  /* A folder with contents asks in its own row before it goes. */
+  .confirm {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 4px;
+    padding-inline-end: 4px;
+  }
+
+  .row:has(.confirm) .detail {
+    display: none;
+  }
+
+  .undo {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 8px 8px;
+    padding: 4px 4px 4px 12px;
+    border-radius: var(--radius-row);
+    background: var(--row-active);
+    box-shadow: var(--row-rim);
+    color: var(--color-text);
+    font-size: var(--text-label);
+    animation: rise var(--motion-base) var(--ease-emphasized) both;
+  }
+
+  .undo span {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      translate: 0 6px;
+    }
   }
 
   .add {
@@ -593,10 +745,13 @@
     background: var(--row-active);
   }
 
-  .field {
-    height: 28px;
-    padding: 0 8px;
-    border: 1px solid var(--color-border);
+  /* The kit's field: fill at rest, a ring only while the caret is in it. */
+  .field,
+  .rename {
+    box-sizing: border-box;
+    min-width: 0;
+    padding: 0 10px;
+    border: 0;
     border-radius: var(--radius-inset);
     background: var(--color-field);
     color: var(--color-text);
@@ -604,10 +759,27 @@
     font-size: var(--text-label);
     outline: none;
     user-select: text;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
   }
 
-  .field:focus {
-    border-color: var(--color-ring);
+  .field {
+    height: 30px;
+  }
+
+  .field::placeholder {
+    color: var(--color-faint);
+  }
+
+  .field:focus,
+  .rename {
+    background: var(--color-field-hover);
+    box-shadow: var(--shadow-field-focus);
+  }
+
+  .field:hover:not(:focus) {
+    background: var(--color-field-hover);
   }
 
   .add-problem {
@@ -657,38 +829,41 @@
     inset-block-start: 0;
     inset-inline-start: 0;
     z-index: 60;
-    max-width: 220px;
-    padding: 5px 10px;
-    overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 240px;
+    padding: 6px 12px 6px 9px;
     border-radius: var(--radius-row);
     background: var(--color-raised);
     box-shadow: var(--shadow-float);
     color: var(--color-text);
     font-size: var(--text-label);
+    pointer-events: none;
+  }
+
+  .ghost-title {
+    min-width: 0;
+    overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    pointer-events: none;
   }
 
   .rename {
     flex: 1;
-    min-width: 0;
     height: 26px;
     margin-inline-end: 8px;
-    padding: 0 8px;
-    border: 1px solid var(--color-ring);
-    border-radius: var(--radius-inset);
-    background: var(--color-field);
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-label);
-    outline: none;
-    user-select: text;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .row {
+    .row,
+    .field,
+    .rename {
       transition: none;
+    }
+
+    .undo {
+      animation: none;
     }
   }
 

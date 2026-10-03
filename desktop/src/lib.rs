@@ -1562,6 +1562,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             menu_popup,
             add_menu_popup,
             tab_menu_popup,
+            bookmark_menu_popup,
             profile_menu_popup,
             sidebar_menu_popup,
             tools_menu_popup,
@@ -3056,6 +3057,14 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         let _ = try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &section);
         return execute_command(app, "browser.settings");
     }
+    if BOOKMARK_MENU_ACTION_IDS.contains(&id) {
+        let command = id.replacen("bookmarkmenu.", "bookmark.menu.", 1);
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &command) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     if id == "mode.work" {
         return execute_command(app, "browser.work");
     }
@@ -3983,6 +3992,41 @@ fn tab_menu_popup(
 
 #[tauri::command]
 #[specta::specta]
+fn bookmark_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    folder: bool,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "bookmark_menu_popup") {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let Ok(menu) = build_bookmark_menu(&app, folder) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
+}
+
+#[tauri::command]
+#[specta::specta]
 fn sidebar_menu_popup(
     caller: WebviewWindow,
     app: tauri::AppHandle,
@@ -4581,6 +4625,18 @@ const SIDEBAR_MENU_COMMAND_IDS: [&str; 4] = [
 const PROTECTION_SITE_COMMAND: &str = "protection.site";
 const PROTECTION_HIDE_COMMAND: &str = "protection.hide";
 
+/// The bookmark panel arms the row it opened the menu on and applies the
+/// choice itself, through the same calls a click makes. Native only relays
+/// which entry was chosen, so it never holds a bookmark id.
+const BOOKMARK_MENU_ACTION_IDS: [&str; 6] = [
+    "bookmarkmenu.open",
+    "bookmarkmenu.openNewTab",
+    "bookmarkmenu.copyLink",
+    "bookmarkmenu.rename",
+    "bookmarkmenu.remove",
+    "bookmarkmenu.removeFolder",
+];
+
 const TAB_MENU_ACTION_IDS: [&str; 10] = [
     "tabmenu.reload",
     "tabmenu.duplicate",
@@ -4725,6 +4781,34 @@ fn build_tab_menu(
         &[
             &reload, &duplicate, &copy_link, &bookmark, &first, &keep, &split, &second, &close,
             &others, &below,
+        ],
+    )
+}
+
+fn build_bookmark_menu(
+    handle: &tauri::AppHandle,
+    folder: bool,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let item = |index: usize, title: &str| {
+        MenuItemBuilder::with_id(BOOKMARK_MENU_ACTION_IDS[index], title).build(handle)
+    };
+    let open = item(0, "Open")?;
+    let rename = item(3, "Rename")?;
+    if folder {
+        let separator = PredefinedMenuItem::separator(handle)?;
+        let remove = item(5, "Delete Folder")?;
+        return Menu::with_items(handle, &[&open, &separator, &rename, &remove]);
+    }
+    let new_tab = item(1, "Open in New Tab")?;
+    let first = PredefinedMenuItem::separator(handle)?;
+    let copy_link = item(2, "Copy Link")?;
+    let second = PredefinedMenuItem::separator(handle)?;
+    let remove = item(4, "Delete")?;
+    Menu::with_items(
+        handle,
+        &[
+            &open, &new_tab, &first, &copy_link, &second, &rename, &remove,
         ],
     )
 }
@@ -6226,7 +6310,10 @@ mod tests {
         }));
         // The panel is privileged but must not be able to drive a context-menu
         // action against whichever tab main chrome last armed.
-        for id in super::TAB_MENU_ACTION_IDS {
+        for id in super::TAB_MENU_ACTION_IDS
+            .into_iter()
+            .chain(super::BOOKMARK_MENU_ACTION_IDS)
+        {
             assert!(!super::search_action_in_bounds(&SearchAction::RunCommand {
                 id: id.into(),
             }));

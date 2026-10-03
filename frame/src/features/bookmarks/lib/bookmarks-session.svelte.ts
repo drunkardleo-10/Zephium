@@ -148,6 +148,20 @@ export class BookmarksSession {
     return "failed";
   }
 
+  /** Puts a deleted link back in its folder, at its old place when known. */
+  async restore(item: { title: string; url: string; parent: string | null }, index: number | null) {
+    const id = await this.write({
+      kind: "add_link",
+      parent: item.parent,
+      title: item.title,
+      url: item.url,
+    });
+    if (typeof id !== "string") return false;
+    if (index !== null) await this.move(id, item.parent, index);
+    this.highlighted = id;
+    return true;
+  }
+
   /** Moves `id` among the folder in view, before the bookmark at `at`. */
   reorder(id: string, at: number) {
     const from = this.items.findIndex((item) => item.id === id);

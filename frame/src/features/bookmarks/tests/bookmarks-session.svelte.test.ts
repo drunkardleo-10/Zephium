@@ -13,6 +13,7 @@ const view = (id: string, title: string, url: string | null = null): BookmarkVie
   url,
   icon: null,
   children: 0,
+  parent: null,
 });
 const listing = (folder: string | null, items: BookmarkView[]): BookmarkResponse => ({
   kind: "listing",

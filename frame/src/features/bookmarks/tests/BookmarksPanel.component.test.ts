@@ -12,6 +12,7 @@ const view = (id: string, title: string, url: string | null, children = 0): Book
   url,
   icon: null,
   children,
+  parent: null,
 });
 
 const top = [
@@ -70,15 +71,54 @@ test("browses folders, opens links, and renames in place", async () => {
   );
 });
 
-test("a folder with contents asks for a second press before it goes", async () => {
+test("a folder with contents asks in its row before it goes", async () => {
   native.call.mockImplementation(async (_profile: string, call: BookmarkCall) => answer(call));
   const screen = await render(BookmarksPanel, { profile: "p", query: "" });
-  const remove = screen.getByRole("button", { name: "Delete" }).first();
-  await remove.click();
-  expect(native.call).not.toHaveBeenCalledWith("p", { kind: "remove", id: "1" });
   await screen.getByRole("button", { name: "Delete this folder and its 2 items" }).click();
+  expect(native.call).not.toHaveBeenCalledWith("p", { kind: "remove", id: "1" });
+  const question = screen.getByRole("group", { name: "Delete this folder and its 2 items" });
+  await expect.element(question).toHaveTextContent(/Delete 2 Items/u);
+  await question.getByRole("button", { name: "Cancel" }).click();
+  await expect.element(question).not.toBeInTheDocument();
+
+  await screen.getByRole("button", { name: "Delete this folder and its 2 items" }).click();
+  await screen
+    .getByRole("group", { name: "Delete this folder and its 2 items" })
+    .getByRole("button", { name: "Delete 2 Items" })
+    .click();
   await vi.waitFor(() =>
     expect(native.call).toHaveBeenCalledWith("p", { kind: "remove", id: "1" }),
+  );
+  // A folder cannot be put back, so it offers no undo.
+  await expect.element(screen.getByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+});
+
+test("a deleted link can be put back where it was", async () => {
+  native.call.mockImplementation(async (_profile: string, call: BookmarkCall) =>
+    call.kind === "add_link" ? { kind: "saved", id: "9" } : answer(call),
+  );
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await screen.getByRole("button", { name: "Delete", exact: true }).nth(1).click();
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", { kind: "remove", id: "3" }),
+  );
+  await expect.element(screen.getByRole("status")).toHaveTextContent("Deleted Rust docs");
+  await screen.getByRole("button", { name: "Undo" }).click();
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", {
+      kind: "add_link",
+      parent: null,
+      title: "Rust docs",
+      url: "https://doc.rust-lang.org/std/",
+    }),
+  );
+  await vi.waitFor(() =>
+    expect(native.call).toHaveBeenCalledWith("p", {
+      kind: "move",
+      id: "9",
+      parent: null,
+      index: 2,
+    }),
   );
 });
 
