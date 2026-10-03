@@ -155,3 +155,14 @@ export async function set(key: PreferenceKey, next: string) {
     if (generation === epoch) pending = null;
   }
 }
+
+/** Every preference back to how Zephium ships, one validated write at a
+ *  time. False when any of them did not land. */
+export async function resetAll(): Promise<boolean> {
+  for (const key of Object.keys(defaults) as PreferenceKey[]) {
+    if (values[key] === defaults[key]) continue;
+    await set(key, defaults[key]);
+    if (failed || values[key] !== defaults[key]) return false;
+  }
+  return true;
+}

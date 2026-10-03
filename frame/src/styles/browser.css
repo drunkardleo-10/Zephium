@@ -833,12 +833,6 @@
   display: grid;
   gap: 10px;
 }
-.diagnostic-preview {
-  background: var(--color-fill);
-  border-radius: var(--radius-control);
-  padding: 16px;
-  color: var(--color-muted);
-}
 @keyframes interface-fade {
   from {
     opacity: 0;
@@ -1148,44 +1142,6 @@
   color: var(--color-muted);
   padding: 20px;
   text-align: center;
-}
-.version-pill {
-  color: var(--color-muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.update-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 18px 8px;
-}
-.update-state > span {
-  display: grid;
-  place-items: center;
-  width: 54px;
-  height: 54px;
-  border-radius: 50%;
-  background: var(--color-fill);
-  color: var(--color-text);
-  margin-bottom: 16px;
-}
-.update-state h3 {
-  margin: 0;
-  font-size: 17px;
-  letter-spacing: -0.02em;
-  font-weight: 500;
-}
-.update-state p {
-  font-size: 12px;
-  color: var(--color-muted);
-  line-height: 1.6;
-}
-.update-state small {
-  font-size: 11px;
-  color: var(--color-faint);
-  line-height: 1.6;
 }
 .settings-result-section {
   display: block;

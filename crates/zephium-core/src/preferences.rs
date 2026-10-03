@@ -43,7 +43,10 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "appearance" => matches!(value, "system" | "light" | "dark"),
         "sidebar.mode" => matches!(value, "default" | "compact"),
-        "ui.accent" => matches!(value, "graphite" | "sky" | "sage" | "rose"),
+        "ui.accent" => matches!(
+            value,
+            "graphite" | "sky" | "sage" | "rose" | "amber" | "teal" | "lavender" | "orchid"
+        ),
         "ui.newtab-clock-format" => matches!(value, "system" | "12h" | "24h"),
         "ui.tab-layout" => matches!(value, "vertical" | "horizontal"),
         "ui.language" => LANGUAGES.contains(&value),
@@ -80,6 +83,8 @@ mod tests {
     fn settings_are_closed_and_values_are_bounded() {
         assert!(value_allowed("sidebar.mode", "compact"));
         assert!(value_allowed("ui.accent", "sage"));
+        assert!(value_allowed("ui.accent", "orchid"));
+        assert!(!value_allowed("ui.accent", "purple"));
         assert!(value_allowed("ui.newtab-clock-format", "24h"));
         assert!(value_allowed("ui.newtab-tasks", "false"));
         assert!(value_allowed("ui.language", "en"));

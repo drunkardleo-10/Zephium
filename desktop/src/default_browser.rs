@@ -10,7 +10,7 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, PartialEq, Eq)]
 pub(crate) struct DefaultBrowserStatus {

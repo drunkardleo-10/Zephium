@@ -8,7 +8,6 @@ import {
   UserCircleIcon,
   Search01Icon,
   Shield01Icon,
-  Key01Icon,
   KeyboardIcon,
   Globe02Icon,
   SparklesIcon,
@@ -72,13 +71,6 @@ const allSections = [
     title: m.section_privacy,
     description: m.section_privacy_description,
     icon: Shield01Icon,
-  },
-  {
-    id: "passwords",
-    group: "browser",
-    title: m.section_passwords,
-    description: m.section_passwords_description,
-    icon: Key01Icon,
   },
   {
     id: "shortcuts",
@@ -165,13 +157,6 @@ const allSections = [
     icon: UserCircleIcon,
   },
   {
-    id: "developer",
-    group: "application",
-    title: m.section_developer,
-    description: m.section_developer_description,
-    icon: Key01Icon,
-  },
-  {
     id: "about",
     group: "application",
     title: m.section_about,
@@ -184,7 +169,7 @@ export type SettingsSection = (typeof allSections)[number]["id"];
  *  only in development builds. A release offers only what works. */
 export const showPreviews = import.meta.env.DEV;
 /** Sections that hold nothing but placeholders today. */
-const previewSections = new Set<SettingsSection>(["profiles", "performance", "focus", "developer"]);
+const previewSections = new Set<SettingsSection>(["profiles", "performance", "focus"]);
 export const sections = allSections.filter(
   (section) => section.id !== "account" && (showPreviews || !previewSections.has(section.id)),
 );

@@ -5,7 +5,7 @@ describe("settings discovery", () => {
   it("finds nested preferences by their localized vocabulary", () => {
     expect(searchSections("languages").map((section) => section.id)).toContain("languages");
     expect(searchSections("motion").map((section) => section.id)).toContain("appearance");
-    expect(searchSections("passwords").map((section) => section.id)).toContain("passwords");
+    expect(searchSections("download").map((section) => section.id)).toContain("general");
   });
   it("matches every search word and distinguishes no results", () => {
     expect(searchSections("  ACCENT color  ").map((section) => section.id)).toEqual(["appearance"]);
@@ -21,7 +21,9 @@ it("finds the reserved agent destinations without exposing unimplemented control
   expect(searchSections("models").some((section) => section.id === "ai")).toBe(true);
   expect(searchSections("MCP").some((section) => section.id === "mcp")).toBe(true);
   expect(searchSettings("API key")).toEqual([]);
-  expect(searchSettings("updates").some((result) => result.target === "updates.check")).toBe(true);
+  expect(searchSettings("reset settings").some((result) => result.target === "about.reset")).toBe(
+    true,
+  );
 });
 
 it("hides Account from navigation and search", async () => {

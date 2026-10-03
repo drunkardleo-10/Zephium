@@ -28,6 +28,10 @@
     { id: "sky", label: m.settings_sky },
     { id: "sage", label: m.settings_sage },
     { id: "rose", label: m.settings_rose },
+    { id: "amber", label: m.settings_amber },
+    { id: "teal", label: m.settings_teal },
+    { id: "lavender", label: m.settings_lavender },
+    { id: "orchid", label: m.settings_orchid },
   ];
   const materials: Record<string, () => string> = {
     liquid_glass: m.settings_material_glass,
@@ -117,6 +121,7 @@
     ><span class="settings-value">{materials[material]?.() ?? m.settings_material_solid()}</span
     ></SettingsRow
   >
+  <PreferenceSelect id="appearance.density" preference="ui.density" />
 </SettingsGroup>
 <SettingsGroup title={m.settings_motion()}>
   <SettingsRow
@@ -132,7 +137,3 @@
     /></SettingsRow
   >
 </SettingsGroup>
-
-<SettingsGroup title={m.settings_layout()}
-  ><PreferenceSelect id="appearance.density" preference="ui.density" /></SettingsGroup
->

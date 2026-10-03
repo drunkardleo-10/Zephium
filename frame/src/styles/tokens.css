@@ -127,6 +127,10 @@
   --color-tint-sky: #7fb3f5;
   --color-tint-sage: #86c9a4;
   --color-tint-rose: #ee8f95;
+  --color-tint-amber: #e9b872;
+  --color-tint-teal: #6fc6c1;
+  --color-tint-lavender: #b3a4f2;
+  --color-tint-orchid: #dc9ad8;
   --color-danger: #ef8a8e;
   --color-success: #7fcaa1;
   --color-warning: #dcb977;
@@ -624,6 +628,10 @@
   --color-tint-sky: #3b82e6;
   --color-tint-sage: #2f8a5e;
   --color-tint-rose: #d2545e;
+  --color-tint-amber: #a5680f;
+  --color-tint-teal: #188a84;
+  --color-tint-lavender: #6e5bd6;
+  --color-tint-orchid: #b14fa9;
   --color-danger: #c0474f;
   --color-success: #2f7f5a;
   --color-warning: #8c6a2a;

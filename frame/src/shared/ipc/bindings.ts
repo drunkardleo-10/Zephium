@@ -304,6 +304,12 @@ export const commands = {
 	 *  single pane to send people to, so the caller offers another folder instead.
 	 */
 	downloadOpenAccessSettings: () => __TAURI_INVOKE<boolean>("download_open_access_settings"),
+	aboutInfo: () => __TAURI_INVOKE<{
+	version: string,
+	/**  Product name and version, such as "macOS 26.1.0". */
+	os: string,
+	arch: string,
+} | null>("about_info"),
 	/**
 	 *  Opens an address in the focused window. The launcher panel and the history
 	 *  surfaces have no tab id to navigate, and must not be given one.
@@ -399,6 +405,13 @@ export const events = {
 };
 
 /* Types */
+export type AboutInfo = {
+	version: string,
+	/**  Product name and version, such as "macOS 26.1.0". */
+	os: string,
+	arch: string,
+};
+
 /**
  *  Stable diagnostics classification. Native/parser text and filter content
  *  never cross the privileged IPC boundary.

@@ -7,8 +7,8 @@ use std::ffi::c_void;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
-    REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::UI::Shell::{SHChangeNotify, ShellExecuteW, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -156,6 +156,15 @@ fn write_string(key: &str, name: &str, value: &str) -> bool {
 }
 
 fn read_string(key: &str, name: &str) -> Option<String> {
+    read_string_in(HKEY_CURRENT_USER, key, name)
+}
+
+/// A machine-wide string value, such as the Windows build About reports.
+pub(crate) fn read_machine_string(key: &str, name: &str) -> Option<String> {
+    read_string_in(HKEY_LOCAL_MACHINE, key, name)
+}
+
+fn read_string_in(root: HKEY, key: &str, name: &str) -> Option<String> {
     let key = wide(key);
     let name = wide(name);
     let mut buffer = [0u16; 128];
@@ -163,7 +172,7 @@ fn read_string(key: &str, name: &str) -> Option<String> {
     // SAFETY: the buffer and its byte size describe the same live array.
     let status: WIN32_ERROR = unsafe {
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            root,
             PCWSTR(key.as_ptr()),
             PCWSTR(name.as_ptr()),
             RRF_RT_REG_SZ,

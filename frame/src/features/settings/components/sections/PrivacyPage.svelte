@@ -12,6 +12,7 @@
   import PreviewToggle from "../PreviewToggle.svelte";
   import PreviewAction from "../PreviewAction.svelte";
   import SiteExceptions from "../SiteExceptions.svelte";
+  import PasskeysGroup from "../PasskeysGroup.svelte";
   import Checkbox from "$shared/ui/Checkbox";
   import Select from "$shared/ui/Select";
 
@@ -26,6 +27,7 @@
 </script>
 
 <ProtectionControls />
+<PasskeysGroup />
 {#if showPreviews}
   <PreviewNotice />
   <SettingsGroup title={m.settings_site_permissions()}

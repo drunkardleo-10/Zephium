@@ -1,99 +1,107 @@
 <script lang="ts">
-  import * as m from "$shared/i18n/messages";
-  import { showPreviews } from "../../lib/settings-model";
-  import * as preview from "../../lib/preview.svelte";
   import { onMount } from "svelte";
-  import { getVersion } from "@tauri-apps/api/app";
+  import * as m from "$shared/i18n/messages";
+  import { commands, type AboutInfo } from "$shared/ipc/bindings";
+  import { preferences } from "$domain/preferences";
+  import { keymap } from "$domain/keymap";
+  import * as notices from "$session/notice.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
-  import PreviewNotice from "../PreviewNotice.svelte";
-  import PreviewAction from "../PreviewAction.svelte";
-  import PreviewSelect from "../PreviewSelect.svelte";
-  import PreviewToggle from "../PreviewToggle.svelte";
-  import Checkbox from "$shared/ui/Checkbox";
-  import Select from "$shared/ui/Select";
-  import Icon from "$shared/ui/Icon";
-  import { Tick02Icon, Download01Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
-  let version = $state("—");
-  let status = $derived(preview.get("updates.status", "current"));
-  const statuses = [
-    { value: "current", label: m.updates_current },
-    { value: "available", label: m.updates_available },
-    { value: "failed", label: m.updates_failed },
-  ];
+  import Button from "$shared/ui/Button";
+
+  let about = $state<AboutInfo | null>(null);
+  let confirming = $state(false);
+  let resetting = $state(false);
+  let outcome = $state<"done" | "failed" | null>(null);
+
   onMount(() => {
     let live = true;
-    void getVersion()
-      .then((value) => {
-        if (live) version = value;
+    void commands
+      .aboutInfo()
+      .then((info) => {
+        if (live) about = info;
       })
       .catch(() => {});
     return () => {
       live = false;
     };
   });
+
+  let platform = $derived(about ? m.about_platform({ os: about.os, arch: about.arch }) : "");
+
+  async function copyDetails() {
+    if (!about) return;
+    const details = `Zephium ${about.version}\n${about.os} (${about.arch})`;
+    try {
+      await navigator.clipboard.writeText(details);
+      notices.show(m.about_details_copied());
+    } catch {
+      // A denied clipboard leaves the details on screen to read.
+    }
+  }
+
+  async function reset() {
+    resetting = true;
+    outcome = null;
+    const settled = await preferences.resetAll();
+    const shortcuts = await keymap.reset(null);
+    resetting = false;
+    confirming = false;
+    outcome = settled && shortcuts ? "done" : "failed";
+  }
 </script>
 
 <div class="settings-about">
   <span class="zephium-wordmark" role="img" aria-label="Zephium"></span>
   <p>{m.settings_about_body()}</p>
-  <span class="version-pill">{m.settings_version()} {version}</span>
 </div>
-{#if showPreviews}
-  <PreviewNotice />
-  <SettingsGroup title={m.updates_title()}
-    ><PreviewAction id="updates.check" actionLabel={m.updates_check()}
-      ><Select
-        label={m.updates_preview_state()}
-        value={status}
-        options={statuses.map((item) => ({ value: item.value, label: item.label() }))}
-        onchange={(value) => preview.set("updates.status", value)}
-      />
-      <div class="update-state">
-        <span
-          ><Icon
-            icon={status === "current"
-              ? Tick02Icon
-              : status === "available"
-                ? Download01Icon
-                : Refresh01Icon}
-            size={26}
-          /></span
-        >
-        <h3>{statuses.find((item) => item.value === status)?.label()}</h3>
-        <p>
-          {status === "current"
-            ? m.updates_current_body()
-            : status === "available"
-              ? m.updates_available_body()
-              : m.updates_failed_body()}
-        </p>
-        <small>{m.updates_note()}</small>
-      </div></PreviewAction
-    ><PreviewToggle id="updates.automatic" /><PreviewSelect id="updates.channel" /></SettingsGroup
+<SettingsGroup title={m.settings_about()}>
+  <SettingsRow title={m.settings_version()} description={platform}>
+    <span class="settings-value">{about?.version ?? ""}</span>
+  </SettingsRow>
+  <SettingsRow title={m.about_copy_details()} description={m.about_copy_details_help()}>
+    <Button size="compact" disabled={!about} onclick={() => void copyDetails()}
+      >{m.about_copy_details()}</Button
+    >
+  </SettingsRow>
+</SettingsGroup>
+<SettingsGroup title={m.settings_advanced()}>
+  <SettingsRow
+    settingId="about.reset"
+    title={m.pref_about_reset()}
+    description={outcome === "done"
+      ? m.about_reset_done()
+      : outcome === "failed"
+        ? m.about_reset_failed()
+        : m.pref_about_reset_help()}
   >
-{/if}
-<SettingsGroup title={m.settings_application()}
-  ><SettingsRow title={m.settings_version()}>{version}</SettingsRow><PreviewAction
-    id="about.diagnostics"
-    ><p>{m.preview_diagnostics_body()}</p>
-    <pre class="diagnostic-preview">Zephium {version}</pre></PreviewAction
-  ><PreviewAction
-    id="about.reset"
-    onapply={() =>
-      preview.resetPrefixes([
-        ...(preview.get("reset.appearance", true) ? ["appearance."] : []),
-        ...(preview.get("reset.newtab", true) ? ["ntp."] : []),
-      ])}
-    ><p>{m.preview_reset_body()}</p>
-    <Checkbox
-      label={m.settings_appearance()}
-      checked={preview.get("reset.appearance", true)}
-      onchange={(value) => preview.set("reset.appearance", value)}
-    /><Checkbox
-      label={m.settings_newtab()}
-      checked={preview.get("reset.newtab", true)}
-      onchange={(value) => preview.set("reset.newtab", value)}
-    /></PreviewAction
-  ></SettingsGroup
->
+    <div class="reset">
+      {#if confirming}
+        <Button
+          size="compact"
+          variant="ghost"
+          disabled={resetting}
+          onclick={() => (confirming = false)}>{m.action_cancel()}</Button
+        >
+        <Button size="compact" variant="danger" pending={resetting} onclick={() => void reset()}
+          >{m.about_reset_confirm()}</Button
+        >
+      {:else}
+        <Button
+          size="compact"
+          onclick={() => {
+            outcome = null;
+            confirming = true;
+          }}>{m.about_reset_action()}</Button
+        >
+      {/if}
+    </div>
+  </SettingsRow>
+</SettingsGroup>
+
+<style>
+  .reset {
+    display: flex;
+    gap: 6px;
+  }
+</style>

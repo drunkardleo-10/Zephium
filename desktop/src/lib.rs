@@ -65,6 +65,7 @@ pub use work::{
     launch_public_read_work, selected_work_profile, WorkAdmissionFailure,
 };
 
+mod about;
 mod blocker_service;
 mod browser_credentials;
 mod browser_import;
@@ -1580,6 +1581,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             favicon_probe,
             download_call,
             download_open_access_settings,
+            about::about_info,
             browser_open_url,
             keymap::keymap_entries,
             keymap::keymap_bind,
