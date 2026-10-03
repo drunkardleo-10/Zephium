@@ -6,6 +6,7 @@ import { settle } from "$domain/operations";
 const EMPTY: FocusStatus = { session: null, blocked: [] };
 
 let state = $state.raw<FocusStatus>(EMPTY);
+let covered = $state<string | null>(null);
 let pending = $state(false);
 let failed = $state(false);
 let lifecycle = 0;
@@ -16,6 +17,8 @@ let lifetime = new AbortController();
 
 /** The running session, or null between sessions. */
 export const session = (): FocusView | null => state.session;
+/** The shut site the current tab would show, while focus covers it. */
+export const cover = () => covered;
 export const busy = () => pending;
 export const lastFailed = () => failed;
 
@@ -62,13 +65,22 @@ export const start = (minutes: number, breaks: boolean) =>
   control({ kind: "start", minutes, breaks });
 export const stop = () => control({ kind: "stop" });
 export const skip = () => control({ kind: "skip" });
+export const allow = (site: string) => control({ kind: "allow", site });
 
 async function initialize(generation: number) {
   // Native projects focus with every bootstrap, so this must listen before
   // tabs asks for one.
-  const stopListening = await events.focusChanged.listen((event) => {
+  const stopStatus = await events.focusChanged.listen((event) => {
     if (generation === lifecycle) state = event.payload;
   });
+  const stopCover = await events.uiCommand.listen(({ payload }) => {
+    if (generation !== lifecycle || !payload.startsWith("focus.cover=")) return;
+    covered = payload.slice("focus.cover=".length) || null;
+  });
+  const stopListening = () => {
+    stopStatus();
+    stopCover();
+  };
   if (generation !== lifecycle) {
     stopListening();
     return;
@@ -103,6 +115,7 @@ export function dispose() {
   unlisten?.();
   unlisten = null;
   state = EMPTY;
+  covered = null;
   pending = false;
   failed = false;
 }

@@ -2617,5 +2617,11 @@
   "focus_suggested": "From your time",
   "focus_done_title": "Focus complete",
   "focus_break_title": "Time for a break",
-  "focus_back_title": "Back to focus"
+  "focus_back_title": "Back to focus",
+  "focus_cover_title": "Paused for focus",
+  "focus_cover_body": "{site} stays shut until this round ends.",
+  "focus_cover_allow": "Allow 5 minutes",
+  "focus_cover_end": "End focus",
+  "focus_cover_left": "left in this round",
+  "focus_shut_notice": "{site} is shut during focus"
 }

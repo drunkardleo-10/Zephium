@@ -39,7 +39,8 @@
   import { loadHistoryPage } from "$features/history";
   import { bookmarkReveal } from "$features/bookmarks";
   import { loadTasksPage } from "$features/tasks";
-  import { loadTimePage } from "$features/time";
+  import { loadFocusCover, loadTimePage } from "$features/time";
+  import { focus } from "$domain/time";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
   import { ModeTabs, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
@@ -185,6 +186,11 @@
       if (command.id === "extensions.manage") void browserPage.open("extensions");
       if (command.id === "protection.site") void toggleSiteProtection();
       if (command.id === "protection.hide") void hideElements();
+      if (command.id.startsWith("focus.shut="))
+        notices.show(m.focus_shut_notice({ site: command.id.slice("focus.shut=".length) }));
+      if (command.id === "focus.alert=finished") notices.show(m.focus_done_title());
+      if (command.id === "focus.alert=break") notices.show(m.focus_break_title());
+      if (command.id === "focus.alert=focus") notices.show(m.focus_back_title());
     });
   });
   // A search belongs to the page it runs in; moving to another page ends it.
@@ -327,7 +333,21 @@
   {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
       {m.browser_nav_failed()}
     </div>{/if}
-  {#if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
+  {#if focus.cover() !== null && browserPage.currentPage() === null}
+    <!-- Focus shuts the site this tab shows; native has taken the page off
+         the stage, so this stands where it was. -->
+    <main class="internal-stage">
+      <div class="stage-page">
+        <LazyView
+          loader={loadFocusCover}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(View)}<View site={focus.cover() ?? ""} />{/snippet}</LazyView
+        >
+      </div>
+    </main>
+  {:else if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
     <!--
       A tab opened straight to an address is loading before it has a URL; it
       goes to its page rather than flashing the new tab first.

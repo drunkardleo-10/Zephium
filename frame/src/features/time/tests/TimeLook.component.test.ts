@@ -99,7 +99,7 @@ async function capture(container: HTMLElement, name: string) {
   }
 }
 
-async function setup(view: "panel" | "page", span: "day" | "week" = "day") {
+async function setup(view: "panel" | "page" | "cover", span: "day" | "week" = "day") {
   native.settings = { "focus.blocked": "youtube.com\nx.com", "focus.minutes": "25" };
   await preferences.init();
   await focus.init();
@@ -153,4 +153,13 @@ test("the page shows a period, a site in depth and the sites focus shuts", async
     .click();
   await expect.element(screen.getByRole("heading", { name: "linear.app" })).toBeVisible();
   await capture(screen.container, "page-site");
+});
+
+test("a shut page is covered with the round's time and a way out", async () => {
+  const screen = await setup("cover");
+  emitNativeEvent("focusChanged", running);
+  await expect.element(screen.getByRole("heading", { name: "Paused for focus" })).toBeVisible();
+  await screen.getByRole("button", { name: "Allow 5 minutes" }).click();
+  expect(native.control).toHaveBeenCalledWith({ kind: "allow", site: "youtube.com" });
+  await capture(screen.container, "cover");
 });
