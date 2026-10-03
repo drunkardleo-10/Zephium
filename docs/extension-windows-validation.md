@@ -1,11 +1,15 @@
 # Windows extension filesystem validation
 
-Status: 2026-09-10. The Windows private-filesystem implementation is present and
-passes Windows cross-target Rust checks, including its tests. Windows linking
-and native execution have **not been verified here**. Default
-namespace activation still returns `PrimitiveUnavailable` before inspecting the
-requested path. The explicit `windows-namespace-validation` feature enables the
-adapter only for debug validation; optimized builds reject it at compile time.
+Status: 2026-10-02. The Windows adapter has now linked and run native tests on
+Windows 10.0.26200 x64, local NTFS, under an Administrators-group account with
+its administrator role disabled (non-elevated). The explicit debug-validation
+suite passes 38 tests. The separately invoked mandatory reparse test also
+passes after the user enabled Developer Mode. A separate non-admin account,
+an account name containing spaces, and a long profile path remain unqualified.
+Production namespace activation remains closed: it returns
+`PrimitiveUnavailable` before inspecting the requested path. The explicit
+`windows-namespace-validation` feature enables the adapter only for debug
+validation; optimized builds reject it at compile time.
 
 This is a validation recipe for the Windows agent, not a completed extension
 release handoff. Shared Beta installation, consent, native ownership, and update
@@ -139,6 +143,79 @@ be inferred from successful filesystem tests.
 
 ## Local evidence
 
+The 2026-10-02 native run used an explicitly selected disposable fixture beneath
+`.codex/worktrees/windows-runtime`, with TEMP/TMP set only for the validation
+process. The ambient AppData/Local/Temp ancestry on this instrumented host grants
+untrusted principals mutation rights and is correctly refused. No existing ACL,
+Developer Mode setting, privilege, or shipping data-root selection was changed
+by the agents. The user later enabled Developer Mode explicitly; the mandatory
+reparse test was then rerun non-elevated. A safe fixture does not establish
+admission of the default product data root. The exact account facts are recorded
+in `target/windows-private-fs-live-account-evidence.json`.
+
+Native execution exposed and fixed three adapter defects: directory writable
+reopening now uses the held local-volume file ID as a locator and independently
+verifies full 128-bit identity, kind, and unchanged owned security snapshots;
+directory deletion uses the exact held-parent child name rather than a linkless
+by-ID handle; deletion settlement accepts an already-held zero-link regular
+file only when its full identity still matches. New-file admission still requires
+exactly one link, and settled deletion still requires exact-name absence.
+
+The initial unblocked suite records 35 passed, zero failed, and one mandatory
+ignored reparse test in `target/windows-private-fs-final-unblocked-validation.log`.
+It exercises moved-original versus ambient-replacement reopening, sealed write
+refusal, public sealed-tree publication and bounded recovery, native directory
+barriers, hostile hard-link/ACL/name cases, and actual cross-process lock
+exclusion and owner-exit recovery. The separate native measurements are recorded
+in `target/windows-private-fs-win32-identity-reopen.log` and
+`target/windows-private-fs-symlink-permission.log`; the initial file and directory
+symlink attempts returned 1314. After the user enabled Developer Mode, the
+existing mandatory file/directory/root reparse rejection test passed, with
+one passed and zero failed in
+`target/windows-private-fs-mandatory-reparse-enabled.log`. This supersedes the
+symlink-permission blocker. The expanded suite subsequently passed 38 tests,
+with zero failed and one mandatory ignored, in
+`target/windows-private-fs-expanded-live-validation.log`; the separate mandatory
+test passed again in `target/windows-private-fs-expanded-mandatory-reparse.log`.
+The added cases exercise four synchronized first-create process races, forced
+termination of the exact winner and independent reacquisition, canonical/staging
+marker-prefix and malformed-residue rejection, and actual NTFS junction refusal
+at leaf/root/ancestor positions with the outside sentinel untouched. A losing
+first-create contender may conservatively report `IdentityAmbiguous` before
+acquiring a lease; the test verifies the canonical full identity and marker
+remain unchanged, with no staging residue and successful independent recovery.
+Scoped all-targets validation Clippy also passed in
+`target/windows-private-fs-expanded-clippy.log`.
+These results do not complete the remaining account,
+junction/mount, alias, remote-filesystem, filter, or crash-boundary campaign
+above, and do not authorize production activation.
+
+
+The same explicit validation graph passes 19 native Store journal/artifact tests,
+including actual child-process ownership fencing, exact Claim/CAS, partial-write
+and restart transaction recovery, terminal immutability, and archived artifact
+reads/erasure. Its child-only test is invoked by the parent fixture. The newly
+selected Windows Store callback-loss/panic fixture also passes. Evidence is in
+`target/windows-work-store-native-validation.log` and
+`target/windows-work-store-callback-native-validation.log`. These tests exercise
+the original journal implementation against the debug adapter. They do not
+promote general namespace admission. Windows Work now has a separate fixed
+`NativeWorkStorageAnchor` capability and protected SQLite backend, admitted at
+the native KnownFolder Profile anchor with immutable held-directory and file
+identity/security proofs. This does not expose arbitrary-root namespace
+activation or admit extension installation.
+
+The restored real Shell/Store artifact subprocess fixture also passes under this
+validation graph: one process publishes the result and exits; a different
+process reads the durable result without restoring execution. Its captured
+child output is preserved on failure. Evidence is in
+`target/windows-work-app-journal-native-validation.log`. The fixture remains
+selected on Windows in the ordinary graph. The protected backend subsequently
+passed the default-feature Store suite (289 tests), the actual Shell artifact
+subprocess, and scoped Store/App Clippy without general namespace validation.
+The fresh fixed Work test session is retired only after the owning subprocess
+has exited and released its permanent journal fence.
+
 On the development Mac, the updated private-filesystem crate passed 60 unit
 tests and 57 integration tests. The Windows x64 default build, explicit
 validation build, and instrumented validation build passed cross-target Clippy
@@ -155,3 +232,74 @@ qualification or completed Beta installation.
 The backend parser source remains
 `crates/zephium-extension-package/src/public_policy.rs`, SHA-256
 `daa44d8c80a650b5ac6b6dfbfa7aff390dabec1c4872d072ee7f8b03eeac907a`.
+
+## WebView2 user-data path spelling evidence
+
+The engine's native WebView2 boundary projects an existing canonical local
+directory to ordinary Win32 spelling and prefers a strictly shorter native
+GetShortPathNameW alias when available. This does not admit aliases as
+filesystem authority: canonical confinement, erasure and environment proofs
+remain unchanged. Both directory handles are held with directory-list access
+and without delete sharing while exact canonical path, full 128-bit identity
+and volume are checked. Malformed output, access/lookup errors, and binding
+mismatches fail closed. Only no-shorter output or explicit unsupported native
+query results fall back to the already verified ordinary spelling.
+
+On this host, the full retained Work cookie witness previously failed its
+unchanged browser-process shutdown proof at canonical native profile/Cookies
+lengths of 227/243 UTF-16 units. The same deep protected fixture passed with a
+verified shorter API spelling, including full semantic observations, persistent
+authenticated cookie, server-authorized read, zero model calls, zero native
+resource debt, exact browser-process exit and clean Shell/Store shutdown.
+Evidence is in target/windows-work-shutdown-deep-short-alias-pinned.log.
+Eight focused path tests pass, including rename refusal under the held handle,
+unsupported-query fallback, and unrelated canonical/full-identity rejection
+(target/windows-work-native-short-path-production-tests.log).
+
+[Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getshortpathnamew)
+that NTFS does not guarantee short names. No aliases, ACLs, roots or OS settings
+were changed. Deep paths on a volume without usable short aliases remain
+unqualified; this result does not establish arbitrary-depth WebView2 support
+or complete the extension filesystem activation campaign.
+## Integrated Windows Work evidence
+
+The fresh final loopback run in
+`target/windows-work-all-changed-handoff-fixed.log` passes all 22 functional
+checks. This includes actual GET-form Enter submission, allowed script requests
+beside the denied automatic document POST, navigation and preview retirement,
+persistent authenticated sessions, consent, autosave, and sign-in continuation.
+Apps asks once for all three named sites and reads all three with authenticated
+cookies and zero model calls; its fixture seeds each isolated Windows origin
+through a real HTTP response. Entry preparation now enrolls before native
+presence awaits, so already-started sibling queries join one question even when
+they exceed the prior gather window; cancellation releases that enrollment.
+
+Changed also exercises the fixture's later-handoff decline: after its sole
+approval, a generic model Human request is declined only for the same execution,
+attempt and Read step with a strictly newer handoff generation, an empty
+decision queue and no undecided running Confirm or Ask. Its original zero-POST
+and first-Approved/Failed assertions pass. The earlier isolated run remains
+failed evidence in `target/windows-work-changed-followup-native.log`: the model
+twice proposed unsupported Select operations against a button, which the exact
+capability guard refused before native dispatch.
+
+These are functional results, not an overall clean-run pass. The final run
+exits 1 at the Shell shutdown barrier despite zero native resource ledger debt;
+the parent subsequently proves `exact_session_retired=true` with
+`child_success=false`. The targeted follow-up
+`target/windows-work-churn-classified-recovery.log` proves why: the deliberate
+churn case retains classified `RecoveryRequired` and `UNKNOWN` debt after the
+original native-zero proof succeeds. Existing lifecycle policy intentionally
+returns Unclean for that unresolved operation history. Store, native process
+proof, private cleanup, and blocker shutdown all pass; no deadline or recovery
+verdict was relaxed. The four positive writes separately pass with Clean Shell
+shutdown in `target/windows-work-writes-final-integrated.log`.
+
+The traced full repeat `target/windows-work-all-shutdown-traced.log` passes 21
+assertions; SPA fails after two unsupported model Scroll proposals with zero
+native actions. Its earlier passing result is preserved, and this failed run
+is not relabeled a pass. Six applicable recovery tests and strict App Clippy
+pass; two explicit recovery-contract tests are macOS/Linux-only and were
+inspected as source rather than claimed as Windows test coverage.
+This automated synthetic workflow does not establish
+manual Human UI qualification or general extension namespace activation.

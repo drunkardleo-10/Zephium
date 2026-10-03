@@ -680,8 +680,11 @@ fn ci() {
             ],
         );
     }
-    #[cfg(target_os = "macos")]
-    for package in ["zephium-work-composition", "zephium-desktop"] {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    for (package, features) in [
+        ("zephium-work-composition", "durable-runtime"),
+        ("zephium-desktop", "work-product"),
+    ] {
         for target in ["--all-targets", "--lib"] {
             run(
                 "cargo",
@@ -691,7 +694,7 @@ fn ci() {
                     "-p",
                     package,
                     "--features",
-                    "macos-work",
+                    features,
                     target,
                     "--",
                     "-D",
@@ -708,7 +711,7 @@ fn ci() {
                 "-p",
                 package,
                 "--features",
-                "macos-work",
+                features,
             ],
         );
     }

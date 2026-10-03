@@ -308,6 +308,28 @@ the production invariant unless the pinned WebView2 version proves that no
 extension process, content script, background worker, or hook can execute for
 the context.
 
+Retained Work pages use stable `work-site-<digest>` subprofiles in the selected
+profile's user-data environment. The digest binds the approved registrable
+site, scheme and port. Pages for that site share the person's Work sign-in and
+origin storage across parts and runs, while independent apps can run in
+parallel. Each construction still verifies the extension-free inventory.
+Anonymous public Work sessions use separate ephemeral environments and never
+seed from the person's profile.
+
+The retained Work cookie bridge keeps existing destination-origin cookies.
+Initial seeding is serialized per site store; a new origin waits for that
+store to become idle within the original construction deadline. A failed seed
+removes only newly attempted cookie identities and proves their absence; it
+never clears retained profile data. Failure to prove cleanup quarantines the
+logical profile. A profile-owned, nonsecret initialization stamp is published
+after a successful seed and before the page becomes available. Reopening a
+page or restarting the browser therefore preserves an intentional Work logout
+instead of reseeding stale Browse cookies. These stamps are erased with the
+profile. Session presence checks both Browse and Work cookie stores, including
+previously used HTTP and custom-port stores, within one bounded request.
+This preserves Work sign-ins without claiming full Browse origin-storage
+equivalence or cross-site Work storage sharing with macOS.
+
 ### 4.3 Profile leasing
 
 Every probe or production context names a profile explicitly. Test tooling

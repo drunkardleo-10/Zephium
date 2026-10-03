@@ -112,8 +112,13 @@ fn validate_artifact(source: &str) -> Result<(), String> {
 }
 
 fn validate_artifact_store(source: &str) -> Result<(), String> {
+    let compact: String = source.split_whitespace().collect();
+    if !compact.contains(
+        "ifownership.incarnation!=owner||!self.registry.contains(&profile)||self.work_profile_retired(profile)?{returnErr(Error::Fenced);}",
+    ) {
+        return Err("Work artifact Store lost its owner, registry or protected retirement fence".into());
+    }
     for required in [
-        "ownership.incarnation != owner || !self.registry.contains(&profile)",
         "publication.mutation()",
         "stored_profile != Some(publication.descriptor.profile())",
         "archived.descriptor() != descriptor",
@@ -299,6 +304,9 @@ mod tests {
             assert!(validate_artifact(&format!("{codec}\n{mutation}")).is_err());
         }
         for removed in [
+            "ownership.incarnation != owner",
+            "!self.registry.contains(&profile)",
+            "self.work_profile_retired(profile)?",
             "archived.descriptor() != descriptor",
             "CASE WHEN length(body) BETWEEN 1 AND ?3 THEN body END",
             "tests::Fault::AfterArtifactWrite",

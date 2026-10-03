@@ -85,6 +85,7 @@ fn ordinary_navigation_observer(source: &str) -> Result<(), String> {
     for forbidden in [
         "AgentWorkController::",
         "MacosWorkComposition::",
+        "NativeWorkComposition::",
         "WebviewEngine::",
         "SqliteStore::",
         "spawn_suspended",
@@ -156,6 +157,8 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     require(
         &native,
         &[
+            "pub struct NativeWorkComposition",
+            "impl NativeWorkComposition",
             "let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;",
             "prepared.with_browser_profile(binding)",
         ],
@@ -253,6 +256,8 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         &manifest,
         &[
             "default = []",
+            "native-work = [\"dep:zephium-app\", \"dep:zephium-engine\", \"dep:zephium-store\", \"dep:zephium-agent-controller\", \"dep:zephium-agent-provider-transport\", \"dep:zephium-agentic\"]",
+            "macos-work = [\"native-work\"]",
             "navigation-qualification = [\"macos-work\", \"dep:zephium-agentic\", \"dep:zephium-core\", \"dep:zephium-agent-runtime\"]",
             "public-qualification = [\"macos-work\", \"zephium-app/work-execution-probe\", \"zephium-agent-provider-transport/probe-harness\",]",
             "retained-public-qualification = [\"retained-qualification\", \"zephium-engine/native-agentic-public-resource-probe\"]",
@@ -273,7 +278,10 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     require(
         &read("crates/zephium-work-composition/src/lib.rs")?,
         &[
-            "#[cfg(feature = \"macos-work\")] mod native;",
+            "#[cfg(feature = \"native-work\")] mod native;",
+            "#[cfg(feature = \"native-work\")] pub use native::{NativeWorkComposition, TrustedWorkRequest};",
+            "#[cfg(feature = \"macos-work\")] pub use native::NativeWorkComposition as MacosWorkComposition;",
+            "#[cfg(all(feature = \"native-work\", not(any(target_os = \"macos\", target_os = \"windows\"))))] compile_error!",
             "#[cfg(feature = \"public-qualification\")] mod qualification;",
             "#[cfg(all(feature = \"navigation-qualification\", not(debug_assertions)))] compile_error!",
             "#[cfg(feature = \"navigation-qualification\")] #[doc(hidden)] pub mod navigation_qualification;",
