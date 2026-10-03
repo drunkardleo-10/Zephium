@@ -2545,6 +2545,7 @@
   "download_more_active": "+{count} more",
   "download_dismiss": "Dismiss",
   "download_open_named": "Open {name}",
+  "notice_link_copied": "Link copied",
   "download_error_permission": "Zephium isn't allowed to save to this folder.",
   "download_reason_permission": "No access to this folder",
   "download_reason_destination": "Couldn't save to this folder",

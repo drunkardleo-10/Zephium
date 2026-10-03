@@ -15,6 +15,7 @@
   import { favicons } from "$domain/favicons";
   import { keymap } from "$domain/keymap";
   import { uiCommands } from "$domain/ui-commands";
+  import * as notices from "$session/notice.svelte";
   import { IS_MAC } from "$shared/platform";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { createPointerDrag } from "$shared/lib/pointer-drag.svelte";
@@ -233,7 +234,11 @@
         if (item.url) void commands.browserOpenUrl(item.url, true);
         break;
       case "copyLink":
-        if (item.url) void navigator.clipboard.writeText(item.url).catch(() => {});
+        if (item.url)
+          void navigator.clipboard.writeText(item.url).then(
+            () => notices.show(m.notice_link_copied()),
+            () => {},
+          );
         break;
       case "rename":
         startRename(item);

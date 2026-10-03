@@ -174,21 +174,24 @@ export function openChromeMenu(x: number, y: number, page: boolean) {
   void commands.chromeMenuPopup(x, y, page, canSplitActive());
 }
 
-export function copyMenuTargetLink() {
+export function copyMenuTargetLink(): Promise<boolean> {
   const id = menuTarget;
   menuTarget = null;
-  if (id === null) return;
-  copyLink(state.tabs.find((tab) => tab.id === id)?.url);
+  if (id === null) return Promise.resolve(false);
+  return copyLink(state.tabs.find((tab) => tab.id === id)?.url);
 }
 
 /** Copies the address of the page in front, for the Copy Link command. */
-export function copyActiveLink() {
-  copyLink(activeTab()?.url);
+export function copyActiveLink(): Promise<boolean> {
+  return copyLink(activeTab()?.url);
 }
 
-function copyLink(url: string | null | undefined) {
-  if (!url) return;
-  void navigator.clipboard.writeText(url).catch(() => {
+/** Whether the address reached the clipboard, so chrome can say so. */
+function copyLink(url: string | null | undefined): Promise<boolean> {
+  if (!url) return Promise.resolve(false);
+  return navigator.clipboard.writeText(url).then(
+    () => true,
     // A denied clipboard is a user-visible no-op, never a chrome failure.
-  });
+    () => false,
+  );
 }

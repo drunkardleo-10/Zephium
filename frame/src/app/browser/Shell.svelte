@@ -33,6 +33,7 @@
   import { surface as browserPage } from "$domain/surface";
   import { loadToolSlot } from "$features/tools";
   import * as toolHost from "$session/tools.svelte";
+  import * as notices from "$session/notice.svelte";
   import { SettingsNavigation } from "$features/settings";
   import { loadLibraryPage } from "$features/library";
   import { loadHistoryPage } from "$features/history";
@@ -40,7 +41,7 @@
   import { loadTasksPage } from "$features/tasks";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
+  import { ModeTabs, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
@@ -159,6 +160,10 @@
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
 
+  function linkCopied(copied: boolean) {
+    if (copied) notices.show(m.notice_link_copied());
+  }
+
   let protectionMenuActivated = $state(0);
   let handledCommand = 0;
   $effect(() => {
@@ -167,8 +172,8 @@
     handledCommand = command.seq;
     untrack(() => {
       if (command.id === "split.choose") splitting = true;
-      if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
-      if (command.id === "page.copyLink") tabs.copyActiveLink();
+      if (command.id === "tab.copyLink") void tabs.copyMenuTargetLink().then(linkCopied);
+      if (command.id === "page.copyLink") void tabs.copyActiveLink().then(linkCopied);
       if (command.id === "find.show") findInPage.show(tabs.activeId());
       if (command.id === "find.next") findInPage.step(true, tabs.activeId());
       if (command.id === "find.previous") findInPage.step(false, tabs.activeId());
@@ -244,7 +249,8 @@
                 {m.choose_split()}
               </p>{/if}
             <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
-            <!-- Downloads in progress sit at the foot of the column, by the dock. -->
+            <!-- Brief notices and downloads sit at the foot of the column, by the dock. -->
+            <SidebarNotice />
             {#if tabs.profile()?.id}<DownloadStatus
                 profile={tabs.profile()!.id}
                 onopen={() => toolHost.open("downloads")}
