@@ -139,10 +139,15 @@ pub struct FocusStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FocusControl {
-    Start { minutes: u32, breaks: bool },
+    Start {
+        minutes: u32,
+        breaks: bool,
+    },
     Stop,
     /// Lets one shut site through for a few minutes.
-    Allow { site: String },
+    Allow {
+        site: String,
+    },
     /// Ends the running phase now: a break, or a round.
     Skip,
 }

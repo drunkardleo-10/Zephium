@@ -113,8 +113,8 @@ impl Tracker {
 
     fn close(&self, now: Instant, wall_ms: i64) -> Option<Segment> {
         let (attention, since) = self.current.as_ref()?;
-        let duration_ms = i64::try_from(now.saturating_duration_since(*since).as_millis())
-            .unwrap_or(i64::MAX);
+        let duration_ms =
+            i64::try_from(now.saturating_duration_since(*since).as_millis()).unwrap_or(i64::MAX);
         (duration_ms > 0).then(|| Segment {
             profile: attention.profile,
             place: attention.place.clone(),
@@ -245,7 +245,10 @@ impl TimeQuery {
     pub fn valid(&self) -> bool {
         matches!(self.bucket_hours, 1 | 24)
             && (1..=MAX_REPORT_BUCKETS).contains(&self.buckets)
-            && self.from_hour.checked_abs().is_some_and(|hour| hour < 1 << 40)
+            && self
+                .from_hour
+                .checked_abs()
+                .is_some_and(|hour| hour < 1 << 40)
             && self
                 .site
                 .as_ref()
@@ -398,7 +401,10 @@ pub struct FocusSession {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusEvent {
     /// A phase ran out and the next one began.
-    Phase { ended: FocusPhase, began: FocusPhase },
+    Phase {
+        ended: FocusPhase,
+        began: FocusPhase,
+    },
     /// A single round ran out; the session is over.
     Finished,
 }
@@ -463,7 +469,7 @@ impl FocusSession {
                 }
             }
             let began = match ended {
-                FocusPhase::Focus if self.rounds % ROUNDS_PER_LONG_BREAK == 0 => {
+                FocusPhase::Focus if self.rounds.is_multiple_of(ROUNDS_PER_LONG_BREAK) => {
                     FocusPhase::LongBreak
                 }
                 FocusPhase::Focus => FocusPhase::Break,
@@ -511,7 +517,8 @@ impl FocusSession {
         if self.phase != FocusPhase::Focus {
             return false;
         }
-        self.allowances.retain(|(kept, until)| *until > now_ms && *kept != site);
+        self.allowances
+            .retain(|(kept, until)| *until > now_ms && *kept != site);
         if self.allowances.len() >= MAX_ALLOWANCES {
             return false;
         }
@@ -614,10 +621,7 @@ mod tests {
             .iter()
             .map(|tally| (tally.hour, tally.tally.spent_ms))
             .collect();
-        assert_eq!(
-            spent,
-            vec![(8, 300_000), (9, HOUR_MS), (10, 600_000)]
-        );
+        assert_eq!(spent, vec![(8, 300_000), (9, HOUR_MS), (10, 600_000)]);
         assert!(ledger.is_empty());
     }
 
@@ -790,7 +794,10 @@ mod tests {
         assert!(gate.blocks("WWW.YouTube.com.", 1_000));
         assert!(!gate.blocks("github.com", 1_000));
         session.allow("youtube.com".into(), 1_000);
-        assert!(!session.gate(&shut, 2_000).unwrap().blocks("youtube.com", 2_000));
+        assert!(!session
+            .gate(&shut, 2_000)
+            .unwrap()
+            .blocks("youtube.com", 2_000));
         assert!(session.gate(&[], 2_000).is_none());
         session.advance(26 * MINUTE_MS);
         assert!(session.gate(&shut, 26 * MINUTE_MS).is_none());

@@ -108,7 +108,14 @@ mod tests {
     fn focus_settings_hold_normalized_sites_and_bounded_numbers() {
         assert!(value_allowed("focus.blocked", ""));
         assert!(value_allowed("focus.blocked", "x.com\nyoutube.com"));
-        for value in ["x.com\n", "x.com\nx.com", "https://x.com", "www.x.com", "X.com", "x"] {
+        for value in [
+            "x.com\n",
+            "x.com\nx.com",
+            "https://x.com",
+            "www.x.com",
+            "X.com",
+            "x",
+        ] {
             assert!(!value_allowed("focus.blocked", value), "{value:?}");
         }
         assert!(value_allowed("focus.minutes", "25"));

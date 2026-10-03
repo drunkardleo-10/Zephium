@@ -3,7 +3,6 @@ mod agent_context;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
 mod agent_cookie_source;
 mod blocker_statistics;
-mod focus;
 mod construction;
 mod content_rules;
 mod content_styles;
@@ -22,6 +21,7 @@ mod extension_action;
 mod extension_browser_surface;
 #[cfg(target_os = "macos")]
 mod file_uploads;
+mod focus;
 mod lifecycle;
 mod navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]

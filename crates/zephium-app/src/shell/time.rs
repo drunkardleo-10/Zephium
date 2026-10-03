@@ -10,8 +10,8 @@ use zephium_core::time::{
     FocusSession, Ledger, Place, TimeQuery, TimeReport, Tracker, HOUR_MS, MAX_BLOCKED_SITES,
 };
 use zephium_ipc::{
-    FocusControl, FocusDayView, FocusPhaseView, FocusStatus, FocusView, IconSurface,
-    ShutSiteView, SiteTimeView, TimeBucketView, TimeCall, TimeError, TimeResponse,
+    FocusControl, FocusDayView, FocusPhaseView, FocusStatus, FocusView, IconSurface, ShutSiteView,
+    SiteTimeView, TimeBucketView, TimeCall, TimeError, TimeResponse,
 };
 
 /// The running session, kept so a relaunch picks it up where it was.
@@ -407,13 +407,19 @@ impl Shell {
             }
             FocusControl::Stop => {
                 let Some(running) = self.time.focus.take() else {
-                    return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+                    return operation_result(
+                        OperationOutcome::NoOp,
+                        OperationReason::StateUnchanged,
+                    );
                 };
                 self.record_focus(running.stop(now));
             }
             FocusControl::Allow { site } => {
                 let Some(site) = zephium_core::time::normalize_site(&site) else {
-                    return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+                    return operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::InvalidInput,
+                    );
                 };
                 let allowed = self
                     .time
@@ -421,19 +427,31 @@ impl Shell {
                     .as_mut()
                     .is_some_and(|session| session.allow(site.clone(), now));
                 if !allowed {
-                    return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+                    return operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::InvalidInput,
+                    );
                 }
                 self.focus_changed();
                 self.open_shut_loads(Some(&site));
-                return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+                return operation_result(
+                    OperationOutcome::Applied,
+                    OperationReason::MutationApplied,
+                );
             }
             FocusControl::Skip => {
                 let Some(session) = self.time.focus.as_mut() else {
-                    return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+                    return operation_result(
+                        OperationOutcome::NoOp,
+                        OperationReason::StateUnchanged,
+                    );
                 };
                 session.phase_ends_ms = now.max(session.phase_started_ms + 1);
                 self.focus_wake();
-                return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+                return operation_result(
+                    OperationOutcome::Applied,
+                    OperationReason::MutationApplied,
+                );
             }
         }
         self.focus_changed();
@@ -611,7 +629,9 @@ impl Shell {
             return;
         };
         if tab.url.is_none() {
-            self.time.shut_loads.retain(|kept, _| self.items.tab(*kept).is_some());
+            self.time
+                .shut_loads
+                .retain(|kept, _| self.items.tab(*kept).is_some());
             if self.time.shut_loads.len() < MAX_SHUT_LOADS || self.time.shut_loads.contains_key(&id)
             {
                 self.time.shut_loads.insert(id, url);
@@ -663,7 +683,11 @@ impl Shell {
             .filter(|view| view.icon.is_none())
             .flat_map(|view| pages(&view.site))
             .collect();
-        self.want_icons(IconSurface::Chrome, profile, missing.iter().map(String::as_str));
+        self.want_icons(
+            IconSurface::Chrome,
+            profile,
+            missing.iter().map(String::as_str),
+        );
         self.publish_icons();
         views
     }
@@ -718,9 +742,18 @@ mod tests {
     #[test]
     fn sites_group_by_registrable_domain() {
         let site = |url: &str| site_of(&url::Url::parse(url).unwrap());
-        assert_eq!(site("https://m.youtube.com/watch").as_deref(), Some("youtube.com"));
-        assert_eq!(site("https://www.bbc.co.uk/news").as_deref(), Some("bbc.co.uk"));
-        assert_eq!(site("https://docs.google.com/").as_deref(), Some("google.com"));
+        assert_eq!(
+            site("https://m.youtube.com/watch").as_deref(),
+            Some("youtube.com")
+        );
+        assert_eq!(
+            site("https://www.bbc.co.uk/news").as_deref(),
+            Some("bbc.co.uk")
+        );
+        assert_eq!(
+            site("https://docs.google.com/").as_deref(),
+            Some("google.com")
+        );
         assert_eq!(site("http://localhost:5173/").as_deref(), Some("localhost"));
         assert_eq!(site("about:blank"), None);
     }

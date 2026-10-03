@@ -1484,7 +1484,8 @@ impl Shell {
         }
         self.clear_pending_store_reads();
 
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.flush_time(None))).is_err() {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.flush_time(None))).is_err()
+        {
             crate::diagnostic!("shutdown: final time flush panicked");
         }
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.persist())).is_err() {

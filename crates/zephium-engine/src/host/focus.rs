@@ -16,7 +16,9 @@ pub(super) fn focus_shuts(gate: &SharedFocusGate, target: &str) -> bool {
     };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        });
     gate.read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_ref()

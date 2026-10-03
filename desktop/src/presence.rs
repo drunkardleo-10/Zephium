@@ -79,8 +79,18 @@ pub fn install(app: &tauri::AppHandle, _window: &tauri::WebviewWindow) {
     unsafe {
         observe(&workspace, NSWorkspaceWillSleepNotification, ASLEEP, true);
         observe(&workspace, NSWorkspaceDidWakeNotification, ASLEEP, false);
-        observe(&workspace, NSWorkspaceScreensDidSleepNotification, DISPLAY_OFF, true);
-        observe(&workspace, NSWorkspaceScreensDidWakeNotification, DISPLAY_OFF, false);
+        observe(
+            &workspace,
+            NSWorkspaceScreensDidSleepNotification,
+            DISPLAY_OFF,
+            true,
+        );
+        observe(
+            &workspace,
+            NSWorkspaceScreensDidWakeNotification,
+            DISPLAY_OFF,
+            false,
+        );
         observe(
             &workspace,
             NSWorkspaceSessionDidResignActiveNotification,
@@ -124,8 +134,8 @@ mod windows_presence {
     use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         DEVICE_NOTIFY_WINDOW_HANDLE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
-        PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK,
-        WTS_CONSOLE_CONNECT, WTS_CONSOLE_DISCONNECT, WTS_SESSION_UNLOCK,
+        PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WTS_CONSOLE_CONNECT,
+        WTS_CONSOLE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
     };
 
     use super::{mark, ASLEEP, DISPLAY_OFF, LOCKED, SWITCHED_OUT};
@@ -155,8 +165,7 @@ mod windows_presence {
                     // SAFETY: for PBT_POWERSETTINGCHANGE the OS passes a live
                     // POWERBROADCAST_SETTING whose Data holds DataLength bytes.
                     let setting = unsafe { &*(lparam.0 as *const POWERBROADCAST_SETTING) };
-                    if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE
-                        && setting.DataLength >= 4
+                    if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE && setting.DataLength >= 4
                     {
                         // SAFETY: DataLength was checked to cover a u32.
                         let state = unsafe {

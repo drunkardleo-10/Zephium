@@ -203,7 +203,11 @@ impl Hub {
         tx.commit()
     }
 
-    pub(crate) fn focus_days(&mut self, from_day: i64, days: u32) -> rusqlite::Result<Vec<FocusDay>> {
+    pub(crate) fn focus_days(
+        &mut self,
+        from_day: i64,
+        days: u32,
+    ) -> rusqlite::Result<Vec<FocusDay>> {
         if self.recovery_required.is_some() || days == 0 || days > MAX_REPORT_BUCKETS {
             return Err(invalid_data("invalid focus query"));
         }
@@ -285,7 +289,10 @@ mod tests {
             .iter()
             .map(|entry| (entry.site.as_str(), entry.spent_ms, entry.opens))
             .collect();
-        assert_eq!(ranked, vec![("github.com", 661_000, 3), ("x.com", 30_000, 1)]);
+        assert_eq!(
+            ranked,
+            vec![("github.com", 661_000, 3), ("x.com", 30_000, 1)]
+        );
         assert_eq!(report.sites[0].series[9], 601_000);
         assert_eq!(report.sites[0].series[10], 60_000);
 
@@ -300,7 +307,13 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(one.buckets, vec![BucketTime { browse_ms: 30_000, work_ms: 0 }]);
+        assert_eq!(
+            one.buckets,
+            vec![BucketTime {
+                browse_ms: 30_000,
+                work_ms: 0
+            }]
+        );
         assert_eq!(one.previous.browse_ms, 120_000);
         assert_eq!(one.sites.len(), 1);
     }
@@ -344,11 +357,15 @@ mod tests {
             rounds: 1,
             completed,
         };
-        hub.record_focus(&record(1_000, 1_500_000, true), 7).unwrap();
-        hub.record_focus(&record(9_000_000, 600_000, false), 7).unwrap();
-        hub.record_focus(&record(99_000_000, 1_500_000, true), 8).unwrap();
+        hub.record_focus(&record(1_000, 1_500_000, true), 7)
+            .unwrap();
+        hub.record_focus(&record(9_000_000, 600_000, false), 7)
+            .unwrap();
+        hub.record_focus(&record(99_000_000, 1_500_000, true), 8)
+            .unwrap();
         // A rewrite of the same session replaces it.
-        hub.record_focus(&record(1_000, 1_400_000, true), 7).unwrap();
+        hub.record_focus(&record(1_000, 1_400_000, true), 7)
+            .unwrap();
         let days = hub.focus_days(7, 2).unwrap();
         assert_eq!(
             days,

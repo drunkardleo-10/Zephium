@@ -75,8 +75,14 @@ pub fn phase_ended(app: &tauri::AppHandle, alert: &str) {
         return;
     }
     let (title, body) = match alert {
-        "finished" => ("Focus complete", "Your round is done. Shut sites are open again."),
-        "break" => ("Time for a break", "Shut sites are open until the next round."),
+        "finished" => (
+            "Focus complete",
+            "Your round is done. Shut sites are open again.",
+        ),
+        "break" => (
+            "Time for a break",
+            "Shut sites are open until the next round.",
+        ),
         "focus" => ("Back to focus", "A new round has started."),
         _ => return,
     };

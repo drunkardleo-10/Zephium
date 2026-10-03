@@ -457,7 +457,10 @@ impl Engine for FakeEngine {
         });
     }
     fn set_media_suspended(&self, id: ItemId, suspended: bool) {
-        self.log(format!("media {id} {}", if suspended { "still" } else { "free" }));
+        self.log(format!(
+            "media {id} {}",
+            if suspended { "still" } else { "free" }
+        ));
     }
     fn load_web_extension(
         &self,
