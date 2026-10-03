@@ -352,6 +352,8 @@ export const commands = {
 } | null>("default_browser_request"),
 	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
 	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
+	timeCall: (expectedProfile: string, call: TimeCall) => __TAURI_INVOKE<TimeResponse>("time_call", { expectedProfile, call }),
+	focusControl: (control: FocusControl) => __TAURI_INVOKE<OperationAdmission>("focus_control", { control }),
 	/**
 	 *  Finds `query` in the page in front, stepping forward or back when it
 	 *  repeats; no query ends the search. Results arrive as `zephium:find`.
@@ -383,6 +385,7 @@ export const events = {
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
 	faviconsChanged: makeEvent<FaviconsChanged>("favicons-changed"),
 	findChanged: makeEvent<FindChanged>("find-changed"),
+	focusChanged: makeEvent<FocusChanged>("focus-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
@@ -900,6 +903,49 @@ export type FindResultView = {
 	matches: number,
 	/**  One-based position of the current match, when the engine knows it. */
 	active: number | null,
+};
+
+export type FocusChanged = FocusStatus;
+
+export type FocusControl = { kind: "start"; minutes: number; breaks: boolean } | { kind: "stop" } | 
+/**  Lets one shut site through for a few minutes. */
+{ kind: "allow"; site: string } | 
+/**  Ends the running phase now: a break, or a round. */
+{ kind: "skip" };
+
+export type FocusDayView = {
+	day: number,
+	seconds: number,
+	sessions: number,
+	completed: number,
+};
+
+export type FocusPhaseView = "focus" | "break" | "long_break";
+
+/**
+ *  Focus as chrome shows it: the running session, if any, and the sites a
+ *  focus round keeps shut.
+ */
+export type FocusStatus = {
+	session: FocusView | null,
+	blocked: string[],
+};
+
+export type FocusView = {
+	phase: FocusPhaseView,
+	started_at: number | null,
+	phase_started_at: number | null,
+	phase_ends_at: number | null,
+	minutes: number,
+	breaks: boolean,
+	break_minutes: number,
+	long_break_minutes: number,
+	/**  Focus rounds finished so far. */
+	rounds: number,
+	/**  Seconds focused in finished rounds; the running round adds to it. */
+	focused: number,
+	/**  Sites let through for a moment. */
+	allowed: string[],
 };
 
 /**
@@ -1718,6 +1764,16 @@ export type SidebarNodeView = {
  */
 export type SidebarSectionView = "favorites" | "pinned" | "today";
 
+export type SiteTimeView = {
+	site: string,
+	icon: IconRef | null,
+	seconds: number,
+	/**  Times the site was come to, rather than returned to. */
+	opens: number,
+	/**  Seconds per bucket, for the few leading sites; empty for the rest. */
+	series: number[],
+};
+
 export type SpaceId = string;
 
 /**  One ordered space owned by the focused profile. */
@@ -1878,6 +1934,27 @@ export type TaskStep = {
  *  generic resource browser. `today` is the caller's local calendar date.
  */
 export type TaskView = "inbox" | "today" | "upcoming" | "all" | "completed" | "trash";
+
+/**  Seconds in one bucket, on the web and in Work. */
+export type TimeBucketView = {
+	browse: number,
+	work: number,
+};
+
+export type TimeCall = 
+/**
+ *  Time over `buckets` spans of `bucket_hours` (1 or 24) local hours,
+ *  from local hour `from_hour`, narrowed to `site` when given.
+ */
+{ kind: "report"; from_hour: number; bucket_hours: number; buckets: number; site: string | null } | 
+/**  Focus per local day, from local day `from_day`. */
+{ kind: "focus_days"; from_day: number; days: number };
+
+export type TimeError = "invalid" | "unavailable" | "capacity";
+
+export type TimeResponse = { kind: "report"; buckets: TimeBucketView[]; 
+/**  The same span just before, for comparison. */
+previous: TimeBucketView; sites: SiteTimeView[] } | { kind: "focus_days"; days: FocusDayView[] } | { kind: "error"; error: TimeError };
 
 export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "bookmarks" | "time";
 

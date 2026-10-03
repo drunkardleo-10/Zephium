@@ -91,6 +91,7 @@ mod overlay;
 #[cfg(target_os = "macos")]
 mod panel;
 mod platform;
+mod presence;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
 mod resource_close;
@@ -203,6 +204,7 @@ const EVENT_SEARCH: &str = "zephium:search";
 const EVENT_LAYOUT: &str = "zephium:layout";
 const EVENT_RUNTIME_STATUS: &str = "zephium:runtime-status";
 const EVENT_BLOCKER_STATUS: &str = "zephium:blocker-status";
+const EVENT_FOCUS: &str = "zephium:focus";
 const EVENT_OPERATION_PROCESSED: &str = "zephium:operation-processed";
 // Accepted operations are never evicted before privileged chrome explicitly
 // acknowledges the actor's disposition. Refuse new admission at the bound
@@ -1314,6 +1316,9 @@ struct RuntimeStatusChanged(zephium_ipc::RuntimeStatus);
 struct BlockerStatusChanged(zephium_ipc::BlockerStatusView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct FocusChanged(zephium_ipc::FocusStatus);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct OperationProcessed(zephium_ipc::OperationDisposition);
 
 #[derive(Clone, Default)]
@@ -1590,6 +1595,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             default_browser::default_browser_status,
             default_browser::default_browser_request,
             bookmark_call,
+            time_call,
+            focus_control,
             page_find,
             browser_import::import_sources,
             browser_import::import_start,
@@ -1628,6 +1635,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             LayoutChanged,
             RuntimeStatusChanged,
             BlockerStatusChanged,
+            FocusChanged,
             OperationProcessed
         ])
 }
@@ -3891,6 +3899,66 @@ async fn bookmark_call(
 
 #[tauri::command]
 #[specta::specta]
+async fn time_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: zephium_ipc::TimeCall,
+) -> zephium_ipc::TimeResponse {
+    use zephium_ipc::{TimeError, TimeResponse};
+    let failed = |error| TimeResponse::Error { error };
+    if !authorize(&caller, CallerPolicy::Main, "time_call") || shutdown_started(&app) {
+        return failed(TimeError::Unavailable);
+    }
+    if !call.validate() {
+        return failed(TimeError::Invalid);
+    }
+    let Some(expected_profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(TimeError::Invalid);
+    };
+    let shell = app.state::<Handle>().inner().clone();
+    static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let Ok(permit) = ADMISSION.try_acquire() else {
+        return failed(TimeError::Capacity);
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    if !shell.dispatch(Command::TimeCall {
+        expected_profile,
+        call: Box::new(call),
+        done: zephium_app::TimeCompletion::new(move |response| {
+            let _permit = permit;
+            let _ = send.send(response);
+        }),
+    }) {
+        return failed(TimeError::Unavailable);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
+        Ok(Ok(response)) => response,
+        _ => failed(TimeError::Unavailable),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+fn focus_control(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    shell: State<'_, Handle>,
+    control: zephium_ipc::FocusControl,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "focus_control")
+        || shutdown_started(&app)
+        || !control.validate()
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(&app, &shell, Command::Focus(control))
+}
+
+#[tauri::command]
+#[specta::specta]
 fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !authorize(&caller, CallerPolicy::Both, "setting_get") {
         return None;
@@ -5570,6 +5638,9 @@ pub fn run() {
                 Projection::BlockerStatus(status) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_BLOCKER_STATUS, &status)
                 }
+                Projection::Focus(status) => {
+                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FOCUS, &status)
+                }
                 Projection::OperationProcessed(disposition) => {
                     let panel_result=disposition.clone();
                     if record_and_deliver_operation(&disposition_ledger,disposition,|disposition| {
@@ -5856,6 +5927,7 @@ pub fn run() {
                         // resize notification. Wake content before it can be
                         // interacted with.
                         resize_shell.dispatch(Command::SetWindowVisible(true));
+                        presence::report_app_active(resize_window.app_handle());
                         // DWM occasionally drops the backdrop applied before
                         // first show; one re-apply on first focus heals it.
                         #[cfg(target_os = "windows")]
@@ -5870,10 +5942,11 @@ pub fn run() {
                     // Losing focus alone does not make a browser tab
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
-                    tauri::WindowEvent::Focused(false)
-                        if resize_window.is_minimized().unwrap_or(false) =>
-                    {
-                        resize_shell.dispatch(Command::SetWindowVisible(false));
+                    tauri::WindowEvent::Focused(false) => {
+                        if resize_window.is_minimized().unwrap_or(false) {
+                            resize_shell.dispatch(Command::SetWindowVisible(false));
+                        }
+                        presence::report_app_active(resize_window.app_handle());
                     }
                     _ => {}
                 }
@@ -5989,7 +6062,10 @@ pub fn run() {
             panel_window.on_window_event(move |event| {
                 if matches!(event,tauri::WindowEvent::Destroyed){blur_overlay.destroyed();}
                 match event {
-                tauri::WindowEvent::Focused(_) => blur_overlay.focus_changed(),
+                tauri::WindowEvent::Focused(_) => {
+                    blur_overlay.focus_changed();
+                    presence::report_app_active(blur_overlay.window_app());
+                }
                 tauri::WindowEvent::ScaleFactorChanged { .. } => blur_overlay.display_changed(),
                 tauri::WindowEvent::CloseRequested { api, .. } if !shutdown_started(blur_overlay.window_app()) => { api.prevent_close(); blur_overlay.hide(); },
                 #[cfg(target_os = "windows")]
@@ -6001,6 +6077,8 @@ pub fn run() {
                 _ => {}
             }});
             app.manage(overlay);
+            presence::install(app.handle(), &window);
+            presence::report_app_active(app.handle());
             #[cfg(all(debug_assertions, target_os = "macos"))]
             log_webview_processes(&window, &panel_window);
 
