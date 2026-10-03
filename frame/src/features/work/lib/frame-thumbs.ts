@@ -1,18 +1,20 @@
 import { commands } from "$shared/ipc/bindings";
 
 /**
- * Small copies of page frames and photos, at the size the canvas shows them.
- * Rust sends the picture already scaled to that width, so what is decoded is
- * the size drawn; the canvas keeps the copy within a byte budget, and the
+ * Native page frames retain their bounded original pixels for screen DPI and
+ * canvas zoom; photos have small copies at the size the canvas shows them.
+ * The canvas keeps decoded copies within a byte budget, and the
  * webview's own cache of pictures is emptied once the works that used them
  * are left or the screen has been still.
  */
 const BUDGET = 16 * 1024 * 1024;
 const MEDIA = /^(?:zephium-media:\/\/localhost|http:\/\/zephium-media\.localhost(?::\d+)?)\//u;
+const FRAME =
+  /^(?:zephium-media:\/\/localhost|http:\/\/zephium-media\.localhost(?::\d+)?)\/frame\//u;
 
 /** A picture's address asking for the copy `width` CSS pixels wide, as sharp as the screen shows it. */
 export function thumbSrc(url: string, width: number): string {
-  if (!MEDIA.test(url)) return url;
+  if (!MEDIA.test(url) || FRAME.test(url)) return url;
   return `${url}${url.includes("?") ? "&" : "?"}w=${pixelsOf(width)}`;
 }
 const pixelsOf = (width: number) =>
@@ -35,7 +37,7 @@ function drop(canvas: HTMLCanvasElement) {
   canvas.height = 0;
 }
 
-async function shrink(url: string, width: number): Promise<ImageBitmap | null> {
+async function decode(url: string, width: number): Promise<ImageBitmap | null> {
   const image = new Image();
   image.decoding = "async";
   image.src = thumbSrc(url, width);
@@ -43,6 +45,9 @@ async function shrink(url: string, width: number): Promise<ImageBitmap | null> {
   try {
     await image.decode();
     if (!image.naturalWidth) return null;
+    // The native frame is already bounded to 640 pixels and 1 MiB. Decode it
+    // once per generation, without a second resize or a lossy JPEG round trip.
+    if (FRAME.test(url)) return await createImageBitmap(image);
     const scale = Math.min(1, pixelsOf(width) / image.naturalWidth);
     scratch = document.createElement("canvas");
     scratch.width = Math.max(1, Math.round(image.naturalWidth * scale));
@@ -63,9 +68,39 @@ async function shrink(url: string, width: number): Promise<ImageBitmap | null> {
 let shown = 0;
 let releasing: ReturnType<typeof setTimeout> | undefined;
 let releasedAt = 0;
+let waking: AbortController | undefined;
 /** How long after the last canvas that drew a picture is gone, and after pictures were last decoded with some still on show, the copies go. */
 const LEFT_MS = 4000;
 const STILL_MS = 60_000;
+
+async function releaseNativeMemory() {
+  waking?.abort();
+  const listeners = new AbortController();
+  waking = listeners;
+  let idle = true;
+  const restore = () => {
+    void commands.workReleaseMemory(false).catch(() => false);
+  };
+  const wake = () => {
+    idle = false;
+    listeners.abort();
+    restore();
+  };
+  for (const event of ["pointermove", "pointerdown", "wheel", "keydown", "focusin"]) {
+    document.addEventListener(event, wake, {
+      capture: true,
+      passive: true,
+      signal: listeners.signal,
+    });
+  }
+  try {
+    await commands.workReleaseMemory(true);
+    // Activity may arrive before the native idle request has settled.
+    if (!idle) restore();
+  } catch {
+    listeners.abort();
+  }
+}
 
 function releaseLater(after: number) {
   clearTimeout(releasing);
@@ -77,7 +112,7 @@ function releaseLater(after: number) {
     if (Date.now() - releasedAt < 10_000) return;
     releasedAt = Date.now();
     try {
-      void commands.workReleaseMemory().catch(() => false);
+      void releaseNativeMemory();
     } catch {
       // Off the app (a test page), there is no webview to ask.
     }
@@ -95,7 +130,7 @@ function evict() {
 
 /** The frame's thumbnail at a width, made once and kept among the most recently used. */
 function frameThumbnail(url: string, width: number): Promise<ImageBitmap | null> {
-  const key = `${width}|${url}`;
+  const key = FRAME.test(url) ? url : `${width}|${url}`;
   const hit = kept.get(key);
   if (hit) {
     kept.delete(key);
@@ -103,7 +138,7 @@ function frameThumbnail(url: string, width: number): Promise<ImageBitmap | null>
     return hit.bitmap;
   }
   releaseLater(shown ? STILL_MS : LEFT_MS);
-  const entry: Kept = { bitmap: shrink(url, width), bytes: 0 };
+  const entry: Kept = { bitmap: decode(url, width), bytes: 0 };
   kept.set(key, entry);
   void entry.bitmap.then((bitmap) => {
     if (kept.get(key) !== entry) return;
@@ -129,19 +164,29 @@ export function thumbnail(canvas: HTMLCanvasElement, frame: Thumb) {
   let width = frame.width;
   let missing = frame.onmissing;
   let gone = false;
+  let generation = 0;
   shown += 1;
-  const draw = ({ url, width }: Thumb) =>
+  const draw = ({ url, width }: Thumb) => {
+    const requested = ++generation;
     void frameThumbnail(url, width).then((bitmap) => {
-      if (gone || current !== url) return;
+      if (gone || current !== url || requested !== generation) return;
       if (!bitmap) return missing?.();
       try {
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        canvas.getContext("2d", SOFT)?.drawImage(bitmap, 0, 0);
+        // Keep DOM canvas pixels at their display size too: the shared bitmap
+        // budget does not include each card's software backing store.
+        const scale = FRAME.test(url) ? Math.min(1, pixelsOf(width) / bitmap.width) : 1;
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        const context = canvas.getContext("2d", SOFT);
+        if (context) {
+          context.imageSmoothingQuality = "high";
+          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        }
       } catch {
         // A copy let go before it was drawn: the window keeps its sheet.
       }
     });
+  };
   draw(frame);
   return {
     update(next: Thumb) {

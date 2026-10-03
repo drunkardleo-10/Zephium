@@ -42,6 +42,14 @@ pub(crate) fn install(
     ));
     {
         let app = app.clone();
+        providers
+            .activity
+            .set_page_observer(std::sync::Arc::new(move |change| {
+                super::emit_to_privileged(&app, super::MAIN_LABEL, "zephium:work-changed", &change);
+            }));
+    }
+    {
+        let app = app.clone();
         super::work_decision::set_observer(Box::new(move |change| {
             super::emit_to_privileged(
                 &app,
