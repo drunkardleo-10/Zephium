@@ -122,12 +122,18 @@ pub struct FocusView {
     pub allowed: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ShutSiteView {
+    pub site: String,
+    pub icon: Option<IconRef>,
+}
+
 /// Focus as chrome shows it: the running session, if any, and the sites a
 /// focus round keeps shut.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct FocusStatus {
     pub session: Option<FocusView>,
-    pub blocked: Vec<String>,
+    pub shut: Vec<ShutSiteView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

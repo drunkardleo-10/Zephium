@@ -928,7 +928,7 @@ export type FocusPhaseView = "focus" | "break" | "long_break";
  */
 export type FocusStatus = {
 	session: FocusView | null,
-	blocked: string[],
+	shut: ShutSiteView[],
 };
 
 export type FocusView = {
@@ -1737,6 +1737,11 @@ export type SearchResults = {
 	 */
 	completion: string | null,
 	results: SearchResult[],
+};
+
+export type ShutSiteView = {
+	site: string,
+	icon: IconRef | null,
 };
 
 /**

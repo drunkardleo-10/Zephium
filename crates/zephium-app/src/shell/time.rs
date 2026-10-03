@@ -11,7 +11,7 @@ use zephium_core::time::{
 };
 use zephium_ipc::{
     FocusControl, FocusDayView, FocusPhaseView, FocusStatus, FocusView, IconSurface,
-    SiteTimeView, TimeBucketView, TimeCall, TimeError, TimeResponse,
+    ShutSiteView, SiteTimeView, TimeBucketView, TimeCall, TimeError, TimeResponse,
 };
 
 /// The running session, kept so a relaunch picks it up where it was.
@@ -640,7 +640,36 @@ impl Shell {
         queue.schedule_focus(deadline);
     }
 
-    pub(super) fn project_focus(&self) {
+    /// A shut site's icon, as held for the site or its `www.` host. Anything
+    /// missing is fetched, and arrives with the next projection.
+    fn shut_site_views(&mut self) -> Vec<ShutSiteView> {
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            return Vec::new();
+        };
+        let pages = |site: &str| [format!("https://{site}/"), format!("https://www.{site}/")];
+        let views: Vec<ShutSiteView> = self
+            .time
+            .blocked
+            .iter()
+            .map(|site| ShutSiteView {
+                icon: pages(site)
+                    .iter()
+                    .find_map(|page| self.icon_ref_for_url(IconSurface::Chrome, profile, page)),
+                site: site.clone(),
+            })
+            .collect();
+        let missing: Vec<String> = views
+            .iter()
+            .filter(|view| view.icon.is_none())
+            .flat_map(|view| pages(&view.site))
+            .collect();
+        self.want_icons(IconSurface::Chrome, profile, missing.iter().map(String::as_str));
+        self.publish_icons();
+        views
+    }
+
+    pub(super) fn project_focus(&mut self) {
+        let shut = self.shut_site_views();
         let session = self.time.focus.as_ref().map(|session| {
             let (short, long) = session.plan.break_minutes();
             FocusView {
@@ -661,10 +690,7 @@ impl Shell {
                     .collect(),
             }
         });
-        (self.emit)(Projection::Focus(FocusStatus {
-            session,
-            blocked: self.time.blocked.clone(),
-        }));
+        (self.emit)(Projection::Focus(FocusStatus { session, shut }));
     }
 
     /// Picks a restored session back up once the actor can schedule it.
