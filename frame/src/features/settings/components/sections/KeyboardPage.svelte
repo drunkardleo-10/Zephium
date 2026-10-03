@@ -1,12 +1,10 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { preferences } from "$domain/preferences";
   import { keymap, type KeymapEntry, type KeymapOutcome } from "$domain/keymap";
   import { IS_MAC } from "$shared/platform";
   import { acceleratorFrom, acceleratorKeys, heldModifiers } from "$shared/lib/accelerator";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
-  import Switch from "$shared/ui/Switch";
   import Button from "$shared/ui/Button";
   import PreferenceSelect from "../PreferenceSelect.svelte";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
@@ -126,15 +124,6 @@
 </script>
 
 <LauncherShortcut />
-{#if sections.length > 0}
-  <SettingsGroup title={m.settings_keyboard()}>
-    <SettingsRow title={m.keymap_reset_all()} description={m.keymap_reset_all_help()}>
-      <Button size="compact" disabled={!anyCustomized} onclick={() => void reset(null)}
-        >{m.keymap_reset_all_action()}</Button
-      >
-    </SettingsRow>
-  </SettingsGroup>
-{/if}
 {#each sections as section (section.id)}
   <SettingsGroup title={section.title}>
     {#each section.entries as entry (entry.id)}
@@ -167,17 +156,18 @@
     {/each}
   </SettingsGroup>
 {/each}
-<SettingsGroup title={m.settings_motion()}
-  ><SettingsRow title={m.settings_reduce_motion()} description={m.settings_reduce_motion_desc()}
-    ><Switch
-      label={m.settings_reduce_motion()}
-      labelHidden
-      checked={preferences.value("ui.reduce-motion") === "true"}
-      disabled={preferences.saving()}
-      onchange={(value) => void preferences.set("ui.reduce-motion", String(value))}
-    /></SettingsRow
-  ></SettingsGroup
->
+{#if sections.length > 0}
+  <!-- Out of the cards, like a system Restore Defaults: present, never loud. -->
+  <div class="restore">
+    <Button
+      size="compact"
+      variant="ghost"
+      title={m.keymap_reset_all_help()}
+      disabled={!anyCustomized}
+      onclick={() => void reset(null)}>{m.keymap_reset_all()}</Button
+    >
+  </div>
+{/if}
 <SettingsGroup title={m.settings_accessibility()}
   ><PreferenceSelect id="accessibility.text" preference="ui.text-size" /><PreferenceSwitch
     id="accessibility.contrast"
@@ -186,6 +176,12 @@
 >
 
 <style>
+  .restore {
+    display: flex;
+    justify-content: flex-end;
+    margin: -22px 0 34px;
+  }
+
   .shortcut {
     display: flex;
     align-items: center;

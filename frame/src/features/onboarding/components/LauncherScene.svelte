@@ -9,7 +9,7 @@
   import * as m from "$shared/i18n/messages";
   import Icon from "$shared/ui/Icon";
   import { SITES } from "../lib/catalog";
-  import Mark from "./Mark.svelte";
+  import Mark from "$shared/ui/BrandMark";
 
   let {
     typing,

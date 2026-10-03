@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { Mark } from "../lib/catalog";
+  import type { BrandArt } from "./index";
 
-  let { mark, size = 32 }: { mark: Mark; size?: number } = $props();
+  let { mark, size = 32 }: { mark: BrandArt; size?: number } = $props();
 </script>
 
 <!-- First-party artwork shipped with the app, never a site's own favicon. A

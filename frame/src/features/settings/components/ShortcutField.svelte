@@ -27,6 +27,7 @@
   let shown = $derived(recording ? held : keys);
 </script>
 
+<!-- The keycaps are the control: no box around them until it is listening. -->
 <button
   type="button"
   class="recorder"
@@ -46,61 +47,93 @@
   .recorder {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    gap: 4px;
-    min-width: 112px;
-    height: 32px;
-    padding: 0 10px;
-    border: 1px solid var(--color-border-strong);
+    justify-content: flex-end;
+    gap: 3px;
+    height: 30px;
+    padding: 0 4px;
+    border: 0;
     border-radius: var(--radius-control);
-    background: var(--color-field);
+    background: transparent;
     color: var(--color-text);
+    font: inherit;
     transition:
-      border-color var(--motion-fast) var(--ease-smooth),
-      box-shadow var(--motion-fast) var(--ease-smooth);
+      background-color var(--motion-fast) var(--ease-smooth),
+      box-shadow var(--motion-fast) var(--ease-smooth),
+      scale var(--motion-slow) var(--ease-smooth);
+  }
+
+  .recorder:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
   }
 
   .recorder:hover:not(:disabled) {
-    background: var(--color-field-hover);
+    background: var(--row-hover);
+  }
+
+  .recorder:active:not(:disabled) {
+    scale: 0.97;
+    transition-duration: var(--motion-fast);
   }
 
   .recorder.recording {
-    border-color: var(--color-ring);
-    box-shadow: 0 0 0 3px var(--color-field-ring);
+    min-width: 108px;
+    justify-content: center;
+    padding: 0 8px;
+    background: var(--color-field);
+    box-shadow:
+      inset 0 0 0 1px var(--color-ring),
+      0 0 0 3px var(--color-field-ring);
   }
 
   .recorder.warn {
-    border-color: var(--color-warning);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warning) 70%, transparent);
   }
 
   .prompt {
-    font-size: 12.5px;
+    padding: 0 4px;
     color: var(--color-muted);
+    font-size: 12.5px;
   }
 
   kbd {
     display: inline-grid;
     place-items: center;
     box-sizing: border-box;
-    min-width: 22px;
-    height: 22px;
-    padding: 0 6px;
+    min-width: 24px;
+    height: 24px;
+    padding: 0 7px;
     border-radius: var(--radius-inset);
-    background: var(--color-fill);
+    background: var(--color-control);
+    box-shadow: var(--shadow-control);
+    color: var(--color-text);
     font-family: var(--font-sans);
     font-size: 12px;
     font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .recording kbd {
+    color: var(--color-muted);
   }
 
   @media (prefers-reduced-motion: reduce) {
     .recorder {
       transition: none;
     }
+
+    .recorder:active:not(:disabled) {
+      scale: none;
+    }
   }
 
   @media (forced-colors: active) {
     .recorder.recording {
       outline: 2px solid Highlight;
+    }
+
+    kbd {
+      border: 1px solid CanvasText;
     }
   }
 </style>

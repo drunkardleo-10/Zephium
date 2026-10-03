@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { Tick02Icon } from "@hugeicons/core-free-icons";
+  import { Globe02Icon, Tick02Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import { browserImport, type ImportKind } from "$domain/browser-import";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
-  import { BROWSER_MARKS, BROWSERS } from "../../lib/catalog";
-  import Mark from "../Mark.svelte";
+  import { BROWSERS } from "../../lib/catalog";
+  import { browserMark } from "$shared/brand/browsers";
+  import Mark from "$shared/ui/BrandMark";
 
   // What native found, or, until it can look, the browsers people come from.
   let sources = $derived(
@@ -74,7 +75,10 @@
         onclick={() => (chosen = candidate.id)}
       >
         <span class="plate"
-          ><Mark mark={BROWSER_MARKS[candidate.browser] ?? BROWSER_MARKS.chrome!} size={30} /></span
+          >{#if browserMark(candidate.browser)}<Mark
+              mark={browserMark(candidate.browser)!}
+              size={30}
+            />{:else}<Icon icon={Globe02Icon} size={22} />{/if}</span
         >
         <span class="name">{candidate.name}</span>
       </button>

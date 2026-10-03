@@ -15,7 +15,7 @@
   import Icon from "$shared/ui/Icon";
   import { WORDMARK } from "$shared/lib/wordmark";
   import type { Site } from "../lib/catalog";
-  import Mark from "./Mark.svelte";
+  import Mark from "$shared/ui/BrandMark";
   import WorkCanvas from "./WorkCanvas.svelte";
 
   let {

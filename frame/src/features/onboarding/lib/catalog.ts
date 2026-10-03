@@ -1,30 +1,21 @@
-import arc from "../marks/arc.svg";
-import brave from "../marks/brave.svg";
 import chatgpt from "../marks/chatgpt.svg";
 import chatgptDark from "../marks/chatgpt-dark.svg";
-import chrome from "../marks/chrome.svg";
 import claude from "../marks/claude.svg";
-import edge from "../marks/edge.svg";
 import figma from "../marks/figma.svg";
-import firefox from "../marks/firefox.svg";
 import github from "../marks/github.svg";
 import githubDark from "../marks/github-dark.svg";
 import gmail from "../marks/gmail.svg";
 import googleCalendar from "../marks/google-calendar.svg";
 import linear from "../marks/linear.svg";
 import notion from "../marks/notion.svg";
-import opera from "../marks/opera.svg";
-import safari from "../marks/safari.svg";
 import slack from "../marks/slack.svg";
 import spotify from "../marks/spotify.svg";
-import vivaldi from "../marks/vivaldi.svg";
-import zen from "../marks/zen.svg";
 import whatsapp from "../marks/whatsapp.svg";
 import youtube from "../marks/youtube.svg";
 
-/** A brand's mark, with the version drawn for a dark ground when the
- *  brand's own is a dark glyph that would vanish there. */
-export type Mark = { light: string; dark?: string };
+import type { BrandArt } from "$shared/ui/BrandMark";
+
+export type Mark = BrandArt;
 
 /** A site onboarding offers to keep. Native owns each one's address and the
  *  raster it seeds; chrome names it by id and draws it from here. The lines
@@ -63,20 +54,6 @@ export const SITE_URLS: Readonly<Record<string, string>> = {
   claude: "https://claude.ai/",
   youtube: "https://www.youtube.com/",
   spotify: "https://open.spotify.com/",
-};
-
-/** Browsers onboarding can bring things over from, by the id the import
- *  source reports. */
-export const BROWSER_MARKS: Readonly<Record<string, Mark>> = {
-  arc: { light: arc },
-  brave: { light: brave },
-  chrome: { light: chrome },
-  edge: { light: edge },
-  firefox: { light: firefox },
-  opera: { light: opera },
-  safari: { light: safari },
-  vivaldi: { light: vivaldi },
-  zen: { light: zen },
 };
 
 /** The browsers people most often come from, in the order they are offered

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Mark as MarkType } from "../lib/catalog";
-  import Mark from "./Mark.svelte";
+  import Mark from "$shared/ui/BrandMark";
 
   let {
     kind,

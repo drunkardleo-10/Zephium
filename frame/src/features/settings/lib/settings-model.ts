@@ -17,6 +17,10 @@ import {
   DashboardSpeed01Icon,
   PuzzleIcon,
   InformationCircleIcon,
+  UserMultiple02Icon,
+  TranslateIcon,
+  MagicWand01Icon,
+  Brain01Icon,
   Plug01Icon,
 } from "@hugeicons/core-free-icons";
 const allSections = [
@@ -53,7 +57,7 @@ const allSections = [
     group: "browser",
     title: m.section_profiles,
     description: m.section_profiles_description,
-    icon: UserCircleIcon,
+    icon: UserMultiple02Icon,
   },
   {
     id: "search",
@@ -88,7 +92,7 @@ const allSections = [
     group: "application",
     title: m.section_languages,
     description: m.section_languages_description,
-    icon: Globe02Icon,
+    icon: TranslateIcon,
   },
   {
     id: "work",
@@ -123,14 +127,14 @@ const allSections = [
     group: "intelligence",
     title: m.section_skills,
     description: m.section_skills_description,
-    icon: SparklesIcon,
+    icon: MagicWand01Icon,
   },
   {
     id: "memory",
     group: "intelligence",
     title: m.section_memory,
     description: m.section_memory_description,
-    icon: InformationCircleIcon,
+    icon: Brain01Icon,
   },
   {
     id: "sites",

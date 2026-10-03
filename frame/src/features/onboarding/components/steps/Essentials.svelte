@@ -6,7 +6,7 @@
   import { reducedMotion } from "$shared/lib/motion";
   import { SITES, type Site } from "../../lib/catalog";
   import { throwMark } from "../../lib/flight";
-  import Mark from "../Mark.svelte";
+  import Mark from "$shared/ui/BrandMark";
 
   let {
     kept,
