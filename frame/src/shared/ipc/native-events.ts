@@ -12,6 +12,7 @@ import type {
   DownloadsChanged,
   BlockerStatusChanged,
   BrowserCredentialCapabilityChanged,
+  FocusChanged,
   ExtensionActionFailed,
   ExtensionActionShortcut,
   ExtensionActionsChanged,
@@ -80,6 +81,7 @@ export const nativeEventNames = {
   operationProcessed: "zephium:operation-processed",
   runtimeStatusChanged: "zephium:runtime-status",
   blockerStatusChanged: "zephium:blocker-status",
+  focusChanged: "zephium:focus",
 } as const;
 
 export const events = {
@@ -131,4 +133,5 @@ export const events = {
   operationProcessed: scopedEvent<OperationProcessed>(nativeEventNames.operationProcessed),
   runtimeStatusChanged: scopedEvent<RuntimeStatusChanged>(nativeEventNames.runtimeStatusChanged),
   blockerStatusChanged: scopedEvent<BlockerStatusChanged>(nativeEventNames.blockerStatusChanged),
+  focusChanged: scopedEvent<FocusChanged>(nativeEventNames.focusChanged),
 };

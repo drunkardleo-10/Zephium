@@ -28,6 +28,12 @@ const defaults = {
   "tabs.after-close": "next",
   "tabs.switch-to-open": "true",
   "tabs.startup": "continue",
+  "time.track": "true",
+  "time.retention": "90",
+  "focus.minutes": "25",
+  "focus.breaks": "false",
+  "focus.goal": "120",
+  "focus.blocked": "",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
