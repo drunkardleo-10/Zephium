@@ -8,7 +8,9 @@ use zephium_core::ports::engine::EngineEvent;
 
 use super::permits::EventPermit;
 #[cfg(target_os = "windows")]
-use super::profiles::windows_profile_provenance_presence_is_consistent;
+use super::profiles::{
+    windows_erasure_provenance_is_consistent, windows_profile_provenance_presence_is_consistent,
+};
 use super::EngineHost;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,8 +178,48 @@ impl EngineHost {
                         self.browser_processes.contains_key(profile),
                         self.browser_process_exit_observers.contains_key(profile),
                         self.browser_version_observers.contains_key(profile),
+                    ) || windows_erasure_provenance_is_consistent(
+                        self.environments.contains_key(profile),
+                        self.browser_version_observers.contains_key(profile),
+                        self.erasure_tombstones.contains(profile),
+                        self.browser_processes
+                            .get(profile)
+                            .map(crate::platform::imp::BrowserProcess::id),
+                        self.browser_process_exit_observers
+                            .get(profile)
+                            .map(|observer| {
+                                (observer.expected_process_id(), observer.is_invalid())
+                            }),
                     )
                 });
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        {
+            use super::resources::NativeResourceClass as Class;
+            crate::platform::imp::diagnose_shutdown_admission(
+                [
+                    self.unverifiable_browser_processes.is_empty(),
+                    self.construction_unproven.is_empty(),
+                    self.unproven_browser_processes.is_empty(),
+                    self.unproven_environments.is_empty(),
+                    self.windows_cleanup_debts.is_empty(),
+                    !self.windows_cleanup_invariant_failed,
+                    !self.native_resource_accounting_failed,
+                    self.native_resources.is_quiescent(),
+                    provenance_valid,
+                    self.browser_processes.len() == self.browser_process_exit_observers.len(),
+                ],
+                [
+                    Class::Tab,
+                    Class::WarmSpare,
+                    Class::TeardownDebt,
+                    Class::AgentContext,
+                    Class::Extension,
+                    Class::TransientConstruction,
+                ]
+                .map(|class| self.native_resources.count_for_audit(class)),
+            );
+        }
+        self.windows_process_shutdown_started = true;
         let mut obligations = Vec::with_capacity(self.browser_processes.len());
         for (profile, process) in self.browser_processes.drain() {
             let Some(proof) = self
@@ -259,6 +301,10 @@ impl EngineHost {
         self.macos_ephemeral_data_stores.clear();
         #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
         self.anonymous_work_stores.clear();
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        self.anonymous_work_environments.clear();
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        self.work_site_stores.clear();
         #[cfg(not(target_os = "macos"))]
         self.web_contexts.clear();
         #[cfg(all(unix, not(target_os = "macos")))]

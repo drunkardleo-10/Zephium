@@ -239,17 +239,88 @@ impl AgentContextPortSlot {
         &self,
         resource: &WorkBrowserResourceJoin,
     ) -> Option<WorkResourceFailureCause> {
+        let guard = self.work_resource_diagnostic_guard(resource)?;
+        let result = *guard.failure_cause.lock().ok()?;
+        result
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn work_resource_frame_capture_pending(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<bool> {
+        let guard = self.work_resource_diagnostic_guard(resource)?;
+        let pending = guard
+            .frame_capture
+            .lock()
+            .ok()?
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        Some(pending.is_some_and(|pending| pending.load(Ordering::Acquire)))
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn work_resource_on_frame_capture_dispatched(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+        callback: Box<dyn FnOnce() + Send>,
+    ) -> bool {
+        let Some(guard) = self.work_resource_diagnostic_guard(resource) else {
+            return false;
+        };
+        let Ok(capture) = guard.frame_capture.lock() else {
+            return false;
+        };
+        // Install only before this original resource's first native capture.
+        // Qualifiers hold their synthetic response until registration returns.
+        if capture.is_some() {
+            return false;
+        }
+        let Ok(mut slot) = guard.frame_capture_dispatched.lock() else {
+            return false;
+        };
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(callback);
+        true
+    }
+    fn work_resource_diagnostic_guard(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<Arc<super::work_resource::WorkResourceGuard>> {
         let (direct, factory) = {
             let state = self.state.lock().ok()?;
             (state.admission.clone(), state.factory.clone())
         };
-        // The shipping product uses the original sequential lifetime factory;
-        // the old direct port is not a substitute or a second lookup owner.
-        let admission = match (direct, factory) {
-            (Some(admission), None) => admission,
-            (None, Some(factory)) => factory.state.lock().ok()?.active.clone()?,
+        // Read only original lifetime owners. Work pages use a bounded group,
+        // while standalone contexts use the sequential active admission.
+        let admissions = match (direct, factory) {
+            (Some(admission), None) => vec![admission],
+            (None, Some(factory)) => {
+                let (active, group) = {
+                    let state = factory.state.lock().ok()?;
+                    (state.active.clone(), state.group.clone())
+                };
+                match (active, group) {
+                    (Some(admission), None) => vec![admission],
+                    (None, Some(group))
+                        if group.work == resource.identity().work()
+                            && (1..=3).contains(&group.capacity) =>
+                    {
+                        let members = group.members.lock().ok()?;
+                        if members.len() > group.capacity {
+                            return None;
+                        }
+                        members.clone()
+                    }
+                    _ => return None,
+                }
+            }
             _ => return None,
         };
-        admission.resource_failure_cause(resource)
+        // Each owner validates the full immutable join before exposing its
+        // first cause. Do not hold factory/group locks across owner lookup.
+        admissions
+            .into_iter()
+            .find_map(|admission| admission.resource_diagnostic_guard(resource))
     }
 }

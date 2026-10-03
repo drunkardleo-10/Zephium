@@ -2,8 +2,11 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
 
-#[cfg(all(feature = "macos-work", not(target_os = "macos")))]
-compile_error!("native Work composition is currently supported only on macOS");
+#[cfg(all(
+    feature = "native-work",
+    not(any(target_os = "macos", target_os = "windows"))
+))]
+compile_error!("native Work composition requires macOS or Windows");
 #[cfg(all(feature = "public-qualification", not(debug_assertions)))]
 compile_error!("public Work qualification is forbidden in optimized builds");
 #[cfg(all(
@@ -38,20 +41,22 @@ compile_error!("select the authenticated Notion write qualification without anot
 mod account_scope;
 #[cfg(feature = "durable-runtime")]
 pub mod durable_runtime;
-#[cfg(feature = "macos-work")]
+#[cfg(feature = "native-work")]
 mod native;
-#[cfg(feature = "macos-work")]
+#[cfg(feature = "native-work")]
 mod native_work_clock;
-#[cfg(feature = "macos-work")]
+#[cfg(feature = "native-work")]
 mod open_objective;
 #[cfg(feature = "macos-work")]
-pub use native::{MacosWorkComposition, TrustedWorkRequest};
-#[cfg(feature = "macos-work")]
+pub use native::NativeWorkComposition as MacosWorkComposition;
+#[cfg(feature = "native-work")]
+pub use native::{NativeWorkComposition, TrustedWorkRequest};
+#[cfg(feature = "native-work")]
 pub use open_objective::{
     PublicLocalActionWorkInvocation, PublicReadWorkAccount, PublicReadWorkInvocation,
     PublicReadWorkObjective, PublicReadWorkSettings,
 };
-#[cfg(feature = "macos-work")]
+#[cfg(feature = "native-work")]
 pub use zephium_agent_controller::AgentWorkFailure;
 #[cfg(feature = "public-qualification")]
 mod qualification;

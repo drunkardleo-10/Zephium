@@ -18,10 +18,11 @@ fn work_deadline_projection_preserves_epoch_and_only_rounds_fractional_milliseco
         let deadline = origin.checked_add(Duration::from_nanos(nanos)).unwrap();
         assert_eq!(project_work_deadline(origin, deadline), Some(tick(millis)));
     }
-    assert!(
-        project_work_deadline(origin, origin.checked_sub(Duration::from_nanos(1)).unwrap())
-            .is_none()
-    );
+    assert!(project_work_deadline(
+        origin,
+        origin.checked_sub(Duration::from_micros(1)).unwrap()
+    )
+    .is_none());
 }
 
 pub(super) fn tick(value: u64) -> AgentPolicyInstant {
@@ -43,6 +44,91 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
         )
         .unwrap();
     (rows, request)
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn frame_projection_preserves_final_revocation_but_discards_closed_authority() {
+    let (_, request) = source();
+    let admission = admission();
+    let mut guard = WorkResourceGuard::new(&request, &admission);
+    for phase in [
+        Phase::Constructing,
+        Phase::Retained,
+        Phase::Leased,
+        Phase::Revoking,
+    ] {
+        guard.state.lock().unwrap().phase = phase;
+        assert!(
+            guard.frame_projection_current(),
+            "final revocation may publish its original picture"
+        );
+    }
+    for phase in [Phase::Destroying, Phase::Destroyed, Phase::Quarantined] {
+        guard.state.lock().unwrap().phase = phase;
+        assert!(
+            !guard.frame_projection_current(),
+            "closed resources cannot disclose late pixels"
+        );
+    }
+    guard.state.lock().unwrap().phase = Phase::Constructing;
+    let session = zephium_agentic::WorkBrowserSession::new(
+        request.resource().identity().profile(),
+        request.resource().identity().work(),
+        Instant::now() + std::time::Duration::from_secs(10),
+    );
+    guard.anonymous_session = Some(session.clone());
+    assert!(guard.frame_projection_current());
+    session.close();
+    assert!(!guard.frame_projection_current());
+    guard.anonymous_session = None;
+    assert!(guard.frame_projection_current());
+    admission.state.lock().unwrap().sealed = true;
+    assert!(!guard.frame_projection_current());
+}
+
+#[cfg(all(
+    target_os = "windows",
+    feature = "native-agentic-work-lifetime-diagnostic"
+))]
+#[test]
+fn frame_capture_diagnostic_notifies_once_while_original_debt_is_live() {
+    let admission = admission();
+    let (_, request) = source();
+    let guard = Arc::new(WorkResourceGuard::new(&request, &admission));
+    let pending = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let session = zephium_agentic::WorkBrowserSession::new(
+        request.resource().identity().profile(),
+        request.resource().identity().work(),
+        Instant::now() + std::time::Duration::from_secs(10),
+    );
+    let callback_pending = pending.clone();
+    let callback_calls = calls.clone();
+    let callback_session = session.clone();
+    let callback_guard = Arc::downgrade(&guard);
+    *guard.frame_capture_dispatched.lock().unwrap() = Some(Box::new(move || {
+        assert!(callback_pending.load(Ordering::Acquire));
+        let guard = callback_guard.upgrade().unwrap();
+        assert!(guard.frame_capture.try_lock().is_ok());
+        assert!(guard.frame_capture_dispatched.try_lock().is_ok());
+        callback_session.close();
+        callback_calls.fetch_add(1, Ordering::AcqRel);
+    }));
+    guard.notify_frame_capture_dispatched_diagnostic();
+    guard.bind_frame_capture_diagnostic(&pending);
+    guard.notify_frame_capture_dispatched_diagnostic();
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    assert!(session.is_current());
+    pending.store(true, Ordering::Release);
+    guard.notify_frame_capture_dispatched_diagnostic();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(!session.is_current());
+    assert!(guard.frame_capture_dispatched.lock().unwrap().is_none());
+    guard.notify_frame_capture_dispatched_diagnostic();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    // The diagnostic consumes only its notification, never the original debt.
+    assert!(pending.load(Ordering::Acquire));
 }
 
 #[test]
@@ -1967,4 +2053,57 @@ fn work_construction_retry_is_closed_and_preserves_the_original_deadline() {
     assert!(expired
         .with_construction_window(Attempt::Initial, now)
         .is_err());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn anonymous_retirement_dispatch_cannot_retain_its_own_session() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let profile = zephium_core::ids::ProfileId::generate();
+    let work = WorkId::generate();
+    let session = zephium_agentic::WorkBrowserSession::new(
+        profile,
+        work,
+        Instant::now() + std::time::Duration::from_secs(60),
+    );
+    let weak_session = session.downgrade();
+    let mut rows = WorkBrowserResources::new(work, profile);
+    let request = rows
+        .construct_document_with_isolation(
+            WorkBrowserResourceId::generate(),
+            ContextId::generate(),
+            ContextProfileStorageClass::Durable,
+            ContextNavigationTarget::parse("https://example.test/").unwrap(),
+            zephium_agentic::WorkBrowserDocumentPolicy::Exact,
+            true,
+            tick(0),
+        )
+        .unwrap()
+        .with_anonymous_session(session.clone())
+        .unwrap();
+    let admission = admission();
+    let mut guard = WorkResourceGuard::new(&request, &admission);
+    let calls = Arc::new(AtomicUsize::new(0));
+    guard.notification_native_dispatch = Some(Arc::new(|task| {
+        task();
+        true
+    }));
+    let guard = Arc::new(guard);
+    let weak_guard = Arc::downgrade(&guard);
+    let counted = calls.clone();
+    assert!(session.register_retirement(
+        guard
+            .retirement_notification(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap()
+    ));
+    drop(request);
+    drop(rows);
+    drop(session);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(guard);
+    assert!(weak_guard.upgrade().is_none());
+    assert!(!weak_session.is_current());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

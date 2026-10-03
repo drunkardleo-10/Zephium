@@ -104,6 +104,28 @@ pub(super) fn transferred_erasure_exit_settlement(
     }
 }
 
+/// Group-exit delivery can precede the original kernel HANDLE's signal. That
+/// exact retained pair remains pending; absence without shutdown ownership or
+/// a disagreeing HANDLE is a permanent provenance failure.
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn transferred_erasure_handle_settlement(
+    observed: TransferredErasureExitSettlement,
+    process: Option<(u32, bool)>,
+    expected_process_id: u32,
+    shutdown_transferred: bool,
+) -> TransferredErasureExitSettlement {
+    use TransferredErasureExitSettlement::*;
+    if observed != Proven {
+        return observed;
+    }
+    match process {
+        Some((id, true)) if id == expected_process_id => Proven,
+        Some((id, false)) if id == expected_process_id => Pending,
+        None if shutdown_transferred => Pending,
+        _ => Invalid,
+    }
+}
+
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn windows_profile_provenance_presence_is_consistent(
     environment: bool,
@@ -115,6 +137,41 @@ pub(super) fn windows_profile_provenance_presence_is_consistent(
         (environment, process, exit_observer, version_observer),
         (false, false, false, false) | (true, true, true, true)
     )
+}
+
+/// Erasure released the environment but still owns the original process.
+/// The ordinary observer-only state is never valid shutdown provenance.
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_erasure_provenance_is_consistent(
+    environment: bool,
+    version_observer: bool,
+    tombstoned: bool,
+    process_id: Option<u32>,
+    exit_observer: Option<(u32, bool)>,
+) -> bool {
+    !environment
+        && !version_observer
+        && tombstoned
+        && matches!((process_id, exit_observer),
+            (Some(process), Some((expected, false))) if process == expected)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_erasure_pair_is_reapable(
+    environment: bool,
+    version_observer: bool,
+    tombstoned: bool,
+    process: Option<(u32, bool)>,
+    exit_observer: Option<(u32, bool, bool)>,
+) -> bool {
+    windows_erasure_provenance_is_consistent(
+        environment,
+        version_observer,
+        tombstoned,
+        process.map(|(id, _)| id),
+        exit_observer.map(|(id, invalid, _)| (id, invalid)),
+    ) && matches!(exit_observer, Some((_, false, true)))
+        && matches!(process, Some((_, true)))
 }
 
 fn admit_profile_erasure(
@@ -309,9 +366,42 @@ impl EngineHost {
 
     #[cfg(target_os = "windows")]
     pub(super) fn windows_profile_process_group_capacity_allows(
-        &self,
+        &mut self,
         requested: ProfileId,
     ) -> bool {
+        if self.windows_process_shutdown_started {
+            return false;
+        }
+        // An exact group-exit event can precede the original HANDLE signal.
+        // Recheck the existing bounded process-pair map on admission instead
+        // of retaining an already exited group forever or adding a timer.
+        let settled: Vec<_> = self
+            .browser_process_exit_observers
+            .iter()
+            .filter_map(|(profile, observer)| {
+                windows_erasure_pair_is_reapable(
+                    self.environments.contains_key(profile),
+                    self.browser_version_observers.contains_key(profile),
+                    self.erasure_tombstones.contains(profile),
+                    self.browser_processes
+                        .get(profile)
+                        .map(|process| (process.id(), process.has_exited())),
+                    Some((
+                        observer.expected_process_id(),
+                        observer.is_invalid(),
+                        observer.observed_expected_exit(),
+                    )),
+                )
+                .then_some((
+                    *profile,
+                    observer.expected_process_id(),
+                    observer.generation(),
+                ))
+            })
+            .collect();
+        for (profile, process_id, generation) in settled {
+            self.settle_transferred_profile_erasure_exit(profile, process_id, generation);
+        }
         profile_process_group_capacity_allows(
             self.environments
                 .keys()
@@ -335,9 +425,36 @@ impl EngineHost {
         profile: ProfileId,
         environment: ICoreWebView2Environment,
     ) -> windows_core::Result<(u32, crate::platform::imp::BrowserProcessGeneration)> {
+        self.capture_windows_environment_impl(profile, environment, None)
+    }
+
+    #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+    pub(super) fn capture_windows_work_environment(
+        &mut self,
+        profile: ProfileId,
+        environment: ICoreWebView2Environment,
+        deadline: std::time::Instant,
+    ) -> windows_core::Result<(u32, crate::platform::imp::BrowserProcessGeneration)> {
+        if self.construction_unproven.contains(&profile) {
+            return Err(windows_core::Error::from_hresult(
+                windows::Win32::Foundation::E_UNEXPECTED,
+            ));
+        }
+        self.capture_windows_environment_impl(profile, environment, Some(deadline))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn capture_windows_environment_impl(
+        &mut self,
+        profile: ProfileId,
+        environment: ICoreWebView2Environment,
+        work_deadline: Option<std::time::Instant>,
+    ) -> windows_core::Result<(u32, crate::platform::imp::BrowserProcessGeneration)> {
         let process = match crate::platform::imp::browser_process_for_environment(&environment) {
             Ok(process) => process,
             Err(error) => {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                eprintln!("windows-work-construction: stage=process_capture capture_failed=true; content=redacted");
                 self.unproven_environments
                     .entry(profile)
                     .or_insert(environment);
@@ -347,6 +464,14 @@ impl EngineHost {
             }
         };
         let process_id = process.id();
+        if let Some(deadline) = work_deadline {
+            self.settle_idle_windows_work_generation(
+                profile,
+                &environment,
+                Some(process_id),
+                deadline,
+            );
+        }
         if let Some(existing) = self.browser_processes.get(&profile) {
             let observer = self.browser_process_exit_observers.get(&profile);
             let observer_matches = observer.is_some_and(|observer| {
@@ -365,6 +490,8 @@ impl EngineHost {
                 || !environment_matches
                 || !self.browser_version_observers.contains_key(&profile)
             {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                eprintln!("windows-work-construction: stage=process_reuse observer_matches={observer_matches} environment_matches={environment_matches} retained_pid={} observer_pid={:?} returned_pid={process_id} observer_generation={:?} version_observer={} retained_running={} exit_observer_pending={}; content=redacted", existing.id(), observer.map(|observer| observer.expected_process_id()), observer.map(|observer| observer.generation()), self.browser_version_observers.contains_key(&profile),existing.is_running(), observer.is_some_and(|observer|observer.is_pending()));
                 self.unproven_environments
                     .entry(profile)
                     .or_insert(environment);
@@ -399,6 +526,8 @@ impl EngineHost {
             || self.browser_process_exit_observers.contains_key(&profile)
             || self.browser_version_observers.contains_key(&profile)
         {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            eprintln!("windows-work-construction: stage=process_partial_provenance refused=true; content=redacted");
             self.unproven_environments
                 .entry(profile)
                 .or_insert(environment);
@@ -462,6 +591,86 @@ impl EngineHost {
         self.browser_process_exit_observers
             .insert(profile, observer);
         Ok((process_id, generation))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn settle_idle_windows_work_generation(
+        &mut self,
+        profile: ProfileId,
+        environment: &ICoreWebView2Environment,
+        returned_process_id: Option<u32>,
+        deadline: std::time::Instant,
+    ) -> bool {
+        if self.erasure_tombstones.contains(&profile)
+            || self.unverifiable_browser_processes.contains(&profile)
+            || self.unproven_browser_processes.contains_key(&profile)
+            || self.unproven_environments.contains_key(&profile)
+            || self.windows_cleanup_debts.contains_key(&profile)
+            || self.windows_cleanup_invariant_failed
+            || self.native_resource_accounting_failed
+            || !self.native_resources.is_healthy()
+            || wry::webview2_cleanup_overflowed()
+            || self
+                .windows_extensions
+                .has_native_views_for_profile(profile)
+            || self
+                .partitions
+                .values()
+                .any(|partition| partition.profile() == profile)
+            || self
+                .spare
+                .as_ref()
+                .is_some_and(|spare| spare.partition.profile() == profile)
+            || !self.environments.get(&profile).is_some_and(|existing| {
+                crate::platform::imp::same_environment(existing, environment)
+            })
+        {
+            return false;
+        }
+        #[cfg(feature = "agentic-browser")]
+        if self.has_windows_agent_view_or_transfer_for_profile(profile)
+            || self.work_resources.values().any(|resource| {
+                resource
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.work_native_profile() == Some(profile))
+            })
+        {
+            return false;
+        }
+        let Some(process) = self.browser_processes.get(&profile) else {
+            return false;
+        };
+        let Some(observer) = self.browser_process_exit_observers.get(&profile) else {
+            return false;
+        };
+        if returned_process_id == Some(process.id())
+            || observer.expected_process_id() != process.id()
+            || !self.browser_version_observers.contains_key(&profile)
+            || (returned_process_id.is_none()
+                && !process.has_exited()
+                && !observer.observed_expected_exit())
+        {
+            return false;
+        }
+        // The last controller may have closed just before this bootstrap
+        // created a successor. Its native exit proof is recorded before the
+        // reentrant host callback can settle the old generation. Keep both
+        // exact native owners until the original group and HANDLE prove exit.
+        if !crate::platform::imp::wait_for_browser_process_exit(
+            process,
+            &observer.proof(),
+            deadline,
+        ) {
+            return false;
+        }
+        let old_process_id = process.id();
+        let old_generation = observer.generation();
+        if let Some(downloads) = &self.downloads {
+            downloads.runtime_exited(profile);
+        }
+        self.finalize_and_authorize_profile_recovery(profile, old_process_id, old_generation);
+        !self.browser_processes.contains_key(&profile)
     }
 }
 
@@ -613,6 +822,11 @@ impl EngineHost {
             completion.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
             return;
         }
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        let completion = self.prepare_windows_anonymous_erasure(profile, completion);
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        self.work_site_stores
+            .retain(|(selected, _), _| *selected != profile);
         // Durable erasure tombstones the profile and synchronously retires
         // every transient extension routing projection before native cleanup.
         self.retire_extension_browser_surface(profile);
@@ -689,7 +903,9 @@ impl EngineHost {
             .get(&profile)
             .map(crate::platform::imp::BrowserProcessExitObserver::proof);
         #[cfg(target_os = "windows")]
-        let browser_process = self.browser_processes.remove(&profile);
+        // The erasure continuation and shutdown share the same original
+        // HANDLE. Only the exact group-exit callback retires the host's pair.
+        let browser_process = self.browser_processes.get(&profile).cloned();
         #[cfg(target_os = "windows")]
         let process_pair_valid = match (&browser_process, &browser_process_exit_proof) {
             (Some(process), Some(proof)) => process.id() == proof.expected_process_id(),
@@ -776,6 +992,11 @@ impl EngineHost {
         process_id: u32,
         generation: crate::platform::imp::BrowserProcessGeneration,
     ) {
+        if self.windows_process_shutdown_started {
+            // Environment5 recorded its shared proof before this queued task.
+            // The original shutdown worker now owns HANDLE validation.
+            return;
+        }
         // The exact Environment5 callback may have recorded its proof and
         // queued settlement just before this equal-key ProcessFailed task
         // replaced it. Erasure has transferred the HANDLE out of the normal
@@ -827,6 +1048,9 @@ impl EngineHost {
         event: crate::platform::imp::BrowserProcessExitEvent,
     ) {
         use crate::platform::imp::BrowserProcessExitEvent;
+        if self.windows_process_shutdown_started {
+            return;
+        }
 
         let (expected_process_id, generation) = match event {
             BrowserProcessExitEvent::Exited {
@@ -902,8 +1126,8 @@ impl EngineHost {
     }
 
     /// Settles the observer half retained on the UI apartment after profile
-    /// erasure transferred its exact process HANDLE and cloneable exit proof
-    /// to the bounded erasure continuation. Returns `true` whenever the
+    /// erasure shared its exact process HANDLE and cloneable exit proof
+    /// with the bounded erasure continuation. Returns `true` whenever the
     /// profile is tombstoned, including stale/pending callbacks that must not
     /// enter ordinary recovery.
     #[cfg(target_os = "windows")]
@@ -928,10 +1152,26 @@ impl EngineHost {
                 )
             },
         );
+        let retained = self
+            .browser_processes
+            .get(&profile)
+            .map(|process| (process.id(), process.has_exited()));
+        let settlement = transferred_erasure_handle_settlement(
+            settlement,
+            retained,
+            process_id,
+            self.windows_process_shutdown_started,
+        );
         match settlement {
             TransferredErasureExitSettlement::Stale | TransferredErasureExitSettlement::Pending => {
             }
             TransferredErasureExitSettlement::Proven => {
+                // An Environment5 event alone cannot release original HANDLE
+                // ownership or turn a missing/mismatched pair into absence.
+                self.browser_version_observers.remove(&profile);
+                self.environments.remove(&profile);
+                self.web_contexts.remove(&profile);
+                self.browser_processes.remove(&profile);
                 self.browser_process_exit_observers.remove(&profile);
                 self.exiting_browser_processes.remove(&profile);
             }

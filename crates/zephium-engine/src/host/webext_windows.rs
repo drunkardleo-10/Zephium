@@ -161,6 +161,14 @@ pub(super) struct WindowsExtensions {
 }
 
 impl WindowsExtensions {
+    pub(super) fn has_native_views_for_profile(&self, profile: ProfileId) -> bool {
+        self.installs.keys().any(|(owner, _)| *owner == profile)
+            || self
+                .popup
+                .as_ref()
+                .is_some_and(|popup| popup.runtime.profile() == profile)
+    }
+
     pub(super) fn navigation_grants(
         &mut self,
         profile: ProfileId,

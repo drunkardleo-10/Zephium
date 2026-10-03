@@ -301,7 +301,7 @@ impl TrustedWorkRequest {
     /// Consumes approved product operands into the ordinary retained Work path.
     /// The request carries no diagnostic retention or qualification authority.
     /// Admission is dormant: native/browser/provider work starts only when the
-    /// Shell admits `MacosWorkComposition::launch_retained`.
+    /// Shell admits `NativeWorkComposition::launch_retained`.
     pub fn public_read_objective(
         profile: AgentWorkProfileBinding,
         objective: PublicReadWorkObjective,

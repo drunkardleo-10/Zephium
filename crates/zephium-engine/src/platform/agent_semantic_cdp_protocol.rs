@@ -25,9 +25,10 @@ use serde_json::{json, Value};
 #[cfg(test)]
 use zephium_agentic::SEMANTIC_RUNTIME_GLOBAL_NAME;
 use zephium_agentic::{
-    SemanticRuntimeInvocation, SemanticRuntimeResultError, SemanticSnapshot,
-    MAX_SEMANTIC_RUNTIME_REQUEST_BYTES, MAX_SEMANTIC_RUNTIME_SOURCE_BYTES, MAX_SEMANTIC_WIRE_BYTES,
-    SEMANTIC_RUNTIME_PROGRAM,
+    SemanticActionRuntimeEvidence, SemanticActionRuntimeInvocation,
+    SemanticActionRuntimeResultError, SemanticRuntimeInvocation, SemanticRuntimeResultError,
+    SemanticSnapshot, MAX_SEMANTIC_RUNTIME_REQUEST_BYTES, MAX_SEMANTIC_RUNTIME_SOURCE_BYTES,
+    MAX_SEMANTIC_WIRE_BYTES, SEMANTIC_RUNTIME_PROGRAM,
 };
 
 const WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
@@ -72,6 +73,9 @@ pub(crate) enum FixedSemanticCdpMethod {
     CreateIsolatedWorld,
     RuntimeDisable,
     CallFunctionOn,
+    DispatchMouseEvent,
+    DispatchKeyEvent,
+    InsertText,
 }
 
 impl FixedSemanticCdpMethod {
@@ -82,6 +86,9 @@ impl FixedSemanticCdpMethod {
             Self::CreateIsolatedWorld => "Page.createIsolatedWorld",
             Self::RuntimeDisable => "Runtime.disable",
             Self::CallFunctionOn => "Runtime.callFunctionOn",
+            Self::DispatchMouseEvent => "Input.dispatchMouseEvent",
+            Self::DispatchKeyEvent => "Input.dispatchKeyEvent",
+            Self::InsertText => "Input.insertText",
         }
     }
 }
@@ -486,6 +493,192 @@ pub(crate) fn invoke_runtime_command(
     )
 }
 
+pub(crate) fn prepare_action_command(
+    context: &SemanticExecutionContext,
+    invocation: &SemanticActionRuntimeInvocation,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    if invocation.as_str().len() > MAX_SEMANTIC_RUNTIME_REQUEST_BYTES {
+        return Err(SemanticCdpProtocolError::Limit);
+    }
+    action_call(
+        context,
+        "function(encoded){return globalThis.__zephiumSemanticRuntimeV1.prepareCdpAction(encoded);}",
+        json!([{ "value": invocation.as_str() }]),
+    )
+}
+
+pub(crate) fn next_action_command(
+    context: &SemanticExecutionContext,
+    invocation: &SemanticActionRuntimeInvocation,
+    index: u32,
+    abort: bool,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    action_call(
+        context,
+        "function(attempt,index,abort){return globalThis.__zephiumSemanticRuntimeV1.nextCdpAction(attempt,index,abort);}",
+        json!([{ "value": invocation.attempt().get() }, { "value": index }, { "value": abort }]),
+    )
+}
+
+fn action_call(
+    context: &SemanticExecutionContext,
+    function: &'static str,
+    arguments: Value,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration": function, "arguments": arguments, "silent": true,
+            "returnByValue": true, "generatePreview": false, "userGesture": false,
+            "awaitPromise": true, "uniqueContextId": context.unique_id(),
+        }),
+        MAX_CONTROL_PARAMETERS_BYTES,
+        MAX_CONTROL_RESPONSE_BYTES,
+    )
+}
+
+pub(crate) enum ActionCdpReply {
+    Input(FixedSemanticCdpCommand),
+    Terminal(Result<SemanticActionRuntimeEvidence, SemanticActionRuntimeResultError>),
+}
+
+pub(crate) fn decode_action_response(
+    invocation: &SemanticActionRuntimeInvocation,
+    index: u32,
+    response: &str,
+) -> Result<ActionCdpReply, SemanticCdpProtocolError> {
+    let object = parse_success_object(response, MAX_CONTROL_RESPONSE_BYTES)?;
+    let result = object
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or(SemanticCdpProtocolError::InvalidResponse)?;
+    if result.get("type").and_then(Value::as_str) != Some("string")
+        || result.get("subtype").is_some()
+    {
+        return Err(SemanticCdpProtocolError::InvalidResponse);
+    }
+    let value = result
+        .get("value")
+        .and_then(Value::as_str)
+        .ok_or(SemanticCdpProtocolError::InvalidResponse)?;
+    let Some(encoded) = value.strip_prefix("P2:") else {
+        return Ok(ActionCdpReply::Terminal(
+            invocation.decode_result(value.as_bytes()),
+        ));
+    };
+    decode_action_plan(invocation.attempt().get(), index, encoded).map(ActionCdpReply::Input)
+}
+
+fn decode_action_plan(
+    attempt: u64,
+    index: u32,
+    encoded: &str,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    if encoded.len() > 32 * 1024 || index > 8192 {
+        return Err(SemanticCdpProtocolError::Limit);
+    }
+    let plan: Value =
+        serde_json::from_str(encoded).map_err(|_| SemanticCdpProtocolError::InvalidResponse)?;
+    let plan = plan
+        .as_object()
+        .ok_or(SemanticCdpProtocolError::InvalidResponse)?;
+    if plan.len() != 4
+        || plan.get("a").and_then(Value::as_u64) != Some(attempt)
+        || plan.get("i").and_then(Value::as_u64) != Some(u64::from(index))
+    {
+        return Err(SemanticCdpProtocolError::InvalidResponse);
+    }
+    let payload = plan
+        .get("p")
+        .and_then(Value::as_object)
+        .ok_or(SemanticCdpProtocolError::InvalidResponse)?;
+    let method = match plan.get("k").and_then(Value::as_str) {
+        Some("text")
+            if payload.len() == 1
+                && payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.len() <= 4096 && !text.contains('\0')) =>
+        {
+            FixedSemanticCdpMethod::InsertText
+        }
+        Some("mouse")
+            if payload.len() == 6
+                && matches!(
+                    payload.get("type").and_then(Value::as_str),
+                    Some("mousePressed" | "mouseReleased")
+                )
+                && payload.get("button").and_then(Value::as_str) == Some("left")
+                && payload.get("clickCount").and_then(Value::as_u64) == Some(1)
+                && matches!(
+                    (
+                        payload.get("type").and_then(Value::as_str),
+                        payload.get("buttons").and_then(Value::as_u64)
+                    ),
+                    (Some("mousePressed"), Some(1)) | (Some("mouseReleased"), Some(0))
+                )
+                && ["x", "y"].iter().all(|key| {
+                    payload
+                        .get(*key)
+                        .and_then(Value::as_f64)
+                        .is_some_and(|value| {
+                            value.is_finite() && (0.0..=1_000_000.0).contains(&value)
+                        })
+                }) =>
+        {
+            FixedSemanticCdpMethod::DispatchMouseEvent
+        }
+        Some("key")
+            if (payload.len() == 5
+                && !(payload.get("type").and_then(Value::as_str) == Some("keyDown")
+                    && payload.get("key").and_then(Value::as_str) == Some("Enter"))
+                || payload.len() == 7
+                    && payload.get("type").and_then(Value::as_str) == Some("keyDown")
+                    && payload.get("key").and_then(Value::as_str) == Some("Enter")
+                    && payload.get("text").and_then(Value::as_str) == Some("\r")
+                    && payload.get("unmodifiedText").and_then(Value::as_str) == Some("\r"))
+                && matches!(
+                    payload.get("type").and_then(Value::as_str),
+                    Some("keyDown" | "keyUp")
+                )
+                && matches!(
+                    payload.get("modifiers").and_then(Value::as_u64),
+                    Some(0 | 8)
+                )
+                && matches!(
+                    (
+                        payload.get("key").and_then(Value::as_str),
+                        payload.get("code").and_then(Value::as_str),
+                        payload.get("windowsVirtualKeyCode").and_then(Value::as_u64)
+                    ),
+                    (Some("Enter"), Some("Enter"), Some(13))
+                        | (Some("Escape"), Some("Escape"), Some(27))
+                        | (Some(" "), Some("Space"), Some(32))
+                        | (Some("Tab"), Some("Tab"), Some(9))
+                        | (Some("ArrowUp"), Some("ArrowUp"), Some(38))
+                        | (Some("ArrowDown"), Some("ArrowDown"), Some(40))
+                        | (Some("ArrowLeft"), Some("ArrowLeft"), Some(37))
+                        | (Some("ArrowRight"), Some("ArrowRight"), Some(39))
+                        | (Some("Home"), Some("Home"), Some(36))
+                        | (Some("End"), Some("End"), Some(35))
+                        | (Some("PageUp"), Some("PageUp"), Some(33))
+                        | (Some("PageDown"), Some("PageDown"), Some(34))
+                        | (Some("Backspace"), Some("Backspace"), Some(8))
+                        | (Some("Delete"), Some("Delete"), Some(46))
+                ) =>
+        {
+            FixedSemanticCdpMethod::DispatchKeyEvent
+        }
+        _ => return Err(SemanticCdpProtocolError::InvalidResponse),
+    };
+    command(
+        method,
+        Value::Object(payload.clone()),
+        MAX_CONTROL_PARAMETERS_BYTES,
+        MAX_CONTROL_RESPONSE_BYTES,
+    )
+}
+
 pub(crate) fn decode_invocation_response(
     invocation: &SemanticRuntimeInvocation,
     response: &str,
@@ -589,6 +782,81 @@ fn validate_browser_identifier(value: &str) -> Result<(), SemanticCdpProtocolErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_step_correlation_and_closed_authority_reject_replays_and_extra_fields() {
+        let plan = json!({"a":17,"i":1,"k":"text","p":{"text":"Exact text"}});
+        let command = decode_action_plan(17, 1, &plan.to_string()).expect("exact text step");
+        assert_eq!(command.method(), FixedSemanticCdpMethod::InsertText);
+        assert!(decode_action_plan(18, 1, &plan.to_string()).is_err());
+        assert!(decode_action_plan(17, 2, &plan.to_string()).is_err());
+        for value in [
+            json!({"a":17,"i":1,"k":concat!("Runtime.", "evaluate"),"p":{"text":"Exact text"}}),
+            json!({"a":17,"i":1,"k":"text","p":{"text":"Exact text","expression":"attack"}}),
+            json!({"a":17,"i":1,"k":"text","p":{"text":"Exact text"},"selector":"body"}),
+            json!({"a":17,"i":1,"k":"text","p":{"text":"x".repeat(4097)}}),
+            json!({"a":17,"i":1,"k":"text","p":{"text":"x\u{0}y"}}),
+        ] {
+            assert!(decode_action_plan(17, 1, &value.to_string()).is_err());
+        }
+    }
+
+    #[test]
+    fn enter_carriage_return_is_fixed_and_absent_from_key_up_or_other_keys() {
+        let enter = json!({"a":17,"i":0,"k":"key","p":{"type":"keyDown","key":"Enter","code":"Enter","windowsVirtualKeyCode":13,"modifiers":0,"text":"\r","unmodifiedText":"\r"}});
+        assert!(decode_action_plan(17, 0, &enter.to_string()).is_ok());
+        let mut missing = enter.clone();
+        missing["p"].as_object_mut().unwrap().remove("text");
+        missing["p"]
+            .as_object_mut()
+            .unwrap()
+            .remove("unmodifiedText");
+        assert!(decode_action_plan(17, 0, &missing.to_string()).is_err());
+        for field in ["text", "unmodifiedText"] {
+            for value in ["", "\n", "arbitrary text"] {
+                let mut invalid = enter.clone();
+                invalid["p"][field] = json!(value);
+                assert!(decode_action_plan(17, 0, &invalid.to_string()).is_err());
+            }
+        }
+        let mut up_with_text = enter.clone();
+        up_with_text["p"]["type"] = json!("keyUp");
+        assert!(decode_action_plan(17, 0, &up_with_text.to_string()).is_err());
+        up_with_text["p"].as_object_mut().unwrap().remove("text");
+        up_with_text["p"]
+            .as_object_mut()
+            .unwrap()
+            .remove("unmodifiedText");
+        assert!(decode_action_plan(17, 0, &up_with_text.to_string()).is_ok());
+        let mut other = enter;
+        other["p"]["key"] = json!("Escape");
+        other["p"]["code"] = json!("Escape");
+        other["p"]["windowsVirtualKeyCode"] = json!(27);
+        assert!(decode_action_plan(17, 0, &other.to_string()).is_err());
+    }
+
+    #[test]
+    fn action_mouse_and_key_steps_remain_bounded_and_sensitive() {
+        let mouse = json!({"a":17,"i":0,"k":"mouse","p":{"type":"mousePressed","x":40,"y":30,"button":"left","buttons":1,"clickCount":1}});
+        let command = decode_action_plan(17, 0, &mouse.to_string()).expect("exact mouse");
+        assert_eq!(command.method(), FixedSemanticCdpMethod::DispatchMouseEvent);
+        let mut escaped = mouse.clone();
+        escaped["p"]["x"] = json!(-1);
+        assert!(decode_action_plan(17, 0, &escaped.to_string()).is_err());
+        let key = json!({"a":17,"i":1,"k":"key","p":{"type":"keyDown","key":"Enter","code":"Enter","windowsVirtualKeyCode":13,"modifiers":8,"text":"\r","unmodifiedText":"\r"}});
+        assert_eq!(
+            decode_action_plan(17, 1, &key.to_string())
+                .expect("shift enter")
+                .method(),
+            FixedSemanticCdpMethod::DispatchKeyEvent
+        );
+        let mut escaped = key;
+        escaped["p"]["modifiers"] = json!(2);
+        assert!(decode_action_plan(17, 1, &escaped.to_string()).is_err());
+        let text = json!({"a":17,"i":1,"k":"text","p":{"text":"sensitive-fixture-text"}});
+        let command = decode_action_plan(17, 1, &text.to_string()).expect("private text");
+        assert!(!format!("{command:?}").contains("sensitive-fixture-text"));
+    }
     use zephium_agentic::{
         encode_semantic_runtime_invocation, ContextCapabilities, ContextCapability, ContextId,
         ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,

@@ -7,6 +7,12 @@
 // route and is reachable only through the dormant `agentic-browser` port.
 #[cfg(feature = "agentic-browser")]
 mod agent_context;
+#[cfg(feature = "agentic-browser")]
+mod agent_history;
+#[cfg(feature = "agentic-browser")]
+pub(crate) mod work_seed_metadata;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use agent_history::AgentHistoryBackTicket;
 #[cfg(feature = "native-agentic-input-probe")]
 mod agentic_input_probe;
 #[cfg(any(
@@ -20,11 +26,17 @@ mod agentic_semantic_probe;
 #[allow(dead_code)]
 mod cdp;
 mod content_filter;
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+mod cookie_storage_diagnostic;
+#[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+pub(crate) use cookie_storage_diagnostic::shutdown_admission as diagnose_shutdown_admission;
 #[cfg(feature = "agentic-browser")]
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
 pub(crate) mod extensions;
+#[cfg(feature = "agentic-browser")]
+mod semantic_action;
 #[cfg(feature = "agentic-browser")]
 // Compiled and lifecycle-bound while invocation remains closed until the
 // physical Windows isolated-world qualifier promotes the support claim.
@@ -32,10 +44,26 @@ pub(crate) mod extensions;
 mod semantic_runtime;
 // The bounded native capture adapter is compiled now, but the Windows host
 // keeps screenshot dispatch closed with semantic support until qualification.
+mod native_paths;
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
 mod semantic_screenshot;
 mod stage;
+#[cfg(feature = "agentic-browser")]
+mod work_rendering;
+pub(crate) use native_paths::webview2_user_data_path;
+#[cfg(feature = "agentic-browser")]
+pub use work_rendering::{install_work_rendering_backing, remove_work_rendering_backing};
+#[cfg(feature = "agentic-browser")]
+mod work_network;
+#[cfg(feature = "agentic-browser")]
+mod work_presentation;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use semantic_screenshot::capture_work_frame;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use work_presentation::{
+    PresentationState, WorkHumanPresentation, WorkObservationPresentation,
+};
 #[cfg(feature = "agentic-browser")]
 mod timeout;
 
@@ -54,13 +82,20 @@ pub(crate) use timeout::{schedule_content_policy_timeout, ContentPolicyTimeout};
 pub(crate) use crate::platform::agent_cookie_preflight::map_cookie_transfer_deadline;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
-    build_owned_agent_view, AgentNavigationCommit, AgentNavigationTerminal, AgentOwnedProfile,
-    AgentOwnedView, AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
+    build_owned_agent_view, build_owned_work_view, AgentNavigationCommit, AgentNavigationTerminal,
+    AgentOwnedProfile, AgentOwnedView, AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
+    WorkStoreSeed,
 };
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;
+#[cfg(all(debug_assertions, feature = "native-agentic-semantic-probe"))]
+pub(crate) use agentic_semantic_probe::run_cookie_persistence_control;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run_semantic_action_guard_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run_work_application_probe;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use cookie_transfer::{
     selected_profile_cookie_manager, WindowsAgentCookieCleanup, WindowsAgentCookieTerminal,
@@ -637,8 +672,12 @@ impl Drop for NavigationObserver {
 }
 
 pub fn current_url(view: &wry::WebView) -> Option<String> {
-    let core = view.webview();
+    current_url_core(&view.webview())
+}
+
+fn current_url_core(core: &ICoreWebView2) -> Option<String> {
     let mut source = PWSTR::null();
+    // SAFETY: exact STA-owned core and initialized out pointer, freed by bounded string owner.
     unsafe { core.Source(&mut source) }.ok()?;
     take_pwstr_bounded(source, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
 }
@@ -653,9 +692,12 @@ pub fn enforce_navigation_pending(view: &wry::WebView) -> bool {
 /// A synchronization handle opened while the WebView2 browser process is
 /// known alive. Holding the OS handle (rather than only a PID) avoids PID
 /// reuse races when profile deletion waits for the UDF session to end.
+#[derive(Clone)]
 pub(crate) struct BrowserProcess {
     id: u32,
-    handle: OwnedHandle,
+    // Erasure and app shutdown may overlap. Both retain the same opened
+    // kernel object; neither reopens a numeric PID or owns a second process.
+    handle: Arc<OwnedHandle>,
 }
 
 impl BrowserProcess {
@@ -703,7 +745,10 @@ fn open_browser_process(id: u32) -> windows_core::Result<BrowserProcess> {
     // SAFETY: OpenProcess returned a new owned HANDLE. OwnedHandle closes it
     // exactly once when the profile process record is dropped.
     let handle = unsafe { OwnedHandle::from_raw_handle(raw.0) };
-    Ok(BrowserProcess { id, handle })
+    Ok(BrowserProcess {
+        id,
+        handle: Arc::new(handle),
+    })
 }
 
 /// Capture the browser process directly from an environment, before Wry starts
@@ -795,6 +840,80 @@ pub(crate) fn browser_process_reuse_is_safe(
         && retained_process_id == returned_process_id
         && observer_proof_pending
         && exact_handle_running
+}
+
+pub(crate) fn wait_for_browser_process_exit(
+    process: &BrowserProcess,
+    proof: &BrowserProcessExitProof,
+    deadline: std::time::Instant,
+) -> bool {
+    if process.id() != proof.expected_process_id() {
+        return false;
+    }
+    wait_for_exact_exit_with_pump(
+        deadline,
+        || match proof.snapshot() {
+            BrowserProcessExitProofState::Invalid => Some(false),
+            BrowserProcessExitProofState::Exited if process.has_exited() => Some(true),
+            _ => None,
+        },
+        pump_browser_exit_callbacks,
+    )
+}
+
+fn wait_for_exact_exit_with_pump(
+    deadline: std::time::Instant,
+    mut terminal: impl FnMut() -> Option<bool>,
+    mut pump: impl FnMut(std::time::Instant) -> bool,
+) -> bool {
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        if let Some(proven) = terminal() {
+            return proven;
+        }
+        if !pump(deadline) {
+            return false;
+        }
+    }
+}
+
+pub(crate) fn pump_browser_exit_callbacks(deadline: std::time::Instant) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage,
+        TranslateMessage, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
+    };
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return false;
+    }
+    // SAFETY: this bounded pump runs on the same apartment that owns the
+    // environment. Reentrant host commands remain deferred by its dispatcher.
+    unsafe {
+        let _ = MsgWaitForMultipleObjectsEx(
+            None,
+            remaining.as_millis().clamp(1, 25) as u32,
+            QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE,
+        );
+        for _ in 0..256 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            let mut message = MSG::default();
+            if !PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                break;
+            }
+            if message.message == WM_QUIT {
+                PostQuitMessage(message.wParam.0 as i32);
+                return false;
+            }
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    true
 }
 
 /// A browser-process exit reported by the environment. Unlike ProcessFailed,
@@ -1541,13 +1660,25 @@ pub(crate) fn wait_for_browser_process_shutdown(
 ) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     for obligation in &obligations {
-        if obligation.exit_proof.wait_until(deadline) != BrowserProcessExitProofState::Exited {
+        let state = obligation.exit_proof.wait_until(deadline);
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        cookie_storage_diagnostic::shutdown_wait(
+            obligation.process.id(),
+            state == BrowserProcessExitProofState::Exited,
+            state == BrowserProcessExitProofState::Invalid,
+            obligation.process.has_exited(),
+        );
+        if state != BrowserProcessExitProofState::Exited {
             return false;
         }
     }
     obligations.into_iter().all(|obligation| {
         let raw = HANDLE(obligation.process.handle.as_raw_handle());
-        unsafe { WaitForSingleObject(raw, 0) == WAIT_OBJECT_0 }
+        // An Environment5 callback can arrive just before its original process
+        // HANDLE signals. Wait only the remainder of the same global bound.
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let millis = remaining.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+        unsafe { WaitForSingleObject(raw, millis) == WAIT_OBJECT_0 }
     })
 }
 
@@ -1686,6 +1817,88 @@ mod process_exit_tests {
                 ready: std::sync::Condvar::new(),
             }),
         }
+    }
+
+    #[test]
+    fn erasure_and_shutdown_share_one_original_live_process_handle() {
+        // SAFETY: queries this test's own current process; no foreign process
+        // is launched, terminated, or given additional access.
+        let id = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        let original = open_browser_process(id).unwrap();
+        let erasure = original.clone();
+        assert!(Arc::ptr_eq(&original.handle, &erasure.handle));
+        let shutdown = BrowserProcessShutdownObligation::new(original.clone(), proof(id)).unwrap();
+        assert!(Arc::ptr_eq(&shutdown.process.handle, &erasure.handle));
+        assert!(
+            BrowserProcessShutdownObligation::new(original.clone(), proof(id.wrapping_add(1)))
+                .is_none()
+        );
+        drop(original);
+        assert!(erasure.is_running());
+        drop(erasure);
+        assert!(shutdown.process.is_running());
+        // Shared ownership does not prove exit or turn a pending Environment5
+        // registration into a clean zero-obligation shutdown.
+        assert!(!wait_for_browser_process_shutdown(
+            vec![shutdown],
+            std::time::Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn queued_group_exit_waits_for_the_held_handle_before_generation_rollover() {
+        let proof = proof(41);
+        let handle_exited = std::cell::Cell::new(false);
+        let pumps = std::cell::Cell::new(0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        assert!(wait_for_exact_exit_with_pump(
+            deadline,
+            || match proof.snapshot() {
+                BrowserProcessExitProofState::Invalid => Some(false),
+                BrowserProcessExitProofState::Exited if handle_exited.get() => Some(true),
+                _ => None,
+            },
+            |_| {
+                pumps.set(pumps.get() + 1);
+                if pumps.get() == 1 {
+                    proof.record(BrowserProcessExitEvent::Exited {
+                        expected_process_id: 41,
+                        generation: proof.generation(),
+                        observed_process_id: 41,
+                    });
+                } else {
+                    handle_exited.set(true);
+                }
+                true
+            },
+        ));
+        assert_eq!(
+            pumps.get(),
+            2,
+            "the group event alone cannot authorize rollover"
+        );
+        assert!(!browser_process_callback_matches(
+            43,
+            BrowserProcessGeneration(8),
+            41,
+            proof.generation(),
+        ));
+    }
+
+    #[test]
+    fn pending_group_exit_cannot_authorize_rollover_after_the_original_deadline() {
+        let proof = proof(41);
+        let pumped = std::cell::Cell::new(false);
+        assert!(!wait_for_exact_exit_with_pump(
+            std::time::Instant::now(),
+            || (proof.snapshot() == BrowserProcessExitProofState::Exited).then_some(true),
+            |_| {
+                pumped.set(true);
+                true
+            },
+        ));
+        assert!(!pumped.get());
+        assert_eq!(proof.snapshot(), BrowserProcessExitProofState::Pending);
     }
 
     #[test]

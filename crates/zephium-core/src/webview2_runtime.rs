@@ -267,6 +267,17 @@ fn reclaim_generation(
     kind: RuntimeGenerationKind,
     generation: &str,
 ) -> io::Result<()> {
+    reclaim_generation_with_scan(root, kind, generation, |root, usage| {
+        measure_tree(root, usage, false)
+    })
+}
+
+fn reclaim_generation_with_scan(
+    root: &Path,
+    kind: RuntimeGenerationKind,
+    generation: &str,
+    mut scan: impl FnMut(&Path, &mut QuarantineUsage) -> io::Result<()>,
+) -> io::Result<()> {
     let mut last_error = None;
     for _ in 0..8 {
         let canonical = match direct_directory(root) {
@@ -293,7 +304,19 @@ fn reclaim_generation(
         // An exact-exit or prior-boot generation is already authorized for
         // removal. Its size must not make the cleanup path self-defeating;
         // still bound entry traversal and reject every reparse point.
-        measure_tree(&canonical, &mut measured, false)?;
+        match scan(&canonical, &mut measured) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // A concurrent exact-process-gated profile erasure can remove
+                // a child queued by this scan. Partial absence is not cleanup
+                // proof: retry the whole original identity, marker and tree
+                // validation within the existing removal attempt bound.
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
         match fs::remove_dir_all(&canonical) {
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -582,5 +605,118 @@ mod tests {
         cleanup.cleanup_after_proven_exit().unwrap();
         let boot = open_boot_registry(RuntimeGenerationKind::RawPrivate).unwrap();
         assert!(!current_boot_contains(&boot, &generation).unwrap());
+    }
+
+    #[test]
+    fn concurrent_profile_removal_revalidates_generation_before_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = RuntimeGeneration::prepare(
+            &temp.path().join("private-runtime"),
+            RuntimeGenerationKind::RawPrivate,
+        )
+        .unwrap();
+        let profile = runtime.root().join(ProfileId::generate().to_string());
+        fs::create_dir(&profile).unwrap();
+        fs::write(profile.join("private-data"), b"private").unwrap();
+        let sibling = temp.path().join("sibling");
+        fs::create_dir(&sibling).unwrap();
+        fs::write(sibling.join("untouched"), b"keep").unwrap();
+
+        let mut scans = 0;
+        reclaim_generation_with_scan(
+            runtime.root(),
+            runtime.kind,
+            &runtime.generation,
+            |root, usage| {
+                scans += 1;
+                if scans == 1 {
+                    // A previously queued profile directory disappears after the
+                    // exact generation marker and root were validated.
+                    fs::remove_dir_all(&profile).unwrap();
+                    fs::read_dir(&profile).map(|_| ())
+                } else {
+                    measure_tree(root, usage, false)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(scans, 2);
+        assert!(!runtime.root().exists());
+        assert_eq!(fs::read(sibling.join("untouched")).unwrap(), b"keep");
+        // A repeated exact ticket also removes its matching volatile key.
+        runtime
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+        let boot = open_boot_registry(runtime.kind).unwrap();
+        assert!(!current_boot_contains(&boot, &runtime.generation).unwrap());
+    }
+
+    #[test]
+    fn concurrent_profile_removal_cannot_skip_changed_generation_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = RuntimeGeneration::prepare(
+            &temp.path().join("private-runtime"),
+            RuntimeGenerationKind::RawPrivate,
+        )
+        .unwrap();
+        let profile = runtime.root().join(ProfileId::generate().to_string());
+        fs::create_dir(&profile).unwrap();
+        let mut scans = 0;
+        let error = reclaim_generation_with_scan(
+            runtime.root(),
+            runtime.kind,
+            &runtime.generation,
+            |_, _| {
+                scans += 1;
+                fs::remove_dir_all(&profile).unwrap();
+                fs::write(runtime.root().join(GENERATION_MARKER), b"different owner").unwrap();
+                fs::read_dir(&profile).map(|_| ())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            scans, 1,
+            "changed authority must fail before another scan or delete"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(runtime.root().exists());
+        fs::remove_file(runtime.root().join(GENERATION_MARKER)).unwrap();
+        write_generation_marker(runtime.root(), runtime.kind, &runtime.generation).unwrap();
+        runtime
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn partial_absence_never_proves_generation_cleanup_or_extends_attempt_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = RuntimeGeneration::prepare(
+            &temp.path().join("private-runtime"),
+            RuntimeGenerationKind::RawPrivate,
+        )
+        .unwrap();
+        let missing_child = runtime.root().join("missing-profile");
+        let mut scans = 0;
+        let error = reclaim_generation_with_scan(
+            runtime.root(),
+            runtime.kind,
+            &runtime.generation,
+            |_, _| {
+                scans += 1;
+                fs::read_dir(&missing_child).map(|_| ())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(scans, 8);
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(runtime.root().exists());
+        let boot = open_boot_registry(runtime.kind).unwrap();
+        assert!(current_boot_contains(&boot, &runtime.generation).unwrap());
+        runtime
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
     }
 }

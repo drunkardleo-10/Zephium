@@ -1461,6 +1461,7 @@ impl RetainedWork {
         if self.destroyed {
             let native_clean = self.poll_native_shutdown(deadline)?;
             if native_clean && self.final_scoped_recovery_is_classified() {
+                self.diagnose_classified_recovery_shutdown(deadline);
                 return Err(Refusal::Uncertain);
             }
             return Ok(native_clean && self.local_shutdown_settled());
@@ -1502,9 +1503,22 @@ impl RetainedWork {
         self.destroyed = true;
         let native_clean = self.poll_native_shutdown(deadline)?;
         if native_clean && self.final_scoped_recovery_is_classified() {
+            self.diagnose_classified_recovery_shutdown(deadline);
             return Err(Refusal::Uncertain);
         }
         Ok(native_clean && self.local_shutdown_settled())
+    }
+
+    fn diagnose_classified_recovery_shutdown(&self, deadline: Option<Instant>) {
+        // Normal application polls also reach this final refusal. Report only
+        // the process shutdown attempt, after its original native-zero proof.
+        if deadline.is_some() {
+            crate::diagnostic!(
+                "shutdown: classified retained recovery remains unclean native_zero=true debt_unknown={}",
+                self.record
+                    .is_some_and(|record| record.debt() == AgentWorkDebt::UNKNOWN)
+            );
+        }
     }
 
     /// A final scoped Recovery cannot gain a policy settlement or a different

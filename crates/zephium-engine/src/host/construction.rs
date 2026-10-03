@@ -751,10 +751,21 @@ impl EngineHost {
                 extension_startup.as_ref()?;
                 cached_environment = self.environments.get(&profile).cloned();
             }
+            let api_path = match crate::platform::windows::webview2_user_data_path(&path) {
+                Ok(api_path) => api_path,
+                Err(error) => {
+                    eprintln!("engine: native user-data path projection refused: {error}");
+                    if report_failure {
+                        event_permit
+                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    }
+                    return None;
+                }
+            };
             let builder = WebViewBuilder::new_with_web_context(
                 self.web_contexts
                     .entry(profile)
-                    .or_insert_with(|| wry::WebContext::new(Some(path.clone()))),
+                    .or_insert_with(|| wry::WebContext::new(Some(api_path))),
             );
             (builder, path)
         };
@@ -1824,6 +1835,27 @@ pub(super) enum WindowsProfileEnvironmentFailure {
     Construction,
 }
 
+/// A page-inert, counted native owner that bridges environment bootstrap
+/// into real Work controller construction. It never loads a site or survives
+/// the synchronous constructor; failed close retains the exact native debt.
+#[cfg(target_os = "windows")]
+pub(super) struct WindowsWorkEnvironmentBootstrap {
+    view: wry::WebView,
+    profile: zephium_core::ids::ProfileId,
+    resource: Option<super::resources::NativeResourceLease>,
+}
+#[cfg(target_os = "windows")]
+impl Drop for WindowsWorkEnvironmentBootstrap {
+    fn drop(&mut self) {
+        if let Err(debt) = wry::WebViewExtWindows::close(&mut self.view) {
+            super::queue_windows_cleanup_debt(
+                self.profile,
+                super::OwnedWindowsCleanupDebt::new(debt, self.resource.take()),
+            );
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 impl EngineHost {
     /// Establishes or rejoins a profile's environment at one exact
@@ -1837,6 +1869,42 @@ impl EngineHost {
         path: std::path::PathBuf,
         extensions_enabled: bool,
     ) -> Result<(), WindowsProfileEnvironmentFailure> {
+        self.ensure_windows_profile_environment_impl(
+            profile,
+            deadline,
+            path,
+            extensions_enabled,
+            false,
+        )
+        .map(|_| ())
+    }
+
+    /// Keep the exact bootstrap generation alive until a Work controller owns
+    /// the same environment. All other callers retain immediate close behavior.
+    pub(super) fn begin_windows_work_profile_environment(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        deadline: std::time::Instant,
+        path: std::path::PathBuf,
+        extensions_enabled: bool,
+    ) -> Result<Option<WindowsWorkEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
+        self.ensure_windows_profile_environment_impl(
+            profile,
+            deadline,
+            path,
+            extensions_enabled,
+            true,
+        )
+    }
+
+    fn ensure_windows_profile_environment_impl(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        deadline: std::time::Instant,
+        path: std::path::PathBuf,
+        extensions_enabled: bool,
+        retain_bootstrap: bool,
+    ) -> Result<Option<WindowsWorkEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
         self.collect_pending_windows_cleanup_debts();
         if std::time::Instant::now() >= deadline
             || self.windows_view_admission_blocked(profile)
@@ -1852,7 +1920,8 @@ impl EngineHost {
         } else {
             None
         };
-        if let Some(environment) = self.environments.get(&profile) {
+        let existing_environment = self.environments.get(&profile).cloned();
+        if let Some(environment) = &existing_environment {
             if extensions_enabled
                 && startup
                     .as_ref()
@@ -1860,8 +1929,29 @@ impl EngineHost {
             {
                 return Err(WindowsProfileEnvironmentFailure::Mismatch);
             }
-            return crate::platform::imp::attest_environment(environment, &path)
-                .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch);
+            crate::platform::imp::attest_environment(environment, &path)
+                .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch)?;
+            if !retain_bootstrap {
+                return Ok(None);
+            }
+            let prior_exit_settled =
+                self.settle_idle_windows_work_generation(profile, environment, None, deadline);
+            // An empty controller cohort need not appear in GetProcessInfos.
+            // Rejoin only the retained running HANDLE and exact pending exit
+            // generation; the new bootstrap must then recapture that identity.
+            let current = self.browser_processes.get(&profile).is_some_and(|process| {
+                self.browser_process_exit_observers
+                    .get(&profile)
+                    .is_some_and(|observer| {
+                        process.is_running()
+                            && observer.is_pending()
+                            && observer.expected_process_id() == process.id()
+                            && self.browser_version_observers.contains_key(&profile)
+                    })
+            });
+            if !current && !prior_exit_settled {
+                return Err(WindowsProfileEnvironmentFailure::Busy);
+            }
         }
         let mut construction_resource = Some(
             self.native_resources
@@ -1878,6 +1968,8 @@ impl EngineHost {
         let capture_failed = Rc::new(Cell::new(false));
         let parent = super::ParentHandle(self.parent.0);
 
+        let api_path = crate::platform::windows::webview2_user_data_path(&path)
+            .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch)?;
         if !self.construction_unproven.insert(profile) {
             return Err(WindowsProfileEnvironmentFailure::Busy);
         }
@@ -1887,7 +1979,7 @@ impl EngineHost {
             let context = self
                 .web_contexts
                 .entry(profile)
-                .or_insert_with(|| wry::WebContext::new(Some(path.clone())));
+                .or_insert_with(|| wry::WebContext::new(Some(api_path)));
             let builder = WebViewBuilder::new_with_web_context(context)
                 .with_bounds(wry::Rect {
                     position: Position::Logical(LogicalPosition::new(0.0, 0.0)),
@@ -1920,6 +2012,11 @@ impl EngineHost {
                     }
                     *slot = Some(environment.clone());
                 });
+            let builder = if let Some(environment) = existing_environment {
+                builder.with_environment(environment)
+            } else {
+                builder
+            };
             if let Some(startup) = startup {
                 builder.with_browser_extension_startup_gate(move |environment, core| {
                     startup.authenticate(environment, core)
@@ -1930,6 +2027,29 @@ impl EngineHost {
         };
 
         let mut built = builder.build_as_child(&parent);
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        {
+            use wry::WebViewExtWindows;
+            let mut bootstrap_pid = 0;
+            let bootstrap_pid = built.as_ref().ok().and_then(|view| {
+                // SAFETY: this diagnostic reads the exact live bootstrap core
+                // on its owning apartment; no process authority is changed.
+                unsafe { view.webview().BrowserProcessId(&mut bootstrap_pid) }
+                    .ok()
+                    .map(|()| bootstrap_pid)
+            });
+            let live_work_views = self
+                .work_resources
+                .values()
+                .filter(|resource| {
+                    resource
+                        .view
+                        .as_ref()
+                        .is_some_and(|view| view.work_native_profile() == Some(profile))
+                })
+                .count();
+            eprintln!("windows-work-construction: stage=bootstrap_process bootstrap_pid={bootstrap_pid:?} retained_pid={:?} live_work_views={live_work_views}; content=redacted", self.browser_processes.get(&profile).map(|process| process.id()));
+        }
         if let Err(error) = &built {
             eprintln!("extensions: native bootstrap build failed: {error}");
         }
@@ -1949,7 +2069,12 @@ impl EngineHost {
             .and_then(|environment| {
                 crate::platform::imp::attest_environment(&environment, &path)
                     .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch)?;
-                self.capture_windows_environment(profile, environment)
+                let captured = if retain_bootstrap {
+                    self.capture_windows_environment_impl(profile, environment, Some(deadline))
+                } else {
+                    self.capture_windows_environment(profile, environment)
+                };
+                captured
                     .map(|_| ())
                     .map_err(|_| WindowsProfileEnvironmentFailure::Construction)
             })
@@ -1986,6 +2111,14 @@ impl EngineHost {
                     failure = Some(WindowsProfileEnvironmentFailure::Construction);
                 }
             }
+            if retain_bootstrap && failure.is_none() && std::time::Instant::now() < deadline {
+                let view = built.map_err(|_| WindowsProfileEnvironmentFailure::Construction)?;
+                return Ok(Some(WindowsWorkEnvironmentBootstrap {
+                    view,
+                    profile,
+                    resource: construction_resource.take(),
+                }));
+            }
             if let Err(debt) = wry::WebViewExtWindows::close(view) {
                 let debt = super::OwnedWindowsCleanupDebt::new(debt, construction_resource.take());
                 if !debt.accounted_as_debt() {
@@ -2005,7 +2138,7 @@ impl EngineHost {
         if std::time::Instant::now() >= deadline {
             return Err(WindowsProfileEnvironmentFailure::Busy);
         }
-        Ok(())
+        Ok(None)
     }
 }
 

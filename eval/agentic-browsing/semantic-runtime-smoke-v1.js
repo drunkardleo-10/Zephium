@@ -866,8 +866,17 @@ assert(
 
 const globalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "__zephiumSemanticRuntimeV1");
 assert(!globalDescriptor.writable && !globalDescriptor.configurable && !globalDescriptor.enumerable, "global mutable");
-assert(Object.isFrozen(runtime) && Object.isFrozen(runtime.invoke), "runtime mutable");
-assert(Object.keys(runtime).join(",") === "invoke", "unexpected runtime API");
+assert(Object.isFrozen(runtime) && [runtime.invoke, runtime.prepareCdpAction, runtime.nextCdpAction].every(Object.isFrozen), "runtime mutable");
+assert(Object.keys(runtime).join(",") === "invoke,prepareCdpAction,nextCdpAction", "unexpected runtime API");
+// Native preparation/advance are fixed isolated-host entries. The ordinary
+// invoke channel cannot acquire a native command plan or advance its owner.
+for (const operation of ["prepare_cdp_action", "next_cdp_action"]) {
+  assert(runtime.invoke(JSON.stringify({v: 1, o: operation, a: 1, i: 1, g: 1})) === "E1:invalid_request", "native operation admitted through legacy invoke");
+}
+for (const invalid of ["{}", "null", '{"o":"action_execute"}', '{"o":"snapshot"}']) {
+  assert(runtime.prepareCdpAction(invalid) === "E2:invalid_request", "unbound native preparation admitted");
+}
+assert(runtime.nextCdpAction(1, 0, false) === "E2:invalid_request", "native advance admitted without preparation");
 
 (commandCase ? finishCommandSmoke() : finish()).catch((error) => {
   process.stderr.write(`${error.stack || error}\n`);

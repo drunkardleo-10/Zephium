@@ -24,7 +24,7 @@ use zephium_core::{
     work::{port::*, runtime::*, *},
 };
 use zephium_ipc::work::*;
-use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, MacosWorkComposition};
+use zephium_work_composition::MacosWorkComposition;
 
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
@@ -121,11 +121,7 @@ const ARCHITECTURE_DEADLINE: Duration = Duration::from_secs(180);
 static AGENT_ELAPSED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
 
-pub(super) struct WorkflowResult {
-    pub(super) state: WorkRuntimeProjection,
-    pub(super) failure: Option<&'static str>,
-}
-
+pub(super) use super::loopback_support::WorkflowResult;
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Mode {
     Public,
@@ -2709,54 +2705,7 @@ fn money_schema(
     .with_subject_image_field("image_url")
 }
 
-fn probe_clock() -> &'static std::time::Instant {
-    static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    CLOCK.get_or_init(std::time::Instant::now)
-}
-
-pub(super) fn browser_settings(
-    profile: zephium_app::AgentWorkProfileBinding,
-    credential: zephium_agentic::AgentProviderCredential,
-) -> WorkBrowserAdapterSettings {
-    WorkBrowserAdapterSettings {
-        decisions: zephium_work_composition::durable_runtime::WorkDecisionPreference::Recommended,
-        retain_public_responses: true,
-        loopback_anonymous: false,
-        stage_diagnostic: Some(|stage| {
-            let _ = writeln!(
-                std::io::stdout().lock(),
-                "durable-work: stage={stage} at_ms={}",
-                probe_clock().elapsed().as_millis()
-            );
-        }),
-        model_diagnostic: Some(|event| {
-            let _ = writeln!(std::io::stdout().lock(), "browser-model: {event:?}");
-        }),
-        resource_diagnostic: Some(|cause| {
-            let _ = writeln!(
-                std::io::stdout().lock(),
-                "durable-work: resource_failure={cause:?}; content=redacted"
-            );
-        }),
-        diagnostic: Some(|_, snapshot| {
-            let _ = writeln!(
-                std::io::stdout().lock(),
-                "durable-work: native_phase={:?}; failure={:?}; persistence={:?}; content=redacted",
-                snapshot.phase,
-                snapshot.failure,
-                snapshot.persistence_failure
-            );
-        }),
-        profile,
-        model: zephium_agent_controller::AgentBrowserModel::Gpt6Luna,
-        config: zephium_app::AgentWorkApplicationConfig::new(
-            zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
-            AgentProviderTransportConfig::STANDARD,
-        ),
-        credential,
-    }
-}
-
+pub(super) use super::loopback_support::browser_settings;
 /// What an Airbnb read showed: one listing, whether the site linked it as
 /// `/rooms/<id>` or as a search pinned to it, or some other page by path.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

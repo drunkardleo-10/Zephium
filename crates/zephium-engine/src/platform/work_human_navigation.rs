@@ -13,6 +13,8 @@ pub(super) struct HumanNavigation {
     finished: bool,
     revision: u64,
     deadline: Instant,
+    #[cfg(target_os = "windows")]
+    write_navigation: Option<(wry::NavigationId, u64, ContextNavigationTarget)>,
 }
 
 impl HumanNavigation {
@@ -75,6 +77,15 @@ impl HumanNavigation {
     }
     pub(super) fn observe(&mut self, event: wry::NavigationEvent) -> Result<(bool, bool), ()> {
         use wry::NavigationEventPhase as E;
+        #[cfg(target_os = "windows")]
+        if self
+            .write_navigation
+            .as_ref()
+            .is_some_and(|(id, _, _)| *id == event.id)
+            && event.phase != E::Started
+        {
+            self.write_navigation = None;
+        }
         if Instant::now() >= self.deadline {
             return Err(());
         }
@@ -85,9 +96,21 @@ impl HumanNavigation {
                 self.loading = Some(event.id);
                 self.committed = false;
                 self.finished = false;
+                #[cfg(target_os = "windows")]
+                {
+                    self.write_navigation = Some((event.id, self.revision, target));
+                }
                 Ok((false, true))
             }
             E::Redirected if self.loading == Some(event.id) && !self.committed => {
+                // A native precommit redirect is a new request in this same
+                // Human navigation. Preserve its existing target policy while
+                // minting only the exact redirect URI's one-use method join.
+                // Work's confirmed-action POST token remains separate.
+                #[cfg(target_os = "windows")]
+                {
+                    self.write_navigation = Some((event.id, self.revision, target));
+                }
                 Ok((false, false))
             }
             E::Committed if self.loading == Some(event.id) && !self.committed => {
@@ -122,6 +145,32 @@ impl HumanNavigation {
         self.current = current;
         self.revision = self.revision.checked_add(1).ok_or(())?;
         Ok(true)
+    }
+    #[cfg(target_os = "windows")]
+    pub(super) fn allows_windows_request(&mut self, raw: &str, main_frame: Option<bool>) -> bool {
+        if main_frame == Some(true) {
+            return self.allows(raw, Some(false));
+        }
+        // Headers may not yet include Sec-Fetch-Dest. Correlate only this
+        // Human lease's admitted main Started URI/ID and unchanged revision;
+        // absence alone is never main-frame authority. The token is consumed
+        // once, with the same same-URI subframe availability limit as Work.
+        let current = Instant::now() < self.deadline
+            && main_frame.is_none()
+            && !self.committed
+            && self
+                .write_navigation
+                .as_ref()
+                .is_some_and(|(id, revision, target)| {
+                    self.loading == Some(*id)
+                        && self.revision == *revision
+                        && target.as_url().as_str() == raw
+                        && self.target(raw).is_some()
+                });
+        if current {
+            self.write_navigation = None;
+        }
+        current
     }
 }
 
@@ -189,6 +238,8 @@ impl WorkDocumentNavigation {
             finished: true,
             revision: 0,
             deadline,
+            #[cfg(target_os = "windows")]
+            write_navigation: None,
         });
         state.follow = None;
         state.phase = Phase::Human;
@@ -235,6 +286,125 @@ impl WorkDocumentNavigation {
         state.admission_kind = None;
         state.phase = Phase::Ready;
         Ok(target)
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::super::tests::{event, ready_gate, URL};
+    use super::*;
+    use wry::NavigationEventPhase as E;
+
+    fn human(open: bool) -> WorkDocumentNavigation {
+        let gate = ready_gate();
+        gate.begin_human(
+            &ContextNavigationTarget::parse(URL).unwrap(),
+            Instant::now() + Duration::from_secs(30),
+            open,
+        )
+        .unwrap();
+        gate
+    }
+
+    #[test]
+    fn human_missing_destination_joins_one_exact_started_post_with_existing_site_policy() {
+        for (open, target) in [
+            (false, "https://example.test/login"),
+            (true, "https://identity.test/login"),
+        ] {
+            let gate = human(open);
+            assert!(!gate.allows_windows_request(target, "POST", None));
+            assert!(gate.allows(target));
+            assert!(!gate.allows_windows_request(target, "POST", None));
+            gate.observe(event(2, E::Started, target)).unwrap();
+            assert!(!gate.allows_windows_request("https://example.test/unrelated", "POST", None));
+            assert!(!gate.allows_windows_request("https://attacker.test/login", "POST", None));
+            assert!(gate.allows_windows_request(target, "POST", None));
+            assert!(!gate.allows_windows_request(target, "POST", None));
+            gate.observe(event(2, E::Committed, target)).unwrap();
+            gate.observe(event(2, E::Finished, target)).unwrap();
+            assert!(!gate.allows_windows_request(target, "POST", None));
+        }
+        assert!(!human(false).allows("https://identity.test/login"));
+    }
+
+    #[test]
+    fn human_missing_destination_refuses_cancelled_expired_and_changed_identity() {
+        let target = "https://example.test/login";
+        for failure in 0..4 {
+            let gate = human(false);
+            assert!(gate.allows(target));
+            gate.observe(event(2, E::Started, target)).unwrap();
+            match failure {
+                0 => {
+                    gate.observe(event(2, E::Cancelled, target)).unwrap();
+                }
+                1 => {
+                    gate.0.lock().unwrap().human.as_mut().unwrap().deadline = Instant::now();
+                }
+                2 => {
+                    gate.0.lock().unwrap().human.as_mut().unwrap().revision += 1;
+                }
+                _ => {
+                    gate.0.lock().unwrap().human.as_mut().unwrap().loading =
+                        Some(wry::NavigationId::from_raw(3));
+                }
+            }
+            assert!(!gate.allows_windows_request(target, "POST", None));
+            gate.retire();
+            assert!(!gate.allows_windows_request(target, "POST", None));
+        }
+    }
+
+    #[test]
+    fn human_missing_destination_redirect_post_uses_only_current_native_target() {
+        let first = "https://example.test/login";
+        let redirected = "https://example.test/signin/continue";
+        let gate = human(false);
+        assert!(gate.allows(first));
+        gate.observe(event(2, E::Started, first)).unwrap();
+        assert!(gate.allows_windows_request(first, "POST", None));
+        assert!(!gate.allows_windows_request(first, "POST", None));
+        assert!(gate.allows(redirected));
+        gate.observe(event(2, E::Redirected, redirected)).unwrap();
+        assert!(!gate.allows_windows_request(first, "POST", None));
+        assert!(gate.allows_windows_request(redirected, "POST", None));
+        assert!(!gate.allows_windows_request(redirected, "POST", None));
+        let external = "https://identity.test/continue";
+        let gate = human(true);
+        assert!(gate.allows(first));
+        gate.observe(event(2, E::Started, first)).unwrap();
+        assert!(gate.allows(external));
+        gate.observe(event(2, E::Redirected, external)).unwrap();
+        assert!(gate.allows_windows_request(external, "POST", None));
+        assert!(!gate.allows_windows_request(external, "POST", None));
+        for (id, target) in [(3, redirected), (2, external)] {
+            let gate = human(false);
+            assert!(gate.allows(first));
+            gate.observe(event(2, E::Started, first)).unwrap();
+            gate.observe(event(id, E::Redirected, target)).unwrap();
+            assert!(gate.failed());
+            assert!(!gate.allows_windows_request(target, "POST", None));
+        }
+    }
+
+    #[test]
+    fn human_missing_destination_token_cannot_survive_handoff_end_or_successor() {
+        let gate = human(false);
+        assert!(gate.allows(URL));
+        gate.observe(event(2, E::Started, URL)).unwrap();
+        gate.observe(event(2, E::Committed, URL)).unwrap();
+        gate.observe(event(2, E::Finished, URL)).unwrap();
+        let revision = gate.human_revision().unwrap();
+        gate.finish_human(URL, revision).unwrap();
+        assert!(!gate.allows_windows_request(URL, "POST", None));
+        gate.begin_human(
+            &ContextNavigationTarget::parse(URL).unwrap(),
+            Instant::now() + Duration::from_secs(30),
+            false,
+        )
+        .unwrap();
+        assert!(!gate.allows_windows_request(URL, "POST", None));
     }
 }
 

@@ -1,9 +1,9 @@
 //! Public-data retention only. Native and application composition stay identical.
-use crate::{MacosWorkComposition, TrustedWorkRequest};
+use crate::{NativeWorkComposition, TrustedWorkRequest};
 use zephium_agent_controller::AgentWorkFailure;
 use zephium_app::PreparedAgentWork;
 
-impl MacosWorkComposition {
+impl NativeWorkComposition {
     /// Explicit excluded public qualifier; never accepts private/BYOK task data.
     #[doc(hidden)]
     pub fn prepare_public_qualification(

@@ -1,7 +1,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deepStrictEqual } from "node:assert";
-import { parse, tokenizer } from "../node_modules/.pnpm/acorn@8.17.0/node_modules/acorn/dist/acorn.mjs";
+import { createRequire } from "node:module";
+const frameRequire = createRequire(new URL("../frame/package.json", import.meta.url));
+const eslintRequire = createRequire(frameRequire.resolve("eslint"));
+const espreeRequire = createRequire(eslintRequire.resolve("espree"));
+const { parse, tokenizer } = espreeRequire("acorn");
 
 const assets = new URL("../crates/zephium-agentic/assets/", import.meta.url);
 const source = readFileSync(new URL("semantic-runtime-v1.js", assets), "utf8");

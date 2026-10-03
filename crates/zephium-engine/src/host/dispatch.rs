@@ -393,7 +393,7 @@ pub(crate) fn install(
                 any(target_os = "macos", target_os = "windows")
             ))]
             agent_contexts: HashMap::new(),
-            #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+            #[cfg(all(feature = "agentic-browser", any(target_os = "macos", target_os = "windows")))]
             work_resources: HashMap::new(),
             #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
             agent_cookie_transfers: HashMap::new(),
@@ -452,7 +452,7 @@ pub(crate) fn install(
             macos_ephemeral_data_stores: HashMap::new(),
             #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
             anonymous_work_stores: HashMap::new(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             work_site_loads: HashMap::new(),
             #[cfg(target_os = "macos")]
             webext: Default::default(),
@@ -480,10 +480,16 @@ pub(crate) fn install(
             browser_version_observers: HashMap::new(),
             #[cfg(target_os = "windows")]
             environments: HashMap::new(),
+            #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+            anonymous_work_environments: HashMap::new(),
+            #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+            work_site_stores: HashMap::new(),
             #[cfg(target_os = "windows")]
             browser_processes: HashMap::new(),
             #[cfg(target_os = "windows")]
             browser_process_exit_observers: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            windows_process_shutdown_started: false,
             #[cfg(target_os = "windows")]
             pending_profile_recovery: HashMap::new(),
             #[cfg(target_os = "windows")]
@@ -1478,12 +1484,25 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                             done(clean);
                         }
                     };
-                    if !process_provenance_valid
-                        || !crate::platform::imp::wait_for_browser_process_shutdown(
+                    #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
+                    {
+                        use std::io::Write as _;
+                        let _ = writeln!(std::io::stderr().lock(),
+                            "windows-work-shutdown: stage=process_wait_start obligations={} provenance_valid={process_provenance_valid}; content=redacted",
+                            browser_processes.len());
+                    }
+                    let process_exit_proven = process_provenance_valid
+                        && crate::platform::imp::wait_for_browser_process_shutdown(
                             browser_processes,
                             std::time::Duration::from_secs(5),
-                        )
+                        );
+                    #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
                     {
+                        use std::io::Write as _;
+                        let _ = writeln!(std::io::stderr().lock(),
+                            "windows-work-shutdown: stage=process_wait_complete proven={process_exit_proven}; content=redacted");
+                    }
+                    if !process_exit_proven {
                         eprintln!(
                             "privacy: WebView2 full process-group shutdown could not be proven"
                         );
@@ -1501,6 +1520,12 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                             false
                         }
                     };
+                    #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
+                    {
+                        use std::io::Write as _;
+                        let _ = writeln!(std::io::stderr().lock(),
+                            "windows-work-shutdown: stage=private_cleanup_complete clean={cleaned}; content=redacted");
+                    }
                     finish(cleaned);
                 });
             if let Err(error) = spawned {
@@ -1785,7 +1810,10 @@ mod tests {
         assert_eq!(pending.len(), AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
     }
 
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     #[test]
     fn agent_context_terminals_have_an_independent_exact_band() {
         assert_eq!(
@@ -2237,7 +2265,7 @@ mod tests {
         assert_eq!(pending.front().and_then(|task| task.key), Some(key));
 
         // The surviving ProcessFailed path must consult the already-recorded
-        // observer state. It releases the observer-only map entry, restoring
+        // observer state. It releases the exact process/observer pair, restoring
         // the exact empty-set shutdown invariant after successful erasure.
         assert_eq!(
             transferred_erasure_exit_settlement(41, 41, true, true, false),

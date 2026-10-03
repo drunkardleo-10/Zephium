@@ -10,9 +10,9 @@
 //!
 //! This owner never pumps the message loop, blocks a thread, exposes a cookie
 //! field, or writes before every requested origin has completed preflight.
-//! Destination mutation is sequential. Any failure after a confirmed write
-//! enters profile-wide cleanup and produces a private cleanup proof for the
-//! host; an unproven cleanup must quarantine the automation profile.
+//! Destination mutation is sequential. Legacy transfers clear their disposable
+//! destination after a failed write; retained Work seeds delete only journaled
+//! new identities. An unproven cleanup must quarantine the automation profile.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -31,7 +31,7 @@ use wry::WebViewExtWindows as _;
 use zephium_agentic::{
     ContextCookieScope, ContextCookieTransferFailure, ContextCookieTransferOutcome,
     ContextCookieTransferRequest, ContextCookieTransferStats, MAX_COOKIES_PER_TRANSFER,
-    MAX_COOKIE_BYTES,
+    MAX_COOKIE_BYTES, MAX_COOKIE_TRANSFER_BYTES,
 };
 
 use crate::platform::agent_cookie_preflight::{
@@ -72,7 +72,7 @@ pub(crate) fn selected_profile_cookie_manager(
     manager.map_err(|_| ContextCookieTransferFailure::SourceUnavailable)
 }
 
-/// Whether a partial transfer restored an empty destination cookie store.
+/// Whether cleanup removed the identities owned by this transfer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowsAgentCookieCleanup {
     NotRequired,
@@ -99,6 +99,7 @@ impl WindowsAgentCookieTerminal {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransferPhase {
+    CheckingDestination,
     Enumerating(usize),
     Applying {
         in_flight: bool,
@@ -110,6 +111,10 @@ enum TransferPhase {
     Verifying {
         failure: ContextCookieTransferFailure,
         stats: ContextCookieTransferStats,
+    },
+    WorkRollback {
+        failure: ContextCookieTransferFailure,
+        stats: Option<ContextCookieTransferStats>,
     },
 }
 
@@ -139,6 +144,21 @@ struct TransferState {
     application_deadline: Instant,
     terminal_deadline: Instant,
     completion: Option<TransferCompletion>,
+    work_seed: Option<WorkSeed>,
+}
+
+struct WorkSeed {
+    existing: Vec<CookieIdentity>,
+    attempted: Vec<ICoreWebView2Cookie>,
+}
+
+#[derive(PartialEq, Eq)]
+struct CookieIdentity([zeroize::Zeroizing<Vec<u16>>; 3]);
+
+impl CookieIdentity {
+    fn bytes(&self) -> usize {
+        self.0.iter().map(|field| field.len() * 2).sum()
+    }
 }
 
 struct TransferShared {
@@ -167,6 +187,72 @@ impl WindowsAgentCookieTransfer {
         let now = Instant::now();
         let terminal_deadline = map_cookie_transfer_deadline(request.window(), admitted_at, now)
             .ok_or(ContextCookieTransferFailure::TimedOut)?;
+        Self::start_scoped(
+            source,
+            destination,
+            destination_profile,
+            request.scope().clone(),
+            terminal_deadline,
+            completion,
+            callback_panicked,
+        )
+    }
+
+    pub(crate) fn start_scoped(
+        source: ICoreWebView2CookieManager,
+        destination: ICoreWebView2CookieManager,
+        destination_profile: ICoreWebView2Profile2,
+        scope: ContextCookieScope,
+        terminal_deadline: Instant,
+        completion: impl FnOnce(WindowsAgentCookieTerminal) + 'static,
+        callback_panicked: impl Fn() + 'static,
+    ) -> Result<Self, ContextCookieTransferFailure> {
+        Self::start_mode(
+            source,
+            destination,
+            destination_profile,
+            scope,
+            terminal_deadline,
+            completion,
+            callback_panicked,
+            false,
+        )
+    }
+
+    /// Host admission serializes this initial seed while no Work page can mutate the store.
+    pub(crate) fn start_work_scoped(
+        source: ICoreWebView2CookieManager,
+        destination: ICoreWebView2CookieManager,
+        destination_profile: ICoreWebView2Profile2,
+        scope: ContextCookieScope,
+        terminal_deadline: Instant,
+        completion: impl FnOnce(WindowsAgentCookieTerminal) + 'static,
+        callback_panicked: impl Fn() + 'static,
+    ) -> Result<Self, ContextCookieTransferFailure> {
+        Self::start_mode(
+            source,
+            destination,
+            destination_profile,
+            scope,
+            terminal_deadline,
+            completion,
+            callback_panicked,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_mode(
+        source: ICoreWebView2CookieManager,
+        destination: ICoreWebView2CookieManager,
+        destination_profile: ICoreWebView2Profile2,
+        scope: ContextCookieScope,
+        terminal_deadline: Instant,
+        completion: impl FnOnce(WindowsAgentCookieTerminal) + 'static,
+        callback_panicked: impl Fn() + 'static,
+        retained: bool,
+    ) -> Result<Self, ContextCookieTransferFailure> {
+        let now = Instant::now();
         let Some(application_deadline) =
             terminal_deadline.checked_sub(AGENT_COOKIE_CLEANUP_RESERVE)
         else {
@@ -176,25 +262,37 @@ impl WindowsAgentCookieTransfer {
             return Err(ContextCookieTransferFailure::TimedOut);
         }
         let preflight =
-            AgentCookiePreflight::try_new(request.scope().len()).map_err(map_preflight_failure)?;
+            AgentCookiePreflight::try_new(scope.len()).map_err(map_preflight_failure)?;
         let shared = Rc::new(TransferShared {
             state: RefCell::new(Some(TransferState {
                 source,
                 destination,
                 destination_profile,
-                scope: request.scope().clone(),
+                scope,
                 preflight: Some(preflight),
                 application: None,
-                phase: TransferPhase::Enumerating(0),
+                phase: if retained {
+                    TransferPhase::CheckingDestination
+                } else {
+                    TransferPhase::Enumerating(0)
+                },
                 application_deadline,
                 terminal_deadline,
                 completion: Some(Box::new(completion)),
+                work_seed: retained.then(|| WorkSeed {
+                    existing: Vec::new(),
+                    attempted: Vec::new(),
+                }),
             })),
             cancellation: Cell::new(None),
             terminal: Cell::new(false),
             callback_panicked: Rc::new(callback_panicked),
         });
-        start_origin(&shared, 0);
+        if retained {
+            check_work_destination(&shared);
+        } else {
+            start_origin(&shared, 0);
+        }
         Ok(Self { shared })
     }
 
@@ -308,6 +406,142 @@ fn start_origin(shared: &Rc<TransferShared>, index: usize) {
     }
 }
 
+fn check_work_destination(shared: &Rc<TransferShared>) {
+    let destination = shared
+        .state
+        .try_borrow()
+        .ok()
+        .and_then(|owner| owner.as_ref().map(|state| state.destination.clone()));
+    let Some(destination) = destination else {
+        return;
+    };
+    let owner = shared.clone();
+    let handler = GetCookiesCompletedHandler::create(Box::new(move |result, cookies| {
+        let panic_owner = owner.clone();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let checked = result
+                .map_err(|_| ContextCookieTransferFailure::EnumerationFailed)
+                .and_then(|_| cookie_identities(cookies));
+            if owner.terminal.get() {
+                return;
+            }
+            let result = (|| {
+                let mut state = owner
+                    .state
+                    .try_borrow_mut()
+                    .map_err(|_| ContextCookieTransferFailure::EnumerationFailed)?;
+                let state = state
+                    .as_mut()
+                    .ok_or(ContextCookieTransferFailure::DestinationUnavailable)?;
+                if state.phase != TransferPhase::CheckingDestination {
+                    return Err(ContextCookieTransferFailure::EnumerationFailed);
+                }
+                if Instant::now() >= state.application_deadline {
+                    return Err(ContextCookieTransferFailure::TimedOut);
+                }
+                state
+                    .work_seed
+                    .as_mut()
+                    .ok_or(ContextCookieTransferFailure::DestinationUnavailable)?
+                    .existing = checked?;
+                state.phase = TransferPhase::Enumerating(0);
+                Ok(())
+            })();
+            match result {
+                Ok(()) => start_origin(&owner, 0),
+                Err(failure) => fail_transfer(&owner, failure, None),
+            }
+        }))
+        .is_err()
+        {
+            invoke_callback_panic(&panic_owner);
+            fail_transfer(
+                &panic_owner,
+                ContextCookieTransferFailure::EnumerationFailed,
+                None,
+            );
+        }
+        Ok(())
+    }));
+    // SAFETY: exact retained manager and handler are live; an empty URI requests all cookies.
+    if unsafe { destination.GetCookies(PCWSTR::null(), &handler) }.is_err() {
+        fail_transfer(
+            shared,
+            ContextCookieTransferFailure::EnumerationFailed,
+            None,
+        );
+    }
+}
+
+fn cookie_identities(
+    cookies: Option<ICoreWebView2CookieList>,
+) -> Result<Vec<CookieIdentity>, ContextCookieTransferFailure> {
+    let cookies = cookies.ok_or(ContextCookieTransferFailure::EnumerationFailed)?;
+    let mut count = 0;
+    // SAFETY: live callback list and initialized count output.
+    unsafe { cookies.Count(&mut count) }
+        .map_err(|_| ContextCookieTransferFailure::EnumerationFailed)?;
+    if count as usize > MAX_COOKIES_PER_TRANSFER {
+        return Err(ContextCookieTransferFailure::LimitExceeded);
+    }
+    let mut result = Vec::with_capacity(count as usize);
+    let mut bytes = 0;
+    for index in 0..count {
+        // SAFETY: index is within this exact bounded native list.
+        let cookie = unsafe { cookies.GetValueAtIndex(index) }
+            .map_err(|_| ContextCookieTransferFailure::EnumerationFailed)?;
+        let identity = cookie_identity(&cookie)?;
+        bytes += identity.bytes();
+        if bytes > MAX_COOKIE_TRANSFER_BYTES {
+            return Err(ContextCookieTransferFailure::LimitExceeded);
+        }
+        result.push(identity);
+    }
+    Ok(result)
+}
+
+fn cookie_identity(
+    cookie: &ICoreWebView2Cookie,
+) -> Result<CookieIdentity, ContextCookieTransferFailure> {
+    let mut fields = [
+        zeroize::Zeroizing::new(Vec::new()),
+        zeroize::Zeroizing::new(Vec::new()),
+        zeroize::Zeroizing::new(Vec::new()),
+    ];
+    for (index, field) in fields.iter_mut().enumerate() {
+        let mut raw = PWSTR::null();
+        // SAFETY: native cookie is live; each getter returns an owned NUL-terminated out-string.
+        let result = unsafe {
+            match index {
+                0 => cookie.Name(&mut raw),
+                1 => cookie.Domain(&mut raw),
+                _ => cookie.Path(&mut raw),
+            }
+        };
+        let owner = webview2_com::CoTaskMemPWSTR::from(raw);
+        result.map_err(|_| ContextCookieTransferFailure::InvalidCookie)?;
+        let pointer = owner.as_ref().as_pcwstr().as_ptr();
+        if pointer.is_null() {
+            return Err(ContextCookieTransferFailure::InvalidCookie);
+        }
+        for position in 0..=MAX_COOKIE_BYTES {
+            // SAFETY: getter's NUL-terminated string stays owned; scanning is policy-bounded.
+            let unit = unsafe { pointer.add(position).read() };
+            if unit == 0 {
+                break;
+            }
+            if position == MAX_COOKIE_BYTES {
+                return Err(ContextCookieTransferFailure::LimitExceeded);
+            }
+            field.push(unit);
+        }
+        if field.is_empty() {
+            return Err(ContextCookieTransferFailure::InvalidCookie);
+        }
+    }
+    Ok(CookieIdentity(fields))
+}
+
 fn on_origin_completed(
     shared: &Rc<TransferShared>,
     index: usize,
@@ -388,6 +622,19 @@ fn on_origin_completed(
                         break;
                     }
                 };
+                if let Some(seed) = &state.work_seed {
+                    match cookie_identity(&copied) {
+                        Ok(identity) if !seed.existing.contains(&identity) => {}
+                        Ok(_) => {
+                            failure = Some(ContextCookieTransferFailure::DestinationUnavailable);
+                            break;
+                        }
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                }
                 let Some(preflight) = state.preflight.as_mut() else {
                     failure = Some(ContextCookieTransferFailure::EnumerationFailed);
                     break;
@@ -507,6 +754,9 @@ fn apply_preflight(shared: &Rc<TransferShared>) {
         let entered = shared.state.try_borrow_mut().is_ok_and(|mut owner| {
             owner.as_mut().is_some_and(|state| {
                 if matches!(state.phase, TransferPhase::Applying { in_flight: false }) {
+                    if let Some(seed) = &mut state.work_seed {
+                        seed.attempted.push(cookie.clone());
+                    }
                     state.phase = TransferPhase::Applying { in_flight: true };
                     true
                 } else {
@@ -584,14 +834,19 @@ fn drive_cancellation(shared: &Rc<TransferShared>) {
         .ok()
         .and_then(|owner| owner.as_ref().map(|state| state.phase));
     match phase {
+        Some(TransferPhase::WorkRollback { failure, stats }) => {
+            finish_work_rollback(shared, failure, stats, WindowsAgentCookieCleanup::Unproven);
+        }
         Some(TransferPhase::Clearing { failure, stats })
         | Some(TransferPhase::Verifying { failure, stats }) => {
             complete_partial(shared, failure, stats, WindowsAgentCookieCleanup::Unproven)
         }
         Some(TransferPhase::Applying { in_flight: true }) => {}
-        Some(TransferPhase::Enumerating(_) | TransferPhase::Applying { in_flight: false }) => {
-            fail_transfer(shared, failure, None)
-        }
+        Some(
+            TransferPhase::CheckingDestination
+            | TransferPhase::Enumerating(_)
+            | TransferPhase::Applying { in_flight: false },
+        ) => fail_transfer(shared, failure, None),
         None => {}
     }
 }
@@ -602,6 +857,35 @@ fn fail_transfer(
     forced_stats: Option<ContextCookieTransferStats>,
 ) {
     if shared.terminal.get() {
+        return;
+    }
+    let rollback = shared.state.try_borrow().ok().and_then(|owner| {
+        owner
+            .as_ref()
+            .filter(|state| {
+                state
+                    .work_seed
+                    .as_ref()
+                    .is_some_and(|seed| !seed.attempted.is_empty())
+            })
+            .map(|state| {
+                (
+                    state.phase,
+                    forced_stats.or_else(|| {
+                        state
+                            .application
+                            .as_ref()
+                            .and_then(|application| application.stats().ok())
+                    }),
+                )
+            })
+    });
+    if let Some((phase, stats)) = rollback {
+        if let TransferPhase::WorkRollback { failure, stats } = phase {
+            finish_work_rollback(shared, failure, stats, WindowsAgentCookieCleanup::Unproven);
+        } else {
+            rollback_work_seed(shared, failure, stats);
+        }
         return;
     }
     let decision = {
@@ -620,7 +904,9 @@ fn fail_transfer(
                 failure: original,
                 stats,
             } => Err((original, stats)),
-            TransferPhase::Enumerating(_) | TransferPhase::Applying { .. } => {
+            TransferPhase::CheckingDestination
+            | TransferPhase::Enumerating(_)
+            | TransferPhase::Applying { .. } => {
                 let stats = forced_stats.or_else(|| {
                     state
                         .application
@@ -632,6 +918,7 @@ fn fail_transfer(
                     None => Ok(()),
                 }
             }
+            TransferPhase::WorkRollback { .. } => return,
         }
     };
     match decision {
@@ -705,6 +992,97 @@ fn begin_cleanup(
     if unsafe { profile.ClearBrowsingDataAll(&handler) }.is_err() {
         complete_partial(shared, failure, stats, WindowsAgentCookieCleanup::Unproven);
     }
+}
+
+fn rollback_work_seed(
+    shared: &Rc<TransferShared>,
+    failure: ContextCookieTransferFailure,
+    stats: Option<ContextCookieTransferStats>,
+) {
+    shared.cancellation.set(None);
+    let native = shared.state.try_borrow_mut().ok().and_then(|mut owner| {
+        let state = owner.as_mut()?;
+        state.preflight = None;
+        state.application = None;
+        state.phase = TransferPhase::WorkRollback { failure, stats };
+        (Instant::now() < state.terminal_deadline).then(|| {
+            (
+                state.destination.clone(),
+                state
+                    .work_seed
+                    .as_ref()
+                    .map(|seed| seed.attempted.clone())
+                    .unwrap_or_default(),
+            )
+        })
+    });
+    let Some((destination, attempted)) = native else {
+        finish_work_rollback(shared, failure, stats, WindowsAgentCookieCleanup::Unproven);
+        return;
+    };
+    for cookie in &attempted {
+        // SAFETY: the journal contains only copied cookies attempted by this initial seed.
+        // No pre-existing identity was admitted, and host admission keeps the store quiescent.
+        let _ = unsafe { destination.DeleteCookie(cookie) };
+    }
+    let owner = shared.clone();
+    let handler = GetCookiesCompletedHandler::create(Box::new(move |result, cookies| {
+        let panic_owner = owner.clone();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if owner.terminal.get() {
+                return;
+            }
+            let verified = result.is_ok()
+                && cookie_identities(cookies).is_ok_and(|current| {
+                    attempted.iter().all(|cookie| {
+                        cookie_identity(cookie).is_ok_and(|identity| !current.contains(&identity))
+                    })
+                });
+            let timely = owner.state.try_borrow().is_ok_and(|state| {
+                state
+                    .as_ref()
+                    .is_some_and(|state| Instant::now() < state.terminal_deadline)
+            });
+            finish_work_rollback(
+                &owner,
+                failure,
+                stats,
+                if verified && timely {
+                    WindowsAgentCookieCleanup::Proven
+                } else {
+                    WindowsAgentCookieCleanup::Unproven
+                },
+            );
+        }))
+        .is_err()
+        {
+            invoke_callback_panic(&panic_owner);
+            finish_work_rollback(
+                &panic_owner,
+                failure,
+                stats,
+                WindowsAgentCookieCleanup::Unproven,
+            );
+        }
+        Ok(())
+    }));
+    // SAFETY: live retained manager and copied native handler; all-cookie readback verifies only journaled identities.
+    if unsafe { destination.GetCookies(PCWSTR::null(), &handler) }.is_err() {
+        finish_work_rollback(shared, failure, stats, WindowsAgentCookieCleanup::Unproven);
+    }
+}
+
+fn finish_work_rollback(
+    shared: &Rc<TransferShared>,
+    failure: ContextCookieTransferFailure,
+    stats: Option<ContextCookieTransferStats>,
+    cleanup: WindowsAgentCookieCleanup,
+) {
+    let outcome = match stats.filter(|stats| stats.counts().cookies_applied > 0) {
+        Some(stats) => ContextCookieTransferOutcome::Partial { failure, stats },
+        None => ContextCookieTransferOutcome::Refused(failure),
+    };
+    complete_terminal(shared, WindowsAgentCookieTerminal { outcome, cleanup });
 }
 
 fn on_clear_completed(shared: &Rc<TransferShared>, result: windows_core::Result<()>) {
@@ -801,7 +1179,10 @@ fn finish_cleanup_unproven(shared: &Rc<TransferShared>) {
         match state.phase {
             TransferPhase::Clearing { failure, stats }
             | TransferPhase::Verifying { failure, stats } => Some((failure, stats)),
-            TransferPhase::Enumerating(_) | TransferPhase::Applying { .. } => None,
+            TransferPhase::CheckingDestination
+            | TransferPhase::Enumerating(_)
+            | TransferPhase::Applying { .. }
+            | TransferPhase::WorkRollback { .. } => None,
         }
     });
     if let Some((failure, stats)) = partial {
@@ -969,3 +1350,7 @@ const fn map_preflight_failure(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cookie_transfer_tests.rs"]
+mod tests;

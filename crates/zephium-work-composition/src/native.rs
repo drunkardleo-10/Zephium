@@ -97,7 +97,7 @@ impl std::fmt::Debug for TrustedWorkRequest {
 
 /// Dormant, move-only desktop owners. Construction neither claims persistence
 /// nor takes native authority. The shell checks both exact Arc identities.
-pub struct MacosWorkComposition {
+pub struct NativeWorkComposition {
     #[cfg(feature = "durable-runtime")]
     pub(crate) human_pages: crate::human::HumanPages,
     engine: Arc<WebviewEngine>,
@@ -111,7 +111,7 @@ enum NativeLifetimeOwner {
     Unavailable,
 }
 
-impl MacosWorkComposition {
+impl NativeWorkComposition {
     #[cfg(feature = "retained-lifetime-diagnostic")]
     pub fn retained_resource_failure_cause(
         &self,

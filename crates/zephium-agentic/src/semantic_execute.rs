@@ -1252,20 +1252,34 @@ fn admit_native_outcome(
             let readiness_matches = match (applied.kind, applied.backend, applied.readiness) {
                 (
                     SemanticActionKind::Click,
-                    SemanticActionExecutionBackend::FixedSemanticRecipe,
+                    SemanticActionExecutionBackend::FixedSemanticRecipe
+                    | SemanticActionExecutionBackend::EngineNativeInput,
                     SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
-                ) => rect_intersects_viewport(applied.actual_geometry, applied.viewport),
+                ) => {
+                    (applied.backend != SemanticActionExecutionBackend::EngineNativeInput
+                        || cfg!(target_os = "windows"))
+                        && rect_intersects_viewport(applied.actual_geometry, applied.viewport)
+                }
                 (
                     SemanticActionKind::Fill,
                     SemanticActionExecutionBackend::FixedSemanticRecipe
-                    | SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+                    | SemanticActionExecutionBackend::PageWorldCompatibilityFill
+                    | SemanticActionExecutionBackend::EngineNativeInput,
                     SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
-                ) => true,
+                ) => {
+                    applied.backend != SemanticActionExecutionBackend::EngineNativeInput
+                        || cfg!(target_os = "windows")
+                }
                 (
                     SemanticActionKind::Select | SemanticActionKind::Press,
-                    SemanticActionExecutionBackend::FixedSemanticRecipe,
+                    SemanticActionExecutionBackend::FixedSemanticRecipe
+                    | SemanticActionExecutionBackend::EngineNativeInput,
                     SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
-                ) => rect_intersects_viewport(applied.actual_geometry, applied.viewport),
+                ) => {
+                    (applied.backend != SemanticActionExecutionBackend::EngineNativeInput
+                        || cfg!(target_os = "windows"))
+                        && rect_intersects_viewport(applied.actual_geometry, applied.viewport)
+                }
                 (
                     SemanticActionKind::Scroll,
                     SemanticActionExecutionBackend::FixedSemanticRecipe,

@@ -10,7 +10,7 @@ use std::{
 };
 use zephium_agent_controller::*;
 use zephium_agent_provider_transport::{
-    load_macos_probe_openai_credential, AgentProviderTransportConfig,
+    load_probe_openai_credential, AgentProviderTransportConfig,
 };
 use zephium_agent_runtime::AgentRuntimeConfig;
 use zephium_agentic::*;
@@ -337,7 +337,7 @@ pub fn load_request(
         origin.clone(),
     )?;
     let task = BackTask::new(identity, origin, departure, fixture).map_err(|_| "task")?;
-    let credential = load_macos_probe_openai_credential().map_err(|_| "credential")?;
+    let credential = load_probe_openai_credential().map_err(|_| "credential")?;
     if Instant::now() >= deadline {
         return Err("deadline");
     }

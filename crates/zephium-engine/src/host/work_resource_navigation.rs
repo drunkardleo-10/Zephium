@@ -32,7 +32,7 @@ pub(super) struct WorkHistoryBack {
     task: WorkHistoryBackTask,
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
     deadline: Instant,
-    ticket: crate::platform::macos::AgentHistoryBackTicket,
+    ticket: crate::platform::imp::AgentHistoryBackTicket,
     stage: WorkNavigationStage,
 }
 impl WorkHistoryBack {
@@ -231,7 +231,6 @@ impl WorkNativeResource {
                 );
                 Some(Err(ContextPortFailure::TimedOut))
             } else if self.view.is_some() {
-                #[cfg(target_os = "macos")]
                 if self
                     .navigation
                     .as_ref()
@@ -319,6 +318,25 @@ impl WorkNativeResource {
                 pending.timer = None;
                 // Resource notifications already execute after the original
                 // native callback. The task retains its permit through delivery.
+                #[cfg(target_os = "windows")]
+                if let Ok(target) = outcome.as_ref() {
+                    if let Some(view) = self.view.as_mut() {
+                        let target = target.clone();
+                        let result = target.clone();
+                        let guard = self.guard.clone();
+                        view.enroll_work_history_with_completion(target, false, move |healthy| {
+                            if !healthy {
+                                guard.fail();
+                            }
+                            pending.task.complete(if healthy && guard.is_healthy() {
+                                Ok(result)
+                            } else {
+                                Err(ContextPortFailure::NativeRefused)
+                            });
+                        });
+                        return;
+                    }
+                }
                 pending.task.complete(outcome);
             }
         }
@@ -385,11 +403,54 @@ impl WorkNativeResource {
             let dispatched = self.view.as_mut().is_some_and(|view| {
                 view.reactivate_history_destination(ticket)
                     .is_ok_and(|target| target == expected)
-                    && gate.as_ref().is_some_and(|gate| {
-                        gate.arm_history_back(source, operation, expected.clone())
-                            .is_ok()
-                    })
-                    && view.dispatch_history_back(ticket)
+                    && {
+                        #[cfg(target_os = "macos")]
+                        {
+                            gate.as_ref().is_some_and(|gate| {
+                                gate.arm_history_back(source, operation, expected.clone())
+                                    .is_ok()
+                            })
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            true
+                        }
+                    }
+                    && {
+                        #[cfg(target_os = "macos")]
+                        {
+                            view.dispatch_history_back(ticket)
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            let guard = self.guard.clone();
+                            let lease =
+                                request_coordinates.as_ref().map(|(lease, _)| lease.clone());
+                            let gate = gate.clone();
+                            let expected = expected.clone();
+                            view.dispatch_history_back_guarded(
+                                ticket,
+                                Box::new(move || {
+                                    guard.is_healthy()
+                                        && lease.as_ref().is_some_and(|lease| {
+                                            work_browser_monotonic_now().is_some_and(|now| {
+                                                guard.navigation_dispatch_current(
+                                                    lease, operation, now,
+                                                )
+                                            })
+                                        })
+                                        && gate.as_ref().is_some_and(|gate| {
+                                            gate.arm_history_back(
+                                                source,
+                                                operation,
+                                                expected.clone(),
+                                            )
+                                            .is_ok()
+                                        })
+                                }),
+                            )
+                        }
+                    }
             });
             if !dispatched {
                 Some(Err(ContextPortFailure::NativeRefused))

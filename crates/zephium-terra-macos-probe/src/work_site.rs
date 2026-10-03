@@ -21,7 +21,7 @@ use zephium_core::{
     work::{agent::*, runtime::*, search::*, sites::WorkSiteAccessV1, synthesis::*, *},
 };
 use zephium_ipc::work::*;
-use zephium_work_composition::MacosWorkComposition;
+use zephium_work_composition::NativeWorkComposition;
 
 use super::work_durable::{browser_settings, WorkflowResult};
 
@@ -230,8 +230,8 @@ pub(super) fn install_presence(engine: std::sync::Arc<zephium_engine::WebviewEng
 }
 
 /// Four HTTP/1.1 loopback servers that record method, path and cookie
-/// only. The third and board sites share the account site's host, and so
-/// its cookie.
+/// only. The third and board sites share the account host, but use separate
+/// origins. Each Windows Work origin receives its own real authentication seed.
 struct Sites {
     account: u16,
     other: u16,
@@ -405,7 +405,7 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
         ),
         (Site::Account, _, "/gconsent") => ("200 OK", String::new(), banner(true)),
         (Site::Account, _, "/jconsent") => ("200 OK", String::new(), banner(false)),
-        (Site::Account, _, "/seed") => (
+        (Site::Account | Site::Board | Site::Third, _, "/seed") => (
             "200 OK",
             format!("Set-Cookie: {ACCOUNT_COOKIE}; Path=/; Max-Age=3600; HttpOnly\r\n"),
             page("Account", "<h1>Signed in</h1><p>Welcome back to the account site.</p>"),
@@ -712,13 +712,15 @@ struct Run {
 
 struct Context<'a> {
     handle: &'a zephium_app::Handle,
-    composition: &'a MacosWorkComposition,
+    composition: &'a NativeWorkComposition,
     profile: ProfileId,
     binding: zephium_app::AgentWorkProfileBinding,
     keys: Mutex<Vec<zephium_agentic::AgentProviderCredential>>,
     sites: Sites,
     /// Sign-in walls are passed in a tab rather than released.
     tab_sign_in: AtomicBool,
+    /// Changed declines a fresh model handoff after its sole approval.
+    decline_changed_followup: AtomicBool,
 }
 impl Context<'_> {
     async fn create(&self, objective: &str) -> Result<(WorkId, WorkRevision), &'static str> {
@@ -767,10 +769,15 @@ impl Context<'_> {
         decisions: &Mutex<Vec<(bool, bool)>>,
         confirmed: &Mutex<Vec<String>>,
     ) {
+        let mut approved_page = None;
         while !done.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            if let Ok(pages) = self.composition.human_pages(self.profile, work) {
-                for page in pages {
+            let pages = self
+                .composition
+                .human_pages(self.profile, work)
+                .unwrap_or_default();
+            {
+                for page in &pages {
                     // The person signs in in a tab instead of the pane.
                     if self.tab_sign_in.load(Ordering::Relaxed)
                         && page.reason == WorkHumanReasonV1::SignIn
@@ -816,6 +823,34 @@ impl Context<'_> {
                     .ok()
                     .and_then(|mut queue| (!queue.is_empty()).then(|| queue.remove(0)))
                     .unwrap_or((false, false));
+                let approval_page = if approve
+                    && self.decline_changed_followup.load(Ordering::Relaxed)
+                {
+                    state
+                        .executions
+                        .last()
+                        .filter(|fact| fact.id == execution)
+                        .and_then(|fact| {
+                            pages
+                                .iter()
+                                .find(|page| {
+                                    page.phase == WorkHumanPhaseV1::WaitingForHuman
+                                        && page.reason == WorkHumanReasonV1::UserDecision
+                                        && fact
+                                            .attempts
+                                            .iter()
+                                            .any(|attempt| attempt.id == page.id.attempt)
+                                        && fact.steps.iter().any(|read| {
+                                            read.id == page.id.step
+                                                && read.status == WorkStepStatus::Running
+                                                && matches!(read.kind, WorkStepKindV1::Read { .. })
+                                        })
+                                })
+                                .map(|page| (execution, step, page.id))
+                        })
+                } else {
+                    None
+                };
                 let applied = self
                     .handle
                     .work_command(
@@ -836,12 +871,55 @@ impl Context<'_> {
                     .ok();
                 if let Some(applied) = applied {
                     if applied.await.is_ok() {
+                        if let Some(page) = approval_page {
+                            approved_page = Some(page);
+                        }
                         if let Ok(mut confirmed) = confirmed.lock() {
                             confirmed.push(headline);
                         }
                     }
                 }
                 continue;
+            }
+            // A model may ask the person directly instead of proposing a new
+            // Confirm. Changed declines only a successor of its approved pane;
+            // closing settles the original, undispatched approval as NotSent.
+            if self.decline_changed_followup.load(Ordering::Relaxed)
+                && decisions.lock().is_ok_and(|queue| queue.is_empty())
+            {
+                if let Some((approved_execution, approved_step, original)) = approved_page {
+                    if state.executions.last().is_some_and(|execution| {
+                        execution.id == approved_execution
+                            && execution.steps.iter().any(|step| {
+                                step.id == approved_step
+                                    && matches!(&step.kind, WorkStepKindV1::Confirm { confirm }
+                                        if confirm.decision == Some(WorkConfirmDecisionV1::Approved))
+                            })
+                            && !execution.steps.iter().any(|step| {
+                                step.status == WorkStepStatus::Running
+                                    && match &step.kind {
+                                        WorkStepKindV1::Ask { .. } => true,
+                                        WorkStepKindV1::Confirm { confirm } => confirm.decision.is_none(),
+                                        _ => false,
+                                    }
+                            })
+                    }) {
+                        for page in &pages {
+                            if page.phase == WorkHumanPhaseV1::WaitingForHuman
+                                && page.reason == WorkHumanReasonV1::UserDecision
+                                && page.id.attempt == original.attempt
+                                && page.id.step == original.step
+                                && page.id.generation > original.generation
+                            {
+                                let released = self.composition.release_human_page(
+                                    self.profile, work, page.id
+                                ).is_ok();
+                                let _ = writeln!(std::io::stdout().lock(),
+                                    "loopback-site: changed_followup_declined={released} newer_handoff=true; content=synthetic");
+                            }
+                        }
+                    }
+                }
             }
             let Some((execution, step, prompt)) = state.executions.last().and_then(|execution| {
                 execution.steps.iter().find_map(|step| match &step.kind {
@@ -959,7 +1037,7 @@ impl Context<'_> {
                             let key = match key {
                                 Some(key) => key,
                                 None => tokio::task::spawn_blocking(
-                                    zephium_agentic::load_macos_probe_openai_credential,
+                                    zephium_agentic::load_probe_openai_credential,
                                 )
                                 .await
                                 .map_err(|_| WorkError::Unavailable)?
@@ -1097,7 +1175,7 @@ impl Context<'_> {
                             let key = match key {
                                 Some(key) => key,
                                 None => tokio::task::spawn_blocking(
-                                    zephium_agentic::load_macos_probe_openai_credential,
+                                    zephium_agentic::load_probe_openai_credential,
                                 )
                                 .await
                                 .map_err(|_| WorkError::Unavailable)?
@@ -1235,7 +1313,7 @@ fn mentions(run: &Run, words: &[&str]) -> bool {
 
 pub(super) async fn workflow(
     handle: &zephium_app::Handle,
-    composition: &MacosWorkComposition,
+    composition: &NativeWorkComposition,
     profile: ProfileId,
     binding: zephium_app::AgentWorkProfileBinding,
     keys: Vec<zephium_agentic::AgentProviderCredential>,
@@ -1249,6 +1327,7 @@ pub(super) async fn workflow(
         keys: Mutex::new(keys),
         sites: Sites::start()?,
         tab_sign_in: AtomicBool::new(false),
+        decline_changed_followup: AtomicBool::new(false),
     };
     let line = |text: String| {
         let _ = writeln!(std::io::stdout().lock(), "loopback-site: {text}");
@@ -1446,13 +1525,16 @@ pub(super) async fn workflow(
                         "Allow",
                         vec![vec![browse(
                             "/autopost",
-                            "Wait a moment, then report the drafts count",
+                            "Wait a moment, then quote the visible sentence stating the drafts count verbatim",
                         )]],
                     )
                     .await?;
                 let posts = context.sites.posts() - before;
                 let content = says(&run, AUTOPOST_FACT);
-                line(format!("check=autopost content={content} posts={posts}"));
+                let drafts_term = mentions(&run, &["draft"]);
+                let word_three = mentions(&run, &["three"]);
+                let numeric_three = mentions(&run, &["3"]);
+                line(format!("check=autopost content={content} drafts_term={drafts_term} word_three={word_three} numeric_three={numeric_three} posts={posts}"));
                 last = run.state;
                 content && posts == 0
             }
@@ -1582,6 +1664,7 @@ pub(super) async fn workflow(
                 last = run.state;
                 sent.len() == 1
                     && sent[0] == "On my way, ten minutes out"
+                    && held.len() == 1
                     && held.first()
                         == Some(&(
                             Some(WorkConfirmDecisionV1::Approved),
@@ -1614,8 +1697,13 @@ pub(super) async fn workflow(
                     confirms(&run),
                     pages_of(&run)
                 ));
+                let approved_once = confirms(&run)
+                    == vec![(
+                        Some(WorkConfirmDecisionV1::Approved),
+                        WorkStepStatus::Succeeded,
+                    )];
                 last = run.state;
-                made.len() == 1 && made[0] == expected
+                made.len() == 1 && made[0] == expected && approved_once
             }
             Check::NotionWrite => {
                 let before = context.sites.written("/edit/notion/save").len();
@@ -1642,12 +1730,21 @@ pub(super) async fn workflow(
                     confirms(&run),
                     pages_of(&run)
                 ));
+                let approved_once = confirms(&run)
+                    == vec![(
+                        Some(WorkConfirmDecisionV1::AllowedForRun),
+                        WorkStepStatus::Succeeded,
+                    )];
                 last = run.state;
-                saved
-                    .last()
-                    .is_some_and(|t| t.contains("Launch moves to 14 October"))
+                approved_once
+                    && saved
+                        .last()
+                        .is_some_and(|t| t.trim() == "Launch moves to 14 October")
             }
             Check::Changed => {
+                context
+                    .decline_changed_followup
+                    .store(true, Ordering::Relaxed);
                 let before = context.sites.posts();
                 let run = context
                     .run_deciding(
@@ -1661,6 +1758,9 @@ pub(super) async fn workflow(
                         vec![(true, false)],
                     )
                     .await?;
+                context
+                    .decline_changed_followup
+                    .store(false, Ordering::Relaxed);
                 let posts = context.sites.posts() - before;
                 let held = confirms(&run);
                 line(format!(
@@ -1814,6 +1914,36 @@ pub(super) async fn workflow(
                 read
             }
             Check::Apps => {
+                // Windows Work stores isolate origins including their ports.
+                // The initial Account seed was a Work view, so its cookie is
+                // not in the ordinary Browse profile for cross-origin import.
+                // Sign in each other app through its real HTTP response before
+                // resetting decisions and testing the combined entry question.
+                #[cfg(target_os = "windows")]
+                for (site, fixture) in [(BOARD, Site::Board), (THIRD, Site::Third)] {
+                    let before = context.sites.hits(fixture, "/seed").len();
+                    let seed = context
+                        .run(
+                            "Open the app welcome page",
+                            false,
+                            "Allow",
+                            vec![vec![browse_at(
+                                site,
+                                "/seed",
+                                "Open the welcome page and report it",
+                            )]],
+                        )
+                        .await?;
+                    let seeded = context.sites.hits(fixture, "/seed").len() == before + 1
+                        && seed.opened.len() == 1
+                        && seed.opened.iter().all(|page| {
+                            page.yours && page.status == Some(WorkStepStatus::Succeeded)
+                        });
+                    line(format!("apps_seed native_origin_auth_admitted={seeded}"));
+                    if !seeded {
+                        return Err("apps_seed");
+                    }
+                }
                 for site in [SITE, BOARD_SITE, THIRD_SITE] {
                     zephium_app::work_sites::set_standing(handle, profile, site.into(), None)
                         .await
@@ -1889,6 +2019,7 @@ pub(super) async fn workflow(
                 run.asked.len() == 1
                     && read.iter().all(|read| *read)
                     && run.opened.len() == super::work_app_views::VIEWS.len()
+                    && run.opened.iter().all(|page| page.model_calls == Some(0))
                     && calls == 0
             }
             Check::Churn => {

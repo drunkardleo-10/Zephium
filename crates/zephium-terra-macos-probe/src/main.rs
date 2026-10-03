@@ -16,21 +16,28 @@ mod decision_observation;
 #[cfg(target_os = "macos")]
 mod lead_smoke;
 #[cfg(target_os = "macos")]
+mod loopback_support;
+#[cfg(target_os = "macos")]
 mod work_actor;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_app_editors;
+#[cfg(target_os = "macos")]
 mod work_app_views;
 #[cfg(target_os = "macos")]
 mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
+#[cfg(any(target_os = "macos", test))]
 mod work_commerce;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_durable;
+#[cfg(any(target_os = "macos", test))]
 mod work_navigation;
+#[cfg(any(target_os = "macos", test))]
 mod work_route;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_site;
+#[cfg(any(target_os = "macos", test))]
 mod work_sites;
 
 #[cfg(not(target_os = "macos"))]
@@ -254,7 +261,7 @@ fn main() {
         [argument, site] if argument == "--live-public-luna-work-site-inspectable" => site
             .to_str()
             .ok_or(ProbeFailure::Authority)
-            .and_then(work_sites::Site::parse)
+            .and_then(|site| work_sites::Site::parse(site).map_err(|_| ProbeFailure::Authority))
             .and_then(work_application::run_site),
         [argument, directory] if argument == "--cleanup-public-work-artifact" => {
             work_artifact_cleanup::recover(std::path::Path::new(directory))

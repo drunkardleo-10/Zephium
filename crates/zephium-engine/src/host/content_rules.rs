@@ -486,7 +486,7 @@ impl EngineHost {
                 );
             }
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let cancellation = crate::platform::imp::compile_content_policy(
             &self.content_rule_cache,
             job.encoded,
@@ -1198,7 +1198,7 @@ impl EngineHost {
                     }
                 }
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if agent_failure.is_none() {
                 let mut resource_ids: Vec<_> = self
                     .work_resources
@@ -1279,7 +1279,7 @@ impl EngineHost {
             any(target_os = "macos", target_os = "windows")
         ))]
         for (id, registration) in agent_registrations {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(resource) = self.work_resources.get_mut(&id) {
                 let Some(replaced) = resource.replace_content_policy_registration(registration)
                 else {

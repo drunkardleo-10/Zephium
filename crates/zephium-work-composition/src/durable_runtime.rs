@@ -6,8 +6,8 @@ mod findings;
 pub use collection::WorkBrowseCollectionSchema;
 
 use crate::{
-    MacosWorkComposition, PublicReadWorkAccount, PublicReadWorkInvocation, PublicReadWorkObjective,
-    PublicReadWorkSettings,
+    NativeWorkComposition, PublicReadWorkAccount, PublicReadWorkInvocation,
+    PublicReadWorkObjective, PublicReadWorkSettings,
 };
 use std::{
     collections::BTreeSet,
@@ -107,6 +107,95 @@ struct ReadMeasure {
     basis: WorkCostBasis,
 }
 
+/// Only closed tool kinds, refusal reasons and counts survive a failed page. This
+/// explains early ceilings without recording a proposal's target or text.
+#[derive(Default)]
+struct ReadFailureTrace {
+    last_failure: Option<AgentWorkFailure>,
+    last_tool: Option<zephium_agentic::AgentBrowserToolKind>,
+    snapshots: u16,
+    inspections_refused: u16,
+    navigations_refused: u16,
+    actions_refused: u16,
+    last_action_refusal: Option<SemanticActionBindingError>,
+}
+
+impl ReadFailureTrace {
+    fn observe(&mut self, kind: AgentWorkEventKind) {
+        match kind {
+            AgentWorkEventKind::ToolProposed(tool) => {
+                self.last_tool = Some(tool);
+                if tool == zephium_agentic::AgentBrowserToolKind::Snapshot {
+                    self.snapshots = self.snapshots.saturating_add(1);
+                }
+            }
+            AgentWorkEventKind::InspectionRefused => {
+                self.inspections_refused = self.inspections_refused.saturating_add(1);
+            }
+            AgentWorkEventKind::NavigationRefused(_) => {
+                self.navigations_refused = self.navigations_refused.saturating_add(1);
+            }
+            AgentWorkEventKind::ActionProposalRefused(reason) => {
+                self.actions_refused = self.actions_refused.saturating_add(1);
+                self.last_action_refusal = Some(reason);
+            }
+            _ => {}
+        }
+    }
+
+    fn changed_failure(&mut self, failure: Option<AgentWorkFailure>) -> Option<AgentWorkFailure> {
+        let changed = failure != self.last_failure;
+        self.last_failure = failure;
+        failure.filter(|_| changed)
+    }
+
+    fn report(&mut self, snapshot: &zephium_app::RetainedWorkSnapshot, measure: &ReadMeasure) {
+        if let Some(failure) = self.changed_failure(snapshot.failure) {
+            zephium_app::work_trace::record(format_args!(
+                "work: phase=page event=browser_failure cause={failure:?} state={:?} calls={} actions={} snapshots={} inspection_refusals={} navigation_refusals={} action_refusals={} last_action_refusal={:?} last_tool={:?} content=redacted",
+                snapshot.phase,
+                measure.model_calls,
+                measure.native_actions,
+                self.snapshots,
+                self.inspections_refused,
+                self.navigations_refused,
+                self.actions_refused,
+                self.last_action_refusal,
+                self.last_tool,
+            ));
+        }
+    }
+}
+
+/// Consume one queued event once, including events published during final close.
+fn account_read_event(
+    kind: AgentWorkEventKind,
+    measure: &mut ReadMeasure,
+    failure_trace: &mut ReadFailureTrace,
+    settled: &mut WorkUsage,
+    model_in_flight: &mut bool,
+) {
+    measure.observe(kind);
+    failure_trace.observe(kind);
+    match kind {
+        AgentWorkEventKind::ModelActive => *model_in_flight = true,
+        AgentWorkEventKind::ModelSettled {
+            input_tokens,
+            output_tokens,
+            cost_micro_usd,
+            ..
+        } => {
+            *model_in_flight = false;
+            *settled = settled_model_usage(
+                *settled,
+                input_tokens.saturating_add(output_tokens),
+                cost_micro_usd,
+            );
+        }
+        _ => {}
+    }
+}
+
 impl Default for ReadMeasure {
     /// No call yet: nothing charged, so nothing inexact.
     fn default() -> Self {
@@ -191,7 +280,7 @@ impl Drop for NativeGuard {
     }
 }
 
-impl MacosWorkComposition {
+impl NativeWorkComposition {
     /// One genuine model-directed browser responsibility, with no scripted route.
     /// Only a fresh acknowledged durable attempt can enter this adapter. The
     /// original native owner proves resource closure before semantic publication.
@@ -612,6 +701,7 @@ impl MacosWorkComposition {
         let mut ran = false;
         let mut not_ready = false;
         let mut last_phase: Option<RetainedWorkPhase> = None;
+        let mut failure_trace = ReadFailureTrace::default();
         // A person was shown the page and continued it.
         let mut helped = false;
         // While a person holds the page, the run's own deadline stands still.
@@ -644,24 +734,13 @@ impl MacosWorkComposition {
             // This loop exists only while an admitted worker/resource is owned.
             // Draining also releases the controller's bounded event backpressure.
             while let Some(event) = guard.0.take_event() {
-                measure.observe(event.kind());
-                match event.kind() {
-                    AgentWorkEventKind::ModelActive => model_in_flight = true,
-                    AgentWorkEventKind::ModelSettled {
-                        input_tokens,
-                        output_tokens,
-                        cost_micro_usd,
-                        ..
-                    } => {
-                        model_in_flight = false;
-                        settled = settled_model_usage(
-                            settled,
-                            input_tokens.saturating_add(output_tokens),
-                            cost_micro_usd,
-                        );
-                    }
-                    _ => {}
-                }
+                account_read_event(
+                    event.kind(),
+                    &mut measure,
+                    &mut failure_trace,
+                    &mut settled,
+                    &mut model_in_flight,
+                );
                 #[cfg(feature = "public-qualification")]
                 if matches!(
                     event.kind(),
@@ -1123,6 +1202,7 @@ impl MacosWorkComposition {
                 }
             }
             let snapshot = guard.0.snapshot();
+            failure_trace.report(&snapshot, &measure);
             if last_phase != Some(snapshot.phase) {
                 last_phase = Some(snapshot.phase);
                 trace(&format!("phase:{:?}", snapshot.phase));
@@ -1347,7 +1427,30 @@ impl MacosWorkComposition {
                 trace("close:lost");
             }
             if guard.0.is_closed() || settle_retired || lost {
+                // Closing can publish settled calls/refusals after the first
+                // drain. Consume the remaining events before final counters
+                // and cost attribution; take_event removes each event once.
+                while let Some(event) = guard.0.take_event() {
+                    account_read_event(
+                        event.kind(),
+                        &mut measure,
+                        &mut failure_trace,
+                        &mut settled,
+                        &mut model_in_flight,
+                    );
+                }
+                // Shutdown may publish the final capture after the loop's
+                // first sample. Harvest it before settling the attempt and
+                // dropping its person-facing page observer.
+                if let Some((step, url)) = &page {
+                    if let Some(frame) = guard.0.frame() {
+                        if frame.generation != shown_frame {
+                            attempt.record_page_frame(*step, url, Some(frame));
+                        }
+                    }
+                }
                 let snapshot = guard.0.snapshot();
+                failure_trace.report(&snapshot, &measure);
                 // Closed usage comes from the original policy/drain/resource and
                 // terminal ACK join, never the lossy public progress stream.
                 let usage = Some(
@@ -1768,6 +1871,127 @@ mod closed_result_tests {
     use super::*;
 
     #[test]
+    fn final_events_clear_model_reservation_and_are_accounted_once() {
+        let mut measure = ReadMeasure::default();
+        let mut trace = ReadFailureTrace::default();
+        let mut settled = WorkUsage::default();
+        let mut in_flight = false;
+        account_read_event(
+            AgentWorkEventKind::ModelActive,
+            &mut measure,
+            &mut trace,
+            &mut settled,
+            &mut in_flight,
+        );
+        assert!(in_flight);
+        // These events become available only after the ordinary loop drain.
+        let mut final_events = std::collections::VecDeque::from([
+            AgentWorkEventKind::ModelSettled {
+                call: AgentModelCallId::new(1).unwrap(),
+                input_tokens: 100,
+                cached_input_tokens: 0,
+                output_tokens: 20,
+                cost_micro_usd: 50,
+                request_bytes: 100,
+                semantic_bytes: 50,
+                accounting: AgentModelUsageAccounting::Exact,
+                elapsed_millis: 1,
+            },
+            AgentWorkEventKind::ActionActive,
+            AgentWorkEventKind::InspectionRefused,
+        ]);
+        for _ in 0..2 {
+            while let Some(event) = final_events.pop_front() {
+                account_read_event(
+                    event,
+                    &mut measure,
+                    &mut trace,
+                    &mut settled,
+                    &mut in_flight,
+                );
+            }
+        }
+        assert!(!in_flight);
+        assert_eq!(
+            (
+                measure.model_calls,
+                measure.native_actions,
+                trace.inspections_refused
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            (
+                settled.model_tokens,
+                settled.cost_micro_usd,
+                settled.operations
+            ),
+            (120, 50, 1)
+        );
+        assert_eq!(
+            measure.settle(Instant::now(), in_flight).cost_basis,
+            WorkCostBasis::Exact
+        );
+    }
+
+    #[test]
+    fn failure_trace_preserves_closed_refusal_counts_and_reports_same_phase_changes() {
+        use zephium_agent_controller::AgentBrowserProviderError;
+        use zephium_agentic::AgentBrowserToolKind as Tool;
+        let mut trace = ReadFailureTrace::default();
+        trace.observe(AgentWorkEventKind::ToolProposed(Tool::Snapshot));
+        trace.observe(AgentWorkEventKind::InspectionRefused);
+        trace.observe(AgentWorkEventKind::NavigationRefused(
+            AgentProviderNavigationRefusalReason::Unobserved,
+        ));
+        trace.observe(AgentWorkEventKind::ActionProposalRefused(
+            SemanticActionBindingError::AssignmentDenied,
+        ));
+        trace.observe(AgentWorkEventKind::ToolProposed(Tool::Act));
+        assert_eq!(trace.last_tool, Some(Tool::Act));
+        assert_eq!(
+            trace.last_action_refusal,
+            Some(SemanticActionBindingError::AssignmentDenied),
+        );
+        assert_eq!(
+            (
+                trace.snapshots,
+                trace.inspections_refused,
+                trace.navigations_refused,
+                trace.actions_refused,
+            ),
+            (1, 1, 1, 1),
+        );
+        // Preserve the latest closed cause independently of unrelated events
+        // and a saturated count; no proposal target or text is retained.
+        trace.actions_refused = u16::MAX;
+        trace.observe(AgentWorkEventKind::ActionProposalRefused(
+            SemanticActionBindingError::TargetCovered,
+        ));
+        trace.observe(AgentWorkEventKind::InspectionRefused);
+        assert_eq!(trace.actions_refused, u16::MAX);
+        assert_eq!(
+            trace.last_action_refusal,
+            Some(SemanticActionBindingError::TargetCovered),
+        );
+        let limit = AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit);
+        assert_eq!(trace.changed_failure(None), None);
+        assert_eq!(trace.changed_failure(Some(limit)), Some(limit));
+        assert_eq!(trace.changed_failure(Some(limit)), None);
+        // A terminal cause can change without its retained phase changing.
+        assert_eq!(
+            trace.changed_failure(Some(AgentWorkFailure::Shutdown)),
+            Some(AgentWorkFailure::Shutdown),
+        );
+        // A resumed actor may encounter the same cause anew.
+        assert_eq!(trace.changed_failure(None), None);
+        assert_eq!(trace.changed_failure(Some(limit)), Some(limit));
+        trace.inspections_refused = u16::MAX;
+        trace.observe(AgentWorkEventKind::InspectionRefused);
+        assert_eq!(trace.inspections_refused, u16::MAX);
+    }
+
+    #[test]
     fn construction_notes_require_native_timeout_and_distinguish_the_retry() {
         use zephium_agentic::WorkBrowserConstructionAttempt as Attempt;
         use zephium_core::work::runtime::read_note;
@@ -2125,7 +2349,7 @@ async fn configure_decisions(
         WorkDecisionPreference::Recommended => {
             let loaded = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
-                tokio::task::spawn_blocking(load_macos_development_typesafe_credential),
+                tokio::task::spawn_blocking(load_development_typesafe_credential),
             )
             .await
             .map_err(|_| WorkError::Capacity)?;
@@ -2206,14 +2430,14 @@ fn confirmation(pending: &crate::open_objective::site_work::Pending) -> WorkSite
     }
 }
 async fn load_resume_credential() -> Result<AgentProviderCredential, WorkError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        tokio::task::spawn_blocking(zephium_agentic::load_macos_development_openai_credential)
+        tokio::task::spawn_blocking(zephium_agentic::load_development_openai_credential)
             .await
             .map_err(|_| WorkError::Unavailable)?
             .map_err(|_| WorkError::Unavailable)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Err(WorkError::Unavailable)
     }

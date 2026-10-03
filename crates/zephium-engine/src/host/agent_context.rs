@@ -606,6 +606,13 @@ pub(super) struct AgentOwnedContext {
 
 #[cfg(target_os = "windows")]
 impl AgentOwnedContext {
+    #[cfg_attr(
+        target_os = "windows",
+        expect(
+            clippy::too_many_arguments,
+            reason = "Construction carries independent exact native identity, policy, cleanup and resource owners."
+        )
+    )]
     fn new(
         join: ContextJoin,
         capabilities: ContextCapabilities,
@@ -1260,7 +1267,7 @@ impl EngineHost {
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let binding_count = u8::try_from(self.agent_contexts.len()).ok();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let binding_count = binding_count
             .and_then(|count| usize::from(count).checked_add(self.work_resources.len()))
             .and_then(|count| u8::try_from(count).ok());
@@ -1275,7 +1282,7 @@ impl EngineHost {
                 .count(),
         )
         .ok();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let resident_view_count = resident_view_count
             .and_then(|count| {
                 usize::from(count).checked_add(
@@ -1298,7 +1305,7 @@ impl EngineHost {
                 count.checked_add(usize::from(pending))
             })
             .and_then(|count| u8::try_from(count).ok());
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let pending_operations = pending_operations
             .and_then(|count| {
                 usize::from(count).checked_add(
@@ -1340,7 +1347,7 @@ impl EngineHost {
                 .count();
         #[cfg(not(all(target_os = "macos", feature = "native-agentic-foreground-probe")))]
         let visible_surfaces = 0usize;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let visible_surfaces = visible_surfaces
             + self
                 .work_resources
@@ -1368,7 +1375,7 @@ impl EngineHost {
             .agent_contexts
             .iter()
             .all(|(id, binding)| binding.is_consistent_with_key(*id));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let bindings_consistent = bindings_consistent
             && self
                 .work_resources
@@ -4960,6 +4967,17 @@ impl EngineHost {
         &self,
         profile: zephium_core::ids::ProfileId,
     ) -> bool {
+        self.has_windows_agent_view_or_transfer_for_profile(profile)
+            || self
+                .work_resources
+                .values()
+                .any(|resource| resource.profile() == profile)
+    }
+
+    pub(super) fn has_windows_agent_view_or_transfer_for_profile(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+    ) -> bool {
         self.agent_contexts
             .values()
             .any(|binding| binding.profile() == profile)
@@ -4970,8 +4988,9 @@ impl EngineHost {
     }
 
     pub(super) fn force_shutdown_agent_contexts(&mut self) -> bool {
-        let shell_was_quiescent =
-            self.agent_contexts.is_empty() && self.agent_cookie_transfers.is_empty();
+        let shell_was_quiescent = self.force_shutdown_work_resources()
+            && self.agent_contexts.is_empty()
+            && self.agent_cookie_transfers.is_empty();
         let transfers = std::mem::take(&mut self.agent_cookie_transfers);
         for (id, pending) in transfers {
             let binding_detached = self

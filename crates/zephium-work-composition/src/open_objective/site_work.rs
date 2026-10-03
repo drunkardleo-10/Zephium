@@ -434,6 +434,23 @@ pub(crate) fn classify(
                     )
                 {
                     SiteEffect::Read
+                } else if composer(node)
+                    && (node.role() == SemanticRole::Textbox || node.editable_structure().is_some())
+                    && !pays(node, snapshot)
+                    && !subtree(snapshot, region_index(node, snapshot))
+                        .iter()
+                        .any(|part| {
+                            part.role() == SemanticRole::Button
+                                && matches!(
+                                    commit_words(&label(part)),
+                                    Some(Consequence::Purchase | Consequence::Destructive)
+                                )
+                        })
+                {
+                    // A named message composer commits a communication even
+                    // when a compact look omits Send. Unrelated page buttons
+                    // must not relabel Enter as saving or purchasing.
+                    SiteEffect::Commit(Consequence::Communication)
                 } else {
                     // Enter commits what the region's own control would.
                     let region = subtree(snapshot, region_index(node, snapshot));
@@ -658,13 +675,18 @@ pub(crate) fn preview(
     };
     let text = match consequence {
         Consequence::Edit => action.fill_text().map(|text| text.as_str().to_owned()),
-        Consequence::Communication => region
-            .iter()
-            .filter(|part| {
-                matches!(part.role(), SemanticRole::Textbox | SemanticRole::Searchbox)
-                    || part.editable_structure().is_some()
+        Consequence::Communication => (action.kind() == SemanticActionKind::Press)
+            .then(|| value_text(node))
+            .flatten()
+            .or_else(|| {
+                region
+                    .iter()
+                    .filter(|part| {
+                        part.role() == SemanticRole::Textbox || part.editable_structure().is_some()
+                    })
+                    .filter(|part| !in_search(part, snapshot))
+                    .find_map(value_text)
             })
-            .find_map(value_text)
             .map(str::to_owned),
         _ => None,
     }
@@ -1399,6 +1421,16 @@ mod tests {
             SiteEffect::Draft
         );
         assert_eq!(
+            effect_key(
+                &apps,
+                2,
+                SemanticActionKind::Press,
+                Some(SemanticPressKey::Enter),
+            ),
+            SiteEffect::Commit(Consequence::Communication),
+            "a named composer still sends when its Send button is outside the look",
+        );
+        assert_eq!(
             effect(&apps, 3, SemanticActionKind::Click),
             SiteEffect::Draft
         );
@@ -1467,6 +1499,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn message_names_do_not_lower_purchase_or_destructive_enter_effects() {
+        for (control, consequence) in [
+            ("Pay", Consequence::Purchase),
+            ("Delete", Consequence::Destructive),
+        ] {
+            let look = page(vec![
+                json!({"k":1,"r":"document","o":16}),
+                json!({"k":2,"p":0,"r":"textbox","n":"Message","o":10}),
+                json!({"k":3,"p":0,"r":"button","n":control,"o":1}),
+            ]);
+            assert_eq!(
+                effect_key(
+                    &look,
+                    2,
+                    SemanticActionKind::Press,
+                    Some(SemanticPressKey::Enter)
+                ),
+                SiteEffect::Commit(consequence),
+            );
+        }
+    }
+
     fn booking(total: &str) -> SemanticObservation {
         page(vec![
             json!({"k":1,"r":"document","o":16,"fc":true}),
@@ -1505,6 +1560,81 @@ mod tests {
         .actions()[0]
             .prepare(snapshot)
             .unwrap()
+    }
+
+    #[test]
+    fn a_compact_slack_composer_enter_holds_its_own_draft_and_requires_exact_approval() {
+        let look = |draft: &str| {
+            page(vec![
+                json!({"k":1,"r":"document","o":16,"fc":true}),
+                json!({"k":2,"p":0,"r":"searchbox","n":"Search Slack","o":10,"fc":true,
+                "v":{"k":"text","value":"older search"},"b":{"x":1,"y":1,"w":200,"h":30}}),
+                json!({"k":3,"p":0,"r":"heading","l":1,"n":"#design","fc":true}),
+                // A viewport can omit Send while retaining Slack's rich composer.
+                json!({"k":4,"p":0,"r":"textbox","n":"Message to design","o":11,"fs":1,"es":[1,2,false],"fc":true,
+                "v":{"k":"text","value":draft},"b":{"x":1,"y":100,"w":400,"h":60}}),
+                json!({"k":5,"p":0,"r":"button","n":"Save for later","o":1,"fc":true}),
+            ])
+        };
+        let enter = |observation: &SemanticObservation| {
+            let snapshot = &observation.frames()[0];
+            let proposal = SemanticActionProposal::try_new(
+                SemanticActionIntent::Press {
+                    target: snapshot.nodes()[3].reference(),
+                    key: SemanticPressKey::Enter,
+                },
+                SemanticEffectClass::Communication,
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::PageChanged,
+                SemanticSettleBudget::try_new(2000).unwrap(),
+            )
+            .unwrap();
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).unwrap(),
+                observation,
+                &[snapshot.frame().clone()],
+                vec![proposal],
+            )
+            .unwrap()
+            .actions()[0]
+                .prepare(snapshot)
+                .unwrap()
+        };
+        let gate = Arc::new(SiteGate::new("slack.com".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        let original = look("testing agentic browsing on Windows");
+        assert!(matches!(
+            policy.assess(&enter(&original), &original),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        let pending = gate.pending().unwrap().preview;
+        assert_eq!(pending.consequence, Consequence::Communication);
+        assert_eq!(
+            pending.text.as_deref(),
+            Some("testing agentic browsing on Windows")
+        );
+        gate.approve(false).unwrap();
+        // A changed draft consumes the old approval without permitting Enter.
+        let changed = look("changed draft");
+        assert!(matches!(
+            policy.assess(&enter(&changed), &changed),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert_eq!(gate.take_receipt(), Some(Receipt::NotSent));
+        assert_eq!(
+            gate.pending().unwrap().preview.text.as_deref(),
+            Some("changed draft")
+        );
+        gate.approve(false).unwrap();
+        assert!(policy.assess(&enter(&changed), &changed).is_ok());
+        assert!(matches!(
+            policy.assess(&enter(&changed), &changed),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert_eq!(gate.finish(), Some(Receipt::Unverified));
     }
 
     #[test]

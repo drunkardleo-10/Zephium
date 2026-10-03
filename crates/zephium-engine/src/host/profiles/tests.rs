@@ -337,11 +337,11 @@ fn successful_windows_profile_erasure_restores_the_shutdown_map_invariant() {
     );
     assert!(
         !windows_profile_provenance_presence_is_consistent(false, false, true, false),
-        "an observer retained after transferring the other obligations must block shutdown"
+        "an observer without its original retained HANDLE must block shutdown"
     );
     assert!(
         windows_profile_provenance_presence_is_consistent(false, false, false, false),
-        "the exact exit callback releases the final observer-only entry"
+        "the exact exit callback releases the retained process and observer together"
     );
 
     assert_eq!(
@@ -356,6 +356,155 @@ fn successful_windows_profile_erasure_restores_the_shutdown_map_invariant() {
         transferred_erasure_exit_settlement(41, 41, true, false, false),
         TransferredErasureExitSettlement::Pending
     );
+}
+
+#[test]
+fn windows_erasure_shutdown_requires_the_original_retained_process_pair() {
+    assert!(windows_erasure_provenance_is_consistent(
+        false,
+        false,
+        true,
+        Some(41),
+        Some((41, false)),
+    ));
+    for (environment, version, tombstone, process, observer) in [
+        (false, false, true, None, Some((41, false))),
+        (false, false, true, Some(41), None),
+        (false, false, true, Some(42), Some((41, false))),
+        (false, false, true, Some(41), Some((41, true))),
+        (false, false, false, Some(41), Some((41, false))),
+        (true, false, true, Some(41), Some((41, false))),
+        (false, true, true, Some(41), Some((41, false))),
+    ] {
+        assert!(!windows_erasure_provenance_is_consistent(
+            environment,
+            version,
+            tombstone,
+            process,
+            observer,
+        ));
+    }
+    // Pending erasure is a distinct owned state, not a general exemption for
+    // an orphaned observer or an incomplete ordinary profile environment.
+    assert!(!windows_profile_provenance_presence_is_consistent(
+        false, false, true, false
+    ));
+    assert!(!windows_profile_provenance_presence_is_consistent(
+        false, true, true, false
+    ));
+}
+
+#[test]
+fn transferred_erasure_exit_waits_for_the_original_handle_and_shutdown_owner() {
+    use TransferredErasureExitSettlement::*;
+    assert_eq!(
+        transferred_erasure_handle_settlement(Proven, Some((41, true)), 41, false),
+        Proven
+    );
+    assert_eq!(
+        transferred_erasure_handle_settlement(Proven, Some((41, false)), 41, false),
+        Pending
+    );
+    assert_eq!(
+        transferred_erasure_handle_settlement(Proven, Some((42, true)), 41, false),
+        Invalid
+    );
+    assert_eq!(
+        transferred_erasure_handle_settlement(Proven, None, 41, false),
+        Invalid
+    );
+    // The global worker already owns the original HANDLE/proof after drainage;
+    // a queued late callback cannot invent missing provenance or take it back.
+    assert_eq!(
+        transferred_erasure_handle_settlement(Proven, None, 41, true),
+        Pending
+    );
+    for observed in [Pending, Stale, Invalid] {
+        assert_eq!(
+            transferred_erasure_handle_settlement(observed, Some((41, true)), 41, false),
+            observed
+        );
+    }
+}
+
+#[test]
+fn delayed_erasure_handle_signal_releases_capacity_without_another_exit_event() {
+    let profiles: Vec<_> = (0..MAX_NATIVE_PROFILE_PROCESS_GROUPS)
+        .map(|_| ProfileId::generate())
+        .collect();
+    let erased = profiles[0];
+    let requested = ProfileId::generate();
+    let mut retained: HashSet<_> = profiles.into_iter().collect();
+    assert!(!profile_process_group_capacity_allows(
+        retained.iter().copied(),
+        requested
+    ));
+
+    // The Environment5 proof already arrived; the original HANDLE has not
+    // signalled yet. Admission must continue counting that exact group.
+    assert!(!windows_erasure_pair_is_reapable(
+        false,
+        false,
+        true,
+        Some((41, false)),
+        Some((41, false, true)),
+    ));
+    assert!(!profile_process_group_capacity_allows(
+        retained.iter().copied(),
+        requested
+    ));
+
+    // Without another event, the next admission may release only the exact
+    // tombstoned pair after the original handle signals.
+    if windows_erasure_pair_is_reapable(
+        false,
+        false,
+        true,
+        Some((41, true)),
+        Some((41, false, true)),
+    ) {
+        retained.remove(&erased);
+    }
+    assert!(profile_process_group_capacity_allows(
+        retained.iter().copied(),
+        requested
+    ));
+    for (environment, version, tombstone, process, observer) in [
+        (
+            false,
+            false,
+            true,
+            Some((41, true)),
+            Some((41, false, false)),
+        ),
+        (false, false, true, Some((41, true)), Some((41, true, true))),
+        (
+            false,
+            false,
+            true,
+            Some((42, true)),
+            Some((41, false, true)),
+        ),
+        (false, false, true, None, Some((41, false, true))),
+        (false, false, true, Some((41, true)), None),
+        (
+            false,
+            false,
+            false,
+            Some((41, true)),
+            Some((41, false, true)),
+        ),
+        (true, false, true, Some((41, true)), Some((41, false, true))),
+        (false, true, true, Some((41, true)), Some((41, false, true))),
+    ] {
+        assert!(!windows_erasure_pair_is_reapable(
+            environment,
+            version,
+            tombstone,
+            process,
+            observer
+        ));
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]

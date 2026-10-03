@@ -15,6 +15,7 @@ const HEADINGS: [&str; 3] = [
     "Importing and Exporting Components",
 ];
 const MIDDLE_DEPARTURE: &str = "Components: UI building blocks";
+#[cfg(target_os = "macos")]
 pub(super) const OBJECTIVE: &str = "Follow exactly this ordered public React guide route using current delivered headings. On Quick Start, navigate to https://react.dev/learn/your-first-component. On Your First Component, verify the distinct Components: UI building blocks heading is also present, then navigate to https://react.dev/learn/importing-and-exporting-components. Only on Importing and Exporting Components call extract with initial scope and trusted schema 1, returning destination_heading as the complete exact Importing and Exporting Components heading with exactly one current heading-text citation. The host independently verifies all three document checkpoints. Never skip or repeat a checkpoint, extract early, follow redirects, act, read, expand a subtree, paraphrase or modify anything. Earlier document evidence is retired after each navigation.";
 
 pub(super) fn route() -> Result<AgentNavigationRoute, AgentWorkFailure> {

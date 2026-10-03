@@ -194,6 +194,7 @@ mod tests {
         AgentWorkEventKind::ModelSettled {
             call: AgentModelCallId::new(1).unwrap(),
             input_tokens,
+            cached_input_tokens: 0,
             output_tokens,
             cost_micro_usd,
             request_bytes: 100,

@@ -25,10 +25,10 @@ use zephium_agentic::{
     ContextJoin, ContextNavigationReplacement, ContextNavigationTarget, ContextOperationKind,
     ContextRendererLoss,
 };
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure};
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 use zephium_agentic::{
     SemanticActionExecutionInstant, SemanticActionNativeFailure, SemanticActionNativeSettlement,
 };
@@ -43,18 +43,18 @@ pub(crate) use foreground_probe::AgentForegroundProbeTask;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 #[path = "agent_work_resource_probe_port.rs"]
 pub(crate) mod resource_witness;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[path = "work_resource_port.rs"]
 mod work_resource;
 #[cfg(all(
-    target_os = "macos",
+    any(target_os = "macos", target_os = "windows"),
     feature = "native-agentic-work-lifetime-diagnostic"
 ))]
 #[path = "work_resource_failure_diagnostic.rs"]
 pub(crate) mod work_resource_failure_diagnostic;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use work_resource::{work_browser_monotonic_deadline, work_browser_monotonic_now};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use work_resource::{
     WorkActionTask, WorkHistoryBackTask, WorkLifecycleTask, WorkNavigationTask,
     WorkNotificationPermit, WorkObservationTask, WorkResourceGuard,
@@ -164,7 +164,7 @@ struct AgentPortAdmission {
     fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
     fatal_reported: AtomicBool,
     lineage_failed: Option<Arc<AtomicBool>>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     work: Mutex<work_resource::WorkIngress>,
 }
 
@@ -176,7 +176,7 @@ impl AgentPortAdmission {
             fatal,
             fatal_reported: AtomicBool::new(false),
             lineage_failed: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             work: Mutex::new(work_resource::WorkIngress::default()),
         }
     }
@@ -409,7 +409,7 @@ impl AgentPortAdmission {
     // Only the exact native shutdown task may attest its own sealed cohort.
     // Its permit is still held; every other request/capture must be absent.
     fn verify_native_shutdown(&self, snapshot: ContextNativeResourceSnapshot) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if !self.work_is_absent() {
             return;
         }
@@ -462,7 +462,7 @@ impl AgentPortAdmission {
     // Linearizes retirement with old read-only audit admission. An old port
     // never unseals, changes its sink, or audits a successor's native cohort.
     fn retire_for_successor(&self) -> Result<(), ContextPortFailure> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if !self.work_is_absent() {
             return Err(ContextPortFailure::ProfileBusy);
         }
@@ -578,7 +578,7 @@ pub(crate) struct AgentContextTask {
 }
 
 /// Move-only native capture task sharing the context port's global admission.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(crate) struct AgentScreenshotTask {
     request: Option<SemanticScreenshotNativeRequest>,
     completion: Option<SemanticScreenshotNativeCompletion>,
@@ -588,7 +588,7 @@ pub(crate) struct AgentScreenshotTask {
 }
 
 /// Move-only semantic action task sharing the context port's global admission.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(crate) struct AgentActionTask {
     request: Option<SemanticActionNativeRequest>,
     completion: Option<SemanticActionNativeCompletion>,
@@ -596,7 +596,7 @@ pub(crate) struct AgentActionTask {
     permit: AgentTaskPermit,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 impl AgentActionTask {
     fn new(
         request: SemanticActionNativeRequest,
@@ -623,7 +623,7 @@ impl AgentActionTask {
         self.admitted_at
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn callback_guard(&self) -> AgentScreenshotCallbackGuard {
         AgentScreenshotCallbackGuard {
             admission: self.permit.admission.clone(),
@@ -685,7 +685,7 @@ impl AgentActionTask {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 impl Drop for AgentActionTask {
     fn drop(&mut self) {
         let Some(request) = self.request.take() else {
@@ -705,7 +705,7 @@ impl Drop for AgentActionTask {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 impl AgentScreenshotTask {
     fn new(
         request: SemanticScreenshotNativeRequest,
@@ -738,7 +738,7 @@ impl AgentScreenshotTask {
         self.admitted_at
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn callback_guard(&self) -> AgentScreenshotCallbackGuard {
         AgentScreenshotCallbackGuard {
             admission: self.permit.admission.clone(),
@@ -780,7 +780,7 @@ impl AgentScreenshotTask {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 impl Drop for AgentScreenshotTask {
     fn drop(&mut self) {
         if self.request.take().is_none() && self.completion.is_none() {
@@ -1168,7 +1168,7 @@ impl AgentPortGroup {
             .members
             .lock()
             .map_err(|_| ContextPortFailure::Shutdown)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if members.iter().any(|member| !member.work_is_absent()) {
             return Err(ContextPortFailure::ProfileBusy);
         }
@@ -1626,20 +1626,30 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     fn latest_work_frame(
         &self,
         resource: &zephium_agentic::WorkBrowserResourceJoin,
     ) -> Option<Arc<zephium_agentic::WorkBrowserFrame>> {
         crate::host::work_frames::latest(resource.identity().context())
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn supports_work_resource_history_back(&self) -> bool {
-        let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
-        version.majorVersion >= 26
+        #[cfg(target_os = "macos")]
+        {
+            let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+            version.majorVersion >= 26
+        }
+        #[cfg(target_os = "windows")]
+        {
+            true
+        }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn work_resource_act(
         &self,
         request: zephium_agentic::WorkBrowserActionRequest,
@@ -1647,7 +1657,7 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     ) -> zephium_agentic::WorkBrowserActionDispatch {
         self.schedule_work_action(request, completion)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn work_resource_navigate(
         &self,
         request: zephium_agentic::WorkBrowserNavigationRequest,
@@ -1655,7 +1665,7 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     ) -> zephium_agentic::WorkBrowserNavigationDispatch {
         self.schedule_work_navigation(request, completion)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn work_resource_back(
         &self,
         request: zephium_agentic::WorkBrowserHistoryBackRequest,
@@ -1663,7 +1673,7 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     ) -> zephium_agentic::WorkBrowserHistoryBackDispatch {
         self.schedule_work_history_back(request, completion)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn work_resource_lifecycle(
         &self,
         request: zephium_agentic::WorkBrowserResourceRequest,
@@ -1671,7 +1681,7 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     ) -> zephium_agentic::WorkBrowserResourceDispatch {
         self.schedule_work_lifecycle(request, completion)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn work_resource_observe(
         &self,
         request: zephium_agentic::WorkBrowserObservationRequest,
@@ -3127,6 +3137,7 @@ mod tests {
             }))
             .expect("port");
         let invocation = semantic_invocation(FrameId::MAIN);
+        #[cfg(target_os = "macos")]
         let correlation = invocation.correlation();
         let dispatch = port.invoke_semantic(invocation);
         #[cfg(target_os = "macos")]
@@ -3312,7 +3323,7 @@ mod tests {
         assert_eq!(fatal.load(Ordering::Relaxed), 1);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn rejected_native_callback_seals_admission_and_reports_fatal_once() {
         let fatal = Arc::new(AtomicUsize::new(0));
@@ -3344,7 +3355,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn retained_callback_guard_emits_only_closed_unsolicited_events() {
         let prior = construction_request().context();

@@ -121,6 +121,12 @@ const rangeSetStart = typeof Range === "function" ? Range.prototype.setStart : n
 const rangeSetEnd = typeof Range === "function" ? Range.prototype.setEnd : null;
 const selectionRemoveAllRanges = typeof Selection === "function" ? Selection.prototype.removeAllRanges : null;
 const selectionAddRange = typeof Selection === "function" ? Selection.prototype.addRange : null;
+const selectionAnchorGetter = typeof Selection === "function" ? getter(Selection.prototype,"anchorNode") : null;
+const selectionFocusGetter = typeof Selection === "function" ? getter(Selection.prototype,"focusNode") : null;
+const eventTargetGetter = getter(Event.prototype,"target");
+const eventComposedPath = Event.prototype.composedPath;
+const eventStopImmediatePropagation = Event.prototype.stopImmediatePropagation;
+const shadowElementFromPoint = typeof ShadowRoot === "function" ? ShadowRoot.prototype.elementFromPoint : null;
 const nativeKeyboardEvent = globalThis.KeyboardEvent;
 const formRequestSubmit =
 typeof HTMLFormElement === "function" ? HTMLFormElement.prototype.requestSubmit : null;
@@ -2499,6 +2505,15 @@ const y = mathMax(0, mathMin(viewport.height - 1, mathRound(candidate[1])));
 let hit;
 try {
 hit = apply(documentElementFromPoint, document, [x, y]);
+if (cdpPreparing && typeof shadowElementFromPoint === "function") {
+for (let depth=0; hit!==null && depth<MAX_TREE_DEPTH; depth+=1) {
+const root=read(elementShadowGetter,hit);
+if (root===null || root===undefined) break;
+const inner=apply(shadowElementFromPoint,root,[x,y]);
+if (inner===null || inner===hit) break;
+hit=inner;
+}
+}
 } catch (_) {
 return null;
 }
@@ -2796,7 +2811,135 @@ if (descriptor.contentEditable === true && descriptor.plainTextEditable === true
 if (descriptor.contentEditable === true && descriptor.richText === true) return 4;
 return 0;
 }
-function runRichFill(target, value, revalidate, settled) {
+let cdpPreparing = false;
+let pendingCdpAction = null;
+function cdpKey(key, up, modifiers = 0) {
+const payload = {type:up ? "keyUp" : "keyDown",key:key[0],code:key[1],windowsVirtualKeyCode:key[2],modifiers};
+if (!up && key[0] === "Enter") {
+payload.text = "\r";
+payload.unmodifiedText = "\r";
+}
+return {k:"key",p:payload};
+}
+function startCdpInputs(request, steps, revalidate, finish, cleanup = () => {}) {
+if (pendingCdpAction !== null || steps.length > 8192 || steps.length === 0) return actionFault("unsupported_interaction");
+pendingCdpAction = {attempt:request.a,index:0,steps,revalidate,finish,cleanup};
+return nextCdpAction(request.a, 0, false);
+}
+function guardedCdpInputs(request,target,steps,revalidate,finish) {
+let refused=false;
+let started=false;
+const events=request.k==="click" ? ["pointerdown","mousedown","pointerup","mouseup","click"] : ["keydown","keypress","keyup"];
+const guard=event => {
+try {
+const path=typeof eventComposedPath==="function" ? apply(eventComposedPath,event,[]) : null;
+const recipient=path!==null && path.length>0 ? path[0] : read(eventTargetGetter,event);
+if (refused || !revalidate(started) || (target!==document && !composedContains(target,recipient))) {
+refused=true;
+apply(eventPreventDefault,event,[]);
+apply(eventStopImmediatePropagation,event,[]);
+} else started=true;
+} catch (_) {
+refused=true;
+apply(eventPreventDefault,event,[]);
+apply(eventStopImmediatePropagation,event,[]);
+}
+};
+const cleanup=() => {for (const name of events) apply(eventTargetRemoveEventListener,globalThis,[name,guard,true]);};
+try {
+for (const name of events) apply(eventTargetAddEventListener,globalThis,[name,guard,true]);
+const result=startCdpInputs(request,steps,() => !refused && revalidate(started),() => refused ? actionFault("applied_unverified_postcondition") : finish(),cleanup);
+if (!result.startsWith("P2:")) cleanup();
+return result;
+} catch (_) {cleanup();return actionFault("unsupported_interaction");}
+}
+function cdpTargetGuard(target,request,point,keyboard) {
+const ancestry=cdpAncestry(target);
+return started => {
+if (resolveKeyAtGeneration(request.t,request.g)!==target) return false;
+if (ancestry===null || !ancestry()) return false;
+const current=runtimeDescriptor(target,request.g);
+if (current===null) return false;
+const expected=request.f;
+if (started) {
+if (expected.a!==current.a || expected.r!==current.r || expected.o!==current.o || expected.q!==current.q || expected.n!==current.n) return false;
+} else if (!descriptorMatches({...expected,s:expected.s&~64},{...current,s:current.s&~64})) return false;
+if (target!==document) {
+const descriptor=classify(target);
+if (descriptor===null || disabledState(target,false) || credentialField(target,descriptor,attribute(target,"aria-label",512)||"")) return false;
+if (keyboard && !focusedElements().has(target)) return false;
+if (!keyboard && !started) {
+const currentPoint=actionPoint(target,elementRect(target),boundedViewport());
+if (currentPoint===null || currentPoint.x!==point.x || currentPoint.y!==point.y) return false;
+}
+}
+return true;
+};
+}
+function cdpAncestry(target) {
+if (target===document) return () => true;
+const root=apply(nodeGetRoot,target,[]);
+const chain=[];
+let current=target;
+for (let depth=0;depth<MAX_TREE_DEPTH;depth+=1) {
+if (current===document) return () => read(nodeConnectedGetter,target)===true && apply(nodeGetRoot,target,[])===root && chain.every(([node,next,shadow]) => shadow ? read(shadowHostGetter,node)===next && read(elementShadowGetter,next)===node : read(nodeParentGetter,node)===next);
+const parent=read(nodeParentGetter,current);
+if (parent!==null) {chain.push([current,parent,false]);current=parent;continue;}
+if (nodeType(current)!==11 || shadowHostGetter===null) return null;
+const host=read(shadowHostGetter,current);
+if (host===null || host===undefined || read(elementShadowGetter,host)!==current) return null;
+chain.push([current,host,true]);current=host;
+}
+return null;
+}
+function cdpRichSelectionInside(target) {
+const selection=apply(documentGetSelection,document,[]);
+return read(documentActiveGetter,document)===target && composedContains(target,read(selectionAnchorGetter,selection)) && composedContains(target,read(selectionFocusGetter,selection));
+}
+function nextCdpAction(attempt, index, abort) {
+const pending = pendingCdpAction;
+if (pending === null || pending.attempt !== attempt || pending.index !== index || typeof abort !== "boolean") return actionFault("invalid_request");
+try {
+if (abort || (index < pending.steps.length && !pending.revalidate())) {
+pendingCdpAction = null;
+pending.cleanup();
+busy = false;
+return actionFault("applied_unverified_beforeinput_revalidation");
+}
+if (index === pending.steps.length) {
+pendingCdpAction = null;
+pending.cleanup();
+const result = pending.finish();
+if (typeof result === "string") { busy = false; return result; }
+return apply(promiseThen,result,[(result) => {busy=false;return result;},() => {busy=false;return actionFault("applied_unverified_postcondition");}]);
+}
+const step = pending.steps[index];
+pending.index += 1;
+return "P2:" + jsonStringify({a:attempt,i:index,k:step.k,p:step.p});
+} catch (_) {
+pendingCdpAction = null;
+try { pending.cleanup(); } catch (_) {}
+busy = false;
+return actionFault("applied_unverified_postcondition");
+}
+}
+function prepareCdpAction(encoded) {
+if (busy || pendingCdpAction !== null) return actionFault("busy");
+const request = parseRequest(encoded);
+if (request === null || request.o !== "action_execute") return actionFault("invalid_request");
+busy = true;
+cdpPreparing = true;
+try {
+const result = runAction(request);
+if (typeof result === "string") {
+if (!result.startsWith("P2:")) busy = false;
+return result;
+}
+return apply(promiseThen,result,[(result) => {busy=false;return result;},() => {busy=false;return actionFault("internal");}]);
+} catch (_) { busy=false;return actionFault("internal"); }
+finally { cdpPreparing=false; }
+}
+function runRichFill(target, value, revalidate, settled, finish, request) {
 if ([htmlElementFocus, documentExecCommand, documentGetSelection, documentCreateRange,
 rangeSelectNodeContents, selectionRemoveAllRanges, selectionAddRange, eventTargetAddEventListener,
 eventTargetRemoveEventListener, eventPreventDefault].some(call => typeof call !== "function")) {
@@ -2820,13 +2963,45 @@ apply(selectionRemoveAllRanges, selection, []);
 apply(selectionAddRange, selection, [range]);
 } catch (_) { return "unsupported_interaction"; }
 let refused = false;
+let nativeCleanup = null;
 const guard = event => {
 try {
-if (!revalidate()) { refused = true; apply(eventPreventDefault, event, []); }
+let selectionInside=true;
+if (cdpPreparing || pendingCdpAction!==null) {
+selectionInside=cdpRichSelectionInside(target);
+}
+if (!revalidate() || !selectionInside) { refused = true; apply(eventPreventDefault, event, []); }
 } catch (_) { refused = true; apply(eventPreventDefault, event, []); }
 };
 try {
 apply(eventTargetAddEventListener, target, ["beforeinput", guard]);
+if (cdpPreparing) {
+const recipientGuard=event => {
+try {
+if (!refused && revalidate() && cdpRichSelectionInside(target) && composedContains(target,read(eventTargetGetter,event))) return;
+} catch (_) {}
+refused=true;
+apply(eventPreventDefault,event,[]);
+apply(eventStopImmediatePropagation,event,[]);
+};
+nativeCleanup = () => apply(eventTargetRemoveEventListener,globalThis,["beforeinput",recipientGuard,true]);
+apply(eventTargetAddEventListener,globalThis,["beforeinput",recipientGuard,true]);
+const steps = [];
+const lines = apply(stringSplit, value, ["\n"]);
+if (value === "") steps.push(cdpKey(["Backspace","Backspace",8],false),cdpKey(["Backspace","Backspace",8],true));
+for (let index=0;index<lines.length;index+=1) {
+if (index>0) steps.push(cdpKey(["Enter","Enter",13],false,8),cdpKey(["Enter","Enter",13],true,8));
+if (lines[index]!=="") steps.push({k:"text",p:{text:lines[index]}});
+}
+const cleanup = () => {
+nativeCleanup();
+apply(eventTargetRemoveEventListener,target,["beforeinput",guard]);
+};
+const exact = () => !refused && revalidate() && cdpRichSelectionInside(target);
+const prepared = startCdpInputs(request,steps,exact,() => finish(settled() ? "ok" : "applied_unverified_postcondition"),cleanup);
+if (!prepared.startsWith("P2:")) cleanup();
+return prepared;
+}
 const lines = apply(stringSplit, value, ["\n"]);
 if (value === "") {
 apply(documentExecCommand, document, ["delete", false, null]);
@@ -2839,9 +3014,13 @@ return index === 0 ? "unsupported_interaction" : "applied_unverified_mutation";
 }
 }
 } catch (_) {
+if (cdpPreparing) {
+try { if (nativeCleanup!==null) nativeCleanup(); } catch (_) {}
+try { apply(eventTargetRemoveEventListener,target,["beforeinput",guard]); } catch (_) {}
+}
 return refused ? "applied_unverified_beforeinput_revalidation" : "applied_unverified_mutation";
 } finally {
-try { apply(eventTargetRemoveEventListener, target, ["beforeinput", guard]); } catch (_) {}
+if (!cdpPreparing) try { apply(eventTargetRemoveEventListener, target, ["beforeinput", guard]); } catch (_) {}
 }
 if (refused) return "applied_unverified_beforeinput_revalidation";
 try {
@@ -2849,7 +3028,7 @@ if (!settled()) return "applied_unverified_postcondition";
 } catch (_) { return "applied_unverified_postcondition"; }
 return "ok";
 }
-function runFixedFill(target, descriptor, request) {
+function runFixedFill(target, descriptor, request, finish) {
 const value = request.z;
 const kind = fillControlKind(descriptor, value);
 let parentAtAdmission = null;
@@ -2872,7 +3051,7 @@ if (!validActionText(value)) return "unsupported_interaction";
 const label = attribute(target, "aria-label", 512) || "";
 let checks = 0;
 const sameLabeled = () => sameTarget() && (attribute(target, "aria-label", 512) || "") === label;
-return runRichFill(target, value, () => (checks++ < 1 ? revalidate() : sameLabeled()), sameLabeled);
+return runRichFill(target, value, () => (checks++ < 1 ? revalidate() : sameLabeled()), sameLabeled, finish, request);
 }
 const valueSetter = kind === 1 ? inputValueSetter :
 kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
@@ -3100,6 +3279,14 @@ const before = sampleVisiblePageDialogs();
 if (!arrayIsArray(before)) return actionFault(before);
 pendingDialogSample = {a: request.a, i: request.i, g: request.g, before};
 }
+if (cdpPreparing) {
+const validate = cdpTargetGuard(target,request,point,false);
+const steps = ["mousePressed","mouseReleased"].map((type,index) => ({k:"mouse",p:{type,x:point.x,y:point.y,button:"left",buttons:index===0 ? 1 : 0,clickCount:1}}));
+return guardedCdpInputs(request,target,steps,validate,() => {
+const result = encodeActionEvidence(request,"engine_native_input",readiness,geometry,viewport,point,delta);
+return pendingDialogSample===null ? result : finishActionRendering(result,pendingDialogSample.before);
+});
+}
 try {
 pointerDown(target, point);
 apply(htmlElementClick, target, []);
@@ -3110,6 +3297,7 @@ return actionFault("unsupported_interaction");
 const result = encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
 return pendingDialogSample === null ? result : finishActionRendering(result, pendingDialogSample.before);
 } else if (request.k === "fill") {
+const nativeFill = cdpPreparing && fillControlKind(descriptor,request.z)>=3;
 const finishFill = (result) => {
 if (result !== "ok") {
 return actionFault(result);
@@ -3136,7 +3324,7 @@ return actionFault("applied_unverified_postcondition");
 }
 return encodeActionEvidence(
 request,
-"fixed_semantic_recipe",
+nativeFill ? "engine_native_input" : "fixed_semantic_recipe",
 "form",
 geometry,
 viewport,
@@ -3144,7 +3332,8 @@ point,
 delta
 );
 };
-const result = runFixedFill(target, descriptor, request);
+const result = runFixedFill(target, descriptor, request, finishFill);
+if (cdpPreparing && typeof result === "string" && result.startsWith("P2:")) return result;
 try {
 return finishFill(result);
 } catch (_) {
@@ -3183,6 +3372,10 @@ return actionFault("unsupported_interaction");
 }
 try {
 if (target !== document) apply(htmlElementFocus, target, []);
+if (cdpPreparing) {
+const validate = cdpTargetGuard(target,request,point,true);
+return guardedCdpInputs(request,target,[cdpKey(key,false),cdpKey(key,true)],validate,() => finishActionRendering(encodeActionEvidence(request,"engine_native_input",readiness,geometry,viewport,point,delta)));
+}
 const init = { key: key[0], code: key[1], keyCode: key[2], which: key[2], bubbles: true, cancelable: true, composed: true };
 const down = new nativeKeyboardEvent("keydown", init);
 const handled = apply(fixedDispatchEvent, target, [down]) !== true;
@@ -3392,7 +3585,9 @@ void apply(promiseThen, serving, [
 ]);
 }
 objectFreeze(invoke);
-const api = objectFreeze({ invoke });
+objectFreeze(prepareCdpAction);
+objectFreeze(nextCdpAction);
+const api = objectFreeze({ invoke, prepareCdpAction, nextCdpAction });
 objectDefineProperty(globalThis, GLOBAL_NAME, {
 value: api,
 writable: false,

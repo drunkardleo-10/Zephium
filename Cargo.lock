@@ -7402,6 +7402,7 @@ dependencies = [
  "dispatch2",
  "flate2",
  "gtk",
+ "image",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -7512,6 +7513,7 @@ dependencies = [
 name = "zephium-terra-macos-probe"
 version = "0.1.0"
 dependencies = [
+ "image",
  "serde_json",
  "tempfile",
  "tokio",
@@ -7527,6 +7529,7 @@ dependencies = [
  "zephium-decision",
  "zephium-engine",
  "zephium-ipc",
+ "zephium-private-fs",
  "zephium-store",
  "zephium-work-composition",
 ]

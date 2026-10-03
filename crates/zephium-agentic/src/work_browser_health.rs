@@ -43,6 +43,9 @@ impl HealthState {
         // Finite sticky states, not an overwriteable event queue or a counter
         // which could overflow. Uncertainty dominates retirement and cannot heal.
         self.state.fetch_max(state, Ordering::AcqRel);
+        self.notify_projection();
+    }
+    fn notify_projection(&self) {
         if !self.pending_wake.swap(true, Ordering::AcqRel) {
             self.wake();
         }
@@ -181,6 +184,14 @@ impl WorkBrowserResourceHealthReporter {
     pub fn is_current(&self, resource: &WorkBrowserResourceJoin) -> bool {
         resource == &self.resource && self.installed.load(Ordering::Acquire) && self.state.current()
     }
+    /// The native owner replaced bounded person-facing projection data. Wake
+    /// the existing application receiver without changing its health or any
+    /// execution authority. Repeated updates share its one pending wake.
+    pub fn notify_projection(&self) {
+        if self.installed.load(Ordering::Acquire) && self.state.current() {
+            self.state.notify_projection();
+        }
+    }
 }
 impl Drop for WorkBrowserResourceHealthReporter {
     fn drop(&mut self) {
@@ -230,6 +241,44 @@ pub(super) fn track(
 mod tests {
     use super::*;
     use crate::*;
+
+    #[test]
+    fn frame_projection_wakes_application_once_without_changing_health() {
+        struct CountingWake(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for CountingWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        let mut rows =
+            WorkBrowserResources::new(WorkId::generate(), zephium_core::ids::ProfileId::generate());
+        let request = rows
+            .construct(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        let (mut health, reporter) = track(request.resource().clone());
+        let wake = Arc::new(CountingWake(std::sync::atomic::AtomicUsize::new(0)));
+        health.register(wake.clone().into());
+        reporter.notify_projection();
+        assert_eq!(wake.0.load(Ordering::Acquire), 0);
+        assert!(reporter.install(request.resource()));
+        assert_eq!(health.poll(), WorkBrowserResourceHealthState::Current);
+        assert_eq!(wake.0.load(Ordering::Acquire), 1);
+        reporter.notify_projection();
+        reporter.notify_projection();
+        assert_eq!(wake.0.load(Ordering::Acquire), 2);
+        assert_eq!(health.poll(), WorkBrowserResourceHealthState::Current);
+        reporter.notify_projection();
+        assert_eq!(wake.0.load(Ordering::Acquire), 3);
+        reporter.invalidate();
+        assert_eq!(health.poll(), WorkBrowserResourceHealthState::Uncertain);
+        reporter.notify_projection();
+        assert_eq!(wake.0.load(Ordering::Acquire), 3);
+    }
 
     #[test]
     fn construction_timeout_survives_retirement_without_reclassifying_other_failures() {

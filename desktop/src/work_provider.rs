@@ -13,7 +13,7 @@ mod lead;
 pub(crate) struct WorkProviders {
     pub(crate) activity: super::work_activity::WorkActivity,
     #[cfg(target_os = "macos")]
-    pub(crate) browser: zephium_work_composition::MacosWorkComposition,
+    pub(crate) browser: zephium_work_composition::NativeWorkComposition,
 }
 impl WorkProviders {
     pub(crate) fn new(
@@ -41,7 +41,7 @@ impl WorkProviders {
         Self {
             activity: super::work_activity::WorkActivity::new(frames),
             #[cfg(target_os = "macos")]
-            browser: zephium_work_composition::MacosWorkComposition::new(engine, store),
+            browser: zephium_work_composition::NativeWorkComposition::new(engine, store),
         }
     }
 
