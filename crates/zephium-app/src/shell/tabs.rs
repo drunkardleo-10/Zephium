@@ -73,6 +73,13 @@ impl TabPreferences {
     }
 }
 
+struct KeptSlot {
+    placement: Placement,
+    url: url::Url,
+    title: String,
+    before: Option<ItemId>,
+}
+
 impl Shell {
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
         self.open_tab_with_id()
@@ -145,27 +152,33 @@ impl Shell {
             return NativeWork::default();
         }
         self.native_openers.remove(&id);
+        // An Essential is kept, not closed: the page ends and the site stays.
+        let kept = self.kept_slot(id);
         let closed_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
             .filter(|ms| (1_000..=9_007_199_254_740_991).contains(ms));
-        let closed = self.windows.focused().and_then(|window| {
-            self.items.tab(id).and_then(|tab| {
-                tab.url
-                    .as_ref()
-                    .map(|url| zephium_core::session::PersistedClosedTab {
-                        profile: window.profile,
-                        space: window.space,
-                        url: url.to_string(),
-                        title: tab.title.clone(),
-                        zoom: tab.zoom,
-                        session_id: closed_at_ms
-                            .map(|_| zephium_core::ids::ClosedSessionId::generate()),
-                        closed_at_ms,
-                    })
-            })
-        });
+        let closed = kept
+            .is_none()
+            .then(|| self.windows.focused())
+            .flatten()
+            .and_then(|window| {
+                self.items.tab(id).and_then(|tab| {
+                    tab.url
+                        .as_ref()
+                        .map(|url| zephium_core::session::PersistedClosedTab {
+                            profile: window.profile,
+                            space: window.space,
+                            url: url.to_string(),
+                            title: tab.title.clone(),
+                            zoom: tab.zoom,
+                            session_id: closed_at_ms
+                                .map(|_| zephium_core::ids::ClosedSessionId::generate()),
+                            closed_at_ms,
+                        })
+                })
+            });
         self.cancel_page_permission_for_item(id);
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
@@ -212,7 +225,50 @@ impl Shell {
                 fx.extend(self.focus_tab(next));
             }
         }
+        // Put back after the successor is chosen, so closing never refocuses
+        // and reloads the Essential it just ended.
+        if let Some(kept) = kept {
+            self.restore_kept_slot(kept);
+        }
         self.commit(fx)
+    }
+
+    /// Where an Essential sits, so closing it can leave it there unloaded.
+    fn kept_slot(&self, id: ItemId) -> Option<KeptSlot> {
+        let item = self.items.get(id)?;
+        let tab = item.tab()?;
+        if item.parent.is_some()
+            || !matches!(item.placement, Placement::Favorites { .. })
+            || tab.content != zephium_core::item::TabContent::Web
+        {
+            return None;
+        }
+        let roots = self.items.roots(item.placement);
+        let at = roots.iter().position(|candidate| *candidate == id)?;
+        Some(KeptSlot {
+            placement: item.placement,
+            url: tab.url.clone()?,
+            title: tab.title.clone(),
+            before: roots.get(at + 1).copied(),
+        })
+    }
+
+    /// A new id, not the closed one: the closed view's native teardown may
+    /// still be in flight, and an id is never reused across views.
+    fn restore_kept_slot(&mut self, kept: KeptSlot) {
+        for _ in 0..8 {
+            let id = ItemId::generate();
+            if self
+                .items
+                .insert_unloaded_tab(id, kept.placement, kept.url.clone(), &kept.title)
+            {
+                if let Some(before) = kept.before {
+                    self.items
+                        .move_tab_to_root(id, kept.placement, Some(before));
+                }
+                return;
+            }
+        }
     }
 
     /// Which tab takes over from a closed active one, by the person's choice.

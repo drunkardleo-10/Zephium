@@ -741,3 +741,32 @@ fn a_listed_address_without_an_icon_is_fetched_once_and_sent_to_the_surface_that
     );
     assert_eq!(probed.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn an_essential_never_opened_is_given_its_icon_from_the_store_or_the_network() {
+    let store = Arc::new(FakeStore::default());
+    store.icons.lock().unwrap().push((
+        "https://kept.example".to_owned(),
+        vec![6; zephium_core::icon::RGBA32_BYTES],
+    ));
+    let (mut shell, _engine, _screen, icons) = setup_with_icon_log(store);
+    shell.handle(Command::Bootstrap);
+    let window = shell.windows.focused().unwrap();
+    let (profile, space) = (window.profile, window.space);
+    let probed = attach_prober(&mut shell);
+    let site = |url: &str| crate::ImportedSite {
+        url: url.into(),
+        title: String::new(),
+    };
+    shell.handle(Command::Import {
+        work: Box::new(crate::ImportWork::Essentials(vec![
+            site("https://kept.example/inbox"),
+            site("https://bare.example/"),
+        ])),
+        done: crate::ImportCompletion::new(|_| {}),
+    });
+
+    shell.hydrate_favicon_cache(profile, space);
+    assert!(delivered_origins(&icons).contains(&"https://kept.example".to_owned()));
+    assert_eq!(probed.lock().unwrap().as_slice(), ["https://bare.example"]);
+}

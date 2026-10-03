@@ -467,3 +467,45 @@ fn native_download_cleanup_survives_a_space_switch() {
     assert!(shell.items.get(source).is_some());
     assert_eq!(active_id(&screen), selected);
 }
+
+#[test]
+fn closing_an_essential_ends_its_page_and_keeps_it_in_place() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let site = |url: &str| crate::ImportedSite {
+        url: url.into(),
+        title: url.into(),
+    };
+    shell.handle(Command::Import {
+        work: Box::new(crate::ImportWork::Essentials(vec![
+            site("https://mail.example/"),
+            site("https://board.example/"),
+        ])),
+        done: crate::ImportCompletion::new(|_| {}),
+    });
+    let kept = |shell: &Shell| shell.items.roots(Placement::Favorites { profile }).to_vec();
+    let mail = kept(&shell)[0];
+    shell.handle(Command::Activate(mail));
+    assert!(shell.items.tab(mail).unwrap().has_view());
+    navigate_and_commit(&mut shell, mail, "mail.example/inbox");
+
+    shell.handle(Command::Close(mail));
+    let after = kept(&shell);
+    assert_eq!(after.len(), 2);
+    let reopened = after[0];
+    assert_ne!(reopened, mail, "a closed view's id is never reused");
+    let tab = shell.items.tab(reopened).unwrap();
+    assert!(!tab.has_view());
+    assert_eq!(
+        tab.url.as_ref().unwrap().as_str(),
+        "https://mail.example/inbox"
+    );
+    assert!(shell.recently_closed.is_empty());
+    // Focus moves on by the usual close policy, never back onto the ended page.
+    assert_ne!(active_id(&screen), reopened);
+    assert!(engine
+        .last_layout()
+        .iter()
+        .all(|id| *id != reopened.to_string()));
+}

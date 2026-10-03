@@ -398,9 +398,9 @@ async fn import_icons(
     .ok()
     .flatten()
     .unwrap_or_default();
-    if !icons.is_empty() {
-        let _ = write(app, zephium_app::ImportWork::Icons(icons)).await;
-    }
+    // Sent even when empty: storing it is what refreshes the sidebar, so a
+    // source with no icons of its own still has its Essentials fetched.
+    let _ = write(app, zephium_app::ImportWork::Icons(icons)).await;
 }
 
 async fn read(

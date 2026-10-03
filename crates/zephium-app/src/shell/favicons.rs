@@ -243,6 +243,27 @@ impl Shell {
         if changed {
             self.project_items();
         }
+        // An Essential is always on screen but may never have been opened, so
+        // nothing would ever bring its icon; ask for the ones the store lacks.
+        let unmarked: Vec<String> = self
+            .items
+            .roots(Placement::Favorites { profile })
+            .iter()
+            .filter_map(|id| self.items.tab(*id)?.url.as_ref().map(url::Url::to_string))
+            .filter(|url| {
+                url::Url::parse(url)
+                    .ok()
+                    .and_then(|parsed| origin_of(&parsed))
+                    .is_some_and(|origin| {
+                        !self.favicons.icon_values.contains_key(&(profile, origin))
+                    })
+            })
+            .collect();
+        self.want_icons(
+            zephium_ipc::IconSurface::Chrome,
+            profile,
+            unmarked.iter().map(String::as_str),
+        );
     }
 
     pub(super) fn maybe_discover_favicon(&mut self, id: ItemId) {

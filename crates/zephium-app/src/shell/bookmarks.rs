@@ -24,6 +24,8 @@ enum Pending {
 pub(super) struct BookmarkState {
     pending: std::collections::HashMap<u64, Pending>,
     imports: std::collections::HashMap<u64, ImportCompletion>,
+    /// Icon imports by token, with the profile whose sidebar reads them back.
+    icon_imports: std::collections::HashMap<u64, ProfileId>,
     next_token: u64,
 }
 
@@ -247,8 +249,12 @@ impl Shell {
         };
         self.bookmarks.next_token = self.bookmarks.next_token.wrapping_add(1);
         let token = self.bookmarks.next_token;
+        let icons = matches!(work, ImportWork::Icons(_));
         if reads.request_import(token, profile, work) {
             self.bookmarks.imports.insert(token, done);
+            if icons {
+                self.bookmarks.icon_imports.insert(token, profile);
+            }
         } else {
             done.finish(None);
         }
@@ -258,11 +264,25 @@ impl Shell {
         if let Some(done) = self.bookmarks.imports.remove(&token) {
             done.finish(added);
         }
+        // Imported Essentials are unloaded tabs that read their icons from the
+        // cache; the icons just stored reach them through the same read the
+        // sidebar makes at startup.
+        if let Some(profile) = self.bookmarks.icon_imports.remove(&token) {
+            if let Some(space) = self
+                .windows
+                .focused()
+                .filter(|window| window.profile == profile)
+                .map(|window| window.space)
+            {
+                self.hydrate_favicon_cache(profile, space);
+            }
+        }
     }
 
     /// Every completion is answered, including when the shell is shutting down
     /// and the read queue will never deliver.
     pub(super) fn fail_pending_bookmark_calls(&mut self) {
+        self.bookmarks.icon_imports.clear();
         for (_, done) in std::mem::take(&mut self.bookmarks.imports) {
             done.finish(None);
         }
