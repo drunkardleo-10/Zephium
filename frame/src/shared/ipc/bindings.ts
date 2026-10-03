@@ -298,6 +298,12 @@ export const commands = {
 	faviconProbe: (expectedProfile: string, origins: string[]) => __TAURI_INVOKE<boolean>("favicon_probe", { expectedProfile, origins }),
 	downloadCall: (expectedProfile: string, call: DownloadCall) => __TAURI_INVOKE<DownloadResponse>("download_call", { expectedProfile, call }),
 	/**
+	 *  Opens the system pane that grants folder access after a download was
+	 *  refused by the platform (macOS Files and Folders). Elsewhere there is no
+	 *  single pane to send people to, so the caller offers another folder instead.
+	 */
+	downloadOpenAccessSettings: () => __TAURI_INVOKE<boolean>("download_open_access_settings"),
+	/**
 	 *  Opens an address in the focused window. The launcher panel and the history
 	 *  surfaces have no tab id to navigate, and must not be given one.
 	 */
@@ -722,15 +728,19 @@ export type DocumentNode_Serialize = {
 
 export type DoubleTap = "off" | "command" | "option";
 
-export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
 
 export type DownloadCleanup = {
 	running: boolean,
 	error: DownloadError | null,
 };
 
-export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "network" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
+export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "permission" | "network" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
 
+/**
+ *  The default saves straight to the system Downloads folder, as other
+ *  browsers do; asking first is a choice people opt into.
+ */
 export type DownloadPreferences = {
 	ask_destination: boolean,
 	/**  Set only by the native directory picker, never accepted from page IPC. */

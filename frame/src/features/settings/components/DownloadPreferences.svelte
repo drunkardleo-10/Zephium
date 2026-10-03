@@ -48,7 +48,7 @@
       label={m.pref_downloads_ask()}
       labelHidden
       checked={session.siteDownloadsRequireConfirmation ||
-        (session.preferences?.ask_destination ?? true)}
+        (session.preferences?.ask_destination ?? false)}
       disabled={session.busy ||
         !session.preferences ||
         !session.supported ||

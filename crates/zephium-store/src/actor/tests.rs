@@ -3835,13 +3835,62 @@ fn downloads_are_profile_scoped_and_recover_interrupted_native_ownership() {
 }
 
 #[test]
+fn clearing_downloads_forgets_finished_records_and_keeps_live_ones() {
+    use zephium_core::downloads::*;
+    use zephium_core::ids::DownloadId;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let session = DownloadId::generate();
+    let record = |state| DownloadRecord {
+        id: DownloadId::generate(),
+        session,
+        revision: 1,
+        created_at: 1,
+        filename: "fixture.txt".into(),
+        source: "https://example.com".into(),
+        source_is_context: false,
+        state,
+        received: 0,
+        total: None,
+        error: None,
+        destination: None,
+        staging: None,
+        staging_identity: None,
+        identity: None,
+        writer: None,
+        writer_released: false,
+    };
+    let live = record(DownloadState::Pending);
+    let finished = record(DownloadState::Cancelled);
+    for value in [&live, &finished] {
+        assert!(matches!(
+            hub.download_call(profile, DownloadStoreCall::Save(Box::new(value.clone()))),
+            DownloadStoreReply::Saved
+        ));
+    }
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Clear),
+        DownloadStoreReply::Saved
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Get(finished.id)),
+        DownloadStoreReply::Record(None)
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Get(live.id)),
+        DownloadStoreReply::Record(Some(_))
+    ));
+}
+
+#[test]
 fn download_preferences_are_validated_and_persist_only_in_registered_profiles() {
     use zephium_core::downloads::*;
     let mut hub = Hub::in_memory().unwrap();
     hub.save(&sample()).unwrap();
     let profile = ProfileId::from(1);
     let value = DownloadPreferences {
-        ask_destination: false,
+        ask_destination: true,
         directory: Some(
             std::env::temp_dir()
                 .join("download-fixtures")
@@ -3852,8 +3901,8 @@ fn download_preferences_are_validated_and_persist_only_in_registered_profiles() 
     };
     assert!(matches!(
         hub.download_call(profile, DownloadStoreCall::SetPreferences(
-            DownloadPreferenceChange::AskDestination(false)
-        )), DownloadStoreReply::Preferences(saved) if !saved.ask_destination
+            DownloadPreferenceChange::AskDestination(true)
+        )), DownloadStoreReply::Preferences(saved) if saved.ask_destination
     ));
     assert!(matches!(
         hub.download_call(profile, DownloadStoreCall::SetPreferences(

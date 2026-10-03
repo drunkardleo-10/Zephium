@@ -302,10 +302,12 @@ fn identity(metadata: &fs::Metadata) -> FileIdentity {
 }
 
 fn map_io(error: std::io::Error) -> DownloadError {
-    if error.raw_os_error() == Some(libc::ENOSPC) {
-        DownloadError::DiskFull
-    } else {
-        DownloadError::Destination
+    match error.raw_os_error() {
+        Some(libc::ENOSPC) => DownloadError::DiskFull,
+        // EPERM is what macOS privacy consent returns for Downloads, Desktop
+        // and Documents; EACCES is an ordinary permission denial.
+        Some(libc::EPERM | libc::EACCES) => DownloadError::Permission,
+        _ => DownloadError::Destination,
     }
 }
 

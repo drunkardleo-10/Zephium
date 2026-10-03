@@ -9,6 +9,13 @@ import type {
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 
+const TERMINAL = new Set(["completed", "cancelled", "interrupted", "failed"]);
+
+/** Whether a download has stopped for good, so it may be forgotten. */
+export function finished(entry: DownloadView): boolean {
+  return TERMINAL.has(entry.state);
+}
+
 /** Profile-bound projection. Native owns transfers, paths and durable history. */
 export class DownloadSession {
   readonly profile: string;
@@ -186,6 +193,11 @@ export class DownloadSession {
     }
   }
 
+  /** Where the system grants folder access, for a refused destination. */
+  openAccessSettings() {
+    void commands.downloadOpenAccessSettings().catch(() => undefined);
+  }
+
   async perform(call: DownloadCall) {
     if (this.busy) return;
     const generation = this.generation;
@@ -202,6 +214,9 @@ export class DownloadSession {
         this.supported = response.supported;
       } else if (call.kind === "retry_cleanup") {
         await this.refresh();
+      } else if (call.kind === "clear") {
+        this.entries = this.entries.filter((entry) => !finished(entry));
+        await this.reload();
       } else if (call.kind === "forget" || call.kind === "cancel") {
         await this.reload();
       }

@@ -40,6 +40,9 @@ pub enum DownloadError {
     Capacity,
     Storage,
     Destination,
+    // The system refused the destination folder: macOS privacy consent, a
+    // denied ACL or Windows Controlled Folder Access.
+    Permission,
     Network,
     DiskFull,
     Protection,
@@ -169,7 +172,9 @@ pub struct DownloadView {
     pub error: Option<DownloadError>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+/// The default saves straight to the system Downloads folder, as other
+/// browsers do; asking first is a choice people opt into.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadPreferences {
     pub ask_destination: bool,
@@ -178,15 +183,6 @@ pub struct DownloadPreferences {
     /// Read-only native directory identity; only the OS picker can mint it.
     #[serde(default)]
     pub directory_identity: Option<String>,
-}
-impl Default for DownloadPreferences {
-    fn default() -> Self {
-        Self {
-            ask_destination: true,
-            directory: None,
-            directory_identity: None,
-        }
-    }
 }
 impl DownloadPreferences {
     pub fn validate(&self) -> bool {
@@ -215,6 +211,8 @@ pub enum DownloadCall {
     Open { id: String },
     Reveal { id: String },
     Forget { id: String },
+    // Forgets every finished download; files on disk are untouched.
+    Clear,
     Preferences,
     ChooseDirectory,
     SetAskDestination { enabled: bool },
@@ -332,6 +330,8 @@ pub enum DownloadStoreCall {
     },
     Get(DownloadId),
     Forget(DownloadId),
+    /// Deletes every terminal record. Transfers still writing keep theirs.
+    Clear,
     ClearStaging {
         id: DownloadId,
         expected: FileIdentity,

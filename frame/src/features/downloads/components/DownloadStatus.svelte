@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import { Cancel01Icon, FolderOpenIcon } from "@hugeicons/core-free-icons";
   import { DownloadSession, downloadProgress, formatDownloadBytes } from "$domain/downloads";
-  import type { DownloadView } from "$shared/ipc/bindings";
+  import type { DownloadState, DownloadView } from "$shared/ipc/bindings";
   import IconButton from "$shared/ui/IconButton";
   import * as m from "$shared/i18n/messages";
   import FileGlyph from "./FileGlyph.svelte";
@@ -10,8 +10,10 @@
 
   let { profile, onopen }: { profile: string; onopen: () => void } = $props();
   let session = $state.raw(untrack(() => new DownloadSession(profile)));
-  let showTerminal = $state(false);
+  /** The finished download whose card has gone, by id and state. */
   let dismissed = $state<string | null>(null);
+  let leaving = $state(false);
+  let hovered = $state(false);
   const rates = new TransferRate();
   $effect(() => {
     const next = new DownloadSession(profile);
@@ -21,11 +23,24 @@
     return () => next.stop();
   });
 
+  /** How long a finished card stays: long enough to read why one failed. */
+  const LINGER: Partial<Record<DownloadState, number>> = {
+    completed: 4000,
+    cancelled: 3000,
+    failed: 8000,
+    interrupted: 8000,
+  };
+  /** After the pointer leaves a card it was resting on. */
+  const LINGER_AFTER_HOVER = 2500;
+  /** Matches the exit animation below; reduced motion just removes the card. */
+  const EXIT = 140;
+
   const live = (entry: DownloadView) =>
     ["pending", "receiving", "cancelling", "finalizing"].includes(entry.state);
   let active = $derived(session.entries.filter(live));
   let current = $derived(active[0] ?? session.entries[0]);
   let progress = $derived(current ? downloadProgress(current) : undefined);
+  let problem = $derived(current?.state === "failed" || current?.state === "interrupted");
   let rate = $derived.by(() => {
     rates.retain(active.map((entry) => entry.id));
     return current?.state === "receiving"
@@ -44,32 +59,64 @@
       case "finalizing":
         return m.download_finalizing();
       case "completed":
-        return `${m.download_completed()} · ${formatDownloadBytes(current.total ?? current.received)}`;
+        return formatDownloadBytes(current.total ?? current.received);
       case "cancelled":
         return m.download_cancelled();
-      case "interrupted":
-        return m.download_interrupted();
       default:
-        return m.download_failed();
+        return current.error === "permission"
+          ? m.download_reason_permission()
+          : current.error === "disk_full"
+            ? m.download_reason_disk_full()
+            : m.download_failed();
     }
   });
-  let terminalKey = $derived(
+  let finishedKey = $derived(
     active.length === 0 && current ? `${current.id}:${current.state}` : "",
   );
+  let shown = $derived(
+    Boolean(current) && (active.length > 0 || (finishedKey !== "" && finishedKey !== dismissed)),
+  );
+
+  function dismiss() {
+    const key = finishedKey;
+    leaving = true;
+    setTimeout(() => {
+      dismissed = key;
+      leaving = false;
+    }, EXIT);
+  }
+
+  /** The finished card the pointer rested on; it then leaves sooner once let go. */
+  let rested = $state<string | null>(null);
+
+  // A finished card leaves on its own; resting the pointer on it holds it.
   $effect(() => {
-    showTerminal = Boolean(terminalKey) && terminalKey !== dismissed;
-    if (!showTerminal) return;
-    const timer = setTimeout(() => {
-      showTerminal = false;
-    }, 10_000);
+    const key = finishedKey;
+    if (!key || key === dismissed || hovered) return;
+    const state = current?.state;
+    const wait = rested === key ? LINGER_AFTER_HOVER : ((state && LINGER[state]) ?? 4000);
+    const timer = setTimeout(dismiss, wait);
     return () => clearTimeout(timer);
   });
+
+  function enter() {
+    hovered = true;
+    if (finishedKey) rested = finishedKey;
+  }
 </script>
 
-{#if current && (active.length > 0 || showTerminal)}
-  <div class="download-card" data-state={current.state}>
+{#if current && shown}
+  <!-- Hover only pauses the auto-hide. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="download-card"
+    class:leaving={leaving && active.length === 0}
+    data-state={current.state}
+    onpointerenter={enter}
+    onpointerleave={() => (hovered = false)}
+  >
     <button class="body" type="button" onclick={onopen} aria-label={m.download_show_status()}>
-      <FileGlyph filename={current.filename} size={30} />
+      <FileGlyph filename={current.filename} size={30} alert={problem} />
       <span class="copy">
         <strong title={current.filename}>{current.filename}</strong>
         <span class="line"
@@ -103,7 +150,7 @@
         label={m.download_dismiss()}
         size={13}
         buttonSize={24}
-        onclick={() => (dismissed = terminalKey)}
+        onclick={dismiss}
       />
     {/if}
     {#if active.length > 0}
@@ -182,12 +229,12 @@
     color: var(--color-faint);
   }
 
-  .download-card[data-state="completed"] :global(.glyph) {
-    color: var(--color-success);
-  }
-
-  .download-card:is([data-state="failed"], [data-state="interrupted"]) .line {
-    color: var(--color-danger);
+  .download-card.leaving {
+    opacity: 0;
+    translate: 0 4px;
+    transition:
+      opacity var(--motion-fast) var(--ease-exit),
+      translate var(--motion-fast) var(--ease-exit);
   }
 
   .track {
@@ -249,6 +296,10 @@
     .download-card,
     .track[data-indeterminate="true"] i {
       animation: none;
+    }
+
+    .download-card.leaving {
+      transition: none;
     }
   }
 </style>

@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { DownloadView } from "$shared/ipc/bindings";
-import { downloadKind } from "$domain/downloads";
+import { downloadKind, filenameParts } from "$domain/downloads";
 import { TransferRate, formatTimeLeft, transferLine } from "../lib/transfer";
 
 const entry = (received: number, total: number | null): DownloadView => ({
@@ -37,7 +37,20 @@ test("the line says how far along and how long is left once it knows", () => {
 test("a file's kind comes from its name", () => {
   expect(downloadKind("Photo.HEIC")).toBe("image");
   expect(downloadKind("setup.dmg")).toBe("app");
-  expect(downloadKind("report.pdf")).toBe("pdf");
+  expect(downloadKind("report.pdf")).toBe("document");
+  expect(downloadKind("ledger.xlsx")).toBe("sheet");
   expect(downloadKind(".bashrc")).toBe("file");
   expect(downloadKind("archive")).toBe("file");
+});
+
+test("a long name keeps its extension in view", () => {
+  expect(filenameParts("Terax_0.8.6_aarch64.dmg")).toEqual({
+    stem: "Terax_0.8.6_aarch64",
+    extension: ".dmg",
+  });
+  expect(filenameParts(".bashrc")).toEqual({ stem: ".bashrc", extension: "" });
+  expect(filenameParts("notes.a-very-long-suffix")).toEqual({
+    stem: "notes.a-very-long-suffix",
+    extension: "",
+  });
 });

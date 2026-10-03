@@ -87,3 +87,44 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
   await screen.unmount();
   expect(native.listener).toBeNull();
 });
+
+test("a folder the system refused says so once and offers another folder", async () => {
+  const profile = "00000000000000000000000001";
+  const entry: DownloadView = {
+    id: "00000000000000000000000003",
+    revision: "00000004",
+    created_at: "1",
+    filename: "Terax_0.8.6_aarch64.dmg",
+    source: "https://terax.app",
+    source_is_context: false,
+    state: "failed",
+    received: "0",
+    total: null,
+    error: "permission",
+  };
+  native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
+    if (call.kind === "list")
+      return {
+        kind: "page",
+        cleanup: { running: false, error: null },
+        entries: [entry],
+        next: null,
+        supported: true,
+      };
+    if (call.kind === "updates")
+      return {
+        kind: "updates",
+        cleanup: { running: false, error: null },
+        entries: [],
+        removed: [],
+      };
+    return { kind: "applied" };
+  });
+  const screen = await render(DownloadsList, { profile });
+  await expect.element(page.getByText("No access to this folder", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Change Folder", exact: true }).click();
+  expect(native.call).toHaveBeenCalledWith(profile, { kind: "choose_directory" });
+  await page.getByRole("button", { name: "Clear finished downloads", exact: true }).click();
+  expect(native.call).toHaveBeenCalledWith(profile, { kind: "clear" });
+  await screen.unmount();
+});

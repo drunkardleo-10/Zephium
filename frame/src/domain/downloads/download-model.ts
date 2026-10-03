@@ -21,17 +21,18 @@ export function formatDownloadBytes(value: string | null): string {
 }
 
 export type DownloadKind =
-  "image" | "video" | "audio" | "archive" | "pdf" | "code" | "app" | "file";
+  "image" | "video" | "audio" | "archive" | "document" | "sheet" | "code" | "app" | "file";
 
 const KINDS: Record<string, DownloadKind> = {};
 for (const [kind, extensions] of [
-  ["image", "png jpg jpeg gif webp avif heic svg bmp tif tiff ico"],
-  ["video", "mp4 mov m4v webm mkv avi"],
-  ["audio", "mp3 m4a aac wav flac ogg opus"],
-  ["archive", "zip rar 7z tar gz tgz bz2 xz"],
-  ["pdf", "pdf"],
-  ["code", "js ts json html css xml csv txt md rs py sh"],
-  ["app", "dmg pkg exe msi deb rpm appimage apk"],
+  ["image", "png jpg jpeg gif webp avif heic heif svg bmp tif tiff ico raw psd"],
+  ["video", "mp4 mov m4v webm mkv avi wmv"],
+  ["audio", "mp3 m4a aac wav flac ogg opus aiff"],
+  ["archive", "zip rar 7z tar gz tgz bz2 xz zst"],
+  ["document", "pdf doc docx rtf txt md pages odt epub key ppt pptx odp"],
+  ["sheet", "csv tsv xls xlsx numbers ods"],
+  ["code", "js mjs ts json html css xml yaml yml toml rs py rb go java swift sh sql wasm"],
+  ["app", "dmg pkg app exe msi msix deb rpm appimage apk ipa"],
 ] as const)
   for (const extension of extensions.split(" ")) KINDS[extension] = kind;
 
@@ -39,4 +40,11 @@ for (const [kind, extensions] of [
 export function downloadKind(filename: string): DownloadKind {
   const dot = filename.lastIndexOf(".");
   return (dot > 0 && KINDS[filename.slice(dot + 1).toLowerCase()]) || "file";
+}
+
+/** A name split so the extension stays readable when the stem is truncated. */
+export function filenameParts(filename: string): { stem: string; extension: string } {
+  const dot = filename.lastIndexOf(".");
+  if (dot <= 0 || filename.length - dot > 12) return { stem: filename, extension: "" };
+  return { stem: filename.slice(0, dot), extension: filename.slice(dot) };
 }

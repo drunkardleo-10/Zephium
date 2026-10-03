@@ -62,6 +62,8 @@ fn io(error: std::io::Error) -> DownloadError {
     match error.raw_os_error() {
         Some(39 | 112) => DownloadError::DiskFull,
         Some(2 | 3) => DownloadError::MissingFile,
+        // ERROR_ACCESS_DENIED, also raised by Controlled Folder Access.
+        Some(5) => DownloadError::Permission,
         Some(32 | 33) => DownloadError::Unavailable,
         _ => DownloadError::Destination,
     }

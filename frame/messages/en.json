@@ -2540,5 +2540,17 @@
   "download_time_left": "{time} left",
   "download_more_active": "+{count} more",
   "download_dismiss": "Dismiss",
-  "download_open_named": "Open {name}"
+  "download_open_named": "Open {name}",
+  "download_error_permission": "Zephium isn't allowed to save to this folder.",
+  "download_reason_permission": "No access to this folder",
+  "download_reason_destination": "Couldn't save to this folder",
+  "download_reason_disk_full": "Not enough disk space",
+  "download_reason_network": "The connection was lost",
+  "download_reason_protection": "Couldn't verify the file",
+  "download_reason_other": "Couldn't finish",
+  "download_allow_access": "Allow Access",
+  "download_change_folder": "Change Folder",
+  "download_clear": "Clear",
+  "download_clear_label": "Clear finished downloads",
+  "download_empty_title": "No downloads"
 }

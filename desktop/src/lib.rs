@@ -1578,6 +1578,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             history_call,
             favicon_probe,
             download_call,
+            download_open_access_settings,
             browser_open_url,
             keymap::keymap_entries,
             keymap::keymap_bind,
@@ -3715,6 +3716,28 @@ async fn download_call(
         Ok(Ok(response)) => response,
         _ => failed(DownloadError::Unavailable),
     }
+}
+
+/// Opens the system pane that grants folder access after a download was
+/// refused by the platform (macOS Files and Folders). Elsewhere there is no
+/// single pane to send people to, so the caller offers another folder instead.
+#[tauri::command]
+#[specta::specta]
+fn download_open_access_settings(caller: WebviewWindow) -> bool {
+    if !authorize(&caller, CallerPolicy::Both, "download_open_access_settings") {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::{NSString, NSURL};
+        let url = NSURL::URLWithString(&NSString::from_str(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
+        ));
+        url.is_some_and(|url| NSWorkspace::sharedWorkspace().openURL(&url))
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 /// Asks for the site icons of origins chrome shows outside a tab. Held icons
@@ -7525,6 +7548,18 @@ mod tests {
         );
         assert!(plist
             .contains("Zephium uses the microphone only when you allow a website to access it."));
+    }
+
+    #[test]
+    fn macos_bundle_explains_download_folder_consent() {
+        let plist = include_str!("../Info.plist");
+        for key in [
+            "NSDownloadsFolderUsageDescription",
+            "NSDesktopFolderUsageDescription",
+            "NSDocumentsFolderUsageDescription",
+        ] {
+            assert!(plist.contains(&format!("<key>{key}</key>")), "{key}");
+        }
     }
 
     #[test]

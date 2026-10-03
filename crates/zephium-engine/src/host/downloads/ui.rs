@@ -186,6 +186,13 @@ impl Downloads {
                     self.ui_store(token, partition, DownloadStoreCall::Forget(id));
                 }
             }
+            DownloadCall::Clear => {
+                if private {
+                    self.ui_reply(token, DownloadStoreReply::Saved);
+                } else {
+                    self.ui_store(token, partition, DownloadStoreCall::Clear);
+                }
+            }
             DownloadCall::Cancel { .. } | DownloadCall::Updates | DownloadCall::RetryCleanup => {
                 unreachable!()
             }
@@ -322,6 +329,26 @@ impl Downloads {
                         forgotten.pop_back();
                     }
                 }
+                (self.notify)(partition.profile());
+                done.finish(DownloadResponse::Applied);
+            }
+            (DownloadCall::Clear, DownloadStoreReply::Saved) => {
+                let mut cleared = Vec::new();
+                self.recent.borrow_mut().retain(|(owner, record)| {
+                    let keep = owner.profile() != partition.profile() || !record.state.terminal();
+                    if !keep {
+                        cleared.push(record.id);
+                    }
+                    keep
+                });
+                let mut forgotten = self.forgotten.borrow_mut();
+                for id in cleared {
+                    forgotten.push_front((partition.profile(), id));
+                }
+                while forgotten.len() > RECENT_LIMIT {
+                    forgotten.pop_back();
+                }
+                drop(forgotten);
                 (self.notify)(partition.profile());
                 done.finish(DownloadResponse::Applied);
             }

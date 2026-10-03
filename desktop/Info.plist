@@ -6,6 +6,12 @@
   <string>Zephium uses the camera only when you allow a website to access it.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Zephium uses the microphone only when you allow a website to access it.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Zephium saves the files you download to your Downloads folder.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Zephium saves downloads to your Desktop when you choose it as the download folder.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Zephium saves downloads to your Documents folder when you choose it as the download folder.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

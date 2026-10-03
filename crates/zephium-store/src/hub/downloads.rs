@@ -189,6 +189,10 @@ impl Hub {
                     Ok(DownloadStoreReply::Error(DownloadError::Invalid))
                 }
             }
+            DownloadStoreCall::Clear => {
+                conn.execute("DELETE FROM downloads WHERE terminal=1", [])?;
+                Ok(DownloadStoreReply::Saved)
+            }
             DownloadStoreCall::ClearStaging { id, expected } => {
                 let tx = conn.transaction()?;
                 let receipt: Option<String> = tx
