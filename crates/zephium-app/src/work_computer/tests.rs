@@ -330,13 +330,13 @@ fn commands_keep_their_approval_classes() {
 fn test_output_is_summarised() {
     serially(async {
         let (_home, tools, _root) = project();
-        let host = Recorder::default();
+        let host = Recorder::deciding(&[Decision::Approved]);
+        #[cfg(windows)]
+        let command = "Write-Output 'running 2 tests'; Write-Output 'test a ... ok'; Write-Output 'test b ... FAILED'; Write-Output 'test result: FAILED. 1 passed; 1 failed; 0 ignored'";
+        #[cfg(not(windows))]
+        let command = "printf 'running 2 tests\\ntest a ... ok\\ntest b ... FAILED\\ntest result: FAILED. 1 passed; 1 failed; 0 ignored\\n'";
         let ran = tools
-            .call(
-                &host,
-                "bash",
-                &json!({"command": "printf 'running 2 tests\\ntest a ... ok\\ntest b ... FAILED\\ntest result: FAILED. 1 passed; 1 failed; 0 ignored\\n'"}),
-            )
+            .call(&host, "bash", &json!({"command": command}))
             .await;
         assert!(
             ran.content.contains("tests: 1 passed, 1 failed (b)"),

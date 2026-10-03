@@ -29,6 +29,15 @@ beforeEach(() => {
   host.ready.mockReset().mockResolvedValue(true);
   vi.stubGlobal("document", { body: { inert: false } });
 });
+test("acknowledges a resource read with no pending drafts without a save", async () => {
+  const { installCloseService } = await import("../close");
+  const stop = installCloseService();
+  host.request?.({ payload: "current" });
+  await vi.waitFor(() => expect(host.ready).toHaveBeenCalledWith("current", true));
+  host.cancel?.({ payload: "current" });
+  expect(document.body.inert).toBe(false);
+  stop();
+});
 test("flushes before acknowledging close and ignores stale cancellation", async () => {
   const { registerCloseTask, installCloseService } = await import("../close");
   const flush = vi.fn().mockResolvedValue(true);

@@ -51,7 +51,7 @@ pub(crate) fn install(
             );
         }));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let app = app.clone();
         providers
@@ -332,7 +332,9 @@ pub(crate) async fn work_call(
     }) {
         return failed(WorkError::Capacity);
     }
-    super::resource_close::touch(caller.label());
+    if !super::resource_close::touch(&app, caller.label()) {
+        return failed(WorkError::Unavailable);
+    }
     let shell = app.state::<zephium_app::Handle>();
     let name = call_name(&call);
     let request = match admit(name, call_fault(&call), || {
@@ -447,11 +449,17 @@ fn call_name(call: &WorkCallV1) -> &'static str {
 pub(crate) mod human;
 
 pub(crate) fn release_human_presentations(app: &tauri::AppHandle) {
-    #[cfg(all(feature = "work-product", target_os = "macos"))]
+    #[cfg(all(
+        feature = "work-product",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     if let Some(owner) = app.try_state::<WorkProductState>() {
         owner.providers.browser.release_presented_human_pages();
     }
-    #[cfg(not(all(feature = "work-product", target_os = "macos")))]
+    #[cfg(not(all(
+        feature = "work-product",
+        any(target_os = "macos", target_os = "windows")
+    )))]
     let _ = app;
 }
 

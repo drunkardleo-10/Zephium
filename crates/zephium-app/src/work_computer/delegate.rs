@@ -37,8 +37,20 @@ impl Delegate {
     }
     /// Which agent a command line hands work to, if it is a hand-off.
     pub fn of_command(command: &str) -> Option<Self> {
+        #[cfg(windows)]
+        let command = command
+            .rsplit_once(" | ")
+            .map_or(command, |(_, command)| command);
         let mut words = command.split_whitespace();
-        match (words.next(), words.next()) {
+        let program = words.next().map(|program| {
+            program
+                .strip_suffix(".exe")
+                .or_else(|| program.strip_suffix(".cmd"))
+                .or_else(|| program.strip_suffix(".bat"))
+                .or_else(|| program.strip_suffix(".com"))
+                .unwrap_or(program)
+        });
+        match (program, words.next()) {
             (Some("codex"), Some("exec")) => Some(Self::Codex),
             (Some("claude"), Some("-p")) => Some(Self::Claude),
             _ => None,
@@ -47,6 +59,7 @@ impl Delegate {
 }
 
 /// Quotes one argument for the person's login shell, which may be fish.
+#[cfg(any(not(windows), test))]
 fn quote(argument: &str, fish: bool) -> String {
     if fish {
         format!("'{}'", argument.replace('\\', "\\\\").replace('\'', "\\'"))
@@ -55,15 +68,40 @@ fn quote(argument: &str, fish: bool) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn login_shell_is_fish() -> bool {
     std::env::var("SHELL").is_ok_and(|shell| shell.ends_with("/fish"))
 }
 
 /// The non-interactive command line that hands `task` to `agent` in `folder`.
 pub fn command(agent: Delegate, folder: &Path, task: &str) -> String {
-    let fish = login_shell_is_fish();
-    let task = quote(task, fish);
-    match agent {
+    #[cfg(windows)]
+    {
+        use crate::work_connections::cli::{locate, Cli};
+        let cli = match agent {
+            Delegate::Codex => Cli::Codex,
+            Delegate::Claude => Cli::Claude,
+        };
+        let suffix = locate(cli)
+            .and_then(|path| {
+                path.extension()
+                    .map(|extension| extension.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "exe".into())
+            .to_ascii_lowercase();
+        let program = format!("{}.{}", agent.program(), suffix);
+        let prompt = format!("'{}'", task.replace('\'', "''"));
+        let _ = folder; // The command runner already owns the selected working directory.
+        match agent {
+            Delegate::Codex => format!("{prompt} | {program} exec --json --sandbox workspace-write --skip-git-repo-check --ephemeral --color never -"),
+            Delegate::Claude => format!("{prompt} | {program} -p --output-format stream-json --verbose --permission-mode acceptEdits --no-session-persistence --disallowedTools Bash WebFetch WebSearch"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let fish = login_shell_is_fish();
+        let task = quote(task, fish);
+        match agent {
         Delegate::Codex => format!(
             "codex exec --json --sandbox workspace-write --skip-git-repo-check --ephemeral --color never -C {} {task}",
             quote(&folder.to_string_lossy(), fish)
@@ -71,6 +109,7 @@ pub fn command(agent: Delegate, folder: &Path, task: &str) -> String {
         Delegate::Claude => format!(
             "claude -p --output-format stream-json --verbose --permission-mode acceptEdits --no-session-persistence --disallowedTools Bash WebFetch WebSearch -- {task}"
         ),
+    }
     }
 }
 
@@ -153,10 +192,10 @@ pub fn activity(agent: Delegate, output: &str) -> Option<String> {
 }
 
 fn short(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_owned()
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
 }
 
-/// The coding agents installed and signed in on this Mac.
+/// The coding agents installed and signed in on this computer.
 pub async fn available() -> Vec<Delegate> {
     use crate::work_connections::cli::{status, Cli};
     let (codex, claude) = tokio::join!(status(Cli::Codex), status(Cli::Claude));
@@ -182,7 +221,13 @@ const MAX_SNAPSHOT_FILES: usize = 64;
 const MAX_SNAPSHOT_BYTES: u64 = 512 * 1024;
 
 fn git(folder: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command
         .args(["-c", "core.quotepath=off", "--no-optional-locks"])
         .args(args)
         .current_dir(folder)
@@ -268,9 +313,26 @@ mod tests {
         assert_eq!(quote("it's", false), "'it'\\''s'");
         assert_eq!(quote("it's a\\b", true), "'it\\'s a\\\\b'");
         let line = command(Delegate::Codex, Path::new("/tmp/My App"), "Fix the test");
-        assert!(line.starts_with("codex exec --json --sandbox workspace-write"));
-        assert!(line.contains("-C '/tmp/My App'"));
-        assert!(line.ends_with("'Fix the test'"));
+        #[cfg(not(windows))]
+        {
+            assert!(line.starts_with("codex exec --json --sandbox workspace-write"));
+            assert!(line.contains("-C '/tmp/My App'"));
+            assert!(line.ends_with("'Fix the test'"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(line.starts_with("'Fix the test' | "));
+            assert!(line.contains(" exec --json --sandbox workspace-write"));
+            assert!(line.ends_with(" -"));
+            let task = "Fix \"quotes\", it's C:\\code & $HOME — safely";
+            let line = command(Delegate::Codex, Path::new(r"C:\My App"), task);
+            assert!(line.starts_with("'Fix \"quotes\", it''s C:\\code & $HOME — safely' | "));
+            assert!(!line.contains('\n'));
+            assert_eq!(
+                crate::work_commands::policy::classify(&line, Path::new(r"C:\My App"), &[]).0,
+                zephium_core::work::runtime::WorkCommandClassV1::Ask
+            );
+        }
         assert_eq!(Delegate::of_command(&line), Some(Delegate::Codex));
         let line = command(Delegate::Claude, Path::new("/tmp"), "Fix");
         assert!(line.contains("--permission-mode acceptEdits"));

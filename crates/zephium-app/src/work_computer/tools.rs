@@ -21,6 +21,11 @@ const COMMAND_TIMEOUT: u32 = 120;
 const MAX_COMMAND_TIMEOUT: u32 = 600;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
+#[cfg(windows)]
+const SHELL_DESCRIPTION: &str = "Run a Windows PowerShell command in the working folder, or in `cwd` inside a granted folder: tests, builds, git and gh. The shell is Windows PowerShell with no profile and non-interactive UTF-8 output; use PowerShell syntax and cmdlets, not POSIX shell syntax. Literal reading commands run at once; literal commands that change files ask the person once per folder; network, privileged, compound or unusual commands ask each time. You get the exit status, duration, test counts and the lines that matter; the full output is kept with the step. Use glob, grep and read to look at files.";
+#[cfg(not(windows))]
+const SHELL_DESCRIPTION: &str = "Run a shell command in the working folder, or in `cwd` inside a granted folder: tests, builds, git and gh. Reading commands run at once; commands that change files ask the person once per folder; network, privileged or unusual commands ask each time. You get the exit status, duration, test counts and the lines that matter; the full output is kept with the step. Use glob, grep and read to look at files, not cat, find or grep.";
+
 /// A tool's answer: compact text for the model and whether it failed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolReply {
@@ -101,7 +106,7 @@ pub fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "bash",
-            "Run a shell command in the working folder, or in `cwd` inside a granted folder: tests, builds, git and gh. Reading commands run at once; commands that change files ask the person once per folder; network, privileged or unusual commands ask each time. You get the exit status, duration, test counts and the lines that matter; the full output is kept with the step. Use glob, grep and read to look at files, not cat, find or grep.",
+            SHELL_DESCRIPTION,
             json!({"type": "object", "properties": {
                 "command": {"type": "string"},
                 "cwd": {"type": "string"},
@@ -219,7 +224,7 @@ impl ComputerTools {
     fn shown(&self, path: &Path) -> String {
         match path.strip_prefix(&self.root) {
             Ok(relative) if relative.as_os_str().is_empty() => ".".into(),
-            Ok(relative) => relative.to_string_lossy().into_owned(),
+            Ok(relative) => super::find::shown_path(relative),
             Err(_) => path.to_string_lossy().into_owned(),
         }
     }
@@ -755,6 +760,11 @@ impl ComputerTools {
             || command.len() > MAX_WORK_COMMAND_BYTES
             || command.chars().any(|c| c.is_control() && c != '\t')
         {
+            #[cfg(windows)]
+            return Err(ToolReply::fault(
+                "`command` is one line of at most 4096 bytes; use PowerShell semicolons to join steps.",
+            ));
+            #[cfg(not(windows))]
             return Err(ToolReply::fault(
                 "`command` is one line of at most 4096 bytes; join steps with && instead of newlines.",
             ));
@@ -985,8 +995,11 @@ pub(super) async fn hand_off(
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if task.is_empty() || task.len() > 3000 {
-        return ToolReply::fault("`task` is one paragraph of 1 to 3000 characters.");
+    let limit = 3000;
+    if task.is_empty() || task.len() > limit {
+        return ToolReply::fault(format!(
+            "`task` is one paragraph of 1 to {limit} characters."
+        ));
     }
     let folder = tools.root().to_path_buf();
     let snapshot = {

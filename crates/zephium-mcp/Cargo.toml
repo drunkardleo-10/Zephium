@@ -31,6 +31,7 @@ ulid = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 zephium-credentials = { workspace = true, optional = true }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_SystemInformation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", optional = true }

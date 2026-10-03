@@ -3589,7 +3589,9 @@ async fn resource_call(
     if !call.validate() || serde_json::to_vec(&call).map_or(true, |bytes| bytes.len() > 524288) {
         return failed(ResourceError::Invalid);
     }
-    resource_close::touch(caller.label());
+    if !resource_close::touch(&app, caller.label()) {
+        return failed(ResourceError::Unavailable);
+    }
     let Some(expected_profile) =
         ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
     else {

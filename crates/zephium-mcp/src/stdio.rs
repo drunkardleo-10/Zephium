@@ -12,6 +12,10 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use super::{McpError, MAX_MESSAGE_BYTES};
 
+#[cfg(windows)]
+#[path = "stdio_windows.rs"]
+mod windows;
+
 pub struct StdioServer {
     /// An absolute path to the program.
     pub program: PathBuf,
@@ -25,10 +29,14 @@ pub struct StdioServer {
 pub struct Process {
     child: Child,
     group: Option<i32>,
+    #[cfg(windows)]
+    job: windows::Job,
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        self.job.stop();
         #[cfg(unix)]
         if let Some(group) = self.group {
             // SAFETY: a negative pid addresses the group this process created
@@ -49,6 +57,8 @@ impl StdioServer {
             return Err(McpError::Spawn);
         }
         let mut command = tokio::process::Command::new(&self.program);
+        #[cfg(windows)]
+        let job = windows::Job::new()?;
         command
             .args(&self.args)
             .env_clear()
@@ -60,13 +70,15 @@ impl StdioServer {
         // The server and whatever it starts share one group, ended together.
         #[cfg(unix)]
         command.process_group(0);
-        // No console window flashes up for a server started on Windows.
+        // Admit the complete tree before the suspended child executes any instruction.
         #[cfg(windows)]
-        command.creation_flags(0x0800_0000);
+        command.creation_flags(0x0800_0000 | 0x0000_0004);
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
         let mut child = command.spawn().map_err(|_| McpError::Spawn)?;
+        #[cfg(windows)]
+        job.assign_and_resume(&child)?;
         let group = cfg!(unix)
             .then(|| child.id().and_then(|id| i32::try_from(id).ok()))
             .flatten();
@@ -77,7 +89,16 @@ impl StdioServer {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
             });
         }
-        Ok((Process { child, group }, Bounded::new(stdout), stdin))
+        Ok((
+            Process {
+                child,
+                group,
+                #[cfg(windows)]
+                job,
+            },
+            Bounded::new(stdout),
+            stdin,
+        ))
     }
 }
 
@@ -87,6 +108,7 @@ pub struct Bounded<R> {
     inner: R,
     line: usize,
     limit: usize,
+    failed: bool,
 }
 impl<R> Bounded<R> {
     pub fn new(inner: R) -> Self {
@@ -97,6 +119,7 @@ impl<R> Bounded<R> {
             inner,
             line: 0,
             limit,
+            failed: false,
         }
     }
 }
@@ -106,6 +129,12 @@ impl<R: AsyncRead + Unpin> AsyncRead for Bounded<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if self.failed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message too long",
+            )));
+        }
         let before = buf.filled().len();
         let polled = Pin::new(&mut self.inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(())) = polled {
@@ -116,17 +145,49 @@ impl<R: AsyncRead + Unpin> AsyncRead for Bounded<R> {
                     line = 0;
                 } else {
                     line += 1;
+                    if line > self.limit {
+                        self.failed = true;
+                        buf.set_filled(before);
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "message too long",
+                        )));
+                    }
                 }
-            }
-            if line > self.limit {
-                buf.set_filled(before);
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "message too long",
-                )));
             }
             self.line = line;
         }
         polled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Bounded;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn a_newline_cannot_hide_an_overlong_message_in_one_read_or_across_reads() {
+        for split in [false, true] {
+            let mut stream = Bounded::with_limit(&b"12345\nok\n"[..], 4);
+            if split {
+                let mut first = [0; 2];
+                stream.read_exact(&mut first).await.unwrap();
+                assert_eq!(&first, b"12");
+            }
+            let mut output = [0; 32];
+            assert_eq!(
+                stream.read(&mut output).await.unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                stream.read(&mut output).await.unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+        let mut stream = Bounded::with_limit(&b"1234\nok\n"[..], 4);
+        let mut output = Vec::new();
+        stream.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, b"1234\nok\n");
     }
 }

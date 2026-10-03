@@ -1,6 +1,29 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+const WRITE_FIRST: &str =
+    "Set-Content -LiteralPath result.txt -Value first -NoNewline -Encoding ascii";
+#[cfg(not(windows))]
+const WRITE_FIRST: &str = "printf first > result.txt";
+#[cfg(windows)]
+const APPEND_SECOND: &str =
+    "Add-Content -LiteralPath result.txt -Value second -NoNewline -Encoding ascii";
+#[cfg(not(windows))]
+const APPEND_SECOND: &str = "printf second >> result.txt";
+#[cfg(windows)]
+const REMOVE_RESULT: &str = "Remove-Item -LiteralPath result.txt";
+#[cfg(not(windows))]
+const REMOVE_RESULT: &str = "rm result.txt";
+#[cfg(windows)]
+const SLOW_COMMAND: &str = "[Console]::Write('started'); Start-Sleep -Seconds 30";
+#[cfg(not(windows))]
+const SLOW_COMMAND: &str = "printf started; trap '' TERM; sleep 30 & wait";
+#[cfg(windows)]
+const QUIT_COMMAND: &str = "[Console]::Write('started'); Start-Sleep -Seconds 30; Set-Content -LiteralPath replayed -Value replayed";
+#[cfg(not(windows))]
+const QUIT_COMMAND: &str = "printf started; sleep 30; touch replayed";
+
 struct Home {
     dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
@@ -115,10 +138,10 @@ async fn work_local_file_and_command_approval_journal_inner() {
         output(vec![WorkAgentFetch::DeleteFile {
             path: moved.clone(),
         }]),
-        output(vec![run(&root, "printf first > result.txt", None)]),
+        output(vec![run(&root, WRITE_FIRST, None)]),
         output(vec![
-            run(&root, "printf second >> result.txt", None),
-            run(&root, "rm result.txt", None),
+            run(&root, APPEND_SECOND, None),
+            run(&root, REMOVE_RESULT, None),
         ]),
         finish_local(),
     ]);
@@ -126,7 +149,12 @@ async fn work_local_file_and_command_approval_journal_inner() {
     let sources = Sources::default();
     let decisions = async {
         let mut count = 0;
+        let started = Instant::now();
         while count < 5 {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "approval journal did not settle"
+            );
             let state = projection(&handle, profile, work).await;
             if let Some(execution) = state.executions.last() {
                 if let Some(step) = execution.steps.iter().find(|s| {
@@ -139,7 +167,7 @@ async fn work_local_file_and_command_approval_journal_inner() {
                                 .and_then(|l| l.policy.as_ref())
                                 .is_some_and(|p| p.scope != WorkCommandApprovalScopeV1::None))
                 }) {
-                    let approve = !matches!(&step.kind,WorkStepKindV1::RunCommand{command,..} if command.starts_with("rm"));
+                    let approve = !matches!(&step.kind,WorkStepKindV1::RunCommand{command,..} if command == REMOVE_RESULT);
                     if let WorkStepKindV1::EditFile { .. } = step.kind {
                         assert_eq!(
                             std::fs::read_to_string(&file).unwrap(),
@@ -230,6 +258,7 @@ fn work_local_command_timeout_and_stop_settle_with_output() {
 }
 
 async fn work_local_command_timeout_and_stop_settle_with_output_inner() {
+    let timeout_secs = if cfg!(windows) { 5 } else { 1 };
     let home = Home::new();
     let root = home.project();
     for stop in [false, true] {
@@ -240,18 +269,22 @@ async fn work_local_command_timeout_and_stop_settle_with_output_inner() {
         script.play([
             output(vec![run(
                 &root,
-                "printf started; trap '' TERM; sleep 30 & wait",
-                Some(if stop { 30 } else { 1 }),
+                SLOW_COMMAND,
+                Some(if stop { 30 } else { timeout_secs }),
             )]),
             finish_local(),
         ]);
         let sources = Sources::default();
         let service = WorkAgentService::new(handle.clone());
         let decide = async {
-            let (execution, step) = running_step(&handle, profile, work, |k| {
-                matches!(k, WorkStepKindV1::RunCommand { .. })
-            })
-            .await;
+            let (execution, step) = tokio::time::timeout(
+                Duration::from_secs(10),
+                running_step(&handle, profile, work, |k| {
+                    matches!(k, WorkStepKindV1::RunCommand { .. })
+                }),
+            )
+            .await
+            .expect("command step did not start");
             command(
                 &handle,
                 profile,
@@ -265,7 +298,12 @@ async fn work_local_command_timeout_and_stop_settle_with_output_inner() {
             )
             .await;
             if stop {
+                let waiting = Instant::now();
                 loop {
+                    assert!(
+                        waiting.elapsed() < Duration::from_secs(10),
+                        "command output did not arrive"
+                    );
                     let state = projection(&handle, profile, work).await;
                     if state.executions[0].steps.iter().any(|s| {
                         s.local
@@ -330,10 +368,12 @@ async fn work_local_command_timeout_and_stop_settle_with_output_inner() {
             .find(|s| matches!(s.kind, WorkStepKindV1::RunCommand { .. }))
             .unwrap();
         assert_eq!(step.status, WorkStepStatus::Failed);
-        assert_eq!(
-            step.note.as_deref(),
-            Some(if stop { "Stopped" } else { "Stopped after 1 s" })
-        );
+        let note = if stop {
+            "Stopped".into()
+        } else {
+            format!("Stopped after {timeout_secs} s")
+        };
+        assert_eq!(step.note.as_deref(), Some(note.as_str()));
         assert!(execution.command_evidence[0]
             .command
             .text
@@ -361,19 +401,16 @@ async fn work_local_quit_recovers_command_as_failed_without_replay_inner() {
     let (mut shell, queue, handle, profile) = fixture(store.clone());
     let work = new_work(&mut shell, &queue, &handle, "Run a local command").await;
     let script = Script::default();
-    script.play([output(vec![run(
-        &root,
-        "printf started; sleep 30; touch replayed",
-        None,
-    )])]);
+    script.play([output(vec![run(&root, QUIT_COMMAND, None)])]);
     let sources = Sources::default();
     let service = WorkAgentService::new(handle.clone());
     drive(&mut shell,&queue,async{
         tokio::select! {
             _=service.run(profile,local_begin(work,WorkRevision::INITIAL,&root),None,WorkAgentProviders{turn:&script,search:&sources},|probe,request|page(probe,request,false),|_|{})=>panic!("command should still be running"),
             _=async{
-                let (execution,step)=running_step(&handle,profile,work,|k|matches!(k,WorkStepKindV1::RunCommand{..})).await;command(&handle,profile,work,WorkRuntimeIntent::ApproveStep{execution,step,approve:true,for_run:false}).await;
-                loop {let state=projection(&handle,profile,work).await;if state.executions[0].steps.iter().any(|s|s.local.as_ref().and_then(|l|l.output.as_ref()).is_some_and(|o|o.text.contains("started"))){break;}tokio::time::sleep(Duration::from_millis(20)).await;}
+                let (execution,step)=tokio::time::timeout(Duration::from_secs(10), running_step(&handle,profile,work,|k|matches!(k,WorkStepKindV1::RunCommand{..}))).await.expect("command step did not start");command(&handle,profile,work,WorkRuntimeIntent::ApproveStep{execution,step,approve:true,for_run:false}).await;
+                let waiting=Instant::now();
+                loop {assert!(waiting.elapsed()<Duration::from_secs(10), "command output did not arrive"); let state=projection(&handle,profile,work).await;if state.executions[0].steps.iter().any(|s|s.local.as_ref().and_then(|l|l.output.as_ref()).is_some_and(|o|o.text.contains("started"))){break;}tokio::time::sleep(Duration::from_millis(20)).await;}
             }=>{}
         }
     }).await;

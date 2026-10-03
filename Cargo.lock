@@ -7231,6 +7231,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "windows",
  "zephium-agent-controller",
  "zephium-agent-model-catalog",
  "zephium-agent-provider-transport",
@@ -7460,6 +7461,7 @@ dependencies = [
  "tokio",
  "ulid",
  "url",
+ "windows",
  "zephium-credentials",
  "zeroize",
 ]
