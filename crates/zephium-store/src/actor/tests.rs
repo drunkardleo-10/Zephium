@@ -135,13 +135,20 @@ fn work_journal_mailbox_is_lazy_bounded_and_refusal_never_calls_completion() {
 
 #[cfg(all(
     feature = "work-execution",
-    any(target_os = "macos", target_os = "linux")
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 #[test]
 fn work_journal_callback_loss_and_panic_do_not_reclaim_process_identity_or_kill_store() {
     let _process = crate::hub::work_test_guard();
     use zephium_agentic::{AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest};
     let directory = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    let store = SqliteStore::open_with_windows_work_storage(
+        directory.path(),
+        crate::hub::work_test_storage(directory.path()),
+    )
+    .unwrap();
+    #[cfg(not(windows))]
     let store = SqliteStore::open(directory.path()).unwrap();
     // A lost acknowledgement keeps the Store's exact incarnation and lock.
     store

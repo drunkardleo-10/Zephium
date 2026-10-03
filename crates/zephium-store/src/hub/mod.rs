@@ -20,7 +20,11 @@ mod resources;
 mod session;
 mod settings;
 mod userscripts;
+#[cfg(all(windows, feature = "work-execution"))]
+mod windows_work_storage;
 mod work_document;
+#[cfg(all(windows, feature = "work-execution"))]
+pub use windows_work_storage::WindowsWorkStorage;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -45,9 +49,11 @@ pub(crate) use agent_audit::{AgentAuditAppendOutcome, MAX_DURABLE_AGENT_AUDIT_EV
 #[cfg(all(
     test,
     feature = "work-execution",
-    any(target_os = "macos", target_os = "linux")
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 pub(crate) use agent_work::work_test_guard;
+#[cfg(all(test, windows, feature = "work-execution"))]
+pub(crate) use agent_work::work_test_storage;
 use compatibility::remove_legacy_source;
 pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 #[cfg(test)]
@@ -76,6 +82,10 @@ pub struct Hub {
     work_runtime_epoch: std::time::Instant,
     #[cfg(feature = "work-execution")]
     work: Option<std::sync::Arc<agent_work::WorkOwnership>>,
+    #[cfg(all(windows, feature = "work-execution"))]
+    windows_work_storage: Option<WindowsWorkStorage>,
+    #[cfg(all(windows, feature = "work-execution"))]
+    windows_work_database: Option<windows_work_storage::WindowsWorkDatabase>,
     dir: Option<PathBuf>,
     media: Option<media::MediaStore>,
     meta: Connection,
@@ -115,6 +125,29 @@ impl Hub {
         dir: PathBuf,
         deletion_process_generation: ProfileId,
     ) -> rusqlite::Result<Self> {
+        Self::open_prepared(
+            dir,
+            deletion_process_generation,
+            #[cfg(all(windows, feature = "work-execution"))]
+            None,
+        )
+    }
+
+    #[cfg(all(windows, feature = "work-execution"))]
+    pub(crate) fn open_with_windows_work_storage(
+        dir: PathBuf,
+        storage: WindowsWorkStorage,
+    ) -> rusqlite::Result<Self> {
+        Self::open_prepared(dir, deletion_process_generation(), Some(storage))
+    }
+
+    fn open_prepared(
+        dir: PathBuf,
+        deletion_process_generation: ProfileId,
+        #[cfg(all(windows, feature = "work-execution"))] windows_work_storage: Option<
+            WindowsWorkStorage,
+        >,
+    ) -> rusqlite::Result<Self> {
         // Pin every derived database path to the canonical application-data
         // directory selected at startup. Final components are still opened
         // with NOFOLLOW and verified by file identity below.
@@ -141,6 +174,10 @@ impl Hub {
             work_runtime_epoch: std::time::Instant::now(),
             #[cfg(feature = "work-execution")]
             work: None,
+            #[cfg(all(windows, feature = "work-execution"))]
+            windows_work_storage,
+            #[cfg(all(windows, feature = "work-execution"))]
+            windows_work_database: None,
             dir: Some(dir.clone()),
             media: Some(media::MediaStore::new(dir.join("media"))),
             meta,
@@ -242,6 +279,10 @@ impl Hub {
             work_runtime_epoch: std::time::Instant::now(),
             #[cfg(feature = "work-execution")]
             work: None,
+            #[cfg(all(windows, feature = "work-execution"))]
+            windows_work_storage: None,
+            #[cfg(all(windows, feature = "work-execution"))]
+            windows_work_database: None,
             dir: None,
             media: None,
             meta,

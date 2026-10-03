@@ -25,6 +25,8 @@
 
 #[cfg(all(feature = "windows-namespace-validation", not(debug_assertions)))]
 compile_error!("Windows namespace validation must not enter an optimized shipping build");
+#[cfg(all(feature = "windows-work-test-fixtures", not(debug_assertions)))]
+compile_error!("Windows Work test fixtures must not enter an optimized shipping build");
 
 mod component;
 mod entry_name;
@@ -44,6 +46,13 @@ pub use namespace::{
     ByteLimit, LockedPrivateNamespace, OpenedPrivateDirectory, PrivateChildKind, PrivateDirectory,
     SealedPrivateDirectory, TreeRemovalLimits, TreeRemovalReport, MAX_TREE_REMOVAL_DEPTH,
     MAX_TREE_REMOVAL_ENTRIES,
+};
+#[cfg(all(target_os = "windows", feature = "windows-work-test-fixtures"))]
+pub use platform::NativeWorkStorageTestSession;
+#[cfg(target_os = "windows")]
+pub use platform::{
+    NativeApplication, NativeSession, NativeStorageAnchor, NativeStorageFile,
+    NativeWorkStorageAnchor, NativeWorkStorageFile,
 };
 pub use streaming::{StreamingFileLength, StreamingWriteError, MAX_STREAMING_FILE_BYTES};
 pub use transition::PrivateFsTransitionError;

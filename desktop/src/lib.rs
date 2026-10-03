@@ -4794,7 +4794,9 @@ pub fn run() {
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
-                let data_dir = webext_qa::data_dir(data_dir)?;
+                let qa_session = webext_qa::session_label()?;
+                #[cfg(all(target_os = "windows", feature = "webext-qa"))]
+                let data_dir = webext_qa::data_dir(data_dir, qa_session.as_deref())?;
                 #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
                 foreground_rendering_probe::validate_data_root(&data_dir)?;
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
@@ -4823,6 +4825,19 @@ pub fn run() {
                 // private data root is secured. A corrupt/newer database must
                 // fail before either privileged chrome or raw content creates
                 // native renderer state.
+                #[cfg(all(target_os = "windows", feature = "work-product"))]
+                let store = {
+                    #[cfg(feature = "webext-qa")]
+                    let session = qa_session.as_deref();
+                    #[cfg(not(feature = "webext-qa"))]
+                    let session = None;
+                    let work_storage = zephium_store::WindowsWorkStorage::for_application(
+                        &app.config().identifier,
+                        session,
+                    )?;
+                    Arc::new(SqliteStore::open_with_windows_work_storage(&data_dir, work_storage)?)
+                };
+                #[cfg(not(all(target_os = "windows", feature = "work-product")))]
                 let store = Arc::new(SqliteStore::open(&data_dir)?);
                 app.manage(media::MediaBlobs(zephium_store::MediaStore::new(
                     data_dir.join("media"),
@@ -6785,6 +6800,11 @@ mod tests {
             .expect("main privileged WebView construction");
         assert!(watchdog < storage);
         assert!(storage < main_webview);
+        let windows_storage = setup
+            .find("SqliteStore::open_with_windows_work_storage")
+            .expect("Windows protected Work storage selection");
+        assert!(watchdog < windows_storage);
+        assert!(windows_storage < main_webview);
 
         let parent_handle = setup
             .find("let parent = window.window_handle()?.as_raw()")

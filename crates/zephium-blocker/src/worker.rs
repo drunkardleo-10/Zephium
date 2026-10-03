@@ -2678,12 +2678,7 @@ mod tests {
     ))]
     #[test]
     fn persistent_cache_warm_hit_skips_source_parsing_and_retains_only_required_recovery() {
-        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        let root = crate::cache::private_test_root();
         let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
         let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("maintained").unwrap(),
@@ -2693,7 +2688,7 @@ mod tests {
         .unwrap();
 
         let mut cold = ArtifactCache::new(PolicyCatalog::eager(catalog.clone()));
-        let mut cold_persistent = PersistentArtifactCache::open(&config).ok();
+        let mut cold_persistent = Some(PersistentArtifactCache::open(&config).unwrap());
         assert!(matches!(
             cold.resolve(Compiler::default(), &mut cold_persistent),
             BlockerCompileOutcome::Compiled(_)
@@ -2714,7 +2709,7 @@ mod tests {
         drop(cold_persistent);
 
         let mut warm = ArtifactCache::new(PolicyCatalog::eager(catalog));
-        let mut warm_persistent = PersistentArtifactCache::open(&config).ok();
+        let mut warm_persistent = Some(PersistentArtifactCache::open(&config).unwrap());
         assert!(matches!(
             warm.resolve(Compiler::default(), &mut warm_persistent),
             BlockerCompileOutcome::Compiled(_)

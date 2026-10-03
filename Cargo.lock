@@ -7239,6 +7239,7 @@ dependencies = [
  "zephium-core",
  "zephium-ipc",
  "zephium-mcp",
+ "zephium-private-fs",
  "zephium-store",
 ]
 

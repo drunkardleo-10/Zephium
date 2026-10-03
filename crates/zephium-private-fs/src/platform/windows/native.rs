@@ -8,9 +8,11 @@ use windows::core::PWSTR;
 use windows::Win32::Foundation::{HANDLE, UNICODE_STRING};
 use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows::Win32::Storage::FileSystem::{
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, ReOpenFile,
+    FileIdType, GetFileInformationByHandle, GetFinalPathNameByHandleW,
+    GetVolumeInformationByHandleW, OpenFileById, ReOpenFile, BY_HANDLE_FILE_INFORMATION,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
-    FILE_NAME_NORMALIZED, FILE_SHARE_MODE, GETFINALPATHNAMEBYHANDLE_FLAGS, VOLUME_NAME_DOS,
+    FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED, FILE_SHARE_MODE,
+    GETFINALPATHNAMEBYHANDLE_FLAGS, VOLUME_NAME_DOS,
 };
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -375,6 +377,14 @@ pub(super) fn rename(
         )
     };
     if status != 0 {
+        #[cfg(feature = "windows-namespace-validation")]
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "private-fs-native: stage=rename status={status:#x}"
+            );
+        }
         return Err(error(status));
     }
     Ok(())
@@ -390,6 +400,14 @@ pub(super) fn delete(file: &File) -> Result<(), PrivateFsError> {
         NtSetInformationFile(handle(file), &raw mut io, (&raw const flags).cast(), 4, 64)
     };
     if status != 0 {
+        #[cfg(feature = "windows-namespace-validation")]
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "private-fs-native: stage=delete status={status:#x}"
+            );
+        }
         return Err(error(status));
     }
     Ok(())
@@ -421,21 +439,56 @@ pub(super) fn flush(file: &File) -> Result<(), PrivateFsError> {
 }
 
 pub(super) fn reopen_writable(file: &File) -> Result<File, PrivateFsError> {
-    let directory = super::identity(file, None)?.1;
-    let raw = unsafe {
-        ReOpenFile(
-            handle(file),
-            READ | WRITE | METADATA | if directory { TRAVERSE } else { 0 },
-            FILE_SHARE_MODE(7),
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
-        )
+    let expected = super::identity(file, None)?;
+    let security = super::security::snapshot(file)?;
+    let access = READ | WRITE | METADATA | if expected.1 { TRAVERSE } else { 0 };
+    let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH;
+    let raw = if expected.1 {
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the original live directory remains held through ID lookup,
+        // native reopening and complete identity/security revalidation.
+        unsafe { GetFileInformationByHandle(handle(file), &raw mut info) }
+            .map_err(|_| PrivateFsError::PrimitiveUnavailable)?;
+        let descriptor = FILE_ID_DESCRIPTOR {
+            dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
+            Type: FileIdType,
+            Anonymous: FILE_ID_DESCRIPTOR_0 {
+                FileId: (((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64) as i64,
+            },
+        };
+        // SAFETY: OpenFileById admits a held file as its same-volume hint and
+        // supports directories with BACKUP_SEMANTICS. The 64-bit ID is only a
+        // locator: the held original prevents reuse, and full 128-bit identity,
+        // kind and owner/DACL are checked before any authority is returned.
+        unsafe {
+            OpenFileById(
+                handle(file),
+                &descriptor,
+                access,
+                FILE_SHARE_MODE(7),
+                None,
+                flags,
+            )
+        }
+    } else {
+        // SAFETY: ReOpenFile reopens the held regular file without resolving
+        // an ambient path; the returned handle is independently owned.
+        unsafe { ReOpenFile(handle(file), access, FILE_SHARE_MODE(7), flags) }
     }
     .map_err(|_| PrivateFsError::PrimitiveUnavailable)?;
     if raw.is_invalid() {
         return Err(PrivateFsError::PrimitiveUnavailable);
     }
-    // SAFETY: ReOpenFile transfers an independently owned handle on success.
-    Ok(unsafe { File::from_raw_handle(raw.0) })
+    // SAFETY: the successful native open transfers an independently owned handle.
+    let reopened = unsafe { File::from_raw_handle(raw.0) };
+    if super::identity(&reopened, None)? != expected
+        || super::identity(file, None)? != expected
+        || super::security::snapshot(&reopened)? != security
+        || super::security::snapshot(file)? != security
+    {
+        return Err(PrivateFsError::IdentityAmbiguous);
+    }
+    Ok(reopened)
 }
 
 pub(super) fn require_local_ntfs(file: &File) -> Result<(), PrivateFsError> {

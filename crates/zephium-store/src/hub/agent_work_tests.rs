@@ -2,6 +2,13 @@ use super::*;
 use zephium_agentic::{AgentWorkDebt, AgentWorkJournalMutation};
 
 static SERIAL: Mutex<()> = Mutex::new(());
+#[cfg(windows)]
+static WINDOWS_SESSIONS: Mutex<
+    Vec<(
+        std::path::PathBuf,
+        zephium_private_fs::NativeWorkStorageTestSession,
+    )>,
+> = Mutex::new(Vec::new());
 pub(crate) struct WorkTestGuard {
     _serial: std::sync::MutexGuard<'static, ()>,
 }
@@ -13,7 +20,65 @@ pub(crate) fn work_test_guard() -> WorkTestGuard {
 impl Drop for WorkTestGuard {
     fn drop(&mut self) {
         simulate_process_exit();
+        #[cfg(windows)]
+        for (_, session) in std::mem::take(
+            &mut *WINDOWS_SESSIONS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        ) {
+            session
+                .retire()
+                .expect("owned Windows journal test session retirement");
+        }
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn work_test_storage(directory: &std::path::Path) -> super::super::WindowsWorkStorage {
+    use sha2::{Digest, Sha256};
+    let directory = std::fs::canonicalize(directory).unwrap();
+    let digest = Sha256::digest(directory.to_string_lossy().as_bytes());
+    let label = format!(
+        "store-test-{}",
+        digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    // The parent alone creates and retires the scope. Child processes derive
+    // the same selector and retain their original lease until actual OS exit.
+    if std::env::var_os("ZEPHIUM_TEST_WORK_DIRECTORY").is_none() {
+        let mut sessions = WINDOWS_SESSIONS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !sessions.iter().any(|(known, _)| known == &directory) {
+            let session = zephium_private_fs::NativeSession::new(&label).unwrap();
+            sessions.push((
+                directory,
+                zephium_private_fs::NativeWorkStorageTestSession::create(&session).unwrap(),
+            ));
+        }
+    }
+    super::super::WindowsWorkStorage::for_application("app.zephium.webext-qa", Some(&label))
+        .unwrap()
+}
+
+pub(crate) fn open_hub(directory: impl AsRef<std::path::Path>) -> rusqlite::Result<Hub> {
+    #[cfg(windows)]
+    return Hub::open_with_windows_work_storage(
+        directory.as_ref().into(),
+        work_test_storage(directory.as_ref()),
+    );
+    #[cfg(not(windows))]
+    Hub::open(directory.as_ref().into())
+}
+
+pub(super) fn journal(hub: &mut Hub) -> &mut Connection {
+    #[cfg(windows)]
+    if hub.windows_work_storage.is_some() {
+        return hub.windows_work_database().unwrap().test_connection();
+    }
+    &mut hub.meta
 }
 pub(super) fn simulate_process_exit() {
     let mut fence = PROCESS_WORK_FENCE.lock().unwrap();
@@ -57,7 +122,7 @@ pub(super) fn initial(owner: AgentWorkIncarnation, key: u16) -> AgentWorkRecord 
 
 pub(super) fn open() -> (tempfile::TempDir, Hub, AgentWorkIncarnation) {
     let directory = tempfile::tempdir().unwrap();
-    let mut hub = Hub::open(directory.path().into()).unwrap();
+    let mut hub = open_hub(directory.path()).unwrap();
     let Reply::Claimed { owner, records } = hub.agent_work(Request::Claim).unwrap() else {
         panic!()
     };
@@ -66,7 +131,7 @@ pub(super) fn open() -> (tempfile::TempDir, Hub, AgentWorkIncarnation) {
 }
 
 fn put(hub: &mut Hub, record: AgentWorkRecord) {
-    compare_and_set_records(&mut hub.meta, None, record, None, None).unwrap();
+    compare_and_set_records(journal(hub), None, record, None, None).unwrap();
 }
 
 fn transition(
@@ -85,7 +150,7 @@ fn transition(
 fn namespace_fences_live_and_replaced_store_owners_until_process_exit() {
     let _process = work_test_guard();
     let (directory, first, owner) = open();
-    let mut second = Hub::open(directory.path().into()).unwrap();
+    let mut second = open_hub(directory.path()).unwrap();
     assert!(matches!(
         second.agent_work(Request::Claim),
         Err(Error::Fenced)
@@ -140,7 +205,7 @@ fn crash_restart_classifies_every_incomplete_stage_without_replay() {
     }
     drop(hub);
     simulate_process_exit();
-    let mut reopened = Hub::open(directory.path().into()).unwrap();
+    let mut reopened = open_hub(directory.path()).unwrap();
     let Reply::Claimed {
         owner: new_owner,
         records,
@@ -178,14 +243,17 @@ fn partial_restart_transaction_rolls_back_every_record_and_fence() {
     put(&mut hub, second);
     drop(hub);
     simulate_process_exit();
-    let mut reopened = Hub::open(directory.path().into()).unwrap();
+    let mut reopened = open_hub(directory.path()).unwrap();
     FAULT.with(|fault| fault.set(Some(Fault::RestartPartial)));
     assert!(matches!(
         reopened.agent_work(Request::Claim),
         Err(Error::Uncertain)
     ));
-    assert_eq!(inventory(&reopened.meta).unwrap(), vec![first, second]);
-    assert_eq!(verify_owner(&reopened.meta, owner), Ok(()));
+    assert_eq!(
+        inventory(journal(&mut reopened)).unwrap(),
+        vec![first, second]
+    );
+    assert_eq!(verify_owner(journal(&mut reopened), owner), Ok(()));
     assert!(
         matches!(reopened.agent_work(Request::Claim), Ok(Reply::Claimed { owner: new_owner, records }) if new_owner != owner && records.iter().all(|record| record.incarnation() == new_owner))
     );
@@ -210,11 +278,14 @@ fn partial_writes_and_lost_acknowledgement_reconcile_only_exact_cas() {
         } else {
             admitted
         };
-        assert_eq!(read(&hub.meta, admitted.key()).unwrap(), Some(expected));
+        assert_eq!(
+            read(journal(&mut hub), admitted.key()).unwrap(),
+            Some(expected)
+        );
         assert!(
             matches!(hub.agent_work(Request::CompareAndSet(mutation)), Ok(Reply::Record(Some(record))) if record == mutation.next())
         );
-        assert_eq!(inventory(&hub.meta).unwrap(), vec![mutation.next()]);
+        assert_eq!(inventory(journal(&mut hub)).unwrap(), vec![mutation.next()]);
         drop(hub);
         simulate_process_exit();
     }
@@ -246,26 +317,27 @@ fn settled_unsuccessful_terminals_survive_crash_without_reopening_or_result_bodi
             let terminal = AgentWorkRecord::decode(bytes).unwrap();
             FAULT.with(|fault| fault.set(Some(injected)));
             assert_eq!(
-                compare_and_set_records(&mut hub.meta, Some(running), terminal, None, None),
+                compare_and_set_records(journal(&mut hub), Some(running), terminal, None, None),
                 Err(Error::Uncertain)
             );
             assert_eq!(
-                read(&hub.meta, running.key()).unwrap(),
+                read(journal(&mut hub), running.key()).unwrap(),
                 Some(if injected == Fault::AfterCommit {
                     terminal
                 } else {
                     running
                 })
             );
-            compare_and_set_records(&mut hub.meta, Some(running), terminal, None, None).unwrap();
-            compare_and_set_records(&mut hub.meta, Some(running), terminal, None, None).unwrap();
-            assert_eq!(inventory(&hub.meta).unwrap(), [terminal]);
+            compare_and_set_records(journal(&mut hub), Some(running), terminal, None, None)
+                .unwrap();
+            compare_and_set_records(journal(&mut hub), Some(running), terminal, None, None)
+                .unwrap();
+            assert_eq!(inventory(journal(&mut hub)).unwrap(), [terminal]);
             assert!(
                 AgentWorkJournalMutation::transition(terminal, AgentWorkDisposition::Running)
                     .is_err()
             );
-            let bodies: u64 = hub
-                .meta
+            let bodies: u64 = journal(&mut hub)
                 .query_row("SELECT count(*) FROM agent_work_artifacts", [], |row| {
                     row.get(0)
                 })
@@ -273,7 +345,7 @@ fn settled_unsuccessful_terminals_survive_crash_without_reopening_or_result_bodi
             assert_eq!(bodies, 0);
             drop(hub);
             simulate_process_exit();
-            let mut reopened = Hub::open(directory.path().into()).unwrap();
+            let mut reopened = open_hub(directory.path()).unwrap();
             let Reply::Claimed {
                 owner: current,
                 records,
@@ -350,19 +422,19 @@ fn proof_closed_review_partial_writes_restart_and_decisions_preserve_exact_debt(
             let review = AgentWorkRecord::decode(bytes).unwrap();
             FAULT.with(|fault| fault.set(Some(injected)));
             assert_eq!(
-                compare_and_set_records(&mut hub.meta, Some(running), review, None, None),
+                compare_and_set_records(journal(&mut hub), Some(running), review, None, None),
                 Err(Error::Uncertain)
             );
             assert_eq!(
-                read(&hub.meta, running.key()).unwrap(),
+                read(journal(&mut hub), running.key()).unwrap(),
                 Some(if injected == Fault::AfterCommit {
                     review
                 } else {
                     running
                 })
             );
-            compare_and_set_records(&mut hub.meta, Some(running), review, None, None).unwrap();
-            compare_and_set_records(&mut hub.meta, Some(running), review, None, None).unwrap();
+            compare_and_set_records(journal(&mut hub), Some(running), review, None, None).unwrap();
+            compare_and_set_records(journal(&mut hub), Some(running), review, None, None).unwrap();
             let final_record = if let Some(winner) = decision {
                 let mutation = AgentWorkJournalMutation::transition(review, winner).unwrap();
                 FAULT.with(|fault| fault.set(Some(injected)));
@@ -390,10 +462,10 @@ fn proof_closed_review_partial_writes_restart_and_decisions_preserve_exact_debt(
             } else {
                 review
             };
-            assert_eq!(inventory(&hub.meta).unwrap(), [final_record]);
+            assert_eq!(inventory(journal(&mut hub)).unwrap(), [final_record]);
             drop(hub);
             simulate_process_exit();
-            let mut reopened = Hub::open(directory.path().into()).unwrap();
+            let mut reopened = open_hub(directory.path()).unwrap();
             let Reply::Claimed {
                 owner: current,
                 records,
@@ -434,14 +506,15 @@ fn terminal_persistence_is_immutable_across_restart_and_sql_update() {
     let admitted = initial(owner, 1);
     put(&mut hub, admitted);
     let terminal = transition(&mut hub, admitted, AgentWorkDisposition::FailedClosed).unwrap();
-    assert!(hub
-        .meta
+    assert!(journal(&mut hub)
         .execute("UPDATE agent_work_runs SET terminal = 0", [])
         .is_err());
-    assert!(hub.meta.execute("DELETE FROM agent_work_runs", []).is_err());
+    assert!(journal(&mut hub)
+        .execute("DELETE FROM agent_work_runs", [])
+        .is_err());
     drop(hub);
     simulate_process_exit();
-    let mut reopened = Hub::open(directory.path().into()).unwrap();
+    let mut reopened = open_hub(directory.path()).unwrap();
     assert!(
         matches!(reopened.agent_work(Request::Claim), Ok(Reply::Claimed { records, .. }) if records == vec![terminal])
     );
@@ -465,13 +538,16 @@ fn corrupt_record_fails_closed() {
     put(&mut hub, admitted);
     let mut corrupt = *admitted.as_bytes();
     corrupt[3] = 1;
-    hub.meta
+    journal(&mut hub)
         .execute(
             "UPDATE agent_work_runs SET record = ?1",
             [corrupt.as_slice()],
         )
         .unwrap();
-    assert_eq!(read(&hub.meta, admitted.key()), Err(Error::Uncertain));
+    assert_eq!(
+        read(journal(&mut hub), admitted.key()),
+        Err(Error::Uncertain)
+    );
     assert!(matches!(
         hub.agent_work(Request::Claim),
         Err(Error::Uncertain)
@@ -482,7 +558,7 @@ fn corrupt_record_fails_closed() {
 fn retention_capacity_refuses_admission_without_evicting_debt() {
     let _process = work_test_guard();
     let (_directory, mut hub, owner) = open();
-    let transaction = hub.meta.transaction().unwrap();
+    let transaction = journal(&mut hub).transaction().unwrap();
     for key in 1..=1024 {
         let record = initial(owner, key);
         transaction
@@ -494,10 +570,10 @@ fn retention_capacity_refuses_admission_without_evicting_debt() {
     }
     transaction.commit().unwrap();
     assert_eq!(
-        compare_and_set_records(&mut hub.meta, None, initial(owner, 1025), None, None),
+        compare_and_set_records(journal(&mut hub), None, initial(owner, 1025), None, None),
         Err(Error::Capacity)
     );
-    assert_eq!(inventory(&hub.meta).unwrap().len(), 1024);
+    assert_eq!(inventory(journal(&mut hub)).unwrap().len(), 1024);
     let first = initial(owner, 1);
     assert!(transition(&mut hub, first, AgentWorkDisposition::FailedClosed).is_ok());
 }
@@ -536,7 +612,7 @@ fn process_fence_outlives_store_and_is_released_by_real_child_process_exit() {
 fn process_fence_child() {
     let directory =
         std::path::PathBuf::from(std::env::var_os("ZEPHIUM_TEST_WORK_DIRECTORY").unwrap());
-    let mut hub = Hub::open(directory).unwrap();
+    let mut hub = open_hub(&directory).unwrap();
     let result = hub.agent_work(Request::Claim);
     match std::env::var("ZEPHIUM_TEST_WORK_EXPECTED")
         .unwrap()

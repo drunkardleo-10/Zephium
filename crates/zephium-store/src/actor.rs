@@ -426,6 +426,22 @@ impl SqliteStore {
         Self::spawn(Hub::in_memory()?)
     }
 
+    /// Installs protected Work routing before startup tombstone reconciliation.
+    /// Ordinary application/profile databases retain their existing location.
+    #[cfg(all(windows, feature = "work-execution"))]
+    pub fn open_with_windows_work_storage(
+        dir: impl AsRef<Path>,
+        storage: crate::WindowsWorkStorage,
+    ) -> rusqlite::Result<Self> {
+        let mut hub = Hub::open_with_windows_work_storage(dir.as_ref().to_path_buf(), storage)?;
+        if let Err(error) = hub.load_authoritative() {
+            if hub.recovery_reason().is_none() {
+                return Err(error);
+            }
+        }
+        Self::spawn(hub)
+    }
+
     fn spawn(hub: Hub) -> rusqlite::Result<Self> {
         let setting_keys = hub.app_setting_keys()?;
         // Session snapshots use a latest-value mailbox below. Bound every

@@ -53,3 +53,6 @@ zephium-agent-model-catalog.workspace = true
 serde_json.workspace = true
 zephium-store = { workspace = true, features = ["work-execution"] }
 tempfile.workspace = true
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+zephium-private-fs = { workspace = true, features = ["windows-work-test-fixtures"] }

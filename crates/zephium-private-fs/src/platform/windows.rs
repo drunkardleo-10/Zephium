@@ -4,6 +4,7 @@
 #![allow(unsafe_code)]
 
 mod native;
+pub(super) mod native_storage;
 mod security;
 #[cfg(test)]
 mod tests;
@@ -48,13 +49,23 @@ pub(crate) fn admit_namespace_support() -> Result<(), PrivateFsError> {
 }
 
 fn identity(file: &File, directory: Option<bool>) -> Result<(RawIdentity, bool), PrivateFsError> {
+    identity_impl(file, directory, false)
+}
+
+fn identity_impl(
+    file: &File,
+    directory: Option<bool>,
+    allow_unlinked_held_file: bool,
+) -> Result<(RawIdentity, bool), PrivateFsError> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(native::handle(file), &raw mut info) }
         .map_err(|_| PrivateFsError::Unsafe)?;
     let is_directory = info.dwFileAttributes & 0x10 != 0;
     if info.dwFileAttributes & 0x400 != 0
         || directory.is_some_and(|kind| kind != is_directory)
-        || (!is_directory && info.nNumberOfLinks != 1)
+        || (!is_directory
+            && info.nNumberOfLinks != 1
+            && !(allow_unlinked_held_file && info.nNumberOfLinks == 0))
     {
         return Err(PrivateFsError::Unsafe);
     }
@@ -366,10 +377,13 @@ pub(crate) fn remove_regular(parent: &File, path: &Path, name: &str) -> Result<(
 }
 pub(crate) fn remove_directory(
     parent: &File,
-    path: &Path,
+    _path: &Path,
     name: &str,
 ) -> Result<(), PrivateFsError> {
-    let (file, _, _) = open_child_directory_any_mode(parent, path, name)?;
+    // Unlink needs the named directory link, not a by-ID handle used for
+    // writable flushing. The held-parent open already grants DELETE and
+    // validates exact spelling, identity, kind and private DACL.
+    let (file, _, _) = open_child(parent, name, true, native::READ | native::METADATA, 7)?;
     native::delete(&file)?;
     drop(file);
     if !relative_name_is_absent(parent, name) {
@@ -463,7 +477,9 @@ pub(crate) fn create_private_root(path: &Path) -> Result<bool, PrivateFsError> {
     create_directory(&directory, parent, name)
 }
 pub(crate) fn same_open_identity(file: &File, expected: RawIdentity) -> bool {
-    identity(file, None).is_ok_and(|(id, _)| id == expected)
+    // Deletion settlement can inspect the original held, now unlinked regular
+    // file. New opens and admission still require exactly one link.
+    identity_impl(file, None, true).is_ok_and(|(id, _)| id == expected)
 }
 pub(crate) fn validate_private_directory_node(
     path: &Path,

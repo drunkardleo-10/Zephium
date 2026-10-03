@@ -1,20 +1,25 @@
 //! Named disposable sessions in the already isolated QA data root. No product flag.
 use std::path::PathBuf;
 
-pub(super) fn data_dir(root: PathBuf) -> std::io::Result<PathBuf> {
+pub(super) fn session_label() -> std::io::Result<Option<String>> {
     let labels: Vec<_> = std::env::args()
         .filter_map(|arg| arg.strip_prefix("--webext-qa-session=").map(str::to_owned))
         .collect();
-    let label = match labels.as_slice() {
-        [] => return Ok(root),
-        [label] if valid_label(label) => label,
-        _ => {
-            return Err(std::io::Error::other(
-                "Use one alphanumeric QA session label (1–48 characters).",
-            ))
-        }
-    };
-    session_dir(root, label)
+    match labels.as_slice() {
+        [] => Ok(None),
+        [label] if valid_label(label) => Ok(Some(label.clone())),
+        _ => Err(std::io::Error::other(
+            "Use one alphanumeric QA session label (1–48 characters).",
+        )),
+    }
+}
+
+pub(super) fn data_dir(root: PathBuf, label: Option<&str>) -> std::io::Result<PathBuf> {
+    match label {
+        Some(label) if valid_label(label) => session_dir(root, label),
+        None => Ok(root),
+        Some(_) => Err(std::io::Error::other("Invalid QA session label.")),
+    }
 }
 
 fn session_dir(root: PathBuf, label: &str) -> std::io::Result<PathBuf> {

@@ -1487,11 +1487,22 @@ fn unique_bounded<T: Eq + std::hash::Hash>(values: Option<&[T]>, max_count: usiz
     values.iter().all(|value| unique.insert(value))
 }
 
+#[cfg(all(
+    test,
+    any(
+        all(target_os = "windows", feature = "runtime"),
+        all(not(target_os = "windows"), feature = "webkit")
+    )
+))]
+pub(crate) fn private_test_root() -> tempfile::TempDir {
+    tests::private_root()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn private_root() -> tempfile::TempDir {
+    pub(super) fn private_root() -> tempfile::TempDir {
         // macOS exposes `/var` through an OS-managed symlink; cache admission
         // intentionally rejects every symlink in the path chain. Keeping test
         // roots below the checked-out workspace exercises the real invariant.

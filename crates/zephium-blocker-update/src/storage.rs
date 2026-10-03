@@ -1978,6 +1978,15 @@ fn validate_complete_tuf_stage(
             return Err(StoreError::UnsafePath);
         }
         if synchronize {
+            #[cfg(target_os = "windows")]
+            let file = crate::file_identity::open_verified_staged_for_sync(
+                &entry.path(),
+                &file,
+                max_bytes,
+            )
+            .ok_or(StoreError::UnsafePath)?;
+            // Windows FlushFileBuffers requires GENERIC_WRITE, obtained only for
+            // this owned TUF stage after exact identity and size revalidation.
             file.sync_all().map_err(|_| StoreError::Io)?;
         }
     }

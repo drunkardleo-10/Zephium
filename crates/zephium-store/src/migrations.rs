@@ -213,6 +213,8 @@ fn expected_manifest(
         1
     } else if std::ptr::eq(migrations.as_ptr(), PROFILE.as_ptr()) {
         2
+    } else if std::ptr::eq(migrations.as_ptr(), WORK.as_ptr()) {
+        4
     } else {
         return Err(invalid_schema("unknown migration family"));
     };
@@ -243,6 +245,51 @@ fn expected_manifest(
         .insert((family, version), manifest.clone());
     Ok(manifest)
 }
+
+/// Separate protected Work lineage. No ordinary AppData tables are imported.
+pub(crate) static WORK: &[Migration] = &[Migration {
+    version: 1,
+    up: |tx| {
+        (META[16].up)(tx)?;
+        tx.execute_batch(
+            "ALTER TABLE agent_work_runs ADD COLUMN result_profile TEXT
+                 CHECK (result_profile IS NULL OR length(result_profile) = 26);
+             CREATE TRIGGER agent_work_result_intent_immutable BEFORE UPDATE ON agent_work_runs
+             WHEN NEW.result_profile IS NOT OLD.result_profile
+             BEGIN SELECT RAISE(ABORT, 'work result intent is immutable'); END;
+             CREATE TABLE agent_work_artifacts (
+                 run_key BLOB PRIMARY KEY REFERENCES agent_work_runs(run_key),
+                 profile_id TEXT NOT NULL CHECK (length(CAST(profile_id AS BLOB)) = 26),
+                 artifact_id BLOB NOT NULL UNIQUE CHECK (length(artifact_id) = 16),
+                 digest BLOB NOT NULL CHECK (length(digest) = 32),
+                 body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144)
+             ) STRICT, WITHOUT ROWID;
+             CREATE TRIGGER agent_work_artifact_capacity BEFORE INSERT ON agent_work_artifacts
+             WHEN (SELECT coalesce(sum(length(body)), 0) FROM agent_work_artifacts) + length(NEW.body) > 33554432
+             BEGIN SELECT RAISE(ABORT, 'work result capacity exceeded'); END;
+             CREATE TRIGGER agent_work_artifact_immutable BEFORE UPDATE ON agent_work_artifacts
+             BEGIN SELECT RAISE(ABORT, 'work result is immutable'); END;
+             CREATE TABLE agent_work_profile_deletion (
+                 profile_id TEXT PRIMARY KEY CHECK (length(CAST(profile_id AS BLOB)) = 26),
+                 purged INTEGER NOT NULL CHECK (purged IN (0, 1))
+             ) STRICT, WITHOUT ROWID;
+             CREATE TRIGGER agent_work_deletion_capacity BEFORE INSERT ON agent_work_profile_deletion
+             WHEN (SELECT count(*) FROM agent_work_profile_deletion) >= 1024
+             BEGIN SELECT RAISE(ABORT, 'work deletion capacity exceeded'); END;
+             CREATE TRIGGER agent_work_deletion_retained BEFORE DELETE ON agent_work_profile_deletion
+             BEGIN SELECT RAISE(ABORT, 'work deletion authority is retained'); END;
+             CREATE TRIGGER agent_work_deletion_immutable BEFORE UPDATE ON agent_work_profile_deletion
+             WHEN NEW.profile_id != OLD.profile_id OR NEW.purged < OLD.purged
+             BEGIN SELECT RAISE(ABORT, 'work deletion authority is immutable'); END;
+             CREATE TRIGGER agent_work_deleted_artifact BEFORE INSERT ON agent_work_artifacts
+             WHEN EXISTS(SELECT 1 FROM agent_work_profile_deletion WHERE profile_id = NEW.profile_id)
+             BEGIN SELECT RAISE(ABORT, 'work result profile is retired'); END;
+             CREATE TRIGGER agent_work_deleted_run BEFORE INSERT ON agent_work_runs
+             WHEN EXISTS(SELECT 1 FROM agent_work_profile_deletion WHERE profile_id = NEW.result_profile)
+             BEGIN SELECT RAISE(ABORT, 'work result profile is retired'); END;",
+        )
+    },
+}];
 
 fn schema_manifest(conn: &Connection) -> rusqlite::Result<Vec<SchemaObject>> {
     let count = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
