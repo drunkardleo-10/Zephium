@@ -379,12 +379,12 @@
 
   .layout {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-columns: minmax(0, 1fr) clamp(260px, 32%, 320px);
     align-items: start;
     gap: 16px;
   }
 
-  @container time-column (width < 860px) {
+  @container time-column (width < 600px) {
     .layout {
       grid-template-columns: minmax(0, 1fr);
     }

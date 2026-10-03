@@ -462,12 +462,12 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/time/components/TimePage.svelte": {
-    "js": 489800,
+    "js": 490000,
     "css": 124400,
     "description": "The focus dial chooses its length from the menu shared with Tasks."
   },
   "lazy:features/time/components/TimePanel.svelte": {
-    "js": 482400,
+    "js": 482600,
     "css": 122500,
     "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place."
   },

@@ -925,7 +925,7 @@ impl EngineHost {
                 // about frames too, so focus is checked for it below, where
                 // the main frame is known.
                 #[cfg(target_os = "windows")]
-                if admitted && focus_shuts(&target) {
+                if admitted && focus_shuts(target.as_str()) {
                     return false;
                 }
                 #[cfg(target_os = "windows")]

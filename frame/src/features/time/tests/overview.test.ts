@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { localDay } from "$domain/time";
-import { columns, comparison, dailyAverage, totals } from "../lib/overview";
+import { columns, comparison, dailyAverage, describeBucket, totals } from "../lib/overview";
 
 const bucket = (browse: number, work = 0) => ({ browse, work });
 
@@ -28,5 +28,14 @@ describe("overview", () => {
     const current = totals([bucket(6 * 3600)]);
     expect(dailyAverage(week, current, now)).toBe(3600);
     expect(comparison(week, current, bucket(7 * 7200), now)).toBe(-3600);
+  });
+});
+
+describe("readout", () => {
+  it("names the last hour of a day without spelling out dates", () => {
+    const day = { span: "day" as const, start: 0 };
+    const last = describeBucket(day, 23);
+    expect(last).not.toMatch(/2000/u);
+    expect(describeBucket(day, 14)).not.toMatch(/2000/u);
   });
 });

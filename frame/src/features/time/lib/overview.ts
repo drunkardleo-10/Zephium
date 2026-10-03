@@ -58,8 +58,11 @@ const hourFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric" });
 export function describeBucket(period: Period, index: number): string {
   if (period.span === "day") {
     const start = new Date(2000, 0, 1, index);
-    const end = new Date(2000, 0, 1, index + 1);
-    return hourFormat.formatRange(start, end);
+    // The last hour ends on the next day, which a range would spell out in
+    // full dates; it is still just the hour before midnight.
+    if (index >= 23)
+      return `${hourFormat.format(start)} – ${hourFormat.format(new Date(2000, 0, 1, 0))}`;
+    return hourFormat.formatRange(start, new Date(2000, 0, 1, index + 1));
   }
   return new Intl.DateTimeFormat(undefined, {
     weekday: "long",
