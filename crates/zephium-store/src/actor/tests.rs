@@ -1708,6 +1708,51 @@ fn favicons_roundtrip_with_age() {
 }
 
 #[test]
+fn imported_favicons_fill_free_rows_and_never_replace_held_ones() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let held = rgba();
+    hub.save_favicon(profile, "https://held.example", None, &held);
+    let other = vec![9; zephium_core::icon::RGBA32_BYTES];
+    let added = hub.import_favicons(
+        profile,
+        &[
+            ("https://held.example".into(), other.clone()),
+            ("https://new.example".into(), other.clone()),
+            ("https://bad.example".into(), vec![1, 2, 3]),
+            ("https://new.example/path".into(), other.clone()),
+        ],
+    );
+    assert_eq!(added, Some(1));
+    assert_eq!(
+        hub.favicon_bytes(profile, "https://held.example")
+            .unwrap()
+            .1,
+        held
+    );
+    assert_eq!(
+        hub.favicon_bytes(profile, "https://new.example").unwrap().1,
+        other
+    );
+    assert_eq!(hub.import_favicons(ProfileId::from(99), &[]), None);
+
+    // A full store takes nothing, so nothing Zephium fetched is evicted.
+    for index in 0..1100 {
+        hub.save_favicon(
+            profile,
+            &format!("https://site{index}.example"),
+            None,
+            &held,
+        );
+    }
+    assert_eq!(
+        hub.import_favicons(profile, &[("https://late.example".into(), other)]),
+        Some(0)
+    );
+}
+
+#[test]
 fn favicon_raster_batch_is_single_request_bounded_and_exact() {
     let mut hub = Hub::in_memory().unwrap();
     hub.save(&sample()).unwrap();

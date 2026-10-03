@@ -7431,6 +7431,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+ "url",
  "zephium-core",
 ]
 

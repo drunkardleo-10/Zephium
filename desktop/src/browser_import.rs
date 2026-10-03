@@ -260,6 +260,7 @@ async fn run(
         cancelled: false,
     };
     publish(app, &job);
+    let mut sites = ImportedOrigins::default();
     for index in 0..job.kinds.len() {
         if cancelled.load(Ordering::Acquire) {
             job.cancelled = true;
@@ -280,6 +281,7 @@ async fn run(
                     progress.state = ImportStateView::Skipped;
                     job.cancelled = true;
                 } else {
+                    sites.note(&work);
                     match write(app, work).await {
                         Some(added) => {
                             progress.done = added;
@@ -295,8 +297,110 @@ async fn run(
         }
         publish(app, &job);
     }
+    // Icons ride along unannounced: the source already holds them, so the
+    // imported rows show real marks without asking any site.
+    #[cfg(feature = "work-product")]
+    if !job.cancelled && !cancelled.load(Ordering::Acquire) {
+        import_icons(app, browser, &profile, sites.wanted()).await;
+    }
+    #[cfg(not(feature = "work-product"))]
+    let _ = sites;
     job.finished = true;
     publish(app, &job);
+}
+
+/// The HTTPS sites an import brought over, in the order their icons matter:
+/// bookmarks and Essentials as listed, then history by how often it was seen.
+#[derive(Default)]
+struct ImportedOrigins {
+    listed: Vec<String>,
+    seen: std::collections::HashSet<String>,
+    visited: std::collections::HashMap<String, u32>,
+}
+
+impl ImportedOrigins {
+    fn list(&mut self, url: &str) {
+        if let Some(origin) = zephium_import::https_origin(url) {
+            if self.seen.insert(origin.clone()) {
+                self.listed.push(origin);
+            }
+        }
+    }
+
+    fn note(&mut self, work: &zephium_app::ImportWork) {
+        fn walk(origins: &mut ImportedOrigins, nodes: &[zephium_import::ImportNode]) {
+            for node in nodes {
+                match node {
+                    zephium_import::ImportNode::Link { url, .. } => origins.list(url),
+                    zephium_import::ImportNode::Folder { children, .. } => walk(origins, children),
+                }
+            }
+        }
+        match work {
+            zephium_app::ImportWork::Bookmarks { nodes, .. } => walk(self, nodes),
+            zephium_app::ImportWork::Essentials(sites) => {
+                for site in sites {
+                    self.list(&site.url);
+                }
+            }
+            zephium_app::ImportWork::History(visits) => {
+                for visit in visits {
+                    if let Some(origin) = zephium_import::https_origin(&visit.url) {
+                        *self.visited.entry(origin).or_default() += 1;
+                    }
+                }
+            }
+            zephium_app::ImportWork::Icons(_) => {}
+        }
+    }
+
+    fn wanted(self) -> Vec<String> {
+        let Self {
+            mut listed,
+            seen,
+            visited,
+        } = self;
+        let mut visited: Vec<(String, u32)> = visited
+            .into_iter()
+            .filter(|(origin, _)| !seen.contains(origin))
+            .collect();
+        visited.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        listed.extend(visited.into_iter().map(|(origin, _)| origin));
+        listed.truncate(zephium_import::MAX_ICONS);
+        listed
+    }
+}
+
+#[cfg(feature = "work-product")]
+async fn import_icons(
+    app: &tauri::AppHandle,
+    browser: Browser,
+    profile: &str,
+    wanted: Vec<String>,
+) {
+    if wanted.is_empty() {
+        return;
+    }
+    let profile = profile.to_owned();
+    let icons = tauri::async_runtime::spawn_blocking(move || {
+        let locations = Locations::from_env()?;
+        let icons = zephium_import::icons(&locations, browser, &profile, &wanted).ok()?;
+        Some(
+            icons
+                .into_iter()
+                .filter_map(|icon| {
+                    crate::favicon_probe::rasterize(&icon.bytes).map(|raster| (icon.origin, raster))
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    if !icons.is_empty() {
+        let _ = write(app, zephium_app::ImportWork::Icons(icons)).await;
+    }
 }
 
 async fn read(
@@ -407,5 +511,41 @@ mod tests {
             },
         ];
         assert_eq!(links(&tree), 3);
+    }
+
+    #[test]
+    fn icons_are_wanted_for_listed_sites_first_then_the_most_visited() {
+        use zephium_import::{ImportNode, ImportedVisit};
+        let visit = |url: &str| ImportedVisit {
+            url: url.into(),
+            title: String::new(),
+            visited_at: 1,
+        };
+        let mut origins = ImportedOrigins::default();
+        origins.note(&zephium_app::ImportWork::History(vec![
+            visit("https://rare.example/"),
+            visit("https://often.example/a"),
+            visit("https://often.example/b"),
+            visit("https://x.com/home"),
+            visit("http://plain.example/"),
+        ]));
+        origins.note(&zephium_app::ImportWork::Bookmarks {
+            folder: "Imported".into(),
+            nodes: vec![ImportNode::Folder {
+                title: "F".into(),
+                children: vec![ImportNode::Link {
+                    title: String::new(),
+                    url: "https://x.com/settings".into(),
+                }],
+            }],
+        });
+        assert_eq!(
+            origins.wanted(),
+            [
+                "https://x.com",
+                "https://often.example",
+                "https://rare.example"
+            ]
+        );
     }
 }

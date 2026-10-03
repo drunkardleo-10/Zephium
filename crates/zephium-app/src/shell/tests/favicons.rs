@@ -682,3 +682,62 @@ fn a_failed_origin_is_not_probed_again_within_the_hour() {
     assert_eq!(probed.lock().unwrap().len(), 2);
     assert!(shell.favicons.icon_values.is_empty());
 }
+
+#[test]
+fn a_listed_address_without_an_icon_is_fetched_once_and_sent_to_the_surface_that_asked() {
+    let store = Arc::new(FakeStore::default());
+    let stored = vec![4; zephium_core::icon::RGBA32_BYTES];
+    store
+        .icons
+        .lock()
+        .unwrap()
+        .push(("https://stored.example".to_owned(), stored));
+    store
+        .icon_ages
+        .lock()
+        .unwrap()
+        .insert("https://stored.example".to_owned(), 60);
+    let (mut shell, _engine, _screen, icons) = setup_with_icon_log(store);
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let probed = attach_prober(&mut shell);
+    let panel_origins = |icons: &IconLog| -> Vec<String> {
+        icons
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|view| view.surface == zephium_ipc::IconSurface::Panel)
+            .flat_map(|view| view.entries.iter().map(|entry| entry.origin.clone()))
+            .collect()
+    };
+
+    shell.want_icons(
+        zephium_ipc::IconSurface::Panel,
+        profile,
+        [
+            "https://stored.example/page",
+            "https://music.example/album/1",
+            "https://music.example/album/2",
+            "http://plain.example/",
+        ],
+    );
+    shell.publish_icons();
+    // The store answers first; only what it lacks goes to the network, once.
+    assert_eq!(panel_origins(&icons), ["https://stored.example"]);
+    assert_eq!(probed.lock().unwrap().as_slice(), ["https://music.example"]);
+
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: "https://music.example".into(),
+        rgba: Some(vec![7; zephium_core::icon::RGBA32_BYTES]),
+    });
+    assert!(panel_origins(&icons).contains(&"https://music.example".to_owned()));
+
+    // Now held: listing it again asks nothing.
+    shell.want_icons(
+        zephium_ipc::IconSurface::Panel,
+        profile,
+        ["https://music.example/album/3"],
+    );
+    assert_eq!(probed.lock().unwrap().len(), 1);
+}

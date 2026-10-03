@@ -82,7 +82,7 @@ impl Shell {
             done.finish(HistoryResponse::Removed { count });
             return;
         }
-        let visits = visits
+        let visits: Vec<HistoryVisitView> = visits
             .into_iter()
             .map(|visit| HistoryVisitView {
                 id: visit.id.to_string(),
@@ -92,6 +92,14 @@ impl Shell {
                 visited_at: visit.visited_at.to_string(),
             })
             .collect();
+        self.want_icons(
+            IconSurface::Chrome,
+            profile,
+            visits
+                .iter()
+                .filter(|visit| visit.icon.is_none())
+                .map(|visit| visit.url.as_str()),
+        );
         self.publish_icons();
         done.finish(HistoryResponse::Page {
             visits,

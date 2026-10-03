@@ -7,6 +7,7 @@
 mod arc;
 mod chromium;
 mod firefox;
+mod icons;
 mod mozlz4;
 mod safari;
 mod snapshot;
@@ -14,6 +15,7 @@ mod zen;
 
 use std::path::{Path, PathBuf};
 
+pub use icons::{https_origin, SourceIcon, MAX_ICONS};
 pub use zephium_core::bookmarks::ImportNode;
 pub use zephium_core::ports::store::ImportedVisit;
 
@@ -247,6 +249,29 @@ pub fn history(
             since,
             limit,
         ),
+    }
+}
+
+/// The icons one profile already holds for `wanted` origins, most wanted
+/// first. Safari keeps its icon cache out of reach, so it has none to offer.
+pub fn icons(
+    locations: &Locations,
+    browser: Browser,
+    profile: &str,
+    wanted: &[String],
+) -> Result<Vec<SourceIcon>, ImportError> {
+    match browser {
+        Browser::Safari => Ok(Vec::new()),
+        Browser::Firefox => icons::firefox(
+            &firefox::profile_dir(locations, firefox::Family::Firefox, profile)?,
+            wanted,
+        ),
+        Browser::Zen => icons::firefox(
+            &firefox::profile_dir(locations, firefox::Family::Zen, profile)?,
+            wanted,
+        ),
+        Browser::Arc => icons::chromium(&arc::profile_dir(locations, profile)?, wanted),
+        _ => icons::chromium(&chromium::profile_dir(locations, browser, profile)?, wanted),
     }
 }
 

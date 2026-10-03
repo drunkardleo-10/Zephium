@@ -215,7 +215,7 @@ async fn fetch(
 
 /// Decodes one icon and fits it, centred, into the fixed transparent 32x32
 /// raster, as the renderer's canvas path does.
-fn rasterize(bytes: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn rasterize(bytes: &[u8]) -> Option<Vec<u8>> {
     use image::{ImageFormat, ImageReader};
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()

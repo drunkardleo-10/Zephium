@@ -108,6 +108,18 @@ export function forPage(url: string): { image: ImageData; tone: IconTone } | nul
   return entry ? { image: entry.image, tone: entry.tone } : null;
 }
 
+/** A listed address's mark: the reference native sent with the listing, else
+ *  whatever has arrived for its site since. Native fetches what a listing
+ *  lacks, so a row fills in without being listed again. */
+export function mark(
+  ref: IconRef | null | undefined,
+  url: string | null | undefined,
+): { image: ImageData; tone: IconTone } | null {
+  const held = image(ref);
+  if (held) return { image: held, tone: tone(ref) };
+  return url ? forPage(url) : null;
+}
+
 export function tone(ref: IconRef | null | undefined): IconTone {
   if (!ref) return "mid";
   const entry = rasters.get(ref.origin);

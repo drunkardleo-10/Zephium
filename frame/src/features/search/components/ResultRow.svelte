@@ -83,7 +83,12 @@
   let sited = $derived(
     !!result && (result.kind === "tab" || result.kind === "history" || result.kind === "url"),
   );
-  let image = $derived(sited ? favicons.image(result?.icon) : null);
+  let site = $derived(
+    sited && result
+      ? favicons.mark(result.icon, result.action.type === "OpenUrl" ? result.action.url : null)
+      : null,
+  );
+  let image = $derived(site?.image ?? null);
   let glyph = $derived.by(() => {
     if (icon) return icon;
     if (calculation) return CALCULATOR;
@@ -151,13 +156,7 @@
   onclick={onrun}
 >
   <span class="glyph">
-    {#if image}<FavIcon
-        {image}
-        tone={favicons.tone(result?.icon)}
-        size={16}
-        lit
-        fallback={Globe02Icon}
-      />
+    {#if image}<FavIcon {image} tone={site?.tone} size={16} lit fallback={Globe02Icon} />
     {:else}<Icon icon={glyph} size={launcher ? 18 : 16} />{/if}
   </span>
   {#if calculation}<span class="text sum"

@@ -367,6 +367,7 @@ enum Cmd {
         Vec<zephium_core::ports::store::ImportedVisit>,
         Sender<Option<u32>>,
     ),
+    ImportFavicons(ProfileId, Vec<(String, Vec<u8>)>, Sender<Option<u32>>),
     Bookmarks(
         ProfileId,
         zephium_core::bookmarks::BookmarkRequest,
@@ -1202,6 +1203,14 @@ impl Store for SqliteStore {
         rx.recv_timeout(IMPORT_RPC_TIMEOUT).ok().flatten()
     }
 
+    fn import_favicons(&self, profile: ProfileId, icons: Vec<(String, Vec<u8>)>) -> Option<u32> {
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .try_send(Cmd::ImportFavicons(profile, icons, tx))
+            .ok()?;
+        rx.recv_timeout(IMPORT_RPC_TIMEOUT).ok().flatten()
+    }
+
     fn bookmarks(
         &self,
         profile: ProfileId,
@@ -1673,6 +1682,9 @@ fn actor(
             }
             Some(Cmd::ImportHistory(profile, visits, reply)) => {
                 let _ = reply.send(hub.import_history(profile, &visits));
+            }
+            Some(Cmd::ImportFavicons(profile, icons, reply)) => {
+                let _ = reply.send(hub.import_favicons(profile, &icons));
             }
             Some(Cmd::Bookmarks(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks(profile, request));

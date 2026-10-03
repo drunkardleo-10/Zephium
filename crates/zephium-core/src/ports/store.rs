@@ -487,6 +487,11 @@ pub trait Store {
     fn import_history(&self, _profile: ProfileId, _visits: Vec<ImportedVisit>) -> Option<u32> {
         None
     }
+    /// Site icons another browser held, as fixed 32x32 rasters by origin. An
+    /// origin that already has one keeps it. Returns how many were added.
+    fn import_favicons(&self, _profile: ProfileId, _icons: Vec<(String, Vec<u8>)>) -> Option<u32> {
+        None
+    }
     /// One bookmark read or write. Blocking; callers run it off the shell.
     fn bookmarks(
         &self,

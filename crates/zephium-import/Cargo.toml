@@ -9,6 +9,7 @@ zephium-core.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+url.workspace = true
 plist = { version = "1.10", default-features = false }
 
 [dev-dependencies]

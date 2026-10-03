@@ -195,7 +195,7 @@ impl Shell {
         profile: ProfileId,
         nodes: Vec<BookmarkNode>,
     ) -> Vec<BookmarkView> {
-        nodes
+        let views: Vec<BookmarkView> = nodes
             .into_iter()
             .map(|node| BookmarkView {
                 id: node.id.to_string(),
@@ -207,7 +207,16 @@ impl Shell {
                 title: node.title,
                 children: node.children,
             })
-            .collect()
+            .collect();
+        self.want_icons(
+            IconSurface::Chrome,
+            profile,
+            views
+                .iter()
+                .filter(|view| view.icon.is_none())
+                .filter_map(|view| view.url.as_deref()),
+        );
+        views
     }
 
     pub(super) fn import_into_focused(&mut self, work: ImportWork, done: ImportCompletion) {

@@ -24,6 +24,9 @@ pub(super) struct FaviconProbeState {
     failed: std::collections::HashMap<ProbeKey, std::time::Instant>,
     lookups: std::collections::BTreeMap<u64, ProfileId>,
     lookup_generation: u64,
+    /// Surfaces other than chrome that listed an origin before its icon was
+    /// held. Chrome is always sent arriving icons; these are sent them once.
+    wanted: std::collections::HashMap<ProbeKey, Vec<IconSurface>>,
 }
 
 /// The probe fetches over HTTPS only, so only an HTTPS origin can be asked.
@@ -33,6 +36,57 @@ fn probe_origin(value: &str) -> Option<String> {
 }
 
 impl Shell {
+    /// Icons for addresses a surface lists without a tab of their own, such as
+    /// bookmarks, history and launcher hits. A held raster is already in the
+    /// listing; the rest come from the store and, failing that, the network.
+    pub(super) fn want_icons<'a>(
+        &mut self,
+        surface: IconSurface,
+        profile: ProfileId,
+        urls: impl IntoIterator<Item = &'a str>,
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        let origins: Vec<String> = urls
+            .into_iter()
+            .filter_map(probe_origin)
+            .filter(|origin| {
+                !self
+                    .favicons
+                    .icon_values
+                    .contains_key(&(profile, origin.clone()))
+            })
+            .filter(|origin| seen.insert(origin.clone()))
+            .take(MAX_FAVICON_BATCH_ORIGINS)
+            .collect();
+        if origins.is_empty() {
+            return;
+        }
+        if surface != IconSurface::Chrome {
+            let wanted = &mut self.favicons.probe.wanted;
+            // Origins skipped by the queue or a recent failure never answer;
+            // starting over at the bound keeps those from piling up. A surface
+            // that loses its entry is served on its next listing.
+            if wanted.len() + origins.len() > TRACKED_ICON_ORIGIN_CAPACITY {
+                wanted.clear();
+            }
+            for origin in &origins {
+                let key = (profile, origin.clone());
+                let surfaces = wanted.entry(key).or_default();
+                if !surfaces.contains(&surface) {
+                    surfaces.push(surface);
+                }
+            }
+        }
+        self.probe_favicons(profile, origins);
+    }
+
+    /// Marks a newly held icon for the surfaces that were waiting on it.
+    fn deliver_wanted(&mut self, key: &ProbeKey) {
+        for surface in self.favicons.probe.wanted.remove(key).unwrap_or_default() {
+            let _ = self.icon_ref_for(surface, key.0, &key.1);
+        }
+    }
+
     pub(super) fn attach_favicon_prober(&mut self, prober: crate::FaviconProber) {
         self.favicons.probe.prober.get_or_insert(prober);
         self.pump_favicon_probes();
@@ -143,6 +197,7 @@ impl Shell {
             delivered |= self
                 .icon_ref_for(IconSurface::Chrome, profile, &origin)
                 .is_some();
+            self.deliver_wanted(&(profile, origin.clone()));
             // A stored raster is drawn whatever its age; age only decides
             // whether the origin is asked for a newer one.
             if age <= FAVICON_CACHE_MAX_AGE_SECONDS {
@@ -202,7 +257,11 @@ impl Shell {
             && rgba
                 .as_deref()
                 .is_some_and(|rgba| self.admit_origin_icon(profile, &key.1, rgba));
-        if !admitted {
+        if admitted {
+            self.deliver_wanted(&key);
+            self.publish_icons();
+        } else {
+            self.favicons.probe.wanted.remove(&key);
             self.remember_failed_probe(key);
         }
         self.pump_favicon_probes();
@@ -227,6 +286,7 @@ impl Shell {
     pub(super) fn clear_pending_favicon_probe_lookups(&mut self) {
         let probe = &mut self.favicons.probe;
         probe.lookups.clear();
+        probe.wanted.clear();
     }
 }
 

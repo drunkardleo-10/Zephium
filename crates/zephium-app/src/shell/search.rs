@@ -574,6 +574,16 @@ impl Shell {
                 action: SearchAction::OpenUrl { url: hit.url },
             });
         }
+        // Only stored hits are asked for icons: a typed address changes with
+        // every keystroke and must never reach the network as a probe.
+        self.want_icons(
+            self.search_surface(),
+            profile,
+            results
+                .iter()
+                .filter(|result| result.icon.is_none() && matches!(result.kind.as_str(), "history"))
+                .map(|result| result.detail.as_str()),
+        );
         self.publish_search(SearchResults {
             pending: false,
             completion: None,

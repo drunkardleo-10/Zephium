@@ -339,8 +339,8 @@
           {#if renaming === item.id}
             <span class="glyph"
               >{#if folder}<Icon icon={Folder01Icon} size={16} />{:else}<FavIcon
-                  image={favicons.image(item.icon)}
-                  tone={favicons.tone(item.icon)}
+                  image={favicons.mark(item.icon, item.url)?.image ?? null}
+                  tone={favicons.mark(item.icon, item.url)?.tone}
                   size={16}
                   lit
                   fallback={Globe02Icon}
@@ -377,8 +377,8 @@
             >
               <span class="glyph"
                 >{#if folder}<Icon icon={Folder01Icon} size={16} />{:else}<FavIcon
-                    image={favicons.image(item.icon)}
-                    tone={favicons.tone(item.icon)}
+                    image={favicons.mark(item.icon, item.url)?.image ?? null}
+                    tone={favicons.mark(item.icon, item.url)?.tone}
                     size={16}
                     lit
                     fallback={Globe02Icon}

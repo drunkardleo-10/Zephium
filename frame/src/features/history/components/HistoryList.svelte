@@ -126,6 +126,7 @@
     {:else}
       {@const at = visitedAt(row.visit)}
       {@const range = matchRange(row.visit.title, session.query)}
+      {@const site = favicons.mark(row.visit.icon, row.visit.url)}
       <div
         class="visit"
         class:selected={selected === row.id}
@@ -146,8 +147,8 @@
         }}
       >
         <FavIcon
-          image={favicons.image(row.visit.icon)}
-          tone={favicons.tone(row.visit.icon)}
+          image={site?.image ?? null}
+          tone={site?.tone}
           size={16}
           lit
           fallback={Globe02Icon}
