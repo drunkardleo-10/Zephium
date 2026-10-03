@@ -1174,6 +1174,7 @@ impl Shell {
         }
         if self.shutdown_result.is_none() {
             self.refresh_time();
+            self.refresh_focus_cover();
         }
         #[cfg(feature = "work-execution")]
         self.poll_work();

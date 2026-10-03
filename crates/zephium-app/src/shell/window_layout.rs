@@ -45,8 +45,9 @@ impl Shell {
         // cannot prevent a page from obscuring the prompt or receiving input
         // behind it. Remove content from the native stage and expand
         // privileged chrome for exactly the lifetime of the retained prompt.
-        let privileged_overlay_active =
-            self.page_permissions.is_visible() || self.active_browser_page().is_some();
+        let privileged_overlay_active = self.page_permissions.is_visible()
+            || self.active_browser_page().is_some()
+            || self.focus_covers();
         // `Items` marks a prospective view resident before its CreateView
         // effect is dispatched. While the profile's first explicit native
         // policy is still compiling/installing, that effect is intentionally

@@ -450,6 +450,15 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
+        self.log(match gate {
+            Some(gate) => format!("focus-gate {}", gate.shut.join(",")),
+            None => "focus-gate open".to_owned(),
+        });
+    }
+    fn set_media_suspended(&self, id: ItemId, suspended: bool) {
+        self.log(format!("media {id} {}", if suspended { "still" } else { "free" }));
+    }
     fn load_web_extension(
         &self,
         profile: ProfileId,

@@ -6,8 +6,8 @@ use super::*;
 
 use crate::api::TimeCompletion;
 use zephium_core::time::{
-    Attention, FocusEvent, FocusPhase, FocusPlan, FocusRecord, FocusSession, Ledger, Place,
-    TimeQuery, TimeReport, Tracker, HOUR_MS, MAX_BLOCKED_SITES,
+    site_covers, Attention, FocusEvent, FocusGate, FocusPhase, FocusPlan, FocusRecord,
+    FocusSession, Ledger, Place, TimeQuery, TimeReport, Tracker, HOUR_MS, MAX_BLOCKED_SITES,
 };
 use zephium_ipc::{
     FocusControl, FocusDayView, FocusPhaseView, FocusStatus, FocusView, IconSurface,
@@ -17,6 +17,9 @@ use zephium_ipc::{
 /// The running session, kept so a relaunch picks it up where it was.
 const SESSION_KEY: &str = "focus.session";
 const DEFAULT_RETENTION_DAYS: i64 = 90;
+/// Fresh tabs whose first load focus shut, remembered so they can open once
+/// the site is let through.
+const MAX_SHUT_LOADS: usize = 64;
 
 pub(super) struct TimeState {
     tracker: Tracker,
@@ -27,6 +30,13 @@ pub(super) struct TimeState {
     retention_days: i64,
     focus: Option<FocusSession>,
     blocked: Vec<String>,
+    /// The tab the focus surface covers, and the site it would show.
+    covered: Option<(ItemId, String)>,
+    /// Tabs on shut sites, their media held still while the round runs.
+    stilled: std::collections::HashSet<ItemId>,
+    /// The gate the engine holds, so an unchanged one is not sent again.
+    gate: Option<FocusGate>,
+    shut_loads: std::collections::HashMap<ItemId, String>,
 }
 
 impl TimeState {
@@ -43,6 +53,10 @@ impl TimeState {
                 .ok()
                 .filter(FocusSession::valid),
             blocked: Vec::new(),
+            covered: None,
+            stilled: std::collections::HashSet::new(),
+            gate: None,
+            shut_loads: std::collections::HashMap::new(),
         };
         for key in ["time.track", "time.retention", "focus.blocked"] {
             state.apply_setting(key, &setting(key));
@@ -211,6 +225,7 @@ impl Shell {
             self.flush_time(None);
         }
         if was_blocked != self.time.blocked {
+            self.sync_focus_gate();
             self.project_focus();
         }
     }
@@ -397,13 +412,20 @@ impl Shell {
                 self.record_focus(running.stop(now));
             }
             FocusControl::Allow { site } => {
-                let allowed = self.time.focus.as_mut().is_some_and(|session| {
-                    zephium_core::time::normalize_site(&site)
-                        .is_some_and(|site| session.allow(site, now))
-                });
+                let Some(site) = zephium_core::time::normalize_site(&site) else {
+                    return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+                };
+                let allowed = self
+                    .time
+                    .focus
+                    .as_mut()
+                    .is_some_and(|session| session.allow(site.clone(), now));
                 if !allowed {
                     return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
                 }
+                self.focus_changed();
+                self.open_shut_loads(Some(&site));
+                return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
             }
             FocusControl::Skip => {
                 let Some(session) = self.time.focus.as_mut() else {
@@ -423,11 +445,14 @@ impl Shell {
     pub(super) fn focus_wake(&mut self) {
         let Some(session) = self.time.focus.as_mut() else {
             self.schedule_focus_wake();
+            self.sync_focus_gate();
             return;
         };
         let (events, finished) = session.advance(utc_now_ms());
         if events.is_empty() {
+            // An allowance may have run out.
             self.schedule_focus_wake();
+            self.sync_focus_gate();
             return;
         }
         if let Some(record) = finished {
@@ -465,7 +490,142 @@ impl Shell {
             .unwrap_or_default();
         let _ = self.store.set_app_setting(SESSION_KEY.to_owned(), saved);
         self.schedule_focus_wake();
+        self.sync_focus_gate();
         self.project_focus();
+    }
+
+    fn focus_gate_now(&self) -> Option<FocusGate> {
+        self.time
+            .focus
+            .as_ref()?
+            .gate(&self.time.blocked, utc_now_ms())
+    }
+
+    pub(super) fn focus_covers(&self) -> bool {
+        self.time.covered.is_some()
+    }
+
+    /// The active tab and the site it shows, when a focus round shuts it.
+    fn focus_cover_target(&self) -> Option<(ItemId, String)> {
+        if self.active_browser_page().is_some() || self.time.focus.is_none() {
+            return None;
+        }
+        let gate = self.focus_gate_now()?;
+        let id = self.windows.focused()?.active?;
+        let tab = self.items.tab(id)?;
+        let host = match tab.url.as_ref() {
+            Some(url) if tab.content == zephium_core::item::TabContent::Web => {
+                url.host_str()?.to_owned()
+            }
+            Some(_) => return None,
+            None => url::Url::parse(self.time.shut_loads.get(&id)?)
+                .ok()?
+                .host_str()?
+                .to_owned(),
+        };
+        let site = host.strip_prefix("www.").unwrap_or(&host).to_owned();
+        gate.blocks(&host, utc_now_ms()).then_some((id, site))
+    }
+
+    /// Covers the active tab while it shows a shut site. Chrome draws the
+    /// focus surface in the content area the page gives up.
+    pub(super) fn refresh_focus_cover(&mut self) {
+        let next = self.focus_cover_target();
+        if next == self.time.covered {
+            return;
+        }
+        let site = next
+            .as_ref()
+            .map(|(_, site)| site.clone())
+            .unwrap_or_default();
+        self.time.covered = next;
+        let _ = self.relayout();
+        (self.emit)(Projection::UiCommand(format!("focus.cover={site}")));
+    }
+
+    /// Hands the engine the gate for this moment and holds the media of every
+    /// tab already on a shut site; a break or the end lets all of it go.
+    fn sync_focus_gate(&mut self) {
+        let gate = self.focus_gate_now();
+        let now = utc_now_ms();
+        let stilled: std::collections::HashSet<ItemId> = gate
+            .as_ref()
+            .map(|gate| {
+                self.items
+                    .view_ids()
+                    .into_iter()
+                    .filter(|id| {
+                        self.items
+                            .tab(*id)
+                            .and_then(|tab| tab.url.as_ref())
+                            .and_then(|url| url.host_str())
+                            .is_some_and(|host| gate.blocks(host, now))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in self.time.stilled.difference(&stilled) {
+            self.engine.set_media_suspended(*id, false);
+        }
+        for id in stilled.difference(&self.time.stilled) {
+            self.engine.set_media_suspended(*id, true);
+        }
+        self.time.stilled = stilled;
+        let open = gate.is_none();
+        if gate != self.time.gate {
+            self.time.gate.clone_from(&gate);
+            self.engine.set_focus_gate(gate);
+        }
+        if open {
+            self.open_shut_loads(None);
+        }
+    }
+
+    /// Opens fresh tabs whose first load focus shut: those on one site once it
+    /// is let through, or all of them once the round is over.
+    fn open_shut_loads(&mut self, site: Option<&str>) {
+        let ready: Vec<(ItemId, String)> = self
+            .time
+            .shut_loads
+            .iter()
+            .filter(|(_, url)| {
+                site.is_none_or(|site| {
+                    url::Url::parse(url)
+                        .ok()
+                        .and_then(|url| url.host_str().map(|host| site_covers(site, host)))
+                        .unwrap_or(false)
+                })
+            })
+            .map(|(id, url)| (*id, url.clone()))
+            .collect();
+        for (id, url) in ready {
+            self.time.shut_loads.remove(&id);
+            if self.items.tab(id).is_some_and(|tab| tab.url.is_none()) {
+                let _ = self.operation_navigate(id, url);
+            }
+        }
+    }
+
+    pub(super) fn on_focus_blocked(&mut self, id: ItemId, url: String) {
+        let Some(tab) = self.items.tab(id) else {
+            return;
+        };
+        if tab.url.is_none() {
+            self.time.shut_loads.retain(|kept, _| self.items.tab(*kept).is_some());
+            if self.time.shut_loads.len() < MAX_SHUT_LOADS || self.time.shut_loads.contains_key(&id)
+            {
+                self.time.shut_loads.insert(id, url);
+            }
+            return;
+        }
+        // A page already open tried to leave for a shut site; it stays where
+        // it is, and chrome says why nothing happened.
+        if let Some(host) = url::Url::parse(&url).ok().and_then(|url| {
+            url.host_str()
+                .map(|host| host.strip_prefix("www.").unwrap_or(host).to_owned())
+        }) {
+            (self.emit)(Projection::UiCommand(format!("focus.shut={host}")));
+        }
     }
 
     fn schedule_focus_wake(&self) {
@@ -513,7 +673,15 @@ impl Shell {
             self.focus_wake();
             self.schedule_focus_wake();
         }
+        self.sync_focus_gate();
         self.project_focus();
+        let site = self
+            .time
+            .covered
+            .as_ref()
+            .map(|(_, site)| site.clone())
+            .unwrap_or_default();
+        (self.emit)(Projection::UiCommand(format!("focus.cover={site}")));
     }
 }
 

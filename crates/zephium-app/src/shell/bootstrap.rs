@@ -17,7 +17,6 @@ impl Shell {
         if !self.reconcile_runtime_restart_requirement() {
             self.project_runtime_status();
         }
-        self.resume_focus();
         // The chrome re-invokes bootstrap whenever its webview reloads (dev
         // HMR, crash recovery); state and native surfaces must not be rebuilt.
         if self.windows.focused().is_some() {
@@ -25,6 +24,7 @@ impl Shell {
             self.forget_delivered_icons(zephium_ipc::IconSurface::Chrome);
             self.project_items();
             self.project_browser_page();
+            self.resume_focus();
             return;
         }
         let pending_deletions = match self.store.pending_profile_deletions() {
@@ -278,6 +278,7 @@ impl Shell {
         self.project_items();
         self.project_browser_page();
         self.bootstrapped = true;
+        self.resume_focus();
         self.apply_deferred_web_extensions();
         let waiting = std::mem::take(&mut self.pending_external);
         self.open_external(waiting);

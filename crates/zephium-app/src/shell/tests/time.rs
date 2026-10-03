@@ -92,3 +92,86 @@ fn turning_tracking_off_counts_nothing() {
     shell.handle(Command::Tick);
     assert!(spent(&store).is_empty());
 }
+
+fn focus(shell: &mut Shell, control: zephium_ipc::FocusControl) {
+    shell.handle(Command::Operation {
+        operation_id: format!("focus-{control:?}"),
+        command: Box::new(Command::Focus(control)),
+    });
+}
+
+fn shut(shell: &mut Shell, sites: &str) {
+    shell.handle(Command::SetAppSetting {
+        key: "focus.blocked".into(),
+        value: sites.into(),
+    });
+}
+
+#[test]
+fn a_round_shuts_sites_covers_the_tab_and_holds_its_media() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "https://m.youtube.com/watch");
+    shut(&mut shell, "youtube.com");
+    assert!(!shell.focus_covers());
+
+    focus(
+        &mut shell,
+        zephium_ipc::FocusControl::Start {
+            minutes: 25,
+            breaks: false,
+        },
+    );
+    let calls = engine.calls();
+    assert!(calls.contains(&"focus-gate youtube.com".to_owned()));
+    assert!(calls.contains(&format!("media {id} still")));
+    assert!(shell.focus_covers());
+
+    focus(
+        &mut shell,
+        zephium_ipc::FocusControl::Allow {
+            site: "youtube.com".into(),
+        },
+    );
+    assert!(!shell.focus_covers());
+
+    focus(&mut shell, zephium_ipc::FocusControl::Stop);
+    let calls = engine.calls();
+    assert_eq!(calls.last().map(String::as_str), Some("focus-gate open"));
+    assert!(calls.contains(&format!("media {id} free")));
+    assert!(!shell.focus_covers());
+}
+
+#[test]
+fn a_fresh_tab_shut_by_focus_is_covered_and_opens_when_let_through() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shut(&mut shell, "x.com");
+    focus(
+        &mut shell,
+        zephium_ipc::FocusControl::Start {
+            minutes: 50,
+            breaks: true,
+        },
+    );
+    shell.handle(Command::Engine(EngineEvent::FocusBlocked {
+        id,
+        url: "https://x.com/home".into(),
+    }));
+    assert!(shell.focus_covers());
+
+    let before = engine.calls().len();
+    focus(
+        &mut shell,
+        zephium_ipc::FocusControl::Allow {
+            site: "x.com".into(),
+        },
+    );
+    assert!(engine.calls()[before..]
+        .iter()
+        .any(|call| call.contains("x.com/home")));
+}

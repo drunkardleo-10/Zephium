@@ -358,6 +358,7 @@ impl Shell {
                 self.items.set_popup_blocked(id, true);
                 self.project_tab(id);
             }
+            EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
                     tab.url
@@ -602,6 +603,7 @@ impl Shell {
             | EngineEvent::NavState { id, .. }
             | EngineEvent::NativeTabCloseRequested { id }
             | EngineEvent::PageOpenBlocked { id }
+            | EngineEvent::FocusBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
             | EngineEvent::NewWindowRequested { id, .. }
