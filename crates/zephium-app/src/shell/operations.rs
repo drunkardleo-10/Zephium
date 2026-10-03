@@ -41,6 +41,7 @@ impl Shell {
             } => self.operation_invoke_extension_action(runtime, revision, anchor),
             Command::OpenUrl { input, new_tab } => self.operation_open_url(input, new_tab),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
+            Command::Focus(control) => self.operation_focus(control),
             Command::RetryContentPolicy {
                 profile,
                 failed_generation,
@@ -741,6 +742,7 @@ impl Shell {
             self.search.include_history = value == "true";
         }
         self.tab_preferences.apply(&key, &value);
+        self.apply_time_setting(&key, &value);
         // This projection is downstream of truthful store-queue admission.
         // The desktop composition root applies native theme state from this
         // signal, never optimistically from the IPC request itself.

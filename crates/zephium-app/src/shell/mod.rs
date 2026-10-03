@@ -23,6 +23,7 @@ mod projections;
 mod scope;
 mod search;
 mod tabs;
+mod time;
 mod user_content_status;
 mod view_lifecycle;
 mod webext;
@@ -215,6 +216,7 @@ pub struct Shell {
     divider: Option<GrabbedDivider>,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
+    time: time::TimeState,
     window_visible: bool,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
     browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
@@ -416,6 +418,7 @@ impl Shell {
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
             bookmarks: bookmarks::BookmarkState::default(),
+            time: time::TimeState::load(&store),
             search: SearchState {
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
                 engine: store
@@ -1131,6 +1134,7 @@ impl Shell {
                     }
                 }
                 self.maintain_blocker_statistics();
+                self.flush_time(None);
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
                 self.drive_blocker_preference_reconciliations();
@@ -1152,6 +1156,24 @@ impl Shell {
             }
             Command::Engine(event) => self.on_engine_event(event),
             Command::Shutdown { deadline, ack } => self.shutdown_until(deadline, ack),
+            Command::TimeCall {
+                expected_profile,
+                call,
+                done,
+            } => self.time_call(expected_profile, *call, done),
+            Command::TimeReportRead {
+                profile,
+                report,
+                done,
+            } => self.on_time_report(profile, report, done),
+            Command::SetAppActive(active) => self.set_app_active(active),
+            Command::SetSystemAwake(awake) => self.set_system_awake(awake),
+            Command::FocusWake => self.focus_wake(),
+            // Accepted only through `Command::Operation`.
+            Command::Focus(_) => {}
+        }
+        if self.shutdown_result.is_none() {
+            self.refresh_time();
         }
         #[cfg(feature = "work-execution")]
         self.poll_work();
@@ -1461,6 +1483,9 @@ impl Shell {
         }
         self.clear_pending_store_reads();
 
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.flush_time(None))).is_err() {
+            crate::diagnostic!("shutdown: final time flush panicked");
+        }
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.persist())).is_err() {
             crate::diagnostic!("shutdown: final session snapshot panicked");
             terminal_clean = false;

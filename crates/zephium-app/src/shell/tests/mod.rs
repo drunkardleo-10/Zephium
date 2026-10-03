@@ -835,6 +835,7 @@ pub(crate) struct FakeStore {
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
     recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
+    pub(super) recorded_time: Mutex<Vec<(ProfileId, Vec<zephium_core::time::HourTally>)>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
     pub(super) reject_settings: std::sync::atomic::AtomicBool,
@@ -1142,6 +1143,16 @@ impl Store for FakeStore {
         }
         true
     }
+    fn record_time(
+        &self,
+        profile: ProfileId,
+        tallies: Vec<zephium_core::time::HourTally>,
+        _keep_from_hour: i64,
+    ) -> bool {
+        self.recorded_time.lock().unwrap().push((profile, tallies));
+        true
+    }
+
     fn record_visit(&self, _profile: ProfileId, url: String, title: String) {
         let mut visits = self.recorded_visits.lock().unwrap();
         let id = i64::try_from(visits.len()).unwrap_or(i64::MAX) + 1;
@@ -1519,6 +1530,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::Layout(_) => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
+        Projection::Focus(_) => {}
         Projection::OperationProcessed(_) => {}
         Projection::OpenNote { .. } => {}
     }
@@ -1805,6 +1817,7 @@ mod projections;
 mod search;
 mod shutdown;
 mod tabs;
+mod time;
 mod view_lifecycle;
 mod window_layout;
 mod work_pane;

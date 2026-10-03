@@ -5,7 +5,10 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+mod time;
 pub mod work;
+
+pub use time::*;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct TabView {
@@ -1206,6 +1209,7 @@ pub enum Projection {
     Layout(LayoutState),
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
+    Focus(FocusStatus),
     OperationProcessed(OperationDisposition),
 }
 

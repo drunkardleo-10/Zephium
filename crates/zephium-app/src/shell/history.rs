@@ -47,8 +47,12 @@ impl Shell {
             });
             return;
         }
-        if matches!(call, HistoryCall::Clear { .. }) {
+        if let HistoryCall::Clear { range } = &call {
             self.reset_blocker_statistics(expected_profile);
+            let since = range
+                .window_seconds()
+                .map(|window| chrono::Utc::now().timestamp() - window);
+            self.clear_time(expected_profile, since);
         }
         let Some(reads) = &self.store_reads else {
             done.finish(HistoryResponse::Error {

@@ -20,6 +20,7 @@ enum CoalescedKey {
     #[cfg(feature = "work-execution")]
     Work,
     Bootstrap,
+    FocusWake,
     Title(ItemId),
     Url(ItemId),
     Loading(ItemId),
@@ -134,6 +135,7 @@ pub(crate) struct TimerState {
     work_deadline: Option<std::time::Instant>,
     stopped: bool,
     pub(crate) persist_deadline: Option<std::time::Instant>,
+    focus_deadline: Option<std::time::Instant>,
     favicon_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, u8)>,
     pub(crate) presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
     discard_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, DiscardProbeId)>,
@@ -160,6 +162,7 @@ pub(crate) enum TimerWake {
     Work,
     Maintenance,
     Persist,
+    Focus,
     Favicon {
         id: ItemId,
         attempt: u8,
@@ -494,6 +497,7 @@ impl CommandQueue {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         timer.stopped = true;
         timer.persist_deadline = None;
+        timer.focus_deadline = None;
         timer.favicon_deadlines.clear();
         timer.presentation_deadlines.clear();
         timer.discard_deadlines.clear();
@@ -514,6 +518,21 @@ impl CommandQueue {
             return;
         }
         timer.persist_deadline = Some(deadline);
+        self.inner.timer_ready.notify_one();
+    }
+
+    /// One deadline for the running focus session's next change; a later
+    /// schedule replaces it, and `None` cancels it.
+    pub(crate) fn schedule_focus(&self, deadline: Option<std::time::Instant>) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer.focus_deadline = deadline;
         self.inner.timer_ready.notify_one();
     }
 
@@ -836,6 +855,10 @@ impl CommandQueue {
                 timer.persist_deadline = None;
                 return TimerWake::Persist;
             }
+            if timer.focus_deadline.is_some_and(|deadline| now >= deadline) {
+                timer.focus_deadline = None;
+                return TimerWake::Focus;
+            }
             let next_favicon = timer
                 .favicon_deadlines
                 .iter()
@@ -927,6 +950,9 @@ impl CommandQueue {
             #[cfg(feature = "work-execution")]
             if let Some(work) = timer.work_deadline {
                 deadline = deadline.min(work);
+            }
+            if let Some(focus) = timer.focus_deadline {
+                deadline = deadline.min(focus);
             }
             if let Some((_, favicon, _)) = next_favicon {
                 deadline = deadline.min(favicon);
@@ -1134,6 +1160,7 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
             Some(CoalescedKey::StoreFaviconBatch)
         }
         Command::Persist => Some(CoalescedKey::Persist),
+        Command::FocusWake => Some(CoalescedKey::FocusWake),
         Command::Tick => Some(CoalescedKey::Tick),
         _ => None,
     }

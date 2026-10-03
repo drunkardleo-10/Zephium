@@ -229,6 +229,24 @@ pub enum Command {
         call: Box<zephium_ipc::BookmarkCall>,
         done: BookmarkCompletion,
     },
+    TimeCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_ipc::TimeCall>,
+        done: TimeCompletion,
+    },
+    /// A time report the store read, coming back for icons.
+    TimeReportRead {
+        profile: ProfileId,
+        report: Option<zephium_core::time::TimeReport>,
+        done: TimeCompletion,
+    },
+    /// Whether a Zephium window is the one the person is using.
+    SetAppActive(bool),
+    /// Whether the machine is awake and unlocked with its display on.
+    SetSystemAwake(bool),
+    Focus(zephium_ipc::FocusControl),
+    /// The running focus session reached its next change.
+    FocusWake,
     /// Writes what was read from another browser into the focused profile,
     /// restoring the session first when it has not been yet (onboarding).
     Import {
@@ -692,6 +710,28 @@ impl HistoryCompletion {
         if let Some(done) = done {
             done(response);
         }
+    }
+}
+#[derive(Clone)]
+pub struct TimeCompletion(Completion<zephium_ipc::TimeResponse>);
+impl TimeCompletion {
+    pub fn new(done: impl FnOnce(zephium_ipc::TimeResponse) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, response: zephium_ipc::TimeResponse) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(response);
+        }
+    }
+}
+impl fmt::Debug for TimeCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TimeCompletion")
     }
 }
 #[derive(Clone)]

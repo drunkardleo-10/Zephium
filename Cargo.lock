@@ -7223,6 +7223,7 @@ dependencies = [
  "ignore",
  "libc",
  "lopdf",
+ "psl",
  "regex",
  "serde_json",
  "sha2 0.10.9",

@@ -17,6 +17,7 @@ impl Shell {
         if !self.reconcile_runtime_restart_requirement() {
             self.project_runtime_status();
         }
+        self.resume_focus();
         // The chrome re-invokes bootstrap whenever its webview reloads (dev
         // HMR, crash recovery); state and native surfaces must not be rebuilt.
         if self.windows.focused().is_some() {

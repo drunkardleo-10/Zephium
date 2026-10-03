@@ -1181,6 +1181,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::RespondToPagePermissionPrompt { .. }
             | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
+            | Command::Focus(_)
             | Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }
             | Command::SetFocusedContentBlockerEnabled(_)
@@ -1509,6 +1510,13 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                         Err(TryPushError::Closed(_)) => break,
                     }
                 }
+                TimerWake::Focus => match timer_queue.try_push(Command::FocusWake) {
+                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                    Err(TryPushError::Full(_)) => timer_queue.schedule_focus(Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(25),
+                    )),
+                    Err(TryPushError::Closed(_)) => break,
+                },
                 TimerWake::Persist => match timer_queue.try_push(Command::Persist) {
                     Ok(()) | Err(TryPushError::Sealed(_)) => {}
                     Err(TryPushError::Full(_)) => timer_queue.schedule_persist(
