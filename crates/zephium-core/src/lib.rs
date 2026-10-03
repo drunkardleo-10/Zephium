@@ -25,6 +25,8 @@ pub mod search;
 pub mod session;
 pub mod spaces;
 pub mod split;
+/// Time on the web and focus sessions.
+pub mod time;
 pub mod userscripts;
 pub mod webkitgtk;
 pub mod webview2;

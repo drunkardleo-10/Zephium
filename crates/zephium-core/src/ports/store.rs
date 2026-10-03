@@ -518,6 +518,40 @@ pub trait Store {
         done(false);
         true
     }
+    /// Adds hour tallies to a profile's time and drops hours before
+    /// `keep_from_hour`. False when not admitted; the caller keeps them.
+    fn record_time(
+        &self,
+        _profile: ProfileId,
+        _tallies: Vec<crate::time::HourTally>,
+        _keep_from_hour: i64,
+    ) -> bool {
+        false
+    }
+    /// Ordered after every admitted `record_time`, so it sees them.
+    fn time_report(
+        &self,
+        _profile: ProfileId,
+        _query: crate::time::TimeQuery,
+        _done: Box<dyn FnOnce(Option<crate::time::TimeReport>) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Removes a profile's time from `since_hour` on, or all of it.
+    fn clear_time(&self, _profile: ProfileId, _since_hour: Option<i64>) -> bool {
+        false
+    }
+    fn record_focus(&self, _record: crate::time::FocusRecord, _day: i64) -> bool {
+        false
+    }
+    fn focus_days(
+        &self,
+        _from_day: i64,
+        _days: u32,
+        _done: Box<dyn FnOnce(Option<Vec<crate::time::FocusDay>>) + Send>,
+    ) -> bool {
+        false
+    }
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32;
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;

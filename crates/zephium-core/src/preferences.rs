@@ -25,6 +25,12 @@ pub const KEYS: &[&str] = &[
     "tabs.after-close",
     "tabs.switch-to-open",
     "tabs.startup",
+    "time.track",
+    "time.retention",
+    "focus.minutes",
+    "focus.breaks",
+    "focus.goal",
+    "focus.blocked",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -59,6 +65,23 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         // Native writes `pending` on a fresh install; chrome only ever
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
+        "time.retention" => matches!(value, "30" | "90" | "365"),
+        "focus.minutes" => value.parse::<u16>().is_ok_and(|minutes| {
+            value == minutes.to_string()
+                && (crate::time::MIN_FOCUS_MINUTES..=crate::time::MAX_FOCUS_MINUTES)
+                    .contains(&minutes)
+        }),
+        "focus.goal" => matches!(value, "30" | "60" | "120" | "180" | "240" | "360"),
+        // One site per line, each already in the form the shell matches on.
+        "focus.blocked" => {
+            let sites: Vec<&str> = value.lines().collect();
+            sites.len() <= crate::time::MAX_BLOCKED_SITES
+                && !value.ends_with('\n')
+                && sites.iter().enumerate().all(|(index, site)| {
+                    crate::time::normalize_site(site).as_deref() == Some(*site)
+                        && !sites[..index].contains(site)
+                })
+        }
         "search.suggestions"
         | "ui.reduce-motion"
         | "ui.newtab-greeting"
@@ -69,7 +92,9 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "work.enabled"
         | "ui.contrast"
         | "search.history"
-        | "tabs.switch-to-open" => {
+        | "tabs.switch-to-open"
+        | "time.track"
+        | "focus.breaks" => {
             matches!(value, "true" | "false")
         }
         _ => false,
@@ -79,6 +104,23 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn focus_settings_hold_normalized_sites_and_bounded_numbers() {
+        assert!(value_allowed("focus.blocked", ""));
+        assert!(value_allowed("focus.blocked", "x.com\nyoutube.com"));
+        for value in ["x.com\n", "x.com\nx.com", "https://x.com", "www.x.com", "X.com", "x"] {
+            assert!(!value_allowed("focus.blocked", value), "{value:?}");
+        }
+        assert!(value_allowed("focus.minutes", "25"));
+        assert!(value_allowed("focus.minutes", "180"));
+        for value in ["4", "181", "025", "25.0", ""] {
+            assert!(!value_allowed("focus.minutes", value), "{value:?}");
+        }
+        assert!(value_allowed("time.retention", "365"));
+        assert!(!value_allowed("time.retention", "7"));
+        assert!(value_allowed("time.track", "false"));
+    }
+
     #[test]
     fn settings_are_closed_and_values_are_bounded() {
         assert!(value_allowed("sidebar.mode", "compact"));
