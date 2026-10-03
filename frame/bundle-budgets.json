@@ -108,9 +108,9 @@
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
-    "js": 291200,
+    "js": 291400,
     "css": 18000,
-    "description": " Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 290066 JS measured. Round 5b: the shared catalog's new Work words: 290398 JS measured. Launcher, onboarding and new tab merge 2026-10-01: 291,177 bytes of JS measured; ceiling rounded to the next 100 bytes."
+    "description": " Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 290066 JS measured. Round 5b: the shared catalog's new Work words: 290398 JS measured. Launcher, onboarding and new tab merge 2026-10-01: 291,177 bytes of JS measured; ceiling rounded to the next 100 bytes. Jev credential setup 2026-10-02: two generated native key commands add 163 bytes to the shared IPC chunk; measured 291340 JS bytes, rounded to the next 100 bytes. No Jev UI or provider code enters this destination."
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
     "js": 292728,
@@ -235,14 +235,14 @@
     "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog. The request lift's header and its run as a timeline of steps add 10.1 KB JS and 2.4 KB CSS (168962 and 24212 measured). Merged with main: 235567 JS and 23448 CSS measured. Site marks in the lift header and evidence chips (favicon cache and FavIcon) add 3.3 KB JS (238836 measured). Diagram and table projection in the result renderer, the whole table with its sticky header and first column, and the knowledge caption add 3.4 KB JS and 1.2 KB CSS (243278 and 24974 measured). A source glyph asking native once for an icon the cache lacks adds 0.9 KB JS (244203 measured). The code kind's projection and its lazy block loader in the result renderer add 0.4 KB JS (245780 measured). The origin grant approval in the request lift adds 3.7 KB JS and 1.2 KB CSS (249506 and 26379 measured). The answer view in the result renderer adds 5.4 KB JS and 2.7 KB CSS (253708 and 29001 measured on bf0d0f03). The diagram lift's headings in the shared message catalog add under 0.1 KB JS (253801 measured over 253708 at 64a197e4). The sticky lift header and the sortable table with its best marks and CSV footer in the shared result renderer add 3.5 KB JS and 2.9 KB CSS (201146 and 31887 measured over 197656 and 29001 at a33931f7). The signed-in offer's run reply and the run facts in the shared Work graph add 1.2 KB JS (260775 measured over 259607 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (259607 measured over 257289 at 714054aa). Three concurrent rounds (lift and chrome, charts on LayerChart, sources and signed-in) each raised by its own delta from a base without the others; reconciled to the combined measurement (260775 measured on d9a65235). The shared DataTable's sortable headers and its plain variant with a held heading column (Work's sheet) add 1.6 KB CSS (33588 measured). The object renderers' message keys and the code block's first line number in the shared Work graph add 0.3 KB JS (262806 measured)."
   },
   "lazy:features/work/components/local/CommandInspector.svelte": {
-    "js": 91700,
+    "js": 91800,
     "css": 6000,
-    "description": "Local command review and result, loaded only when inspecting a command; measured 64877 JS and 5070 CSS bytes including shared controls and runtime. Existing entry budgets are unchanged. Merged with main: 87227 JS and 4749 CSS measured. LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (89603 measured over 87296 at 714054aa). The code block's first line number adds 0.4 KB JS (90657 measured at aef3a6b9, 91129 with the later shared chunk). Launcher, onboarding and new tab merge 2026-10-01: 91,625 bytes of JS measured; ceiling rounded to the next 100 bytes."
+    "description": "Local command review and result, loaded only when inspecting a command; measured 64877 JS and 5070 CSS bytes including shared controls and runtime. Existing entry budgets are unchanged. Merged with main: 87227 JS and 4749 CSS measured. LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (89603 measured over 87296 at 714054aa). The code block's first line number adds 0.4 KB JS (90657 measured at aef3a6b9, 91129 with the later shared chunk). Launcher, onboarding and new tab merge 2026-10-01: 91,625 bytes of JS measured; ceiling rounded to the next 100 bytes. Jev credential setup 2026-10-02: two generated native key commands add 163 bytes to the shared IPC chunk; measured 91788 JS bytes, rounded to the next 100 bytes. No Jev UI or provider code enters this destination."
   },
   "lazy:features/work/components/local/CommandRecord.svelte": {
-    "js": 86900,
+    "js": 87000,
     "css": 4800,
-    "description": "A settled command's full record in the canvas lift, loaded only when a command card opens; measured 60819 JS and 4333 CSS bytes including shared controls and runtime. Merged with main: 82425 JS and 4001 CSS measured. LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (84800 measured over 82494 at 714054aa). The code block's first line number adds 0.4 KB JS (85854 measured at aef3a6b9, 86326 with the later shared chunk). Launcher, onboarding and new tab merge 2026-10-01: 86,822 bytes of JS measured; ceiling rounded to the next 100 bytes."
+    "description": "A settled command's full record in the canvas lift, loaded only when a command card opens; measured 60819 JS and 4333 CSS bytes including shared controls and runtime. Merged with main: 82425 JS and 4001 CSS measured. LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (84800 measured over 82494 at 714054aa). The code block's first line number adds 0.4 KB JS (85854 measured at aef3a6b9, 86326 with the later shared chunk). Launcher, onboarding and new tab merge 2026-10-01: 86,822 bytes of JS measured; ceiling rounded to the next 100 bytes. Jev credential setup 2026-10-02: two generated native key commands add 163 bytes to the shared IPC chunk; measured 86985 JS bytes, rounded to the next 100 bytes. No Jev UI or provider code enters this destination."
   },
   "lazy:features/work/components/WorkFileInspector.svelte": {
     "js": 167500,
@@ -305,9 +305,9 @@
     "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149380 measured; the board adds a few bytes to the shared runtime)."
   },
   "lazy:features/work/components/parts/ComputerPart.svelte": {
-    "js": 123800,
+    "js": 123900,
     "css": 8400,
-    "description": "Measured 119078 JS and 7393 CSS bytes: a computer part's own view (changed files, the command that matters with its tests, what it read), loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 121991 JS and 7393 CSS. Round two lists every command with its time and outcome (tests, the first failure, a failed command's error): 120830 JS and 7903 CSS. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 123563 JS measured. Launcher, onboarding and new tab merge 2026-10-01: 123,712 bytes of JS measured; ceiling rounded to the next 100 bytes."
+    "description": "Measured 119078 JS and 7393 CSS bytes: a computer part's own view (changed files, the command that matters with its tests, what it read), loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 121991 JS and 7393 CSS. Round two lists every command with its time and outcome (tests, the first failure, a failed command's error): 120830 JS and 7903 CSS. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 123563 JS measured. Launcher, onboarding and new tab merge 2026-10-01: 123,712 bytes of JS measured; ceiling rounded to the next 100 bytes. Jev credential setup 2026-10-02: two generated native key commands add 163 bytes to the shared IPC chunk; measured 123875 JS bytes, rounded to the next 100 bytes. No Jev UI or provider code enters this destination."
   },
   "lazy:features/work/components/parts/ConnectionPart.svelte": {
     "js": 125800,
@@ -450,8 +450,8 @@
     "description": "Release merge 2026-10-01: Merged Work/shared IPC and main protection graph measures 324,010 bytes of JS; ceiling rounded to the next 100 bytes. The combined static CSS graph measures 105,232 bytes. CSS ceiling rounded to the next 100 bytes. Store listings show Remove from Zephium for an installed extension (listing id, inline confirm, rail remove): 326,002 bytes of JS measured (with the new tab condition); ceiling rounded to the next 100 bytes. Store listings show Remove from Zephium for an installed extension (listing id, inline confirm, rail remove): 105,674 bytes of CSS measured; ceiling rounded to the next 100 bytes."
   },
   "onboarding": {
-    "js": 193200,
+    "js": 193300,
     "css": 104700,
-    "description": " Merge with main 2026-10-01: shared IPC and preferences from Work, extensions and protection bring onboarding to 193,109 bytes of JS and 104,672 of CSS measured; ceiling rounded to the next 100 bytes."
+    "description": " Merge with main 2026-10-01: shared IPC and preferences from Work, extensions and protection bring onboarding to 193,109 bytes of JS and 104,672 of CSS measured; ceiling rounded to the next 100 bytes. Jev credential setup 2026-10-02: two generated native key commands add 163 bytes to the shared IPC chunk; measured 193272 JS bytes, rounded to the next 100 bytes. No Jev UI or provider code enters onboarding."
   }
 }

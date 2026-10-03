@@ -15,6 +15,7 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import AiProviderRow from "../AiProviderRow.svelte";
+  import WorkDecisions from "../WorkDecisions.svelte";
 
   let profile = $derived(tabs.profile());
   let session = $state.raw<ModelsSession | null>(null);
@@ -122,6 +123,7 @@
         {m.ai_more_failed()}
       </p>{/if}
   </SettingsGroup>
+  <WorkDecisions profile={profile.id} />
 {/if}
 
 <style>

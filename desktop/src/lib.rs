@@ -1466,6 +1466,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::human::work_human_release,
             work_decision::work_decision_preference,
             work_decision::work_set_decision_preference,
+            work_decision::work_set_decision_key,
+            work_decision::work_clear_decision_key,
             work_models::work_models,
             work_models::work_models_ready,
             work_models::work_choose_model,

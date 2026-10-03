@@ -1,5 +1,5 @@
 //! Per-profile typed-decision preference. The response reports whether the
-//! TypeSafe Keychain item exists, never any part of its content.
+//! TypeSafe/Jev OS credential item exists, never any part of its content.
 use super::*;
 
 /// Trusted per-profile choice; page and model output cannot select it.

@@ -11,6 +11,14 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   const { models } = await import("$shared/testing/work-models");
   return mockBindings({
+    workDecisionPreference: async () => ({
+      version: 1,
+      profile: "00000000000000000000000001",
+      choice: "recommended",
+      effective: "standard",
+      typesafe_key_present: false,
+      error: null,
+    }),
     workModels: vi.fn(async () =>
       models({
         keys: { anthropic: "valid", open_ai: "set", deep_seek: "invalid" },

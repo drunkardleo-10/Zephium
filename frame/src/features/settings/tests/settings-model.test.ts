@@ -20,7 +20,12 @@ it("finds the reserved agent destinations without exposing unimplemented control
   expect(emptySections.has("ai")).toBe(false);
   expect(searchSections("models").some((section) => section.id === "ai")).toBe(true);
   expect(searchSections("MCP").some((section) => section.id === "mcp")).toBe(true);
-  expect(searchSettings("API key")).toEqual([]);
+  for (const query of ["API key", "Jev", "TypeSafe"]) {
+    expect(searchSettings(query).map(({ section, target }) => ({ section, target }))).toEqual([
+      { section: "ai", target: "work.decisions.key" },
+    ]);
+  }
+  expect(searchSettings("Decisions").some((result) => result.section === "work")).toBe(false);
   expect(searchSettings("updates").some((result) => result.target === "updates.check")).toBe(true);
 });
 

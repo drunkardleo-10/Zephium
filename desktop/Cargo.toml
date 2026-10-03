@@ -154,10 +154,11 @@ xkeysym = "=0.2.1"
 zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+zephium-work-composition = { workspace = true, optional = true }
 zephium-blocker = { workspace = true, features = ["runtime"] }
 raw-window-handle.workspace = true
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Media_Audio", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Media_Audio", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zephium-blocker = { workspace = true, features = ["webkit"] }

@@ -34,14 +34,13 @@ export const commands = {
  *  or an existing path that is not a folder.
  */
 { kind: "refused"; not_a_folder: boolean } | null, null>(__TAURI_INVOKE("work_pick_folder", { expectedProfile })),
-	/**  Reveals an admitted folder, or a file inside one, in Finder. */
+	/**  Reveals an admitted folder, or a file inside one, in the native file manager. */
 	workRevealPath: (expectedProfile: string, path: string) => typedError<boolean, null>(__TAURI_INVOKE("work_reveal_path", { expectedProfile, path })),
 	/**
-	 *  Empties the memory cache of the calling interface web view, and nothing
-	 *  else: cookies, storage and disk caches stay, and no page's data store is
-	 *  reached (each page has its own).
+	 *  Reclaims idle UI memory or restores its active memory target. Cookies,
+	 *  storage and disk caches stay; no agent page's store is reached.
 	 */
-	workReleaseMemory: () => __TAURI_INVOKE<boolean>("work_release_memory"),
+	workReleaseMemory: (idle: boolean) => __TAURI_INVOKE<boolean>("work_release_memory", { idle }),
 	/**
 	 *  Opens the folder panel at `start` (or its nearest existing folder) and
 	 *  admits the person's choice.
@@ -61,6 +60,10 @@ export const commands = {
 	workHumanRelease: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_release", { expectedProfile, work, page }),
 	workDecisionPreference: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_decision_preference", { expectedProfile }),
 	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
+	/**  Inbound-only Jev key setup, authorized against the current regular profile. */
+	workSetDecisionKey: (expectedProfile: string, secret: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_key", { expectedProfile, secret }),
+	/**  Removes the separate native decision key without reading it back. */
+	workClearDecisionKey: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_clear_decision_key", { expectedProfile }),
 	workModels: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_models", { expectedProfile }),
 	workModelsReady: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsReadyV1>("work_models_ready", { expectedProfile }),
 	workChooseModel: (expectedProfile: string, role: WorkModelRole, id: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_choose_model", { expectedProfile, role, id }),

@@ -585,13 +585,13 @@ async fn public_decision_settings(
     }
     #[cfg(target_os = "macos")]
     let primary = if choice == WorkDecisionChoiceV1::Recommended {
-        let loaded = tokio::task::spawn_blocking(
-            zephium_agentic::load_macos_development_typesafe_credential,
-        )
-        .await
-        .ok()
-        .and_then(Result::ok);
-        super::work_decision::observe_typesafe_key(profile, loaded.is_some());
+        let key_epoch = super::work_decision::typesafe_presence_epoch();
+        let loaded =
+            tokio::task::spawn_blocking(zephium_agentic::load_development_typesafe_credential)
+                .await
+                .ok()
+                .and_then(Result::ok);
+        super::work_decision::observe_typesafe_key(profile, key_epoch, loaded.is_some());
         loaded.and_then(|key| zephium_agentic::JevDecisionClient::direct(transport, key).ok())
     } else {
         None
