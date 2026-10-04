@@ -315,6 +315,20 @@ export const commands = {
 	os: string,
 	arch: string,
 } | null>("about_info"),
+	updateStatus: () => __TAURI_INVOKE<
+/**  Development and unsupported builds never update themselves. */
+{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" } | null>("update_status"),
+	/**
+	 *  Checks for a newer release and downloads it. Returns the resulting status;
+	 *  a check already in flight, or an update already waiting, is reported as is.
+	 */
+	updateCheck: () => __TAURI_INVOKE<
+/**  Development and unsupported builds never update themselves. */
+{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" } | null>("update_check"),
+	/**  Installs the parked update and relaunches through the orderly shutdown. */
+	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
+	/**  Opens the system's own update settings for an outdated macOS or Safari. */
+	openSoftwareUpdate: () => __TAURI_INVOKE<boolean>("open_software_update"),
 	/**
 	 *  Opens an address in the focused window. The launcher panel and the history
 	 *  surfaces have no tab id to navigate, and must not be given one.
@@ -1984,6 +1998,10 @@ export type UiCommand = string;
 export type UiInfo = {
 	material: Material,
 };
+
+export type UpdateStatus = 
+/**  Development and unsupported builds never update themselves. */
+{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" };
 
 /**  An extension's run-time request for access, awaiting the user's answer. */
 export type WebExtensionAccessRequestView = {

@@ -101,6 +101,7 @@ mod search_providers;
 mod startup_alert;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
+mod updates;
 mod webext;
 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
 mod webext_qa;
@@ -1635,6 +1636,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             download_call,
             download_open_access_settings,
             about::about_info,
+            updates::update_status,
+            updates::update_check,
+            updates::update_relaunch,
+            updates::open_software_update,
             browser_open_url,
             keymap::keymap_entries,
             keymap::keymap_bind,
@@ -5096,6 +5101,10 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         linux_global_shortcuts::shutdown(app);
     }
     #[cfg(target_os = "macos")]
+    if matches!(&event, tauri::RunEvent::Exit) {
+        updates::finish_on_exit(app);
+    }
+    #[cfg(target_os = "macos")]
     if let tauri::RunEvent::Opened { urls } = &event {
         external_links::hand_off(app, urls.iter().map(|url| url.to_string()), true);
         return;
@@ -5241,6 +5250,7 @@ pub fn run() {
         .plugin(navigation_lock())
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Must register first: a second launch (file association, dock, a
         // stale instance holding the global hotkey and the profile dbs)
         // focuses the running window and exits.
@@ -5260,6 +5270,7 @@ pub fn run() {
         // is contained inside that native Ready callback and converted into a
         // correlated event-loop exit instead of escaping as Tauri's panic.
         .manage(ShutdownCoordinator::default())
+        .manage(updates::Updates::default())
         // Storage is admitted first inside setup, but its temporary cleanup
         // owner must already exist so installation and later Shell transfer are
         // one exact, failure-observable transaction.
@@ -6364,6 +6375,7 @@ pub fn run() {
                 "privacy: privileged WebView2 Environment5/PID/HANDLE exit was not proven; leaving this run's UDF generation quarantined"
             );
         }
+        updates::finish_after_exit();
         std::process::exit(if cleanup_succeeded || exit_code != 0 {
             exit_code
         } else {
