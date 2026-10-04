@@ -107,6 +107,7 @@
     color: var(--color-muted);
     font-size: var(--text-body);
   }
+
   .error {
     margin-inline: 0;
     color: var(--color-danger);
