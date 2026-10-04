@@ -39,8 +39,8 @@
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
     "js": 343000,
-    "css": 102300,
-    "description": " Launcher, onboarding and new tab merge 2026-10-01: tools are hosted in the browser graph, as reviewed on the UI branch (343,000 JS limit); 319,628 measured. Launcher, onboarding and new tab merge 2026-10-01: 102,275 bytes of CSS measured; ceiling rounded to the next 100 bytes."
+    "css": 102400,
+    "description": " Launcher, onboarding and new tab merge 2026-10-01: tools are hosted in the browser graph, as reviewed on the UI branch (343,000 JS limit); 319,628 measured. Launcher, onboarding and new tab merge 2026-10-01: 102,275 bytes of CSS measured; ceiling rounded to the next 100 bytes. Windows sidebar menu material, 2026-10-04: reviewed shared surface policy, 102301 CSS bytes measured; 100-byte ceiling step covers the opaque rule without adding a dependency."
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
     "js": 1262430,
@@ -54,8 +54,8 @@
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
     "js": 343500,
-    "css": 102300,
-    "description": " Launcher, onboarding and new tab merge 2026-10-01: tools are hosted in the browser graph, as reviewed on the UI branch (343,500 JS limit); 320,155 measured. Launcher, onboarding and new tab merge 2026-10-01: 102,275 bytes of CSS measured; ceiling rounded to the next 100 bytes."
+    "css": 102400,
+    "description": " Launcher, onboarding and new tab merge 2026-10-01: tools are hosted in the browser graph, as reviewed on the UI branch (343,500 JS limit); 320,155 measured. Launcher, onboarding and new tab merge 2026-10-01: 102,275 bytes of CSS measured; ceiling rounded to the next 100 bytes. Windows sidebar menu material, 2026-10-04: reviewed shared surface policy, 102301 CSS bytes measured; 100-byte ceiling step covers the opaque rule without adding a dependency."
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
     "js": 1267323,
@@ -108,9 +108,9 @@
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
-    "js": 291400,
+    "js": 291700,
     "css": 18000,
-    "description": " Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 290066 JS measured. Round 5b: the shared catalog's new Work words: 290398 JS measured. Launcher, onboarding and new tab merge 2026-10-01: 291,177 bytes of JS measured; ceiling rounded to the next 100 bytes. Jev credential setup 2026-10-02: two generated native key commands add 163 bytes to the shared IPC chunk; measured 291340 JS bytes, rounded to the next 100 bytes. No Jev UI or provider code enters this destination."
+    "description": " Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 290066 JS measured. Round 5b: the shared catalog's new Work words: 290398 JS measured. Launcher, onboarding and new tab merge 2026-10-01: 291,177 bytes of JS measured; ceiling rounded to the next 100 bytes. Jev credential setup 2026-10-02: two generated native key commands add 163 bytes to the shared IPC chunk; measured 291340 JS bytes, rounded to the next 100 bytes. No Jev UI or provider code enters this destination. Windows sidebar menu material, 2026-10-04: 291663 JS bytes measured. Reviewed 300-byte ceiling step for trigger references and per-open material propagation through menu/calendar portals; no observer, polling, or new dependency."
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
     "js": 292728,
@@ -431,8 +431,8 @@
   },
   "lazy:features/settings/components/sections/SkillsPage.svelte": {
     "js": 306500,
-    "css": 19200,
-    "description": "Measured 302801 JS and 17064 CSS bytes. Settings → Skills: built-in and personal skills with the Markdown editor. Launcher, onboarding and new tab merge 2026-10-01: 19,163 bytes of CSS measured; ceiling rounded to the next 100 bytes."
+    "css": 19700,
+    "description": "Measured 302801 JS and 17064 CSS bytes. Settings → Skills: built-in and personal skills with the Markdown editor. Launcher, onboarding and new tab merge 2026-10-01: 19,163 bytes of CSS measured; ceiling rounded to the next 100 bytes. Windows sidebar menu material, 2026-10-04: Select shares the menu surface graph; 19691 CSS bytes measured. Settings has no opaque marker and retains its existing appearance. Reviewed 500-byte ceiling step for the shared graph, with no new stylesheet dependency."
   },
   "lazy:features/work/components/start/WorkStart.svelte": {
     "js": 193100,

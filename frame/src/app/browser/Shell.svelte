@@ -416,7 +416,8 @@
   }
 
   .sidebar-mode-body[data-arriving="true"] {
-    animation: mode-body-in var(--motion-slow) var(--ease-emphasized) both;
+    /* Release the opacity backdrop root after entry so descendant menus can blur. */
+    animation: mode-body-in var(--motion-slow) var(--ease-emphasized) backwards;
   }
 
   @keyframes mode-body-in {

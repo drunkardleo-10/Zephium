@@ -25,6 +25,13 @@
   overflow: hidden;
 }
 
+/* WebView2 cannot reliably blur content over a transparent native backdrop.
+   Only menus opened from the Windows sidebar receive this policy. */
+.ui-menu[data-menu-material="opaque"] {
+  background: var(--color-float);
+  backdrop-filter: none;
+}
+
 /* A panel rather than a list: its contents own their own spacing. */
 .ui-popover {
   padding: 10px;

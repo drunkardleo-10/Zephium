@@ -13,19 +13,17 @@
   protection standing, whatever else earns a place later. One glyph holds
   them, because none of them is worth a permanent seat in the chrome.
 -->
-<div class="utilities">
-  <Disclosure
-    {onopen}
-    label={m.utilities()}
-    menu
-    triggerClass="utilities-trigger"
-    panelClass="utilities-panel"
-    align="end"
-  >
-    {#snippet trigger()}<Icon icon={Settings05Icon} size={15} />{/snippet}
-    {@render children()}
-  </Disclosure>
-</div>
+<Disclosure
+  {onopen}
+  label={m.utilities()}
+  menu
+  triggerClass="utilities-trigger"
+  panelClass="utilities-panel"
+  align="end"
+>
+  {#snippet trigger()}<Icon icon={Settings05Icon} size={15} />{/snippet}
+  {@render children()}
+</Disclosure>
 
 <style>
   /*
@@ -35,18 +33,13 @@
     open all count as in use. The hook belongs to the field, which is the
     only element that knows when it is being addressed.
   */
-  .utilities {
-    opacity: 0;
-    transition: opacity var(--motion-fast) var(--ease-out);
-  }
-
-  .utilities:has(:global([data-state="open"])),
-  :global(.address-field:hover) .utilities,
-  :global(.address-field:focus-within) .utilities {
+  :global(.utilities-trigger[data-state="open"]),
+  :global(.address-field:is(:hover, :focus-within)) :global(.utilities-trigger) {
     opacity: 1;
   }
 
-  .utilities :global(.utilities-trigger) {
+  :global(.utilities-trigger) {
+    opacity: 0;
     display: grid;
     place-items: center;
     width: 26px;
@@ -58,19 +51,20 @@
     cursor: default;
     outline: none;
     transition:
+      opacity var(--motion-fast) var(--ease-out),
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out);
   }
 
-  .utilities :global(.utilities-panel) {
+  :global(.utilities-panel) {
     display: flex;
     flex-direction: column;
     gap: 6px;
     min-width: 212px;
   }
 
-  .utilities :global(.utilities-trigger:hover),
-  .utilities :global(.utilities-trigger[data-state="open"]) {
+  :global(.utilities-trigger:hover),
+  :global(.utilities-trigger[data-state="open"]) {
     background: var(--row-hover);
     color: var(--color-text);
   }

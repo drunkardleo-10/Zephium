@@ -135,6 +135,7 @@
   aria-label={m.ui_browser_sidebar()}
   style:width={`${width}px`}
   style:--sidebar-width={`${width}px`}
+  data-menu-material={IS_WINDOWS && !settings ? "opaque" : undefined}
   data-reshaping={reshaping}
   data-header-fresh={headerFresh}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import "../Menu/surface.css";
+  import { menuMaterialFor } from "../Menu/material";
 
   let {
     label,
@@ -24,6 +25,7 @@
   } = $props();
 
   let open = $state(false);
+  let material = $state<"opaque" | undefined>();
   let root = $state<HTMLElement>();
   let panel = $state<HTMLElement>();
   let button = $state<HTMLButtonElement>();
@@ -31,6 +33,7 @@
   const items = () => [...(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
 
   function show() {
+    material = menuMaterialFor(button);
     open = true;
     onopen?.();
     if (!menu) return;
@@ -120,6 +123,7 @@
     {@render trigger()}
   </button>
   <div
+    data-menu-material={material}
     bind:this={panel}
     class={["ui-menu", "ui-disclosure-panel", !menu && "ui-popover", panelClass]}
     role={menu ? "menu" : "group"}
