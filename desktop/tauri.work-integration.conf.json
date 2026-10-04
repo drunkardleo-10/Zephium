@@ -4,8 +4,7 @@
   "identifier": "app.zephium.work-integration",
   "build": { "devUrl": null },
   "bundle": {
-    "targets": ["app"],
-    "macOS": { "signingIdentity": "Developer ID Application: Edgar Injighulyan (4FLB46KK27)" }
+    "targets": ["app"]
   },
   "app": {
     "windows": [{
