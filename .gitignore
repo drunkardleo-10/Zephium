@@ -19,3 +19,11 @@ __pycache__/
 /frame/.vitest-attachments/
 
 /frame/dist-work-preview/
+
+# Local tooling and secrets
+.claude/
+.vscode/*
+!.vscode/extensions.json
+.env
+.env.*
+*.local
