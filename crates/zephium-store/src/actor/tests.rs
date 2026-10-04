@@ -16,6 +16,10 @@ use zephium_core::userscripts::{
     UserscriptCatalogMutation, UserscriptCatalogRevision, UserscriptRevision,
 };
 
+// Replies wait on durable SQLite commits, which hosted Windows runners can
+// stall for seconds; only a hung actor should fail these waits.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn tab(id: u128, space: SpaceId, url: &str) -> PersistedItem {
     PersistedItem {
         id: ItemId::from(id),
@@ -170,7 +174,7 @@ fn work_journal_callback_loss_and_panic_do_not_reclaim_process_identity_or_kill_
         )
         .unwrap();
     let AgentWorkJournalReply::Claimed { owner, records } =
-        rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap()
+        rx.recv_timeout(REPLY_TIMEOUT).unwrap().unwrap()
     else {
         panic!()
     };
@@ -185,10 +189,10 @@ fn work_journal_callback_loss_and_panic_do_not_reclaim_process_identity_or_kill_
         )
         .unwrap();
     assert!(
-        matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(AgentWorkJournalReply::Claimed { owner: again, .. }) if again == owner)
+        matches!(rx.recv_timeout(REPLY_TIMEOUT).unwrap(), Ok(AgentWorkJournalReply::Claimed { owner: again, .. }) if again == owner)
     );
     assert_eq!(
-        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
         zephium_core::ports::store::StoreShutdownOutcome::Clean
     );
 }
@@ -337,7 +341,7 @@ fn load_userscripts(store: &impl Store, profile: ProfileId) -> UserscriptCatalog
             let _ = reply.send(result);
         }),
     ));
-    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    outcome.recv_timeout(REPLY_TIMEOUT).unwrap()
 }
 
 fn mutate_userscripts(
@@ -355,7 +359,7 @@ fn mutate_userscripts(
             let _ = reply.send(result);
         }),
     ));
-    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    outcome.recv_timeout(REPLY_TIMEOUT).unwrap()
 }
 
 fn page_origin(value: &str) -> PageOrigin {
@@ -377,7 +381,7 @@ fn load_page_permissions(
             let _ = reply.send(result);
         }),
     ));
-    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    outcome.recv_timeout(REPLY_TIMEOUT).unwrap()
 }
 
 fn mutate_page_permissions(
@@ -395,7 +399,7 @@ fn mutate_page_permissions(
             let _ = reply.send(result);
         }),
     ));
-    outcome.recv_timeout(STORE_RPC_TIMEOUT).unwrap()
+    outcome.recv_timeout(REPLY_TIMEOUT).unwrap()
 }
 
 #[test]
@@ -534,7 +538,7 @@ fn userscript_catalog_is_source_authoritative_durable_and_revision_checked() {
         script_revision_before_reopen = disabled_script.revision;
         assert!(store.flush());
         assert_eq!(
-            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
             StoreShutdownOutcome::Clean
         );
     }
@@ -600,7 +604,7 @@ fn userscript_mutation_admission_is_independently_bounded_and_exact() {
         Box::new(|_| {}),
     ));
 
-    drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
+    drop(rx.recv_timeout(REPLY_TIMEOUT).unwrap());
     assert!(store.mutate_userscript_catalog(
         profile,
         UserscriptCatalogRevision::INITIAL,
@@ -760,7 +764,7 @@ fn page_permission_catalog_is_atomic_revision_checked_noop_stable_and_durable() 
         }));
         final_revision = updated.catalog_revision;
         assert_eq!(
-            store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+            store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
             StoreShutdownOutcome::Clean
         );
     }
@@ -913,7 +917,7 @@ fn page_permission_store_admission_is_independently_bounded_and_exact() {
         Box::new(|_| {}),
     ));
 
-    drop(rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap());
+    drop(rx.recv_timeout(REPLY_TIMEOUT).unwrap());
     assert!(store.mutate_page_permission_catalog(
         profile,
         PagePermissionCatalogRevision::INITIAL,
@@ -1069,7 +1073,7 @@ fn blocker_preference_update_is_durable_monotonic_compare_and_swap() {
         config: BlockerConfig { enabled: true },
     };
     assert_eq!(
-        updated_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        updated_rx.recv_timeout(REPLY_TIMEOUT).unwrap(),
         BlockerConfigUpdateOutcome::Updated(updated)
     );
     assert!(
@@ -1094,7 +1098,7 @@ fn blocker_preference_update_is_durable_monotonic_compare_and_swap() {
         }),
     ));
     assert_eq!(
-        conflict_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        conflict_rx.recv_timeout(REPLY_TIMEOUT).unwrap(),
         BlockerConfigUpdateOutcome::Conflict(updated)
     );
 }
@@ -1119,11 +1123,11 @@ fn blocker_preference_update_survives_a_clean_process_boundary() {
             }),
         ));
         assert!(matches!(
-            completed.recv_timeout(Duration::from_secs(1)).unwrap(),
+            completed.recv_timeout(REPLY_TIMEOUT).unwrap(),
             BlockerConfigUpdateOutcome::Updated(_)
         ));
         assert_eq!(
-            store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+            store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
             StoreShutdownOutcome::Clean
         );
     }
@@ -1158,7 +1162,7 @@ fn blocker_preference_update_rejects_unknown_profiles_and_terminal_admission() {
         }),
     ));
     assert_eq!(
-        unknown_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        unknown_rx.recv_timeout(REPLY_TIMEOUT).unwrap(),
         BlockerConfigUpdateOutcome::NotRegistered
     );
 
@@ -1192,7 +1196,7 @@ fn blocker_preference_reconciliation_reads_one_exact_authoritative_row() {
         Box::new(move |outcome| loaded_tx.send(outcome).unwrap()),
     ));
     assert_eq!(
-        loaded_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        loaded_rx.recv_timeout(REPLY_TIMEOUT).unwrap(),
         BlockerConfigLoadOutcome::Loaded(ProfileBlockerConfig {
             profile,
             revision: BlockerConfigRevision::INITIAL,
@@ -1207,7 +1211,7 @@ fn blocker_preference_reconciliation_reads_one_exact_authoritative_row() {
         Box::new(move |outcome| unknown_tx.send(outcome).unwrap()),
     ));
     assert_eq!(
-        unknown_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        unknown_rx.recv_timeout(REPLY_TIMEOUT).unwrap(),
         BlockerConfigLoadOutcome::NotRegistered
     );
 }
@@ -1396,13 +1400,13 @@ fn terminal_shutdown_flushes_drops_sqlite_and_joins_the_actor() {
     store.save_session(latest.clone());
 
     assert_eq!(
-        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
         StoreShutdownOutcome::Clean
     );
     assert!(store.shutdown_clean.load(Ordering::Acquire));
     assert!(store.lifecycle.write().unwrap().join.is_none());
     assert_eq!(
-        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
         StoreShutdownOutcome::Clean,
         "a proven terminal shutdown is idempotent"
     );
@@ -2570,8 +2574,7 @@ fn blocker_site_preferences_survive_session_saves_restart_and_stale_writes() {
             profile,
             Box::new(move |outcome| send.send(outcome).unwrap())
         ));
-        let BlockerSiteLoadOutcome::Loaded(value) =
-            receive.recv_timeout(Duration::from_secs(5)).unwrap()
+        let BlockerSiteLoadOutcome::Loaded(value) = receive.recv_timeout(REPLY_TIMEOUT).unwrap()
         else {
             panic!("site preferences must load");
         };
@@ -2590,7 +2593,7 @@ fn blocker_site_preferences_survive_session_saves_restart_and_stale_writes() {
             next,
             Box::new(move |outcome| send.send(outcome).unwrap())
         ));
-        receive.recv_timeout(Duration::from_secs(5)).unwrap()
+        receive.recv_timeout(REPLY_TIMEOUT).unwrap()
     }
     let dir = tempfile::tempdir().unwrap();
     let profile = ProfileId::from(1);
@@ -2650,7 +2653,7 @@ fn blocker_site_preferences_survive_session_saves_restart_and_stale_writes() {
             BlockerSiteUpdateOutcome::NotRegistered
         );
         assert_eq!(
-            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
             StoreShutdownOutcome::Clean
         );
     }
@@ -2658,7 +2661,7 @@ fn blocker_site_preferences_survive_session_saves_restart_and_stale_writes() {
     assert_eq!(load(&store, profile), expected);
     assert!(load(&store, profile).paused(&site));
     assert_eq!(
-        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
         StoreShutdownOutcome::Clean
     );
     assert!(!std::fs::read(dir.path().join("meta.sqlite"))
@@ -3550,7 +3553,7 @@ fn agent_audit_actor_commits_and_reconciles_the_exact_in_flight_delivery() {
         AgentAuditDispatch::Accepted(proof)
     );
     let first = first_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(REPLY_TIMEOUT)
         .expect("first settlement");
     assert_eq!(first.outcome(), AgentAuditDeliveryOutcome::Committed);
 
@@ -3569,13 +3572,13 @@ fn agent_audit_actor_commits_and_reconciles_the_exact_in_flight_delivery() {
         AgentAuditDispatch::Accepted(proof)
     );
     let replayed = replay_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(REPLY_TIMEOUT)
         .expect("replay settlement");
     assert_eq!(replayed, first);
     ledger.settle_delivery(replayed).expect("settle ledger");
     assert_eq!(ledger.status().committed(), 1);
     assert_eq!(
-        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
         StoreShutdownOutcome::Clean
     );
 }
@@ -3707,11 +3710,11 @@ fn agent_audit_completion_panic_is_contained_by_the_actor() {
         AgentAuditDispatch::Accepted(proof)
     );
     let settlement = settled_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(REPLY_TIMEOUT)
         .expect("actor survived callback panic");
     ledger.settle_delivery(settlement).expect("settle replay");
     assert_eq!(
-        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
         StoreShutdownOutcome::Clean
     );
 }
