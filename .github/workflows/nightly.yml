@@ -196,9 +196,15 @@ jobs:
             --bin windows-agentic-semantic-probe
 
   components:
-    name: Frontend components (WebKit)
+    name: Frontend components (WebKit ${{ matrix.shard }}/4)
     runs-on: macos-15
     timeout-minutes: 40
+    # Each file mounts real UI in one headless WebKit; four shards keep a
+    # runner's memory well below the hosted macOS limit.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -211,7 +217,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir frame run i18n
       - run: pnpm --dir frame exec playwright install webkit
-      - run: pnpm --dir frame run test:component --retry=2
+      - run: pnpm --dir frame run test:component --retry=2 --shard=${{ matrix.shard }}/4
 
   coverage:
     name: Coverage
