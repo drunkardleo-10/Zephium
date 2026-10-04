@@ -246,7 +246,11 @@ Any change that breaks one of these invariants must fail review and release:
    pass after the exact document reaches load completion. Rust accepts only an exact,
    canonical 32-by-32 RGBA raster for the current navigation epoch and origin; chrome
    paints that fixed raster without parsing a page-controlled image container.
-10. On Linux, browsing requires WebKitGTK 2.52.6 or newer. Older builds,
+10. Linux is not a supported platform at launch: `run()` in `desktop/src/lib.rs` prints
+    that Zephium isn't available on Linux yet and exits with status 1 before any
+    runtime is touched. The Linux engine code stays in the tree and keeps the
+    admission described here, but none of it is exercised by a shipped build. On
+    Linux, browsing requires WebKitGTK 2.52.6 or newer. Older builds,
     odd-minor development builds, and unrelated major lines fail closed. A
     newer stable even-minor WebKitGTK 2.x line is admitted with a visible
     unreviewed-runtime advisory rather than a numeric-version kill switch.
@@ -254,29 +258,27 @@ Any change that breaks one of these invariants must fail review and release:
     cross-site process swapping enabled. The
     requested Web-process sandbox flag and the construct-only swap policy are read back
     and asserted before the context can own a WebView. Those properties alone are
-    configuration invariants, not confinement attestation. CI separately starts a real
-    WebProcess on the supported Fedora userspace and checks its namespaces,
-    no-new-privileges and a seccomp filter count above its parent. Those observations
-    neither identify the filter's installer/policy nor prove filesystem denial;
-    an in-renderer or equivalent-credential filesystem probe remains unqualified.
-    Successful evidence is scoped to the exact executed environment.
+    configuration invariants, not confinement attestation; no in-renderer or
+    equivalent-credential filesystem probe exists.
 11. On Windows, privileged native hardening requires `ICoreWebView2Environment10`, and
     every privileged or raw view requires `ICoreWebView2_18` so external URI schemes can
     be cancelled natively. Raw views additionally require `ICoreWebView2Settings7` to
     remove PDF Save, Save As, and Print controls. Before any view is created, startup
     rejects every documented loader/browser-argument/channel and script-debugger
-    environment override, including empty values, and the reported stable runtime must
-    satisfy the currently reviewed security floor. Startup aborts if privileged hardening
-    cannot install; an individual raw view is rejected before its first load if any
+    environment override, including empty values, and the reported runtime must be a
+    parseable Stable Evergreen build. A runtime below the reviewed security floor is
+    admitted with an update-recommended advisory; preview-channel, overridden and
+    unparseable runtimes are refused with a native alert and exit status 78. Startup
+    aborts if privileged hardening cannot install; an individual raw view is rejected before its first load if any
     mandatory setting, navigation, external-URI, or process-failure handler cannot install.
-12. On macOS, startup occurs before any WebView construction and enforces
-    hard minimums for the supported Sonoma, Sequoia, and Tahoe lines. The
-    canonical system Safari bundle
-    and the framework actually supplying `WKWebView` must have the expected identifiers
-    and exactly matching build versions. Malformed, known-obsolete, and
-    mismatched combinations fail closed. A newer stable OS/Safari major is
-    admitted with an unreviewed-runtime advisory until the maintenance review
-    catches up.
+12. On macOS, startup occurs before any WebView construction and refuses only an
+    unsupported system: macOS older than 14, Safari older than major 26, or an
+    unparseable version, with a native alert and exit status 78. The canonical
+    system Safari bundle and the framework actually supplying `WKWebView` must have
+    the expected identifiers. Supported releases below the reviewed Sonoma, Sequoia
+    or Tahoe security floor, a Safari/WebKit build mismatch (typically Safari
+    updated without a restart), and a newer stable OS/Safari major are admitted with
+    an update-recommended or unreviewed-runtime advisory.
 13. The content-policy lifecycle never treats absence as allow-all. Every profile must
     install an exact process-local generation—an explicit allow-all artifact while
     disabled, or a validated blocking artifact—before its first raw view/navigation is
@@ -308,46 +310,41 @@ JavaScript history/window calls. Native URL/history observers are mandatory on a
 platforms. They deduplicate bounded state and close the view if an engine source escapes
 the URL policy, so chrome never presents a pre-navigation URL over a forbidden document.
 
-**Permissions and downloads.** Tabs deny every permission request exposed by Wry.
-Windows and Linux install native permission denial for privileged WebViews. On macOS,
-Zephium replaces Wry's permissive privileged UIDelegate with a retained deny-only
-delegate for media capture, device orientation/motion, and file selection; optional
-dialog and popup methods are deliberately omitted so WebKit takes its cancel/no-dialog
-defaults. All privileged responses also deny ambient features through
-`Permissions-Policy` where the engine supports each directive. A bounded per-profile
-store for remembered HTTP(S) origin decisions exists. Raw macOS media requests now
-cross a bounded native broker that uses WebKit's structured security origin, retains
-the native completion on the main thread, and binds it to the exact profile, item,
-physical view generation, and committed navigation. It has independent exact
-Shell, navigation, close/retirement, and 30-second timeout completion paths; malformed
-origin data, unsupported capabilities, overflow, stale identities, callback panic,
-and teardown all deny. A bounded Shell prompt/store coordinator now exists behind the
-disabled `zephium-app/macos-page-permission-prompts` release feature. It admits only the
-focused resident tab, loads no catalog at startup, retains at most two exact rows,
-serializes one browser-owned prompt, and has a shorter 25-second Shell deadline.
-One-time choices do not write policy. Remembered choices use atomic catalog CAS and an
-exact post-mutation read; native Allow is impossible until every capability in the
-atomic request is durably observed as allowed. Navigation, focus loss, window hide,
-shutdown, Store ambiguity, or stale echo identity closes the prompt and denies. The
-ephemeral-profile projection offers no remember control, and Shell rejects a forged
-durable response without entering Store. The desktop default does not enable this
-feature, so shipped behavior remains deny-only. Its explicit forwarding feature
-exists solely to build the packaged release-gate candidate. Unattended macOS CI
-compiles and lints the feature-only loopback probe but does not execute its media
-request. [WebKit requests system validation before its UI-client policy
-decision](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp);
-even an eventual native Deny can first prompt or wait on device consent, and the
+**Permissions and downloads.** Geolocation, notifications, screen capture and every
+other permission exposed by Wry are denied in every view. Camera and microphone are
+the only exceptions, and only for ordinary human tabs. On Windows, those tabs defer
+camera and microphone to WebView2's own origin-labelled prompt
+(`PermissionResponse::Prompt`); Zephium stores nothing in the profile, and work,
+extension and privileged views stay deny-only. On macOS, Zephium replaces Wry's
+permission callback with a browser-owned broker that is on by default (the
+`macos-page-permission-prompts` desktop feature). It uses WebKit's structured
+security origin, retains the native completion on the main thread, and binds it to the
+exact profile, item, physical view generation and committed navigation. It admits only
+the focused resident tab, loads no catalog at startup, serializes one browser-owned
+prompt, and has independent exact Shell, navigation, close/retirement, 25-second Shell
+and 30-second native timeout paths. Malformed origin data, unsupported capabilities,
+overflow, stale identities, callback panic, navigation, focus loss, window hide and
+shutdown all deny. Decisions are one-time only: `remember_enabled` is false, so
+nothing is written to the profile until the browser can list and revoke grants. The
+store and its atomic remembered-choice path exist behind that switch and are covered by
+tests, not by shipped behavior. Extension pages and offscreen documents deny media
+capture. The bundle carries camera and microphone usage descriptions and the matching
+`desktop/Entitlements.plist` entries; those grant no authority by themselves.
+[WebKit requests system validation before its UI-client policy
+decision](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp),
+so even a native Deny can first prompt or wait on device consent, and the
 [mock-capture setting used by WebKit tooling](https://github.com/WebKit/WebKit/blob/main/Tools/MiniBrowser/mac/WK2BrowserWindowController.m)
-is not a shipping WKWebView API. Treating that path as unattended would make the
-gate interactive and could mutate host privacy state.
-The probe can still verify exact deferred Deny, duplicate-settlement rejection, and
-JavaScript `NotAllowedError` under a pre-authorized responsible process. The bundle
-includes camera and microphone usage descriptions, but those strings grant no
-authority. A signed packaged WKWebView/TCC gate on the supported security floor is
-still required before the release capability can change. Foreground human macOS tabs
+is not a shipping WKWebView API. The feature-only loopback probe is therefore compiled
+and linted in macOS CI but not executed there. On macOS, privileged views use a retained
+deny-only UIDelegate for media capture, device orientation/motion and file selection;
+optional dialog and popup methods are omitted so WebKit takes its cancel/no-dialog
+defaults. All privileged responses also deny ambient features through
+`Permissions-Policy` where the engine supports each directive. A signed packaged
+WKWebView/TCC check on the supported OS lines remains a release gate for the macOS
+broker. Foreground human macOS tabs
 use the native download broker described below. Foreground human Windows views
-now opt into the WebView2 download adapter described below; privileged, agent and
-Linux downloads remain denied. Windows Attachment Services and Mark-of-the-Web
+now opt into the WebView2 download adapter described below; privileged and agent
+downloads remain denied (Linux code also denies them, but Linux does not start). Windows Attachment Services and Mark-of-the-Web
 are implemented but await native Windows qualification. Linux also cancels privileged file-picker requests. Stable WebView2 exposes no supported file-chooser interception event, so a
 raw Windows file input remains an engine-owned, user-selected native upload surface and
 privileged Windows views have no equivalent native denial hook. This is an explicit
@@ -1137,12 +1134,15 @@ These inherited properties must not be overstated:
 - A sandbox limits impact; it does not make engine vulnerabilities impossible. Native
   engine security updates are part of the product's security boundary.
 - Hard runtime admission, recommended maintenance, and review age are separate
-  states. A known-obsolete engine, preview/development channel, provenance
-  mismatch, security-relevant environment override, or missing native
-  capability still fails before WebView construction. Falling behind the
+  states. An unsupported or unparseable engine (macOS older than 14, Safari
+  older than 26, a preview, development or overridden runtime), a
+  security-relevant environment override, or a missing native capability still
+  fails before WebView construction; the first group shows a native alert and
+  exits 78. Falling below the reviewed security floor, falling behind the
   newest reviewed patch, running a newer stable release line, or crossing the
-  review SLA produces an independent sanitized warning in privileged chrome
-  instead of turning the wall clock into an installed-build kill switch. Rust
+  review SLA produces an independent sanitized warning, shown as a dismissible
+  card in the sidebar, instead of blocking startup. The wall-clock rollback
+  checks were removed: no installed build uses the clock as a kill switch. Rust
   carries the closed vocabulary as a canonical allocation-free set, so a
   newer runtime cannot hide an overdue review or update recommendation. CI
   and every release remain fail-closed on an overdue review.
@@ -1255,24 +1255,23 @@ These inherited properties must not be overstated:
   reported UDF must canonically equal the engine-owned per-profile directory, every
   path component must be a direct directory rather than a symlink, junction, mount
   point, or other Windows reparse point, and its environment-local browser-version
-  string must independently pass the current Stable security floor. Only complete
+  string must independently parse as an admissible Stable build. Only complete
   attestation clears the construction obligation. A failure before environment creation
   has no native process obligation; a later failure retains exact provenance and can
   retry only the controller. Missing or contradictory environment/process proof remains
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
-  WebView2 version and meet the reviewed Microsoft Stable security floor. The current
-  hard floor and latest reviewed recommendation are `154.0.4258.53`, published
-  October 1, 2026. An older runtime is rejected rather than admitted with an
-  update advisory. A newer stable major receives
-  an unreviewed-runtime advisory. Preview-channel and malformed strings fail closed.
+  WebView2 version. The reviewed security floor and latest recommendation are
+  `154.0.4258.53`, published October 1, 2026. An older Stable runtime is admitted
+  with an update-recommended advisory. A newer stable major receives
+  an unreviewed-runtime advisory. Preview-channel and malformed strings are
+  refused (exit 78 with a native alert).
   The process also rejects documented WebView2
   environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
   expire this review after October 9, 2026; runtime reports an overdue-review
-  advisory instead. A clock before the hard-floor publication still fails
-  closed. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
+  advisory instead. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
@@ -1288,7 +1287,8 @@ These inherited properties must not be overstated:
   The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into
-  release evidence.
+  release evidence. That gate is a CI and release check; it does not stop a
+  user's machine from starting.
 - Every retained raw WebView2 environment owns one deduplicated RAII
   `NewBrowserVersionAvailable` registration. The first callback sets a sticky,
   queryable backend `restart_required` state, emits one typed engine event, and is
@@ -1357,15 +1357,16 @@ These inherited properties must not be overstated:
 
 - Persistent content profiles use named website-data stores; private content profiles
   and both privileged WebViews use non-persistent stores. Bundle metadata requires
-  macOS 14.8.9 or newer.
-- Before Tauri constructs any WebView, runtime admission requires Sonoma 14.8.9 or
-  newer with Safari 26.6.1 or newer, Sequoia 15.7.9 or newer with Safari 26.6.1 or
-  newer, or Tahoe 26.6.2 or newer. The canonical Safari bundle build must exactly match
-  the loaded `com.apple.WebKit` framework build. Those August 6/17/18 security
-  releases are also the current recommendations; older builds are rejected.
-  Newer stable major lines receive an unreviewed-runtime advisory. The review
-  expires for CI/release after September 10, while runtime keeps the hard floor
-  and reports review age to privileged chrome.
+  macOS 14.0 or newer.
+- Before Tauri constructs any WebView, runtime admission requires macOS 14 or newer
+  with Safari 26 or newer. The reviewed security floor, which is also the current
+  recommendation, is Sonoma 14.8.9, Sequoia 15.7.9 or Tahoe 26.6.2, with
+  Safari 26.6.1 on Sonoma and Sequoia (August 6/17/18 releases). A supported
+  system below that floor, or one whose canonical Safari bundle build differs from
+  the loaded `com.apple.WebKit` framework build, starts with an update-recommended
+  advisory. Newer stable major lines receive an unreviewed-runtime advisory. The
+  review expires for CI/release after September 10 (runtime reports review age to
+  privileged chrome).
 - Overlay configuration keeps Tao's allocated `TaoWindow` class and instance layout
   intact. Zephium does not use `object_setClass` to turn that live object into an
   unrelated `NSPanel`; true non-activating panel behavior remains deferred until an
@@ -1440,36 +1441,13 @@ These inherited properties must not be overstated:
   process swapping reduces process reuse but is not WebKit full site isolation, does not
   promise a process per origin/frame, and remains engine-controlled. Other WebContext
   callbacks are context-global and require explicit single-owner lifetime management.
-- The Linux release path emits a Fedora 43 RPM only; Windows has separate NSIS/MSI
-  artifacts. Before and after Linux compilation, the workflow proves the DNF-installed
-  stable WebKitGTK package is on the reviewed 2.52 release line at patch 2.52.6 or
-  newer, declares runtime dependencies on `bubblewrap` and `libseccomp.so.2`, and has
-  Fedora vendor/signature metadata. Publication remains
-  fail-closed unless Fedora's stable repositories carry an eligible package; native CI may
-  consume signed updates-testing packages explicitly, but release artifacts may not.
-  Current Fedora package promotion has not been reverified by this source review.
-  It explicitly installs and integrity-verifies those Fedora sandbox packages, embeds no WebKit/GStreamer
-  runtime, and rewrites then verifies an install-time dependency of
-  `webkit2gtk4.1 >= 2.52.6`. RPM dependency syntax here cannot encode the reviewed-line
-  development-channel exclusion, so runtime admission remains the final
-  fail-closed gate. AppImage and
-  DEB artifacts are blocked because the supported Ubuntu/Debian build packages are below
-  the floor and a Fedora-built AppImage would silently raise its glibc baseline without
-  Tauri's supported complete media bundling. This package-chain proof is not runtime
-  sandbox attestation.
-- Trusted-main CI invokes the ignored native test explicitly on Fedora userspace
-  built from a pinned base digest with live-resolved packages; PRs run source gates only.
-  It spawns a real WebProcess, identifies it, inspects `/proc` for no-new-privileges,
-  distinct mount/user/PID namespaces and a filter count above its parent's.
-  That does not establish filter provenance or renderer filesystem denial.
-  Observer access to `/proc/<renderer>/root` is not renderer-credential evidence.
-  The [native CI environment](security-maintenance.md#fedora-native-ci-sandbox-environment)
-  requires an unprivileged, capability-free, network-sealed launcher and does not
-  supply outer container seccomp/LSM confinement. Removing Docker's proc-path
-  masking is an explicit containment tradeoff; separate read-only tmpfs masks
-  restore firmware and available powercap protection. Its disposable VM is the outer
-  boundary. A successful execution is evidence for that exact observed state,
-  not attestation of an arbitrary installed machine or packaged application.
+- No Linux package is built or published: the release workflow produces macOS and
+  Windows installers only, and CI compiles and tests the Linux code on Ubuntu as a
+  source gate. The earlier Fedora RPM path and its real-WebProcess confinement CI
+  were removed with Linux support, so nothing here is runtime sandbox attestation.
+  A future Linux release must restore a package that carries a
+  `webkit2gtk4.1 >= 2.52.6` dependency, with runtime admission as the final gate, and
+  re-establish confinement evidence.
 - **Release gates:** rerun the confinement probe through the packaged application on
   supported hosts and inspect its actual process tree. Add an in-renderer or
   equivalent-credential host-file denial probe and identify the filter policy before
@@ -1705,19 +1683,23 @@ unknown settlement keeps the owner poisoned until recovery.
 
 The following are roadmap items or disabled backends, not current security guarantees:
 
-- release-enabled page permission prompts or native enforcement of remembered
-  per-origin grants (the bounded coordinator is built but the desktop feature gate is
-  disabled pending live WKWebView and packaged-build evidence);
-- Linux downloads, native Windows release qualification of downloads/protection,
+- remembered per-origin camera and microphone grants (the macOS broker and the
+  WebView2 prompt are one-time decisions; the catalog behind `remember_enabled` stays
+  off until the browser can list and revoke grants), and any permission beyond camera
+  and microphone;
+- Linux as a supported platform: the code stays in the tree, but the app refuses to
+  start there;
+- native Windows release qualification of downloads/protection,
   guaranteed malware detection, and automatic transfer resumption;
-- extension installation, extension API mediation, or Chrome/Firefox extension
-  compatibility;
+- Chrome/Firefox extension compatibility beyond the subset in
+  `docs/extension-release-scope.md`;
 - continuously maintained online blocker sources or full EasyList semantics: the usable
   network-only release seed is bundled, but production TUF trust is unprovisioned and
   packaged enforcement/endurance proof is still a release gate;
 - a custom certificate-error interstitial or anti-phishing service;
-- an automatic updater client that embeds the update trust root and durably enforces
-  the highest accepted signed release sequence;
+- rollback-resistant update metadata: the updater (`desktop/src/updates.rs`) verifies a
+  minisign signature on GitHub Releases `latest.json` and its artifacts, but enforces
+  no durable highest-accepted-sequence beyond comparing versions;
 - application-level encryption of profiles or session data;
 - Chromium-equivalent full site isolation on every platform.
 
@@ -1739,7 +1721,7 @@ risk. The recurring engine-floor, advisory, and fork-review procedure is defined
    establish privileged process-group teardown seams, continuously refresh all three
    engine security floors, provide a release/update SLA before their review expiries,
    and handle WebView2 runtime replacement for long-lived processes.
-2. Run packaged hostile-page tests on real supported Windows, macOS, and Fedora systems
+2. Run packaged hostile-page tests on real supported Windows and macOS systems
    for IPC absence, custom-protocol absence, navigation/popup/download/permission denial,
    privileged file-picker policy, scripted print denial (top-level, initial blank,
    `srcdoc`, dynamic, and cross-origin frames), malicious PDF `/Named /Print` and
@@ -1751,16 +1733,18 @@ risk. The recurring engine-floor, advisory, and fork-review procedure is defined
    local storage, WebSQL where present, HTTP authentication state, and engine caches for
    persistent and incognito profiles. Inject crashes and ambiguous storage outcomes at
    every authorization, native-proof, filesystem, and journal-finalization boundary.
-4. Keep unsupported download adapters, permission grants, extensions, and
-   product-level content blocking disabled until their brokers are complete and
-   adversarially tested. Qualify the macOS file broker on signed release artifacts. Blocker enablement
-   additionally requires provisioning and exercising the production trust domain and exact
+4. Keep unsupported download adapters and remembered permission grants disabled until
+   their brokers are complete and adversarially tested. Qualify the macOS file broker
+   on signed release artifacts. The ad blocker ships on by default with the bundled
+   seed; calling its protection stable and continuously maintained additionally
+   requires provisioning and exercising the production trust domain and exact
    licensed list package, plus the packaged cross-platform enforcement, external-review,
    and endurance gates in `docs/adblock.md`.
 5. Rehearse the production workflow with protected publisher credentials and verify
    its signed/notarized artifacts, SBOM attestations, encrypted symbols, and signed
-   rollback-resistant metadata on real installer hosts. Before auto-update is offered,
-   implement the client-side trust root and durable sequence check. Track every
+   rollback-resistant metadata on real installer hosts. Exercise the updater's
+   background download and relaunch-to-install path on both signed platforms, and decide
+   whether a durable sequence check is needed beyond version comparison. Track every
    explicit Cargo advisory exception to removal; adding one is a reviewed risk
    acceptance, not a routine way to make CI green.
 6. Pass recorded 1/10/50/100-tab and 24-hour endurance budgets for RSS, process/handle
