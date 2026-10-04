@@ -12,31 +12,33 @@ use crate::runtime_security::{
     RuntimeSecurityUpdateTarget,
 };
 
-pub const SECURITY_FLOOR: [u32; 3] = [2, 52, 6];
-pub const SECURITY_FLOOR_TEXT: &str = "2.52.6";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-08-20";
-pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://webkitgtk.org/security/WSA-2026-0005.html";
-/// 2026-08-20T00:00:00Z. A wall clock before the reviewed advisory cannot
+pub const SECURITY_FLOOR: [u32; 3] = [2, 54, 0];
+pub const SECURITY_FLOOR_TEXT: &str = "2.54.0";
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-09-29";
+pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://webkitgtk.org/security/WSA-2026-0006.html";
+/// 2026-09-29T00:00:00Z. A wall clock before the reviewed advisory cannot
 /// establish that the security floor was published and must fail closed.
-pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_787_184_000;
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_790_640_000;
 
-pub const REVIEWED_STABLE_RELEASE_LINE: [u32; 2] = [2, 52];
-pub const REVIEWED_STABLE_RELEASE_LINE_TEXT: &str = "2.52";
+pub const REVIEWED_STABLE_RELEASE_LINE: [u32; 2] = [2, 54];
+pub const REVIEWED_STABLE_RELEASE_LINE_TEXT: &str = "2.54";
 
-pub const LATEST_REVIEWED: [u32; 3] = [2, 52, 6];
-pub const LATEST_REVIEWED_TEXT: &str = "2.52.6";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-08-19";
+pub const LATEST_REVIEWED: [u32; 3] = [2, 54, 1];
+pub const LATEST_REVIEWED_TEXT: &str = "2.54.1";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-10-02";
 pub const LATEST_REVIEWED_SOURCE_URL: &str =
-    "https://webkitgtk.org/2026/08/19/webkitgtk2.52.6-released.html";
+    "https://webkitgtk.org/2026/10/02/webkitgtk2.54.1-released.html";
 
-/// Re-reviewed on 2026-09-10 against the official security-advisory index and
-/// release feed. WSA-2026-0005 and WebKitGTK 2.52.6 establish the newest stable
-/// security boundary; 2.53.92 is an odd-minor development release.
+/// Re-reviewed on 2026-10-04 against the official security-advisory index and
+/// release feed. WSA-2026-0006 lists fixes in 2.54.0, the first stable 2.54
+/// release, and no 2.52 release after 2.52.6 carries them, so 2.54.0 is the
+/// newest stable security boundary. 2.54.1 is a bug-fix release; 2.53.92 is an
+/// odd-minor development release.
 ///
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-10";
-/// 2026-10-11T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_791_676_800;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-03";
+/// 2026-11-04T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_793_750_400;
 
 /// Environment switches that can disable/replace renderer confinement,
 /// expose a remote inspector, pause a child for a debugger, or turn off
@@ -159,17 +161,17 @@ mod tests {
     #[test]
     fn admission_rejects_obsolete_and_development_release_lines() {
         assert_eq!(
-            admit_runtime(2, 52, 5),
+            admit_runtime(2, 52, 6),
             Err(AdmissionError::BelowSecurityFloor {
-                found: [2, 52, 5],
+                found: [2, 52, 6],
                 required: SECURITY_FLOOR,
             })
         );
-        assert_eq!(admit_runtime(2, 52, 6), Ok(()));
-        assert_eq!(admit_runtime(2, 52, u32::MAX), Ok(()));
         assert_eq!(admit_runtime(2, 54, 0), Ok(()));
+        assert_eq!(admit_runtime(2, 54, u32::MAX), Ok(()));
+        assert_eq!(admit_runtime(2, 56, 0), Ok(()));
 
-        for found in [[2, 53, 0], [2, 55, 0], [3, 0, 0]] {
+        for found in [[2, 55, 0], [2, 57, 0], [3, 0, 0]] {
             assert_eq!(
                 admit_runtime(found[0], found[1], found[2]),
                 Err(AdmissionError::UnreviewedReleaseLine {
@@ -179,7 +181,19 @@ mod tests {
             );
         }
         assert_eq!(
+            assess_runtime(2, 54, 1, SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS),
+            Ok(RuntimeSecurityAdvisories::new())
+        );
+        assert_eq!(
             assess_runtime(2, 54, 0, SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS),
+            Ok(RuntimeSecurityAdvisories::from_advisory(
+                RuntimeSecurityAdvisory::update_recommended(
+                    RuntimeSecurityUpdateTarget::OperatingSystem,
+                ),
+            ))
+        );
+        assert_eq!(
+            assess_runtime(2, 56, 0, SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS),
             Ok(RuntimeSecurityAdvisories::from_advisory(
                 RuntimeSecurityAdvisory::unreviewed_runtime(),
             ))
@@ -187,8 +201,8 @@ mod tests {
         assert_eq!(
             assess_runtime(
                 2,
-                52,
-                6,
+                54,
+                1,
                 SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
             ),
             Ok(RuntimeSecurityAdvisories::from_advisory(
@@ -199,14 +213,14 @@ mod tests {
 
     #[test]
     fn reviewed_line_patch_updates_and_independent_review_age_are_reported() {
-        let recommended = runtime_advisories([2, 52, 5], [2, 52], [2, 52, 6], 10, 20);
+        let recommended = runtime_advisories([2, 54, 0], [2, 54], [2, 54, 1], 10, 20);
         assert!(
             recommended.contains(RuntimeSecurityAdvisory::update_recommended(
                 RuntimeSecurityUpdateTarget::OperatingSystem,
             ))
         );
 
-        let combined = runtime_advisories([2, 54, 0], [2, 52], [2, 52, 6], 20, 20);
+        let combined = runtime_advisories([2, 56, 0], [2, 54], [2, 54, 1], 20, 20);
         assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
         assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
     }

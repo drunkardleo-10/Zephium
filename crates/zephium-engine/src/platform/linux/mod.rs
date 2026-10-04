@@ -1410,15 +1410,15 @@ mod tests {
     #[test]
     fn webkitgtk_floor_matches_the_reviewed_security_advisory() {
         let reviewed_at = zephium_core::webkitgtk::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS;
-        assert!(enforce_runtime_version((2, 52, 3), reviewed_at).is_err());
-        assert!(enforce_runtime_version((2, 52, 4), reviewed_at).is_err());
+        assert!(enforce_runtime_version((2, 52, 6), reviewed_at).is_err());
+        assert!(enforce_runtime_version((2, 53, 92), reviewed_at).is_err());
         assert_eq!(
-            enforce_runtime_version((2, 52, 5), reviewed_at),
+            enforce_runtime_version((2, 54, 1), reviewed_at),
             Ok(zephium_core::runtime_security::RuntimeSecurityAdvisories::new())
         );
-        assert!(enforce_runtime_version((2, 53, 0), reviewed_at).is_err());
+        assert!(enforce_runtime_version((2, 55, 0), reviewed_at).is_err());
         assert_eq!(
-            enforce_runtime_version((2, 54, 0), reviewed_at),
+            enforce_runtime_version((2, 56, 0), reviewed_at),
             Ok(
                 zephium_core::runtime_security::RuntimeSecurityAdvisories::from_advisory(
                     zephium_core::runtime_security::RuntimeSecurityAdvisory::unreviewed_runtime(),
@@ -1466,7 +1466,7 @@ mod tests {
         .is_ok());
         assert_eq!(
             enforce_runtime_version(
-                (2, 52, 5),
+                (2, 54, 1),
                 zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
             ),
             Ok(

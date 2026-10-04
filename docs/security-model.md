@@ -250,7 +250,7 @@ Any change that breaks one of these invariants must fail review and release:
     that Zephium isn't available on Linux yet and exits with status 1 before any
     runtime is touched. The Linux engine code stays in the tree and keeps the
     admission described here, but none of it is exercised by a shipped build. On
-    Linux, browsing requires WebKitGTK 2.52.6 or newer. Older builds,
+    Linux, browsing requires WebKitGTK 2.54.0 or newer. Older builds,
     odd-minor development builds, and unrelated major lines fail closed. A
     newer stable even-minor WebKitGTK 2.x line is admitted with a visible
     unreviewed-runtime advisory rather than a numeric-version kill switch.
@@ -1414,7 +1414,7 @@ These inherited properties must not be overstated:
 
 ### Linux / WebKitGTK
 
-- The loaded library must be WebKitGTK 2.52.6 or newer. Odd-minor
+- The loaded library must be WebKitGTK 2.54.0 or newer. Odd-minor
   development builds, older versions, and unrelated major lines are rejected.
   Newer stable even-minor WebKitGTK 2.x lines are admitted with an
   unreviewed-runtime advisory until the review catches up. The raw content WebContext sandbox
@@ -1422,11 +1422,12 @@ These inherited properties must not be overstated:
   context construction, before any WebView can launch a Web process. A rejected or
   disabled configuration therefore fails closed, but the public property is not an
   attestation of the confinement actually applied to a spawned process. The newest
-  stable release reviewed in this pass is 2.52.6; the enforced 2.52.6 boundary is the
-  first release fixed for WSA-2026-0005. The official advisory index and
-  release feed were re-reviewed on September 10, 2026; 2.53.92 remains an
-  odd-minor development release. The advisory raises the stable security
-  boundary to 2.52.6. CI/release review expires after October 10, 2026; runtime reports that
+  stable release reviewed in this pass is 2.54.1 (October 2, a bug-fix release); the
+  enforced 2.54.0 boundary is the first stable release fixed for WSA-2026-0006
+  (September 29), and no later 2.52 release carries those fixes, so the reviewed
+  line moved from 2.52 to 2.54. The official advisory index and release feed were
+  re-reviewed on October 4, 2026; 2.53.92 remains an odd-minor development
+  release. CI/release review expires after November 3, 2026; runtime reports that
   expiry without disabling an otherwise admitted engine.
 - Both privileged WebViews request non-persistent contexts. Their native permission and
   file-chooser denial handlers must install successfully, and the native context is
@@ -1447,7 +1448,7 @@ These inherited properties must not be overstated:
   source gate. The earlier Fedora RPM path and its real-WebProcess confinement CI
   were removed with Linux support, so nothing here is runtime sandbox attestation.
   A future Linux release must restore a package that carries a
-  `webkit2gtk4.1 >= 2.52.6` dependency, with runtime admission as the final gate, and
+  `webkit2gtk4.1 >= 2.54.0` dependency, with runtime admission as the final gate, and
   re-establish confinement evidence.
 - **Release gates:** rerun the confinement probe through the packaged application on
   supported hosts and inspect its actual process tree. Add an in-renderer or
