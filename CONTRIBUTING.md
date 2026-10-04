@@ -2,20 +2,22 @@
 
 Zephium is a solo-maintained project with a strong product direction. Contributions are welcome, but **alignment matters more than volume**.
 
-This document is about *whether* and *how* to contribute in a way that's likely to get merged, so neither of us wastes time. It's intentionally about principles, not internals - for how the code is actually laid out, read the README and `ARCHITECTURE.md`.
+This document is about *whether* and *how* to contribute in a way that's likely to get merged, so neither of us wastes time. It's intentionally about principles, not internals - for how the code is actually laid out, read [docs/architecture.md](docs/architecture.md).
 
 ## How this project is run
 
 - Zephium has one active maintainer ([@crynta](https://github.com/crynta)).
 - Review bandwidth is limited.
 - Not every contribution can be accepted, even if it's technically correct. Alignment with project direction matters as much as code quality.
-- For scope and direction, see [ROADMAP.md](ROADMAP.md). Read it before opening anything non-trivial.
+- For scope and direction, read [docs/product-system.md](docs/product-system.md) before opening anything non-trivial.
 
 This is normal for a solo maintained project. A "no" on a PR is not personal.
 
 ## What Zephium is
 
-A lightweight, FOSS, zero-telemetry browser on the OS-native webview, Rust-heavy. The priorities, in order:
+A lightweight, FOSS, zero-telemetry browser on the OS-native webview, Rust-heavy. Supported platforms are macOS (Apple Silicon) and Windows; Linux is not supported yet.
+
+The priorities, in order:
 
 1. **Security** - a browser is a hostile environment; security is designed in, not bolted on.
 2. **Performance & resource use** - RAM, CPU, GPU, battery. We measure overhead, not vibes.
@@ -26,17 +28,45 @@ If a change trades any of these away for convenience, it probably won't land. Wh
 
 ## Getting set up
 
-See the README for prerequisites and how to build and run. Before opening a PR, run the project's full local check suite - the same one CI runs - and make sure it's green. If it passes locally, you've cleared most of the bar.
+### Prerequisites
+
+Supported development platforms are macOS (Apple Silicon) and Windows 10/11. Linux development is not supported yet; the app refuses to start there.
+
+- **Rust**: install [rustup](https://rustup.rs). The pinned toolchain in `rust-toolchain.toml` (with `rustfmt` and `clippy`) is installed automatically on first use.
+- **Node.js**: the version in `.node-version` (`engines` in `package.json` allows `>=24.18.0 <25`).
+- **pnpm**: enable it through Corepack (`corepack enable`); the exact version comes from `packageManager` in `package.json`.
+- **Tauri platform requirements**: on macOS, the Xcode Command Line Tools (`xcode-select --install`). On Windows, the Microsoft C++ Build Tools (the "Desktop development with C++" workload) and the WebView2 runtime, which ships with current Windows 10 and 11. See the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for details.
+
+The runtime security floor is enforced in development too. If startup exits with status 78, update your OS or WebView2 runtime.
+
+### Build and run
+
+```sh
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+### Checks
+
+Before opening a PR, run the checks CI runs for the area you touched:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p <crate> --locked        # the crates you changed
+pnpm --dir frame check                # frontend changes
+```
+
+`cargo xtask ci` runs the complete gate; it is slow and memory hungry, so prefer the targeted commands while iterating.
 
 For frontend work, start with [the frame guide](frame/README.md) and
 [the frontend contract](docs/frontend.md). They define ownership, import boundaries,
 colocated tests, native presentation rules, and the active migration gates.
+The [documentation index](docs/README.md) lists the rest.
 
 ## Where to discuss
 
-Discord: **Crynta OS** - https://discord.gg/tyveTUyEp7 
-
-Use Discord for design discussion, scope questions, "should I work on X?", and quick feedback. Use GitHub Issues for tracking concrete bugs and features.
+Use [GitHub Discussions](https://github.com/zephium-browser/Zephium/discussions) for design discussion, scope questions, "should I work on X?", and quick feedback. Use GitHub Issues for tracking concrete bugs and features.
 
 ## What makes a good contribution
 
@@ -44,7 +74,7 @@ These get merged fast:
 
 - **Bug fixes** with clear reproduction steps.
 - **Docs / typos / small UX fixes** - open a PR directly.
-- **Pre-discussed features** - alignment in an issue or Discord first.
+- **Pre-discussed features** - alignment in an issue or discussion first.
 - **Small, focused changes** - easy to review, low risk.
 
 If your change is small and obvious, open a PR directly. No issue required.
@@ -82,7 +112,7 @@ Zephium positions itself as **lightweight, fast, secure, production-grade**. Eve
 - Dependency policy is clean: FOSS licenses only, no banned crates, no known advisories.
 - **No performance regressions in hot paths** - startup time, idle memory footprint, the render/compositing path, the frontend↔core message path, content blocking. Being light is the whole point; a regression here is a real bug, not a nitpick.
 - No new heavy dependencies without justification (rough guide: >50KB gzipped in the frontend bundle, >5MB compiled on the Rust side).
-- Platform parity preserved: macOS, Linux, and Windows all still build and work.
+- Platform parity preserved: macOS and Windows both still build and work.
 - Security review for anything touching a sensitive surface (see below).
 
 If you're not sure how to measure perf or what counts as a hot path, ask first. Better to confirm than get bounced.
@@ -104,7 +134,7 @@ Pure UI, themes, and anything the type-checker already guarantees don't need tes
 
 ## What Zephium is not
 
-- Not aiming for pixel-perfect rendering parity with Chrome/Firefox. We use the system webview **by design**; rendering fidelity, especially on Linux, is a known, accepted tradeoff.
+- Not aiming for pixel-perfect rendering parity with Chrome/Firefox. We use the system webview **by design**; rendering fidelity is a known, accepted tradeoff.
 - **No telemetry, no analytics, no account requirement, no data collection - ever.** Any change that phones home will be closed.
 - Not Electron. We don't bundle an engine. Weight and resource use are features, not afterthoughts.
 - Not a kitchen-sink browser. It's opinionated and focused.
@@ -127,7 +157,7 @@ security(navigation): tighten top-level scheme gate
 
 Types: `feat`, `fix`, `chore`, `docs`, `perf`, `refactor`, `test`, `build`, `ci`, `security`. Scope is just the area you're touching - keep it accurate, don't invent broad ones.
 
-**Fill out the PR template:** what changed, why, and how you tested. "Tested manually by ..." is the bare minimum; add screenshots/GIFs for UI changes. Open a **draft PR early** if you want feedback mid-flight.
+**Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md):** what changed, why, and how you tested. "Tested manually by ..." is the bare minimum; add screenshots/GIFs for UI changes. Open a **draft PR early** if you want feedback mid-flight.
 
 ### What gets merged faster
 Clear problem statement · small, focused diff · follows existing patterns (read 2-3 nearby files first) · all checks pass · real testing notes.
@@ -148,7 +178,7 @@ Mixed-concern PRs · large architectural PRs without prior discussion · new dep
 
 **Should I ask before fixing a typo or obvious bug?** No, open a PR directly.
 
-**I have an idea for a new feature.** Open an issue or bring it to Discord. Don't open a PR without prior discussion.
+**I have an idea for a new feature.** Open an issue or start a Discussion. Don't open a PR without prior discussion.
 
 **My PR was closed without detailed feedback.** Usually it didn't align with direction, or scope was too large to review responsibly. Normal for a solo project. Reopen with a smaller scope is welcome.
 
@@ -162,7 +192,7 @@ Mixed-concern PRs · large architectural PRs without prior discussion · new dep
 
 ## Security issues
 
-Don't file them as public issues. See [SECURITY.md](SECURITY.md).
+Don't file them as public issues. See [SECURITY.md](SECURITY.md) or use [private vulnerability reporting](https://github.com/zephium-browser/Zephium/security/advisories/new).
 
 ## License
 
