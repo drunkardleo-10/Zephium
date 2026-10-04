@@ -1150,6 +1150,30 @@ objc2::define_class!(
     }
 
     unsafe impl WKUIDelegate for PageDelegate {
+        // WebKit's default for an omitted method is its own prompt; extension
+        // pages never receive camera, microphone or motion access.
+        #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
+        fn deny_media_capture(
+            &self,
+            _view: &WKWebView,
+            _origin: &objc2_web_kit::WKSecurityOrigin,
+            _frame: &objc2_web_kit::WKFrameInfo,
+            _capture_type: objc2_web_kit::WKMediaCaptureType,
+            decision: &block2::DynBlock<dyn Fn(objc2_web_kit::WKPermissionDecision)>,
+        ) {
+            decision.call((objc2_web_kit::WKPermissionDecision::Deny,));
+        }
+
+        #[unsafe(method(webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:))]
+        fn deny_device_motion(
+            &self,
+            _view: &WKWebView,
+            _origin: &objc2_web_kit::WKSecurityOrigin,
+            _frame: &objc2_web_kit::WKFrameInfo,
+            decision: &block2::DynBlock<dyn Fn(objc2_web_kit::WKPermissionDecision)>,
+        ) {
+            decision.call((objc2_web_kit::WKPermissionDecision::Deny,));
+        }
         #[unsafe(method(webViewDidClose:))]
         fn did_close(&self, _view: &WKWebView) {
             let ivars = self.ivars();

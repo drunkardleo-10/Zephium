@@ -16,9 +16,7 @@ agentic-browser = ["dep:zephium-agentic"]
 work-execution = ["agentic-browser", "dep:zephium-agent-controller", "dep:zephium-agent-runtime", "dep:zephium-agent-provider-transport"]
 # Explicit public-data qualification only; dependencies independently refuse release.
 work-execution-probe = ["work-execution", "zephium-agent-controller/probe-harness"]
-# Release capability gate. Desktop does not enable this until the real
-# WKWebView camera/microphone product probe passes on the supported macOS
-# security floor and packaged build.
+# Browser-owned camera/microphone prompts for foreground macOS tabs.
 macos-page-permission-prompts = []
 
 [dependencies]

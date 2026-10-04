@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["work-product"]
+default = ["work-product", "macos-page-permission-prompts"]
 # Dormant until an explicit Work intent. Native adapters are target-specific;
 # durable contracts and orchestration also compile on Windows.
 work-product = [
@@ -102,8 +102,7 @@ macos-work-lifetime-diagnostic = [
     "macos-work-public-inspection",
     "zephium-work-composition/retained-lifetime-diagnostic",
 ]
-# Explicit release-gate forwarding only. Default product builds remain
-# deny-only until the packaged WKWebView/TCC gate is recorded as passing.
+# Browser-owned camera/microphone prompts for foreground macOS tabs.
 macos-page-permission-prompts = ["zephium-app/macos-page-permission-prompts"]
 
 [lib]

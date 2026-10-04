@@ -13,7 +13,8 @@ use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSError, NSObjectProtocol, NSRect, NSString, NSTimer, NSURLRequest, NSURL};
 use objc2_web_kit::{
-    WKContentWorld, WKNavigation, WKNavigationDelegate, WKWebExtensionContext, WKWebView,
+    WKContentWorld, WKNavigation, WKNavigationDelegate, WKUIDelegate, WKWebExtensionContext,
+    WKWebView,
 };
 
 use crate::runtime::Shared;
@@ -49,6 +50,7 @@ impl Page {
         let delegate = LoadDelegate::new(mtm, loaded);
         unsafe {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             view.loadRequest(&NSURLRequest::requestWithURL(&url));
         }
         Some(Self { view, delegate })
@@ -59,6 +61,7 @@ impl Page {
         unsafe {
             self.view.stopLoading();
             self.view.setNavigationDelegate(None);
+            self.view.setUIDelegate(None);
         }
     }
 }
@@ -111,6 +114,33 @@ define_class!(
             if let Some(gone) = gone {
                 gone(view);
             }
+        }
+    }
+
+    unsafe impl WKUIDelegate for LoadDelegate {
+        // WebKit's default for an omitted method is its own prompt; extension
+        // pages never receive camera, microphone or motion access.
+        #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
+        fn deny_media_capture(
+            &self,
+            _view: &WKWebView,
+            _origin: &objc2_web_kit::WKSecurityOrigin,
+            _frame: &objc2_web_kit::WKFrameInfo,
+            _capture_type: objc2_web_kit::WKMediaCaptureType,
+            decision: &block2::DynBlock<dyn Fn(objc2_web_kit::WKPermissionDecision)>,
+        ) {
+            decision.call((objc2_web_kit::WKPermissionDecision::Deny,));
+        }
+
+        #[unsafe(method(webView:requestDeviceOrientationAndMotionPermissionForOrigin:initiatedByFrame:decisionHandler:))]
+        fn deny_device_motion(
+            &self,
+            _view: &WKWebView,
+            _origin: &objc2_web_kit::WKSecurityOrigin,
+            _frame: &objc2_web_kit::WKFrameInfo,
+            decision: &block2::DynBlock<dyn Fn(objc2_web_kit::WKPermissionDecision)>,
+        ) {
+            decision.call((objc2_web_kit::WKPermissionDecision::Deny,));
         }
     }
 );

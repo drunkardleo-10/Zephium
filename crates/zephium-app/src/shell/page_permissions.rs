@@ -79,6 +79,9 @@ struct PagePermissionOperationCompletion {
 pub(super) struct PagePermissionPromptState {
     pending: Option<PendingPagePermission>,
     failed_until_restart: bool,
+    /// Remembered grants stay off until the browser can list and revoke
+    /// them; until then every request is a one-time decision.
+    pub(super) remember_enabled: bool,
 }
 
 impl PagePermissionPromptState {
@@ -255,10 +258,11 @@ impl Shell {
         request: PagePermissionRequest,
     ) {
         let profile_kind = self.profiles.get(profile).map(|profile| profile.kind);
-        let rememberable = matches!(
-            profile_kind,
-            Some(ProfileKind::Default | ProfileKind::Named)
-        );
+        let rememberable = self.page_permissions.remember_enabled
+            && matches!(
+                profile_kind,
+                Some(ProfileKind::Default | ProfileKind::Named)
+            );
         if !self.bootstrapped
             || !PAGE_PERMISSION_PROMPTS_ENABLED
             || self.page_permissions.failed_until_restart
