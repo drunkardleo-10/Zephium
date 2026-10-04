@@ -537,11 +537,12 @@ fn check_engine_floors(strict: bool) {
 
     if !zephium_core::macos::security_floor_review_is_current(now) {
         expired.push(format!(
-            "macOS/WebKit security floors expired after {}. Review {}, {}, and {} and update the OS/Safari versions, publication date, and review deadline together.",
+            "macOS/WebKit security floors expired after {}. Review {}, {}, {}, and {} and update the OS/Safari versions, publication date, and review deadline together.",
             zephium_core::macos::SECURITY_FLOOR_REVIEW_BY,
             zephium_core::macos::SECURITY_FLOOR_SOURCE_URL,
             zephium_core::macos::SAFARI_SECURITY_SOURCE_URL,
             zephium_core::macos::TAHOE_SECURITY_SOURCE_URL,
+            zephium_core::macos::SEQUOIA_SECURITY_SOURCE_URL,
         ));
     } else {
         eprintln!(

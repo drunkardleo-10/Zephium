@@ -1360,13 +1360,13 @@ These inherited properties must not be overstated:
   macOS 14.0 or newer.
 - Before Tauri constructs any WebView, runtime admission requires macOS 14 or newer
   with Safari 26 or newer. The reviewed security floor, which is also the current
-  recommendation, is Sonoma 14.8.9, Sequoia 15.7.9 or Tahoe 26.6.2, with
-  Safari 26.6.1 on Sonoma and Sequoia (August 6/17/18 releases). A supported
-  system below that floor, or one whose canonical Safari bundle build differs from
-  the loaded `com.apple.WebKit` framework build, starts with an update-recommended
-  advisory. Newer stable major lines receive an unreviewed-runtime advisory. The
-  review expires for CI/release after September 10 (runtime reports review age to
-  privileged chrome).
+  recommendation, is Sonoma 14.8.9 or Sequoia 15.8.1 with Safari 26.6.1, or
+  Tahoe 26.7.1 (August 6/18 and September 28 releases). A supported system below
+  that floor, or one whose canonical Safari bundle build differs from the loaded
+  `com.apple.WebKit` framework build, starts with an update-recommended advisory.
+  Newer stable major lines (macOS 27, Safari 27) receive an unreviewed-runtime
+  advisory. The review expires for CI/release after October 11, while runtime
+  keeps starting and reports review age to privileged chrome.
 - Overlay configuration keeps Tao's allocated `TaoWindow` class and instance layout
   intact. Zephium does not use `object_setClass` to turn that live object into an
   unrelated `NSPanel`; true non-activating panel behavior remains deferred until an

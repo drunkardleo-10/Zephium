@@ -17,39 +17,42 @@ use crate::runtime_security::{
 };
 
 pub const SONOMA_SECURITY_FLOOR: ProductVersion = ProductVersion::new(14, 8, 9);
-pub const SEQUOIA_SECURITY_FLOOR: ProductVersion = ProductVersion::new(15, 7, 9);
-pub const TAHOE_SECURITY_FLOOR: ProductVersion = ProductVersion::new(26, 6, 2);
+pub const SEQUOIA_SECURITY_FLOOR: ProductVersion = ProductVersion::new(15, 8, 1);
+pub const TAHOE_SECURITY_FLOOR: ProductVersion = ProductVersion::new(26, 7, 1);
 pub const SAFARI_SECURITY_FLOOR: ProductVersion = ProductVersion::new(26, 6, 1);
 
 pub const SONOMA_RECOMMENDED: ProductVersion = ProductVersion::new(14, 8, 9);
-pub const SEQUOIA_RECOMMENDED: ProductVersion = ProductVersion::new(15, 7, 9);
-pub const TAHOE_RECOMMENDED: ProductVersion = ProductVersion::new(26, 6, 2);
+pub const SEQUOIA_RECOMMENDED: ProductVersion = ProductVersion::new(15, 8, 1);
+pub const TAHOE_RECOMMENDED: ProductVersion = ProductVersion::new(26, 7, 1);
 pub const SAFARI_RECOMMENDED: ProductVersion = ProductVersion::new(26, 6, 1);
 
 pub const SONOMA_SECURITY_FLOOR_TEXT: &str = "14.8.9";
-pub const SEQUOIA_SECURITY_FLOOR_TEXT: &str = "15.7.9";
-pub const TAHOE_SECURITY_FLOOR_TEXT: &str = "26.6.2";
+pub const SEQUOIA_SECURITY_FLOOR_TEXT: &str = "15.8.1";
+pub const TAHOE_SECURITY_FLOOR_TEXT: &str = "26.7.1";
 pub const SAFARI_SECURITY_FLOOR_TEXT: &str = "26.6.1";
 pub const SONOMA_RECOMMENDED_TEXT: &str = "14.8.9";
-pub const SEQUOIA_RECOMMENDED_TEXT: &str = "15.7.9";
-pub const TAHOE_RECOMMENDED_TEXT: &str = "26.6.2";
+pub const SEQUOIA_RECOMMENDED_TEXT: &str = "15.8.1";
+pub const TAHOE_RECOMMENDED_TEXT: &str = "26.7.1";
 pub const SAFARI_RECOMMENDED_TEXT: &str = "26.6.1";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-08-18";
-/// 2026-08-18T00:00:00Z. A wall clock before the reviewed Apple security
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-09-28";
+/// 2026-09-28T00:00:00Z. A wall clock before the reviewed Apple security
 /// release cannot establish that this floor was published and must fail closed.
-pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_787_011_200;
-pub const RECOMMENDED_RELEASE_PUBLISHED_ON: &str = "2026-08-18";
-/// 2026-08-18T00:00:00Z.
-pub const RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS: u64 = 1_787_011_200;
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_790_553_600;
+pub const RECOMMENDED_RELEASE_PUBLISHED_ON: &str = "2026-09-28";
+/// 2026-09-28T00:00:00Z.
+pub const RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS: u64 = 1_790_553_600;
 pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://support.apple.com/en-us/100100";
 pub const SAFARI_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/148286";
-pub const TAHOE_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/148281";
+pub const TAHOE_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/149228";
+pub const SEQUOIA_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/149229";
 
 /// The last UTC date on which CI may accept this review without an update.
-// Rechecked against the vendor security releases on 2026-09-11.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-18";
-/// 2026-09-19T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_789_776_000;
+// Rechecked against the vendor security releases on 2026-10-04. Safari 27
+// (2026-09-14, Sequoia and Tahoe only) and macOS 27 are newer, unreviewed
+// lines and still map to the unreviewed-runtime advisory.
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-11";
+/// 2026-10-12T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_791_763_200;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProductVersion([u32; 3]);
@@ -407,10 +410,10 @@ mod tests {
         for (os, safari) in [
             ("14.8.9", "26.6.1"),
             ("14.9.0", "26.6.2"),
-            ("15.7.9", "26.6.1"),
-            ("15.8.0", "26.6.2"),
-            ("26.6.2", "26.6.1"),
-            ("26.6.3", "26.6.2"),
+            ("15.8.1", "26.6.1"),
+            ("15.8.2", "26.6.2"),
+            ("26.7.1", "26.6.1"),
+            ("26.7.2", "26.6.2"),
         ] {
             assert_eq!(
                 assess_at_review(os, safari, BUILD, BUILD),
@@ -429,10 +432,12 @@ mod tests {
         for (os, safari) in [
             ("14.0.0", "26.6.1"),
             ("14.8.8", "26.6.1"),
-            ("15.7.8", "26.6.1"),
-            ("26.6.1", "26.6.1"),
+            ("15.7.9", "26.6.1"),
+            ("15.8.0", "26.6.1"),
+            ("26.6.2", "26.6.1"),
+            ("26.7.0", "26.6.1"),
             ("14.8.9", "26.0"),
-            ("15.7.9", "26.6"),
+            ("15.8.1", "26.6"),
         ] {
             assert_eq!(assess_at_review(os, safari, BUILD, BUILD), Ok(update));
         }
@@ -447,7 +452,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            assess_at_review("15.7.9", "18.6", BUILD, BUILD),
+            assess_at_review("15.8.1", "18.6", BUILD, BUILD),
             Err(AdmissionError::UnsupportedSafariMajor(18))
         );
     }
@@ -456,7 +461,7 @@ mod tests {
     fn current_floor_and_future_runtime_advisories_remain_distinct() {
         assert_eq!(
             assess_runtime(
-                "26.6.2",
+                "26.7.1",
                 "26.6.1",
                 BUILD,
                 BUILD,
@@ -466,7 +471,7 @@ mod tests {
         );
         assert_eq!(
             assess_runtime(
-                "26.6.3",
+                "26.7.2",
                 "26.6.2",
                 BUILD,
                 BUILD,
@@ -488,7 +493,7 @@ mod tests {
         );
         assert_eq!(
             assess_runtime(
-                "26.6.2",
+                "26.7.1",
                 "26.6.1",
                 BUILD,
                 BUILD,
@@ -514,7 +519,7 @@ mod tests {
     #[test]
     fn rejects_malformed_bundle_builds_and_flags_mismatched_ones() {
         assert_eq!(
-            assess_at_review("26.6.2", "26.6.1", "21624.1", "21624.2"),
+            assess_at_review("26.7.1", "26.6.1", "21624.1", "21624.2"),
             Ok(RuntimeSecurityAdvisories::from_advisory(
                 RuntimeSecurityAdvisory::update_recommended(
                     RuntimeSecurityUpdateTarget::OperatingSystem,
@@ -531,8 +536,8 @@ mod tests {
             "21624-1",
             "1.2.3.4.5.6.7.8.9",
         ] {
-            assert!(assess_at_review("26.6.2", "26.6.1", malformed, BUILD).is_err());
-            assert!(assess_at_review("26.6.2", "26.6.1", BUILD, malformed).is_err());
+            assert!(assess_at_review("26.7.1", "26.6.1", malformed, BUILD).is_err());
+            assert!(assess_at_review("26.7.1", "26.6.1", BUILD, malformed).is_err());
         }
     }
 
