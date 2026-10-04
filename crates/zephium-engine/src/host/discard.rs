@@ -705,8 +705,8 @@ impl EngineHost {
         }
         restored.then_some(true)
     }
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     fn native_owned_state_allows_discard(&self, id: ItemId) -> bool {
         let Some(view) = self.views.get(&id) else {
             return false;

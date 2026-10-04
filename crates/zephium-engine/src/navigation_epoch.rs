@@ -425,8 +425,8 @@ impl NavigationEpochTracker {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         (!state.revoked).then_some(state.activity).flatten()
     }
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub(crate) fn matches_activity(&self, activity: NavigationActivity) -> bool {
         self.activity_snapshot() == Some(activity)
     }
