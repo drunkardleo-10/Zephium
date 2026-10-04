@@ -87,6 +87,7 @@ mod linux_shortcut_portal;
 mod linux_x11_shortcut;
 mod material;
 mod media;
+mod memory_pressure;
 mod notes;
 mod overlay;
 #[cfg(target_os = "macos")]
@@ -6087,6 +6088,7 @@ pub fn run() {
             }});
             app.manage(overlay);
             presence::install(app.handle(), &window);
+            memory_pressure::install(app.handle());
             presence::report_app_active(app.handle());
             #[cfg(all(debug_assertions, target_os = "macos"))]
             log_webview_processes(&window, &panel_window);
