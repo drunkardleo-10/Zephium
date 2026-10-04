@@ -8,6 +8,7 @@ use super::*;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(tag = "state", rename_all = "camelCase")]
@@ -109,7 +110,18 @@ async fn check_and_download(
 ) -> Result<UpdateStatus, String> {
     use tauri_plugin_updater::UpdaterExt;
 
-    let updater = app.updater().map_err(|error| error.to_string())?;
+    // Without these a stalled connection would hold the status at Checking or
+    // Downloading for the rest of the session and block every later check.
+    let updater = app
+        .updater_builder()
+        .timeout(Duration::from_secs(30))
+        .configure_client(|client| {
+            client
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(60))
+        })
+        .build()
+        .map_err(|error| error.to_string())?;
     let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
         return Ok(UpdateStatus::UpToDate);
     };
