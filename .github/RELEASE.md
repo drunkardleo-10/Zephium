@@ -1,193 +1,152 @@
-# Production release runbook
+# Releasing Zephium
 
-The `Production release` workflow is intentionally unusable until the
-`production-release` GitHub environment is protected and all publisher
-credentials are provisioned. It never publishes an unsigned fallback.
+Pushing a `v*` tag runs [`release.yml`](workflows/release.yml). It builds and
+verifies macOS (Apple Silicon) and Windows (x64), then creates a **draft**
+GitHub release. Nothing is public until a maintainer publishes the draft.
 
-This runbook describes artifact authenticity, not overall browser readiness.
-The current tree is pre-production: all gates in `docs/security-model.md` still
-apply, including packaged hostile/native-erasure tests, resource endurance, and
-an external native-boundary audit. Before the first stable release, rehearse
-this workflow end to end with the real protected publisher credentials on each
-installer host and retain the verification evidence. Signed update metadata is
-not an automatic updater; the client trust root and monotonic sequence store
-must land first.
+## One-time setup
 
-Engine-floor, dependency-advisory, and native-boundary fork review procedures
-live in `docs/security-maintenance.md`. A release failure caused by an expired
-review or a new advisory is never resolved by weakening the gate or extending
-a date without repeating that review.
+### Secrets
 
-## Repository and environment policy
+Add these under **Settings → Secrets and variables → Actions** as repository
+secrets. The release gate fails with the names of any that are missing.
 
-- Keep `main` as the default branch. Require pull requests and the complete CI
-  workflow on it; a production dispatch is valid only from the current head of
-  protected `main`.
-- Protect `v*` tags. Only release maintainers may create or delete them.
-- Require an annotated `vMAJOR.MINOR.PATCH` tag whose target is the reviewed
-  release commit. The workflow verifies the remote Git ref and annotated-tag
-  object initially, before draft upload, and immediately before publication.
-  Effective tag-ruleset bypass state is still a repository-policy/manual or
-  protection-app gate; the workflow proves tag identity, not every actor's
-  ability to bypass GitHub tag rules.
-- Protect the `production-release` environment with at least one required
-  reviewer, enable **Prevent self-review**, and configure exactly one custom
-  deployment branch policy: the literal branch `main` (not every protected
-  branch and not a wildcard). The workflow verifies every API-visible part of
-  that policy initially and immediately before publication.
-- Disable administrator bypass for `production-release`, or require an
-  equivalent external/custom deployment-protection approval. GitHub's current
-  GET-environment response does **not** expose the administrator-bypass state,
-  so this remains a separately audited manual or protection-app gate; the
-  workflow does not claim to prove it.
-- Store every publisher secret and variable listed below only in
-  `production-release`. Do not define the same names as repository-level or
-  organization-level Actions secrets/variables shared with this repository.
-  The workflow enumerates all three scopes and fails on any duplicate name.
-- Enable GitHub **Release immutability** for this repository. The workflow
-  queries the versioned immutable-releases API before building, again before
-  uploading, and immediately before publication; a disabled or unreadable
-  policy is a hard failure.
-- Treat every principal with repository **Contents: write** as part of the
-  publisher trust boundary. GitHub draft releases remain mutable until the
-  publish operation, so release-edit authority must be restricted to the
-  smallest practical maintainer set. Prefer a dedicated publisher GitHub App
-  or dedicated release repository when that can remove ordinary developer
-  credentials from the draft-mutation path. The workflow performs its final
-  set/byte comparison after every other remote policy check and verifies every
-  local asset against the immutable release attestation after publication, but
-  post-publication detection cannot undo an immutable compromised release.
-- Restrict Actions to pinned, approved actions. Do not allow actions to create
-  or approve pull requests.
-- Configure Actions artifact retention for at least 90 days.
-- Treat Actions artifacts named `zephium-private-symbols-*` as confidential
-  crash-analysis material. Only authenticated-encryption ciphertext and its
-  HMAC are retained for 90 days; raw symbols are never uploaded or copied to
-  the public GitHub release.
-
-## Protected environment secrets
-
-| Name | Purpose |
+| Secret | Value |
 | --- | --- |
-| `RELEASE_POLICY_TOKEN` | Repository-scoped fine-grained token with repository **Actions: read**, **Administration: read**, **Contents: read**, **Environments: read**, **Secrets: read**, and **Variables: read**, and no write permission; used only for release-policy, ref, environment, credential-scope, and prior-release reads |
-| `APPLE_CERTIFICATE` | Base64 Developer ID Application certificate (`.p12`) |
-| `APPLE_CERTIFICATE_PASSWORD` | Export password for that certificate |
-| `APPLE_ID` | Apple notarization account |
-| `APPLE_PASSWORD` | Apple app-specific notarization password |
-| `WINDOWS_CERTIFICATE_BASE64` | Base64 Authenticode PFX |
-| `WINDOWS_CERTIFICATE_PASSWORD` | PFX export password |
-| `RPM_SIGNING_PRIVATE_KEY` | Armored RPM publisher private key |
-| `RPM_SIGNING_KEY_PASSPHRASE` | RPM key passphrase |
-| `SYMBOL_ENCRYPTION_KEY` | Base64 encoding of 32 random symbol-encryption bytes |
-| `SYMBOL_AUTHENTICATION_KEY` | Base64 encoding of a different 32 random HMAC bytes |
-| `UPDATE_SIGNING_PRIVATE_KEY` | Cosign private key for stable update metadata |
-| `UPDATE_SIGNING_KEY_PASSWORD` | Update-key password |
+| `APPLE_CERTIFICATE` | Base64 of the Developer ID Application `.p12` (`base64 -i cert.p12`) |
+| `APPLE_CERTIFICATE_PASSWORD` | The `.p12` export password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: <Name> (<TEAMID>)` |
+| `APPLE_TEAM_ID` | The 10-character team ID; the workflow checks the app is signed by it |
+| `APPLE_API_ISSUER` | App Store Connect API issuer ID (Users and Access → Integrations → Keys) |
+| `APPLE_API_KEY` | That API key's key ID |
+| `APPLE_API_KEY_PATH` | The **contents** of `AuthKey_<KEYID>.p8`; the workflow writes it to disk |
+| `TAURI_SIGNING_PRIVATE_KEY` | The updater private key (file contents) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password |
 
-## Protected environment variables
+The API key needs the Developer role to notarize.
 
-| Name | Required value |
+### Updater key
+
+Generate the minisign key pair once and keep the private key and password in a
+password manager:
+
+```sh
+pnpm --dir desktop tauri signer generate -w ~/.tauri/zephium-updater.key
+```
+
+The public key (the `.pub` file contents) is embedded in
+`desktop/tauri.conf.json` at `plugins.updater.pubkey`. Installed copies trust
+only that key: losing the private key or changing the public key strands every
+existing install on its current version.
+
+### Repository
+
+- The repository must be public: build provenance attestations and the
+  `releases/latest/download/…` links depend on it.
+- Protect `v*` tags with a ruleset so only maintainers can create them.
+
+## Cutting a release
+
+1. **Refresh the blocker seed.** EasyList asks to be refreshed every four days,
+   and the release gate rejects a seed past that point, so do this right
+   before tagging:
+
+   ```sh
+   curl -fsSL -o /tmp/easylist.txt https://easylist.to/easylist/easylist.txt
+   curl -fsSL -o /tmp/easyprivacy.txt https://easylist.to/easylist/easyprivacy.txt
+   cargo xtask update-blocker-seed --easylist /tmp/easylist.txt \
+     --easyprivacy /tmp/easyprivacy.txt \
+     --license assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt
+   ```
+
+   Then copy the new WebKit digest into the native seed probe and its policy
+   test, which pin it (`scripts/ci/probe_macos_blocker_seed.swift` and
+   `scripts/ci/test_macos_blocker_seed_probe.sh`):
+
+   ```sh
+   jq -r '.compilers[] | select(.target == "webkit") | .native_artifact_sha256' \
+     assets/blocker-seed/v1/compile-report.json
+   ```
+
+2. **Bump the version** in `desktop/Cargo.toml` (`[package] version`, e.g.
+   `1.0.0-beta.1`). It is the only version source: `tauri.conf.json` has none.
+   Run `cargo check -p zephium-desktop` so `Cargo.lock` follows.
+3. **Run the release gate locally.** It is the same check the workflow runs
+   first: strict engine-floor and advisory reviews, seed freshness, and
+   outstanding vendor fixes.
+
+   ```sh
+   cargo xtask check-release-engine-security
+   ```
+
+4. Merge to `main` with CI green.
+5. **Tag and push** the merged commit:
+
+   ```sh
+   git tag -a v1.0.0-beta.1 -m "Zephium 1.0.0-beta.1"
+   git push origin v1.0.0-beta.1
+   ```
+
+6. **Review the draft** once the workflow finishes: install the DMG and the
+   Windows installer, check the notes, then **Publish**. Keep "Set as the
+   latest release" checked and leave "Set as a pre-release" unchecked, even for
+   betas: `releases/latest` skips pre-releases, and both the website and the
+   updater resolve through it.
+
+To rebuild a tag (for example after a flaky runner), run **Actions → Release →
+Run workflow** with the tag, or `gh workflow run release.yml -f tag=v1.0.0-beta.1`.
+An existing draft for that tag is replaced; a published release is never
+touched.
+
+## Published assets
+
+The website links `releases/latest/download/<name>`, so these names are a
+contract:
+
+| Asset | Purpose |
 | --- | --- |
-| `APPLE_SIGNING_IDENTITY` | Full `Developer ID Application: …` identity |
-| `APPLE_TEAM_ID` | Ten-character Apple team identifier |
-| `WINDOWS_CERTIFICATE_SHA256` | Uppercase 64-hex SHA-256 of the exact DER-encoded Authenticode leaf certificate |
-| `WINDOWS_CERTIFICATE_SUBJECT` | Exact Authenticode certificate subject |
-| `WINDOWS_TIMESTAMP_URL` | Absolute HTTPS RFC 3161 endpoint |
-| `RPM_SIGNING_KEY_FINGERPRINT` | Uppercase 40-hex publisher-key fingerprint |
-| `UPDATE_SIGNING_PUBLIC_KEY` | Cosign public key corresponding to the update private key |
-| `UPDATE_SIGNING_KEY_ID` | `sha256:` plus SHA-256 of the normalized public-key file |
+| `Zephium-macOS-arm64.dmg` | macOS download |
+| `Zephium-macOS-arm64.app.tar.gz` + `.sig` | macOS updater payload |
+| `Zephium-Windows-x64-setup.exe` + `.sig` | Windows download and updater payload |
+| `latest.json` | Updater manifest (`darwin-aarch64[-app]`, `windows-x86_64[-nsis]`) |
+| `SHA256SUMS` | Digests of every other asset |
 
-Derive the Authenticode leaf pin from certificate DER, then store the uppercase
-digest. The workflow recomputes it at import and for every outer/embedded
-signature; the subject string is only an additional human-readable identity.
+Renaming does not invalidate an updater signature: minisign signs the bytes,
+and the build-time file name in its trusted comment is not checked by the
+updater.
 
-```sh
-openssl pkcs12 -in authenticode.pfx -clcerts -nokeys |
-  openssl x509 -outform DER |
-  sha256sum
-```
+## What the workflow verifies
 
-The workflow normalizes `UPDATE_SIGNING_PUBLIC_KEY` by writing its value plus
-one trailing newline. Compute the key ID using the same representation:
+- The tag is `v` + the `zephium-desktop` version, valid semver, and
+  `tauri.conf.json` carries no competing version.
+- `cargo xtask check-release-engine-security` passes.
+- macOS: `codesign --verify --deep --strict`, the signing team is
+  `APPLE_TEAM_ID`, Gatekeeper (`spctl`) accepts the app, the app and the DMG
+  are notarized and stapled, the main executable's entitlements are exactly
+  camera and microphone, and no other Mach-O carries any.
+- Both updater signatures verify against the public key in
+  `desktop/tauri.conf.json`, and the asset set is exactly the one above.
+- Build provenance is attested for the DMG, the updater archive and the
+  installer (`gh attestation verify <file> --repo zephium-browser/Zephium`).
 
-```sh
-printf '%s\n' "$(cat cosign.pub)" | sha256sum
-```
+The macOS dSYM and Windows PDB are kept as workflow artifacts for 90 days.
+Download them for any release you need to symbolicate later.
 
-Recover a retained symbol archive only on an access-controlled analysis host.
-After exporting both symbol keys, the helper authenticates the ciphertext
-before decrypting it and refuses to overwrite an existing output:
+## Windows signing
 
-```sh
-python3 scripts/release/seal_symbols.py unseal \
-  symbols.tar.gz.enc symbols.tar.gz.enc.hmac-sha256 symbols.tar.gz
-```
+The Windows installer is not Authenticode-signed yet, so SmartScreen warns on
+first run. When SignPath is added, signing goes in the marked spot in the
+Windows job and must come **before** the updater signature: Authenticode
+changes the installer's bytes, so sign it first, then replace Tauri's `.sig`
+by running `pnpm tauri signer sign` over the signed file.
 
-The update public key and manifest-sequence comparison must also be implemented
-in the updater client before automatic updates are enabled. A client must
-verify the manifest signature with an embedded trust root and persist the
-largest accepted `rollback.sequence`; a lower or repeated sequence is rejected
-before any artifact is downloaded.
+## Recovery
 
-## Release procedure
-
-1. Set every authoritative project version to the same semantic version.
-2. Merge the reviewed commit after all required checks pass.
-3. Create and push a protected annotated tag for that exact commit.
-4. Dispatch `Production release` from `main`; enter the protected annotated tag
-   in `release_tag` and the next update sequence. Sequence 1 is allowed only
-   when no prior stable GitHub release exists; every later release must advance
-   the signed prior manifest by one.
-5. A required reviewer inspects the commit, tag, sequence, and publisher-key
-   state before approving the `production-release` environment.
-
-The workflow builds signed RPM, MSI/NSIS, and arm64/x86_64 DMG artifacts;
-verifies native signatures and platform mitigations; extracts every installer
-and proves its main executable identity; generates pinned-Syft CycloneDX SBOMs
-over the Linux/macOS installed payloads and Windows extracted installer
-payloads, plus locked build manifests; binds each SBOM to the installer digest
-and size; signs checksums and chained update metadata; creates provenance and
-SBOM attestations on the platform runner that produced the bytes; uploads a
-draft release; after every final policy/tag check, downloads and byte-compares
-the exact asset set immediately before publication; and only then makes the
-release immutable. It verifies GitHub's release attestation, binds every local
-asset back to that attestation with `gh release verify-asset`, and downloads the
-published set once more to reject missing, changed, or injected assets. Windows
-extraction is not a substitute for packaged clean-VM install, launch, update,
-and uninstall tests; those remain a stable-release readiness gate.
-The macOS entitlement allowlist is intentionally empty: every Mach-O in the
-app is inspected and any explicit entitlement blob blocks publication until a
-specific entitlement receives security review.
-
-The Fedora build runs from the official Fedora 43 OCI index pinned by digest.
-All native build inputs are installed from signature-enforcing stable Fedora
-repositories, verified with `rpm -V`, and recorded as exact NEVRAs in the RPM
-audit. Node is fixed to 24.18.0 and Syft to 1.44.0 rather than following moving
-major or latest-release aliases. The separate hostile WebKitWebProcess
-confinement job runs in the official Fedora 44 OCI index pinned by digest and
-rejects an engine outside the reviewed WebKitGTK 2.52.x line or below 2.52.6.
-That non-artifact job may explicitly consume Fedora's signed updates-testing
-WebKitGTK/JSC transaction while the security update awaits promotion. The RPM
-publisher remains stable-repository-only and therefore blocks rather than
-shipping against 2.52.4.
-
-If a run fails before draft creation, rerun only after fixing the cause and
-re-reviewing the same tagged commit. If it fails after creating a draft, do not
-silently reuse or overwrite that draft: inspect the incident, delete only the
-unpublished draft under a maintainer-approved recovery procedure, then rerun
-the exact tag—or cut a new version if any build input or source changed. A
-published immutable release and its protected tag are never deleted, edited,
-or replaced.
-
-If publication succeeds but release-attestation, `gh release verify-asset`, or
-the final published-set byte comparison fails, treat the workflow failure as a
-post-publication security incident: the release is already public and
-immutable. Freeze the stable channel and updater, retain all workflow/artifact
-evidence, independently run `gh release verify`, `gh release verify-asset`, and
-`gh attestation verify`/asset digest checks, and do not delete, edit, recreate,
-or rerun that version. If authenticity cannot be established, revoke it only by
-publishing a new, higher version and monotonic sequence after incident review.
-
-Never replace assets on an existing release. Revoke a compromised release by
-publishing a new, higher version and sequence. Key rotation requires a reviewed
-dual-trust migration in both this workflow and the updater; the current pipeline
-fails closed if the previous manifest cannot be verified by the configured key.
+- **Before publishing**, anything can be redone: delete the draft, fix the
+  cause, and rerun. If the tagged source was wrong, delete and recreate the
+  tag, or simply bump the version.
+- **After publishing**, never replace assets, edit binaries, or delete the
+  release or tag. Users and the updater may already hold those bytes. Fix
+  forward with a higher version (`1.0.0-beta.2`).
+- If the updater private key leaks, ship a release whose embedded key is new,
+  signed with the old key, and treat it as a security incident.
