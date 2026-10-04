@@ -1796,6 +1796,8 @@ export type SplitGroupView = {
 	members: string[],
 };
 
+export type TabAvailability = { state: "sleeping" } | { state: "waiting_for_capacity"; url: string } | { state: "blocked_by_capacity"; url: string };
+
 export type TabChanged = TabView;
 
 /**
@@ -1834,6 +1836,11 @@ export type TabView = {
 	content?: TabContentView,
 	loading: boolean,
 	popup_blocked?: boolean,
+	/**
+	 *  Transient native residency state. It never replaces the committed URL
+	 *  or title, and an explicit retry remains a fresh navigation intent.
+	 */
+	availability?: TabAvailability | null,
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,

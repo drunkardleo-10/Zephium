@@ -17,6 +17,7 @@
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
   import { TabRail } from "$features/tabs";
+  import { loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
   import { requestTab } from "$session/work-tab.svelte";
@@ -351,6 +352,17 @@
           >{#snippet children(View)}<View site={focus.cover() ?? ""} />{/snippet}</LazyView
         >
       </div>
+    </main>
+  {:else if (tabs.activeTab()?.availability?.state === "waiting_for_capacity" || tabs.activeTab()?.availability?.state === "blocked_by_capacity") && browserPage.currentPage() === null}
+    {@const capacityTab = tabs.activeTab()}
+    <main class="internal-stage">
+      {#if capacityTab}<LazyView
+          loader={loadTabCapacityState}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(View)}<View tab={capacityTab} />{/snippet}</LazyView
+        >{/if}
     </main>
   {:else if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
     <!--

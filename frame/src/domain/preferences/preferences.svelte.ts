@@ -34,6 +34,10 @@ const defaults = {
   "focus.breaks": "false",
   "focus.goal": "120",
   "focus.blocked": "",
+  "performance.sleep": "true",
+  "performance.after": "15",
+  "performance.memory": "balanced",
+  "performance.exceptions": "",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
