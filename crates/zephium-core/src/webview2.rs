@@ -57,21 +57,22 @@ pub const REVIEWED_STABLE_MAJOR: u32 = 154;
 /// Microsoft resolved the July 14 pending-fix notice with Stable releases
 /// beginning on July 16. The October 2 review found later Stable security
 /// updates through 154.0.4258.53 (October 1), with matching WebView2 packages
-/// published for every supported architecture. Keep the historical notice and
+/// published for every supported architecture; the October 4 recheck found no
+/// newer Stable security update and no new pending-fix notice. Keep the historical notice and
 /// post-notice check: clearing the flag alone cannot establish release proof.
 pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = false;
 /// 2026-07-14T00:00:00Z, the date of Microsoft's pending-fix notice.
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_783_987_200;
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_ON: &str = "2026-07-14";
-pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-10-02";
+pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-10-04";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-// Rechecked against vendor security releases and WebView2 packages on 2026-10-02.
+// Rechecked against vendor security releases and WebView2 packages on 2026-10-04.
 // Evidence: docs/windows-webview2-security-review-2026-10-02.md.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-09";
-/// 2026-10-10T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_791_590_400;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-11";
+/// 2026-10-12T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_791_763_200;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including

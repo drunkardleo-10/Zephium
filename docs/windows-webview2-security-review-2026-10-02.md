@@ -57,3 +57,14 @@ advisory-exception date was changed by this Windows review.
 This document records vendor and local inventory review only. Packaged
 hostile/native qualification and a second maintainer's review remain required
 before signing a release.
+
+## Recheck: October 4, 2026
+
+The security release notes still list **154.0.4258.53** (October 1) as the
+newest Stable security update, and the Stable release notes still list it as
+the newest Stable 154 build. Neither page acknowledges an outstanding
+Chromium fix that Stable lacks. The Microsoft Update Catalog query above still
+returns the ARM64, x86 and x64 WebView2 154.0.4258.53 packages. The floor and
+recommendation are unchanged; the review now runs through October 11
+inclusive, and CI expires at 2026-10-12T00:00:00Z. This recheck was
+vendor-source only: it did not reinstall or re-inventory a Windows machine.

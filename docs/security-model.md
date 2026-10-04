@@ -1270,7 +1270,7 @@ These inherited properties must not be overstated:
   environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
-  expire this review after October 9, 2026; runtime reports an overdue-review
+  expire this review after October 11, 2026; runtime reports an overdue-review
   advisory instead. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
@@ -1282,7 +1282,8 @@ These inherited properties must not be overstated:
   Zephium therefore treats the shared runtime release as a conservative floor
   rather than claiming each listed CVE applies to WebView2. The October 2 review
   independently confirmed matching x86, x64, and ARM64 WebView2 packages in the
-  Microsoft Update Catalog and raised both the floor and recommendation. See
+  Microsoft Update Catalog and raised both the floor and recommendation; the
+  October 4 recheck found no newer Stable security release. See
   [the review evidence](windows-webview2-security-review-2026-10-02.md).
   The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
