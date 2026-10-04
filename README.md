@@ -37,7 +37,7 @@ the results.
 <p align="center">
   <img src=".github/assets/browse.webp" alt="Zephium in Browse mode" width="900" />
 </p>
-<p align="center"><sub>Browse: the browser, with notes and tasks beside the page.</sub></p>
+<p align="center"><sub>Browse: your tabs in a quiet sidebar, the page in front.</sub></p>
 
 <p align="center">
   <img src=".github/assets/work.webp" alt="Zephium in Work mode, with an agent comparing AWS, Vercel, Hetzner and Cloudflare" width="900" />
@@ -58,7 +58,6 @@ the results.
 - Notes beside the page, as Markdown files you own.
 - Tasks you write the way you would say them, landing on the right day.
 - Activity shows where the day went, and Focus keeps distractions shut.
-- Profiles keep each one's site data apart.
 - A welcome flow imports what you already have from other browsers.
 
 ### Work
