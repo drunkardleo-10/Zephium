@@ -10,6 +10,7 @@
   import { AddressField, findInPage } from "$features/address";
   import { Dock } from "$features/dock";
   import { DownloadPulse, DownloadStatus } from "$features/downloads";
+  import { UpdateCards, UpdateGlyph } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionActions, ManageExtensions } from "$features/extensions";
   import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
@@ -60,6 +61,10 @@
   // Settings opened from a page lands on the section that page asked for.
   function openSettings() {
     handleNativeSection("settings.section.newtab");
+    void browserPage.open("settings");
+  }
+  function openAbout() {
+    handleNativeSection("settings.section.about");
     void browserPage.open("settings");
   }
   // The sidebar's own menu stands where the engine would offer Reload.
@@ -266,11 +271,12 @@
                 profile={tabs.profile()!.id}
                 onopen={() => toolHost.open("downloads")}
               />{/if}
+            <UpdateCards />
           {/if}
         </div>{/key}
     {/snippet}{#snippet dock(compact)}{#if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
             profile={tabs.profile()?.id ?? ""}
-          />{/if}<Dock compact tools={!inWork}>
+          />{/if}<UpdateGlyph onabout={openAbout} /><Dock compact tools={!inWork}>
           {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
               variant="stack"
             />{/snippet}

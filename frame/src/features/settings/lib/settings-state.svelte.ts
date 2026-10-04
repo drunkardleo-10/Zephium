@@ -29,6 +29,9 @@ export function handleNativeSection(id: string) {
     select("mcp", service ? `connection.${decodeURIComponent(service).toLowerCase()}` : null);
     return;
   }
-  if (id.startsWith("settings.section.") && ["profiles", "newtab", "ai", "focus"].includes(section))
+  if (
+    id.startsWith("settings.section.") &&
+    ["profiles", "newtab", "ai", "focus", "about"].includes(section)
+  )
     select(section as SettingsSection);
 }

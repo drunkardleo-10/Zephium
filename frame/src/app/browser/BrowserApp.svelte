@@ -5,6 +5,7 @@
   import { WebExtensionAccessPrompt, WebExtensionReview } from "$features/webext";
   import { webext } from "$domain/webext";
   import { PagePermissionPrompt } from "$features/permissions";
+  import { updateNotices } from "$features/updates";
   import * as sidebar from "$session/sidebar-mode.svelte";
   import { Dividers } from "$features/split";
   import { commands } from "$shared/ipc/bindings";
@@ -102,6 +103,7 @@
     const runtimeReady = runtime.init();
     void focus.init();
     void updates.init();
+    void updateNotices.init();
     const extensionsReady = extensions.init();
     void webext.refresh();
     const stopAccess = webext.listenForAccess();
@@ -166,6 +168,7 @@
       blocker.dispose();
       runtime.dispose();
       updates.dispose();
+      updateNotices.dispose();
       focus.dispose();
       extensions.dispose();
       pagePermissions.dispose();
