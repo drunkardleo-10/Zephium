@@ -497,7 +497,11 @@ fn approved_deadline_uses_original_monotonic_store_incarnation() {
     let (approved, receipt) = approve(&mut hub, &planned, 100.into());
     // Wall time has not elapsed. Only the original process's monotonic clock
     // decides admission; absolute timestamps remain descriptive history.
-    hub.work_runtime_epoch = std::time::Instant::now() - std::time::Duration::from_secs(301);
+    let Some(epoch) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(301))
+    else {
+        return;
+    };
+    hub.work_runtime_epoch = epoch;
     assert!(matches!(
         hub.work_document(
             planned.profile,

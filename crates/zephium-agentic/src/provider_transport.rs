@@ -4836,21 +4836,23 @@ mod tests {
     async fn provider_attempt_deadline_spans_count_and_model_requests() {
         let server = SequenceServer::spawn(vec![
             ScriptedResponse {
-                delay: Duration::from_millis(150),
+                delay: Duration::from_millis(600),
                 content_type: "application/json",
                 body: br#"{"object":"response.input_tokens","input_tokens":17}"#.to_vec(),
             },
             ScriptedResponse {
-                delay: Duration::from_millis(150),
+                delay: Duration::from_millis(600),
                 content_type: "text/event-stream; charset=utf-8",
                 body: openai_success_stream(),
             },
         ]);
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::try_new(
-                Duration::from_millis(250),
-                Duration::from_millis(200),
-                Duration::from_millis(200),
+                // Each response fits the attempt alone; together they
+                // exceed it, with slack for a slow runner.
+                Duration::from_millis(1_000),
+                Duration::from_millis(900),
+                Duration::from_millis(900),
             )
             .expect("config"),
             server.openai.as_str(),

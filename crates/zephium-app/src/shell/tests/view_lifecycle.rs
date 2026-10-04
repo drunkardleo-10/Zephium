@@ -237,7 +237,12 @@ fn leaving_a_visible_split_starts_idle_grace_and_minimization_keeps_discard_prot
         axis: Axis::Row,
     });
     shell.residency.warm_view_limit = 1;
-    let old = std::time::Instant::now() - std::time::Duration::from_secs(30 * 60);
+    // A freshly booted machine (a hosted Windows runner) cannot represent a
+    // moment before its own uptime.
+    let Some(old) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(30 * 60))
+    else {
+        return;
+    };
     for id in [first, second] {
         shell.residency.last_focus.insert(id, old);
         shell.residency.resident_since.insert(id, old);
@@ -1083,7 +1088,10 @@ fn memory_warning_uses_a_short_grace_instead_of_discarding_at_once() {
         shell.residency.discard_probes.is_empty(),
         "pages left seconds ago stay resident under a warning"
     );
-    let stale = std::time::Instant::now() - std::time::Duration::from_secs(3 * 60);
+    let Some(stale) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(3 * 60))
+    else {
+        return;
+    };
     for times in [
         &mut shell.residency.last_focus,
         &mut shell.residency.resident_since,
