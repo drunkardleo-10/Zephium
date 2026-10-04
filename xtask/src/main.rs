@@ -46,13 +46,17 @@ fn main() {
             ci();
         }
         Some("check-frame-styles") => run("node", &["frame/scripts/check-styles.mjs"]),
-        Some("check-engine-floors") => check_engine_floors(),
+        Some("check-engine-floors") => {
+            check_engine_floors(strict_flag(&arguments[1..], "check-engine-floors"))
+        }
         Some("check-release-engine-security") => check_release_engine_security(),
         Some("check-agentic-probe-boundary") => check_agentic_probe_boundary(),
         Some("check-agent-model-catalog-boundary") => check_agent_model_catalog_boundary(),
         Some("check-agent-controller-boundary") => check_agent_controller_boundary(),
         Some("check-agent-runtime-boundary") => check_agent_runtime_boundary(),
-        Some("check-advisory-exceptions") => check_advisory_exceptions(),
+        Some("check-advisory-exceptions") => {
+            check_advisory_exceptions(strict_flag(&arguments[1..], "check-advisory-exceptions"))
+        }
         Some("check-security-fork-locks") | Some("check-native-adapter-locks") => {
             check_security_fork_locks()
         }
@@ -110,10 +114,12 @@ fn main() {
         }
         // Retain the old entrypoint for local automation while making it run
         // every engine-floor deadline, not only Windows.
-        Some("check-webview2-floor") => check_engine_floors(),
+        Some("check-webview2-floor") => {
+            check_engine_floors(strict_flag(&arguments[1..], "check-webview2-floor"))
+        }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...]|check-frame-styles|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
             );
             exit(2);
         }
@@ -143,7 +149,36 @@ fn update_blocker_seed(arguments: &[String]) {
     }
 }
 
-fn check_advisory_exceptions() {
+fn strict_flag(arguments: &[String], command: &str) -> bool {
+    match arguments {
+        [] => false,
+        [flag] if flag == "--strict" => true,
+        _ => {
+            eprintln!("usage: cargo xtask {command} [--strict]");
+            exit(2);
+        }
+    }
+}
+
+/// An expired review is a maintenance signal, not a defect in the change
+/// under test, so it warns everywhere except where `--strict` is requested:
+/// the release gate and the weekly security review.
+fn report_expired_reviews(title: &str, expired: &[String], strict: bool) {
+    let level = if strict { "error" } else { "warning" };
+    let annotate = std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true");
+    for message in expired {
+        if annotate {
+            println!("::{level} title={title}::{message}");
+        } else {
+            eprintln!("{level}: {message}");
+        }
+    }
+    if strict && !expired.is_empty() {
+        exit(1);
+    }
+}
+
+fn check_advisory_exceptions(strict: bool) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|error| {
@@ -156,9 +191,12 @@ fn check_advisory_exceptions() {
         eprintln!("cannot read {}: {error}", path.display());
         exit(1);
     });
-    if let Err(error) = validate_advisory_exceptions(&source, now) {
-        eprintln!("cargo-deny advisory exception policy failed: {error}");
-        exit(1);
+    match validate_advisory_exceptions(&source, now) {
+        Ok(expired) => report_expired_reviews("Advisory exception expired", &expired, strict),
+        Err(error) => {
+            eprintln!("cargo-deny advisory exception policy failed: {error}");
+            exit(1);
+        }
     }
 }
 
@@ -378,7 +416,9 @@ fn validate_security_fork_lock(source: &str, required: &[(&str, &str)]) -> Resul
     Ok(())
 }
 
-fn validate_advisory_exceptions(source: &str, now: u64) -> Result<(), String> {
+/// Returns one message per expired exception; malformed or over-long
+/// exceptions are hard errors.
+fn validate_advisory_exceptions(source: &str, now: u64) -> Result<Vec<String>, String> {
     const MAX_EXCEPTION_LIFETIME: u64 = 120 * 24 * 60 * 60;
     let document = source
         .parse::<toml::Table>()
@@ -394,6 +434,7 @@ fn validate_advisory_exceptions(source: &str, now: u64) -> Result<(), String> {
     }
 
     let mut ids = std::collections::HashSet::with_capacity(ignore.len());
+    let mut expired = Vec::new();
     for (index, exception) in ignore.iter().enumerate() {
         let entry = index + 1;
         let exception = exception.as_table().ok_or_else(|| {
@@ -429,8 +470,8 @@ fn validate_advisory_exceptions(source: &str, now: u64) -> Result<(), String> {
             .filter(|value| valid_iso_date(value))
             .ok_or_else(|| format!("advisory exception {entry} has no valid ISO expiry"))?;
         if expiry <= now {
-            return Err(format!(
-                "advisory exception {entry} owned by {owner} expired at {human_expiry} ({expiry})"
+            expired.push(format!(
+                "deny.toml advisory exception {id} owned by {owner} expired at {human_expiry} ({expiry}); remove or upgrade the dependency, or re-review the exception"
             ));
         }
         if expiry.saturating_sub(now) > MAX_EXCEPTION_LIFETIME {
@@ -439,7 +480,7 @@ fn validate_advisory_exceptions(source: &str, now: u64) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    Ok(expired)
 }
 
 fn valid_rustsec_id(value: &str) -> bool {
@@ -466,7 +507,7 @@ fn valid_iso_date(value: &str) -> bool {
             .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
 }
 
-fn check_engine_floors() {
+fn check_engine_floors(strict: bool) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|error| {
@@ -474,8 +515,9 @@ fn check_engine_floors() {
             exit(1);
         })
         .as_secs();
+    let mut expired = Vec::new();
     if !zephium_core::webview2::security_floor_review_is_current(now) {
-        eprintln!(
+        expired.push(format!(
             "WebView2 security review (hard floor {}, latest reviewed {}) expired after {}. Review {}, {}, and exact runtime availability at {}, then update the versions, publication dates, and review deadline together.",
             zephium_core::webview2::SECURITY_FLOOR_TEXT,
             zephium_core::webview2::LATEST_REVIEWED_TEXT,
@@ -483,27 +525,26 @@ fn check_engine_floors() {
             zephium_core::webview2::SECURITY_FLOOR_SOURCE_URL,
             zephium_core::webview2::LATEST_REVIEWED_SOURCE_URL,
             zephium_core::webview2::RUNTIME_AVAILABILITY_SOURCE_URL,
+        ));
+    } else {
+        eprintln!(
+            "WebView2 hard floor {} and latest reviewed Stable {} are reviewed through {}",
+            zephium_core::webview2::SECURITY_FLOOR_TEXT,
+            zephium_core::webview2::LATEST_REVIEWED_TEXT,
+            zephium_core::webview2::SECURITY_FLOOR_REVIEW_BY,
         );
-        exit(1);
     }
-    eprintln!(
-        "WebView2 hard floor {} and latest reviewed Stable {} are reviewed through {}",
-        zephium_core::webview2::SECURITY_FLOOR_TEXT,
-        zephium_core::webview2::LATEST_REVIEWED_TEXT,
-        zephium_core::webview2::SECURITY_FLOOR_REVIEW_BY,
-    );
 
     if !zephium_core::macos::security_floor_review_is_current(now) {
-        eprintln!(
+        expired.push(format!(
             "macOS/WebKit security floors expired after {}. Review {}, {}, and {} and update the OS/Safari versions, publication date, and review deadline together.",
             zephium_core::macos::SECURITY_FLOOR_REVIEW_BY,
             zephium_core::macos::SECURITY_FLOOR_SOURCE_URL,
             zephium_core::macos::SAFARI_SECURITY_SOURCE_URL,
             zephium_core::macos::TAHOE_SECURITY_SOURCE_URL,
-        );
-        exit(1);
-    }
-    eprintln!(
+        ));
+    } else {
+        eprintln!(
         "macOS/WebKit hard floors Sonoma {} + Safari {}, Sequoia {} + Safari {}, and Tahoe {}; latest recommendations Sonoma {}, Sequoia {}, Tahoe {}, and Safari {}; reviewed through {}",
         zephium_core::macos::SONOMA_SECURITY_FLOOR_TEXT,
         zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
@@ -516,33 +557,37 @@ fn check_engine_floors() {
         zephium_core::macos::SAFARI_RECOMMENDED_TEXT,
         zephium_core::macos::SECURITY_FLOOR_REVIEW_BY,
     );
+    }
 
     if !zephium_core::webkitgtk::security_floor_review_is_current(now) {
-        eprintln!(
+        expired.push(format!(
             "WebKitGTK security floor {} expired after {}. Review {} and {} and update the advisory floor, latest-reviewed release, and deadline together.",
             zephium_core::webkitgtk::SECURITY_FLOOR_TEXT,
             zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_BY,
             zephium_core::webkitgtk::SECURITY_FLOOR_SOURCE_URL,
             zephium_core::webkitgtk::LATEST_REVIEWED_SOURCE_URL,
+        ));
+    } else {
+        eprintln!(
+            "WebKitGTK security floor {} (latest reviewed {}) is reviewed through {}",
+            zephium_core::webkitgtk::SECURITY_FLOOR_TEXT,
+            zephium_core::webkitgtk::LATEST_REVIEWED_TEXT,
+            zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_BY,
         );
-        exit(1);
     }
-    eprintln!(
-        "WebKitGTK security floor {} (latest reviewed {}) is reviewed through {}",
-        zephium_core::webkitgtk::SECURITY_FLOOR_TEXT,
-        zephium_core::webkitgtk::LATEST_REVIEWED_TEXT,
-        zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_BY,
-    );
+    report_expired_reviews("Engine security review expired", &expired, strict);
 }
 
 /// Release-only publication gate. Runtime admission uses the best stable
-/// engine that actually exists; publishing additionally requires that no
-/// vendor has acknowledged an outstanding stable-channel security fix and
-/// that the immutable blocker sources are still within their upstream
-/// recommended refresh cadence at the exact publication boundary.
+/// engine that actually exists; publishing additionally requires current
+/// engine and advisory reviews, that no vendor has acknowledged an
+/// outstanding stable-channel security fix, and that the immutable blocker
+/// sources are still within their upstream recommended refresh cadence at
+/// the exact publication boundary.
 fn check_release_engine_security() {
     check_agentic_probe_boundary();
-    check_engine_floors();
+    check_engine_floors(true);
+    check_advisory_exceptions(true);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|error| {
@@ -572,8 +617,8 @@ fn ci() {
     check_agent_model_catalog_boundary();
     check_agent_controller_boundary();
     check_agent_runtime_boundary();
-    check_engine_floors();
-    check_advisory_exceptions();
+    check_engine_floors(false);
+    check_advisory_exceptions(false);
     check_blocker_security_fork();
     run("cargo", &["fmt", "--all", "--", "--check"]);
     for (manifest, _) in NATIVE_ADAPTERS {
@@ -1352,7 +1397,7 @@ mod tests {
 ignore = [
   { id = "RUSTSEC-2026-0001", reason = "owner=security; expires=2026-01-01; expires-unix=1000100; tracked" },
 ]"#;
-        assert!(validate_advisory_exceptions(valid, now).is_ok());
+        assert_eq!(validate_advisory_exceptions(valid, now), Ok(Vec::new()));
         assert!(validate_advisory_exceptions(
             r#"[advisories]
 ignore = [{ id = "RUSTSEC-2026-0001", reason = "expires=2026-01-01; expires-unix=1000100; tracked" }]"#,
@@ -1362,11 +1407,27 @@ ignore = [{ id = "RUSTSEC-2026-0001", reason = "expires=2026-01-01; expires-unix
         .contains("owner"));
         assert!(validate_advisory_exceptions(
             r#"[advisories]
-ignore = [{ id = "RUSTSEC-2026-0001", reason = "owner=security; expires=2026-01-01; expires-unix=999999; tracked" }]"#,
+ignore = [{ id = "RUSTSEC-2026-0001", reason = "owner=security; expires=2026-01-01; expires-unix=1000000000; tracked" }]"#,
             now,
         )
         .unwrap_err()
-        .contains("expired"));
+        .contains("120-day"));
+    }
+
+    #[test]
+    fn expired_advisory_exceptions_are_reported_not_rejected() {
+        let expired = validate_advisory_exceptions(
+            r#"[advisories]
+ignore = [
+  { id = "RUSTSEC-2026-0001", reason = "owner=security; expires=2026-01-01; expires-unix=999999; tracked" },
+  { id = "RUSTSEC-2026-0002", reason = "owner=security; expires=2026-01-02; expires-unix=1000100; tracked" },
+]"#,
+            1_000_000,
+        )
+        .expect("expiry alone is not a format error");
+        assert_eq!(expired.len(), 1);
+        assert!(expired[0].contains("RUSTSEC-2026-0001"));
+        assert!(expired[0].contains("expired at 2026-01-01"));
     }
 
     #[test]
