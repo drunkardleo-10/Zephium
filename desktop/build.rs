@@ -9,6 +9,7 @@ mod navigation_probe_config;
 
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
+const DEVELOPMENT_IDENTIFIER: &str = "app.zephium.dev";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
 const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
 const LEGAL_RESOURCES: [(&str, &str); 3] = [
@@ -102,6 +103,14 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .ok_or("navigation qualification requires its isolated configuration override")?,
         )?;
+    }
+    let development_identity = config_override
+        .as_ref()
+        .and_then(|config| config.get("identifier"))
+        .and_then(Value::as_str)
+        == Some(DEVELOPMENT_IDENTIFIER);
+    if development_identity && env::var("PROFILE").as_deref() != Ok("debug") {
+        return Err("the development identity is for debug builds only".into());
     }
     let webext_qa = env::var_os("CARGO_FEATURE_WEBEXT_QA").is_some();
     if webext_qa {
@@ -210,6 +219,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !isolated_ui_qa
                 && !webext_qa
                 && !adblock_qa
+                && !development_identity
             {
                 validate_linux_identity("effective", &config, &root)?;
             }

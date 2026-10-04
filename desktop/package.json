@@ -2,7 +2,7 @@
   "name": "@zephium/desktop",
   "private": true,
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "tauri dev --config tauri.dev.conf.json",
     "build": "tauri build"
   },
   "devDependencies": {

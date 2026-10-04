@@ -31,6 +31,8 @@ pub use work_fixture::NativeWorkStorageTestSession;
 pub enum NativeApplication {
     /// The ordinary Zephium installation.
     Product,
+    /// `pnpm dev` builds, kept apart from the installed product's profile.
+    Development,
     /// The separately identified extension/Work QA installation.
     ExtensionQa,
     /// File-grant integration qualification.
@@ -51,6 +53,7 @@ impl NativeApplication {
     fn component(self) -> &'static str {
         match self {
             Self::Product => "app.zephium",
+            Self::Development => "app.zephium.dev",
             Self::ExtensionQa => "app.zephium.webext-qa",
             Self::FilesIntegrationQa => "app.zephium.files-integration-qa",
             Self::Performance => "app.zephium.performance",

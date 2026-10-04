@@ -12,13 +12,14 @@ const MAX_SEARCH_FILES: usize = 2000;
 const MAX_SEARCH_HITS: usize = 64;
 const SEARCH_BUDGET: Duration = Duration::from_millis(200);
 const SKIPPED_DIRS: [&str; 6] = [".git", "node_modules", "target", ".cache", "dist", "build"];
-const DENIED_UNDER_HOME: [&str; 7] = [
+const DENIED_UNDER_HOME: [&str; 8] = [
     ".ssh",
     ".gnupg",
     ".aws",
     ".config/gcloud",
     "Library/Keychains",
     "Library/Application Support/app.zephium",
+    "Library/Application Support/app.zephium.dev",
     "Library/Cookies",
 ];
 
