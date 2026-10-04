@@ -443,7 +443,7 @@ impl super::EngineHost {
         // QA admission budget, not a WebView2 limit: five installed extensions
         // already measured ~406 MiB with one lab page. Keep observer resources
         // bounded separately from browsing/Work; reserve one slot for a popup.
-        // The measured shared-view tradeoff is in windows-extensions-handoff.md.
+        // The measured shared-view tradeoff is in docs/windows-extension-qa.md.
         if self.windows_extensions.installs.len() >= NativeResourceClass::Extension.limit() - 1
             && !self
                 .windows_extensions
