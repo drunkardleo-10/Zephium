@@ -1864,7 +1864,7 @@ fn validate_engine_windows_agent_context_boundary(
     for required in [
         "#[cfg(feature=\"agentic-browser\")]modagent_context;",
         "#[allow(dead_code)]modsemantic_runtime;",
-        "#[cfg(feature=\"agentic-browser\")]modtimeout;",
+        "modtimeout;",
         "build_owned_agent_view",
         "pub(crate)usecookie_transfer::{selected_profile_cookie_manager,WindowsAgentCookieCleanup,WindowsAgentCookieTerminal,WindowsAgentCookieTransfer,};",
         "schedule_content_policy_timeout",
@@ -1931,7 +1931,8 @@ fn validate_engine_windows_agent_context_boundary(
     let timeout = compact(timeout);
     for required in [
         "MAX_PENDING_NATIVE_CONTEXT_TASKS",
-        "[Option<(usize,TimerCallback)>;MAX_AGENT_UI_TIMERS]",
+        "[Option<TimerEntry>;MAX_UI_TIMERS]",
+        "schedule_timeout(duration,callback,0..MAX_AGENT_UI_TIMERS)",
         "SetTimer(None,0,interval,Some(timer_proc))",
         "KillTimer(None,self.timer)",
         "catch_unwind",
@@ -2334,7 +2335,7 @@ fn validate_engine_windows_timeout_thread_binding(source: &str) -> Result<(), St
     let source = compact(source);
     for required in [
         "_thread_bound:PhantomData<Rc<()>>",
-        "ContentPolicyTimeout{timer,_thread_bound:PhantomData",
+        "ContentPolicyTimeout{timer,generation,_thread_bound:PhantomData",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -10288,10 +10289,11 @@ mod tests {
         let valid = r#"
             struct ContentPolicyTimeout {
                 timer: usize,
+                generation: u64,
                 _thread_bound: PhantomData<Rc<()>>,
             }
-            fn guard(timer: usize) -> ContentPolicyTimeout {
-                ContentPolicyTimeout { timer, _thread_bound: PhantomData }
+            fn guard(timer: usize, generation: u64) -> ContentPolicyTimeout {
+                ContentPolicyTimeout { timer, generation, _thread_bound: PhantomData }
             }
         "#;
         validate_engine_windows_timeout_thread_binding(valid).expect("thread-bound timer guard");
@@ -10301,8 +10303,8 @@ mod tests {
         .is_err());
         assert!(
             validate_engine_windows_timeout_thread_binding(&valid.replace(
-                "ContentPolicyTimeout { timer, _thread_bound: PhantomData }",
-                "ContentPolicyTimeout { timer }"
+                "ContentPolicyTimeout { timer, generation, _thread_bound: PhantomData }",
+                "ContentPolicyTimeout { timer, generation }"
             ))
             .is_err()
         );
