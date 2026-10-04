@@ -19,7 +19,9 @@ concurrency:
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
   CARGO_TERM_COLOR: always
-  UPDATER_CONFIG: '{"bundle":{"createUpdaterArtifacts":true}}'
+  # Updater artifacts need the signing key, and the notices are generated per
+  # build, so neither belongs in the base configuration.
+  RELEASE_CONFIG: '{"bundle":{"createUpdaterArtifacts":true,"resources":{"../target/THIRD_PARTY_NOTICES.txt":"licenses/THIRD_PARTY_NOTICES.txt"}}}'
 
 jobs:
   gate:
@@ -124,6 +126,12 @@ jobs:
           KEY_CONTENT: ${{ secrets.APPLE_API_KEY_PATH }}
         run: (umask 077 && printf '%s' "${KEY_CONTENT}" > "${RUNNER_TEMP}/AuthKey.p8")
 
+      - name: Write third-party notices
+        shell: bash
+        run: |
+          python3 scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt \
+            || python scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt
+
       - name: Build, sign and notarize
         working-directory: desktop
         env:
@@ -142,7 +150,7 @@ jobs:
           CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
         run: >-
           pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
-          --config "${UPDATER_CONFIG}"
+          --config "${RELEASE_CONFIG}"
 
       - name: Locate the bundles
         run: |
@@ -264,6 +272,12 @@ jobs:
           shared-key: release-windows
       - run: pnpm install --frozen-lockfile
 
+      - name: Write third-party notices
+        shell: bash
+        run: |
+          python3 scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt \
+            || python scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt
+
       - name: Build
         working-directory: desktop
         env:
@@ -273,7 +287,7 @@ jobs:
           # PDB. MSVC keeps debug info in the PDB, never in the .exe.
           CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
           CARGO_PROFILE_RELEASE_STRIP: none
-        run: pnpm tauri build --bundles nsis --config "${UPDATER_CONFIG}"
+        run: pnpm tauri build --bundles nsis --config "${RELEASE_CONFIG}"
 
       # Authenticode signing (SignPath) goes here. It changes the installer's
       # bytes, so it must run before the updater signature is made: sign the
