@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import budgets from "./bundle-budgets.json";
 import { checkBundleBudget } from "./bundle-budget";
 import type { Plugin } from "vite";
@@ -165,13 +166,18 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
           );
       }
       if (failures.length) this.error(failures.join("\n"));
-      this.emitFile({
-        type: "asset",
-        fileName: pages.includes("browser")
-          ? "bootstrap-report.json"
-          : `bootstrap-report.${pages.join("-")}.json`,
-        source: JSON.stringify(reports, null, 2),
-      });
+      // Kept out of dist: Tauri embeds all of dist into the shipped binary.
+      const dir = new URL("./reports/", import.meta.url);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        new URL(
+          pages.includes("browser")
+            ? "bootstrap-report.json"
+            : `bootstrap-report.${pages.join("-")}.json`,
+          dir,
+        ),
+        JSON.stringify(reports, null, 2),
+      );
     },
     writeBundle(_options, bundle) {
       for (const [name, styles] of surfaceStyles) {
