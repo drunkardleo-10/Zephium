@@ -62,6 +62,10 @@ impl Shell {
         };
         self.history.next_token = self.history.next_token.wrapping_add(1);
         let token = self.history.next_token;
+        let forget_native_state = matches!(
+            &call,
+            HistoryCall::Forget { .. } | HistoryCall::Clear { .. }
+        );
         if !reads.request_history_call(token, expected_profile, call) {
             done.finish(HistoryResponse::Error {
                 error: HistoryError::Unavailable,
@@ -69,6 +73,13 @@ impl Shell {
             return;
         }
         self.history.pending.insert(token, done);
+        // Opaque native back/forward state must not resurrect deleted history.
+        // Clear it only after this validated deletion entered the store queue.
+        // A failed queue admission retains both history and restoration state.
+        // The native hook also invalidates an in-flight state capture.
+        if forget_native_state {
+            self.engine.forget_discarded_state(expected_profile, None);
+        }
     }
 
     pub(super) fn on_history_surface_read(

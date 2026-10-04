@@ -601,6 +601,7 @@ impl EngineHost {
         ) {
             return;
         }
+        self.forget_discarded_state(profile, None);
         #[cfg(all(
             feature = "agentic-browser",
             any(target_os = "macos", target_os = "windows")

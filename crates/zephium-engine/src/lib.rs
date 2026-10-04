@@ -731,6 +731,7 @@ impl Drop for EventTransitionGuard {
 struct ItemBinding {
     profile: ProfileId,
     active: Arc<AtomicBool>,
+    pending_discard: Option<DiscardProbeId>,
 }
 
 pub(crate) struct EngineEventIngress {
@@ -827,6 +828,7 @@ impl RetirementGate {
             ItemBinding {
                 profile,
                 active: active.clone(),
+                pending_discard: None,
             },
         );
         Some(active)
@@ -871,6 +873,41 @@ impl RetirementGate {
             && self.tracked_items.get(&id).is_some_and(|binding| {
                 Arc::ptr_eq(&binding.active, active) && self.profile_is_active(binding.profile)
             })
+    }
+
+    fn begin_discard(
+        &mut self,
+        id: ItemId,
+        probe: DiscardProbeId,
+    ) -> Option<(ProfileId, Arc<AtomicBool>)> {
+        let profile = self.active_profile(id)?;
+        let binding = self.tracked_items.get_mut(&id)?;
+        if binding.pending_discard.is_some() {
+            return None;
+        }
+        binding.pending_discard = Some(probe);
+        Some((profile, binding.active.clone()))
+    }
+
+    fn discard_is_current(
+        &self,
+        id: ItemId,
+        probe: DiscardProbeId,
+        active: &Arc<AtomicBool>,
+    ) -> bool {
+        self.allows_item_token(id, active)
+            && self
+                .tracked_items
+                .get(&id)
+                .is_some_and(|binding| binding.pending_discard == Some(probe))
+    }
+
+    fn cancel_discard(&mut self, id: ItemId, probe: DiscardProbeId) {
+        if let Some(binding) = self.tracked_items.get_mut(&id) {
+            if binding.pending_discard == Some(probe) {
+                binding.pending_discard = None;
+            }
+        }
     }
 
     fn allows_items(&self, ids: &[ItemId]) -> bool {
@@ -1098,6 +1135,9 @@ impl RetirementGate {
             EngineEvent::ViewDiscarded { id, profile, probe } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::ViewDiscarded { id, profile, probe }),
+            EngineEvent::ViewDiscardRefused { id, profile, probe } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::ViewDiscardRefused { id, profile, probe }),
         }
     }
 }
@@ -1890,6 +1930,16 @@ impl Engine for WebviewEngine {
         });
     }
 
+    fn set_memory_pressure(&self, pressure: zephium_core::ports::engine::MemoryPressure) {
+        self.run(move || {
+            host::best_effort_with(move |host| host.set_memory_pressure(pressure));
+        });
+    }
+
+    fn suspends_hidden_views(&self) -> bool {
+        cfg!(target_os = "windows")
+    }
+
     fn set_dormant(&self, ids: Vec<ItemId>) {
         // `set_dormant` replaces the host's desired set. Once any profile is
         // retired, even an empty or filtered replacement could resume one of
@@ -2378,6 +2428,30 @@ impl Engine for WebviewEngine {
         }))
     }
 
+    fn set_resize_guide(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
+        #[cfg(target_os = "windows")]
+        {
+            let queued_retirement = self.retirement.clone();
+            let queued_delivery = self.event_delivery.clone();
+            let queued_fatal = self.fatal_security_failure.clone();
+            NativeDispatch::from_scheduled(self.run(move || {
+                if !host::try_with(move |host| host.set_resize_guide(window, zone)) {
+                    fail_native_host_admission(
+                        &queued_delivery,
+                        &queued_retirement,
+                        &queued_fatal,
+                        "resize-guide update was not admitted by the engine host",
+                    );
+                }
+            }))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (window, zone);
+            NativeDispatch::Unsupported
+        }
+    }
+
     fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {
         if !valid_page_zoom(scale) {
             return NativeDispatch::Rejected;
@@ -2436,57 +2510,130 @@ impl Engine for WebviewEngine {
     }
 
     fn discard_view(&self, id: ItemId, probe: DiscardProbeId) -> bool {
-        let Some(profile) = lock_retirement_gate(&self.retirement).active_profile(id) else {
+        let Some((profile, active)) =
+            lock_retirement_gate(&self.retirement).begin_discard(id, probe)
+        else {
             return false;
         };
-        if mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
-            gate.begin_close(id)
-        })
-        .is_none()
-        {
-            seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
-            (self.fatal_security_failure)(
-                "caller sink synchronously re-entered discard during event delivery",
-            );
-            return false;
-        }
-
+        // The safety probe is advisory. Keep the exact native generation live
+        // while the host refreshes activity and prepares restorable state.
+        // Refusal at this stage must not revoke a usable page's permissions.
         let queued_sink = self.sink.clone();
+        let rejected_sink = self.sink.clone();
         let queued_retirement = self.retirement.clone();
+        let rejected_retirement = self.retirement.clone();
         let queued_delivery = self.event_delivery.clone();
         let queued_fatal = self.fatal_security_failure.clone();
         let dispatched = self.run(move || {
-            let close_retirement = queued_retirement.clone();
-            if !host::try_with_close(id, move |host| {
-                host.close(id);
-                lock_retirement_gate(&close_retirement).finish_close(id);
-                queued_sink(EngineEventIngress::global(EngineEvent::ViewDiscarded {
-                    id,
-                    profile,
-                    probe,
-                }));
-            }) {
-                if mutate_lifecycle_gate(&queued_delivery, &queued_retirement, |gate| {
-                    gate.seal_all_profiles()
-                })
-                .is_none()
-                {
-                    seal_lifecycle_gate_terminally(&queued_delivery, &queued_retirement);
+            let admitted = host::try_with(move |host| {
+                if !lock_retirement_gate(&queued_retirement).discard_is_current(id, probe, &active) {
+                    lock_retirement_gate(&queued_retirement).cancel_discard(id, probe);
+                    queued_sink(EngineEventIngress::global(EngineEvent::ViewDiscardRefused {
+                        id, profile, probe,
+                    }));
+                    return;
                 }
-                queued_fatal("native discard was not admitted by the engine host");
+                host.finalize_discard(id, probe, Box::new(move |host, safe| {
+                    if !safe {
+                        lock_retirement_gate(&queued_retirement).cancel_discard(id, probe);
+                        queued_sink(EngineEventIngress::global(EngineEvent::ViewDiscardRefused {
+                            id, profile, probe,
+                        }));
+                        return;
+                    }
+                    let retired = mutate_lifecycle_gate(&queued_delivery, &queued_retirement, |gate| {
+                        if !gate.discard_is_current(id, probe, &active) {
+                            gate.cancel_discard(id, probe);
+                            return false;
+                        }
+                        gate.begin_close(id);
+                        true
+                    });
+                    match retired {
+                        Some(true) => {}
+                        Some(false) => {
+                            queued_sink(EngineEventIngress::global(EngineEvent::ViewDiscardRefused {
+                                id, profile, probe,
+                            }));
+                            return;
+                        }
+                        None => {
+                            seal_lifecycle_gate_terminally(&queued_delivery, &queued_retirement);
+                            queued_fatal("caller sink synchronously re-entered final discard during event delivery");
+                            return;
+                        }
+                    }
+                    // Close acknowledgement remains after native destruction;
+                    // only then may the shell reuse the residency slot.
+                    host.close_for_discard(id);
+                    lock_retirement_gate(&queued_retirement).finish_close(id);
+                    queued_sink(EngineEventIngress::global(EngineEvent::ViewDiscarded {
+                        id, profile, probe,
+                    }));
+                }));
+            });
+            if !admitted {
+                lock_retirement_gate(&rejected_retirement).cancel_discard(id, probe);
+                rejected_sink(EngineEventIngress::global(EngineEvent::ViewDiscardRefused {
+                    id, profile, probe,
+                }));
             }
         });
         if !dispatched {
-            if mutate_lifecycle_gate(&self.event_delivery, &self.retirement, |gate| {
-                gate.seal_all_profiles()
-            })
-            .is_none()
-            {
-                seal_lifecycle_gate_terminally(&self.event_delivery, &self.retirement);
-            }
-            (self.fatal_security_failure)("native discard was not admitted by the main event loop");
+            lock_retirement_gate(&self.retirement).cancel_discard(id, probe);
         }
         dispatched
+    }
+
+    fn cancel_discard(&self, id: ItemId, probe: DiscardProbeId) {
+        // This shares the exact final-retirement lock. Once cancellation wins,
+        // a delayed native positive callback can no longer destroy the view.
+        lock_retirement_gate(&self.retirement).cancel_discard(id, probe);
+        #[cfg(target_os = "windows")]
+        {
+            // Cancellation is already linearized. A queued native refusal
+            // releases its UI timer promptly; the retained deadline remains
+            // a bounded fallback if optional queue admission fails.
+            let _ = self.run(move || {
+                let _ = host::with_discard_terminal(id, move |host| {
+                    host.cancel_final_discard(id, probe)
+                });
+            });
+        }
+    }
+
+    fn forget_discarded_state(&self, profile: ProfileId, item: Option<ItemId>) {
+        {
+            let mut gate = lock_retirement_gate(&self.retirement);
+            for (id, binding) in &mut gate.tracked_items {
+                if binding.profile == profile && item.is_none_or(|item| item == *id) {
+                    binding.pending_discard = None;
+                }
+            }
+        }
+        let retirement = self.retirement.clone();
+        let delivery = self.event_delivery.clone();
+        let fatal = self.fatal_security_failure.clone();
+        let dispatched = self.run(move || {
+            if !host::try_with_discard_state_erasure(profile, item, move |host| {
+                host.forget_discarded_state(profile, item)
+            }) {
+                fail_native_host_admission(
+                    &delivery,
+                    &retirement,
+                    &fatal,
+                    "discard restoration erasure was not admitted by the engine host",
+                );
+            }
+        });
+        if !dispatched {
+            fail_native_host_admission(
+                &self.event_delivery,
+                &self.retirement,
+                &self.fatal_security_failure,
+                "discard restoration erasure was not admitted by the main event loop",
+            );
+        }
     }
 
     fn print(&self, id: ItemId) -> NativeDispatch {
@@ -2766,6 +2913,31 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
+
+    #[test]
+    fn discard_cancellation_keeps_view_live_and_cannot_authorize_a_replacement() {
+        let mut gate = RetirementGate::default();
+        let id = ItemId::from(401);
+        let profile = ProfileId::from(402);
+        let active = gate.reserve_item(id, profile).unwrap();
+        let probe = DiscardProbeId(1);
+        assert!(gate.begin_discard(id, probe).is_some());
+        assert!(gate.discard_is_current(id, probe, &active));
+        gate.cancel_discard(id, DiscardProbeId(2));
+        assert!(gate.discard_is_current(id, probe, &active));
+        gate.cancel_discard(id, probe);
+        assert!(!gate.discard_is_current(id, probe, &active));
+        assert!(gate.allows_item_token(id, &active));
+        assert!(gate.begin_discard(id, DiscardProbeId(2)).is_some());
+        gate.begin_close(id);
+        gate.finish_close(id);
+        let replacement = gate.reserve_item(id, profile).unwrap();
+        assert!(gate.begin_discard(id, DiscardProbeId(3)).is_some());
+        assert!(!gate.discard_is_current(id, DiscardProbeId(3), &active));
+        assert!(gate.discard_is_current(id, DiscardProbeId(3), &replacement));
+        gate.retire(profile);
+        assert!(!gate.discard_is_current(id, DiscardProbeId(3), &replacement));
+    }
 
     fn test_layout_updates() -> Arc<layout_queue::LatestLayouts<PendingLayout>> {
         Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
@@ -3607,6 +3779,11 @@ mod tests {
                 profile,
                 probe: DiscardProbeId(9),
             },
+            EngineEvent::ViewDiscardRefused {
+                id,
+                profile,
+                probe: DiscardProbeId(9),
+            },
             EngineEvent::NavState {
                 id,
                 can_go_back: true,
@@ -3664,6 +3841,7 @@ mod tests {
                 EngineEvent::SplitChanged { .. }
                     | EngineEvent::ProfileProcessExited { .. }
                     | EngineEvent::ViewDiscarded { .. }
+                    | EngineEvent::ViewDiscardRefused { .. }
             ) {
                 EngineEventIngress::global(event)
             } else {

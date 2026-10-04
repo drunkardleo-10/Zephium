@@ -14,17 +14,37 @@ use super::EngineHost;
 // unload/audio/capture state, while the query itself directly compares form
 // controls with their defaults. This is a data-loss guard, not a capability:
 // it exposes no Rust/native object and returns only a fixed boolean schema.
-// Any hook replacement, excessive state, child frame, or exception becomes
-// `uncertain`, which vetoes discard.
+// Any hook replacement, excessive state, or exception becomes `uncertain`,
+// which vetoes discard. A discarded page reloads when shown again, so only
+// state a reload would lose is protected; ordinary scripted work (network,
+// workers, canvas, history API) is not, and is deliberately left unpatched.
 pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   'use strict';
   var key = '__zephium_discard_safety_v1__';
   if (Object.prototype.hasOwnProperty.call(globalThis, key)) return;
   var uncertain = false;
+  // Inspection that may have missed form or editor state. It matters only once
+  // the user has entered input here: without input there is nothing a reload
+  // could lose that the page did not produce itself.
+  var incomplete = false;
+  var now = Performance.prototype.now;
+  var lastActivity = Reflect.apply(now, performance, []);
+  var lastEdit = -Infinity;
+  var editedEver = false;
+  var EDIT_GRACE_MS = 300000;
+  var MAX_EDITED_ROOTS = 16;
+  var editedRoots = [];
+  var MAX_FOCUSED_FRAMES = 16;
+  var focusedFrames = [];
+  var MAX_DRAWN_CANVASES = 16;
+  var drawnCanvases = [];
   var beforeUnload = [];
   var audioContexts = new Set();
   var captureTracks = new Set();
   var MAX_TRACKED = 4096;
+  // Ordinary article and app pages exceed a few thousand elements. One bounded
+  // walk per probe of a hidden page costs milliseconds.
+  var MAX_SNAPSHOT_ELEMENTS = 50000;
   var MAX_SHADOW_ROOTS = 256;
   var shadowRoots = [];
   var shadowRootSet = new WeakSet();
@@ -51,6 +71,13 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var WeakReference = globalThis.WeakRef;
   var weakDeref = WeakReference && WeakReference.prototype.deref;
   var readyState = captureGetter(Document.prototype, 'readyState');
+  var scrollingElement = captureGetter(Document.prototype, 'scrollingElement');
+  var scrollLeft = captureGetter(Element.prototype, 'scrollLeft');
+  var scrollTop = captureGetter(Element.prototype, 'scrollTop');
+  var historyLength = captureGetter(History.prototype, 'length');
+  var isContentEditable = captureGetter(HTMLElement.prototype, 'isContentEditable');
+  var isConnected = captureGetter(Node.prototype, 'isConnected');
+  var textContent = captureGetter(Node.prototype, 'textContent');
   var shadowRootGetter = captureGetter(Element.prototype, 'shadowRoot');
   var inputType = captureGetter(HTMLInputElement.prototype, 'type');
   var inputValue = captureGetter(HTMLInputElement.prototype, 'value');
@@ -66,6 +93,8 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var mediaPaused = captureGetter(HTMLMediaElement.prototype, 'paused');
   var mediaEnded = captureGetter(HTMLMediaElement.prototype, 'ended');
   var mediaReadyState = captureGetter(HTMLMediaElement.prototype, 'readyState');
+  var mediaMuted = captureGetter(HTMLMediaElement.prototype, 'muted');
+  var mediaVolume = captureGetter(HTMLMediaElement.prototype, 'volume');
   var mediaSrcObject = captureGetter(HTMLMediaElement.prototype, 'srcObject');
   var trackReadyState = globalThis.MediaStreamTrack &&
       captureGetter(MediaStreamTrack.prototype, 'readyState');
@@ -89,7 +118,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
       shadowRoots.length = retained;
     }
     if (shadowRoots.length >= MAX_SHADOW_ROOTS) {
-      uncertain = true;
+      incomplete = true;
       return;
     }
     apply(weakSetAdd, shadowRootSet, [root]);
@@ -113,6 +142,98 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var originalRemove = eventTarget && eventTarget.removeEventListener;
   var wrappedAdd = originalAdd;
   var wrappedRemove = originalRemove;
+  function activity() { lastActivity = apply(now, performance, []); }
+  for (var event of ['input','change','keydown','pointerdown','scroll','visibilitychange']) {
+    apply(originalAdd, document, [event, activity, {capture:true,passive:true}]);
+  }
+  // Events and document.activeElement are retargeted to the outermost shadow
+  // host. Follow focus through open roots and the tracked (also closed) ones
+  // to the element the user is actually in.
+  function hostedRoot(element) {
+    var open = callGetter(shadowRootGetter, element);
+    if (open) return open;
+    for (var i = 0; i < shadowRoots.length; i++) {
+      var root = apply(weakDeref, shadowRoots[i], []);
+      if (root && root.host === element) return root;
+    }
+    return null;
+  }
+  function innermost(element) {
+    for (var depth = 0; element && depth < 32; depth++) {
+      var root = hostedRoot(element);
+      var next = root && root.activeElement;
+      if (!next || next === element) break;
+      element = next;
+    }
+    return element;
+  }
+  function origin(event) {
+    var path = event.composedPath ? event.composedPath() : [];
+    var first = path.length ? path[0] : event.target;
+    return first instanceof Element && hostedRoot(first) ? innermost(first) : first;
+  }
+  function remember(list, max, element) {
+    for (var i = 0; i < list.length; i++) {
+      if (apply(weakDeref, list[i], []) === element) return;
+    }
+    if (list.length >= max) { uncertain = true; return; }
+    apply(arrayPush, list, [new WeakReference(element)]);
+  }
+  function attached(list) {
+    for (var i = 0; i < list.length; i++) {
+      var element = apply(weakDeref, list[i], []);
+      if (element && callGetter(isConnected, element)) return true;
+    }
+    return false;
+  }
+  // Rich editors have no default value to compare with. Remember the edited
+  // editing host and protect it while it still holds text: a sent chat box
+  // empties itself, a closed composer disconnects, an unsent draft stays.
+  function edited(event) {
+    if (!event.isTrusted) return;
+    lastEdit = apply(now, performance, []);
+    editedEver = true;
+    try {
+      var host = origin(event);
+      if (!(host instanceof HTMLElement) || !callGetter(isContentEditable, host)) return;
+      while (host.parentElement && callGetter(isContentEditable, host.parentElement)) {
+        host = host.parentElement;
+      }
+      for (var i = 0; i < editedRoots.length; i++) {
+        if (apply(weakDeref, editedRoots[i], []) === host) return;
+      }
+      if (editedRoots.length >= MAX_EDITED_ROOTS) editedRoots.shift();
+      apply(arrayPush, editedRoots, [new WeakReference(host)]);
+    } catch (_) { uncertain = true; }
+  }
+  for (var event of ['input','change','drop','paste']) {
+    apply(originalAdd, document, [event, edited, {capture:true,passive:true}]);
+  }
+  // Drawing, signatures and game state never fire input events. A canvas
+  // the user pressed on protects its page while it stays attached; most
+  // canvas editors autosave, but nothing here can prove that one did.
+  apply(originalAdd, document, ['pointerdown', function(event) {
+    if (!event.isTrusted) return;
+    try {
+      var target = origin(event);
+      if (target instanceof HTMLCanvasElement) {
+        lastEdit = apply(now, performance, []);
+        editedEver = true;
+        remember(drawnCanvases, MAX_DRAWN_CANVASES, target);
+      }
+    } catch (_) { uncertain = true; }
+  }, {capture:true,passive:true}]);
+  // This script runs only in the main frame. Input inside a child frame is
+  // invisible here, but focus entering it blurs this window with the frame
+  // as the active element. Any such frame protects the page while attached.
+  apply(originalAdd, globalThis, ['blur', function(event) {
+    if (!event.isTrusted || event.target !== globalThis) return;
+    try {
+      var frame = innermost(document.activeElement);
+      if (!(frame instanceof HTMLIFrameElement || frame instanceof HTMLFrameElement)) return;
+      remember(focusedFrames, MAX_FOCUSED_FRAMES, frame);
+    } catch (_) { uncertain = true; }
+  }, {capture:true,passive:true}]);
   function captureOption(options) {
     return options === true || (!!options && typeof options === 'object' && options.capture === true);
   }
@@ -126,7 +247,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
         }
         if (!found) {
           if (beforeUnload.length < MAX_TRACKED) beforeUnload.push([listener, capture]);
-          else uncertain = true;
+          else incomplete = true;
         }
       }
       return apply(originalAdd, this, arguments);
@@ -204,13 +325,17 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     var dirtyForm = false;
     var editable = false;
     var media = false;
+    var mutedOnly = false;
     var audioContext = false;
     var capture = false;
-    var childFrames = false;
+    var frameInput = false;
     var localUncertain = uncertain;
+    var localIncomplete = incomplete;
     try {
+      // Monitoring libraries commonly wrap these again; only beforeunload
+      // tracking depends on them, and beforeunload is gated on input.
       if (eventTarget.addEventListener !== wrappedAdd || eventTarget.removeEventListener !== wrappedRemove) {
-        localUncertain = true;
+        localIncomplete = true;
       }
       for (var h = 0; h < mediaHooks.length; h++) {
         var hook = mediaHooks[h];
@@ -220,38 +345,38 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
         if (globalThis[audioHooks[a][0]] !== audioHooks[a][1]) localUncertain = true;
       }
       if (!elementProto || elementProto.attachShadow !== wrappedAttachShadow) {
-        localUncertain = true;
+        localIncomplete = true;
       }
 
       // One bounded snapshot replaces full-document querySelectorAll arrays
       // and repeated shadow-tree scans. The former '*' query allocated every
-      // element before enforcing MAX_TRACKED. Oversized/uncertain documents
-      // remain protected; a partial scan can never authorize discard.
+      // element before enforcing a cap. A partial scan never proves a form
+      // clean, so it protects any document the user has entered input into.
       if (!createTreeWalker || !walkerNext || !elementMatches || !weakDeref) return 256;
       var snapshotElements = [];
       function append(scope) {
         var walker = apply(createTreeWalker, document, [scope, 1]);
         var node;
         while ((node = apply(walkerNext, walker, []))) {
-          if (snapshotElements.length >= MAX_TRACKED) return false;
+          if (snapshotElements.length >= MAX_SNAPSHOT_ELEMENTS) return false;
           apply(arrayPush, snapshotElements, [node]);
-          // Parser-created open roots may bypass attachShadow. Inspect them
-          // too, but keep the existing uncertainty veto for their discovery.
+          // Parser-created open roots bypass attachShadow and imply closed
+          // ones may exist too. Inspect the open ones and mark the scan partial.
           var untracked = callGetter(shadowRootGetter, node);
           if (untracked && !apply(weakSetHas, shadowRootSet, [untracked])) {
-            localUncertain = true;
+            localIncomplete = true;
             rememberShadowRoot(untracked);
           }
         }
         return true;
       }
-      if (!append(document)) return 256;
-      for (var r = 0; r < shadowRoots.length; r++) {
+      var complete = append(document);
+      for (var r = 0; complete && r < shadowRoots.length; r++) {
         var root = apply(weakDeref, shadowRoots[r], []);
-        if (root && !append(root)) return 256;
+        if (root) complete = append(root);
       }
-      // A live root beyond the tracking cap is always a veto, including one
-      // discovered while walking the current snapshot.
+      // Includes a live root beyond the tracking cap discovered just now.
+      localIncomplete = localIncomplete || !complete || incomplete;
       localUncertain = localUncertain || uncertain;
       function collect(selector) {
         var values = [];
@@ -261,11 +386,11 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
         return values;
       }
       if (collect('template[shadowrootmode],template[shadowroot]').length !== 0) {
-        localUncertain = true;
+        localIncomplete = true;
       }
 
       var controls = collect('input,textarea,select');
-      if (controls.length > MAX_TRACKED) localUncertain = true;
+      if (controls.length > MAX_TRACKED) localIncomplete = true;
       for (var i = 0; i < controls.length && i < MAX_TRACKED && !dirtyForm; i++) {
         var control = controls[i];
         if (control instanceof HTMLInputElement) {
@@ -283,7 +408,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
           dirtyForm = callGetter(textareaValue, control) !== callGetter(textareaDefaultValue, control);
         } else if (control instanceof HTMLSelectElement) {
           var options = callGetter(selectOptions, control);
-          if (options.length > MAX_TRACKED) localUncertain = true;
+          if (options.length > MAX_TRACKED) localIncomplete = true;
           for (var o = 0; o < options.length && o < MAX_TRACKED; o++) {
             if (callGetter(optionSelected, options[o]) !== callGetter(optionDefaultSelected, options[o])) {
               dirtyForm = true; break;
@@ -292,14 +417,23 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
         }
       }
 
-      editable = document.designMode === 'on' ||
-          collect('[contenteditable]:not([contenteditable="false" i])').length !== 0;
+      editable = document.designMode === 'on';
+      for (var e = 0; e < editedRoots.length && !editable; e++) {
+        var root = apply(weakDeref, editedRoots[e], []);
+        editable = !!root && callGetter(isConnected, root) &&
+            String(callGetter(textContent, root)).trim() !== '';
+      }
       var elements = collect('audio,video');
-      if (elements.length > MAX_TRACKED) localUncertain = true;
+      if (elements.length > MAX_TRACKED) localIncomplete = true;
+      var playing = false;
       for (var m = 0; m < elements.length && m < MAX_TRACKED; m++) {
         var element = elements[m];
+        // Muted autoplay loses nothing on reload; audible playback does.
         if (!callGetter(mediaPaused, element) && !callGetter(mediaEnded, element) &&
-            callGetter(mediaReadyState, element) > 0) media = true;
+            callGetter(mediaReadyState, element) > 0) {
+          playing = true;
+          if (!callGetter(mediaMuted, element) && callGetter(mediaVolume, element) > 0) media = true;
+        }
         var stream = callGetter(mediaSrcObject, element);
         if (stream && getTracks) {
           var tracks = apply(getTracks, stream, []);
@@ -310,19 +444,47 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
         if (callGetter(contextState, context) === 'running') audioContext = true;
       });
       captureTracks.forEach(function(track) { if (liveTrack(track)) capture = true; });
-      childFrames = collect('iframe,frame').length !== 0;
+      // Native playback state cannot tell muted from audible. A complete scan
+      // of a frameless document whose playing media is all muted explains it.
+      mutedOnly = playing && !media && complete && elements.length <= MAX_TRACKED &&
+          collect('iframe,frame').length === 0;
+      // Focus still inside a child frame needs no observed transition.
+      var active = innermost(document.activeElement);
+      frameInput = active instanceof HTMLIFrameElement || active instanceof HTMLFrameElement ||
+          attached(focusedFrames);
+      if (attached(drawnCanvases)) editable = true;
     } catch (_) { localUncertain = true; }
 
     // Fixed primitive bitmask: ready=bit0; every protection/uncertainty fact
-    // occupies bits1..8. Native JSON conversion can therefore produce at
-    // most three ASCII bytes and never traverses a page-controlled toJSON.
+    // occupies bits1..11; bit 1024 is informational (playback is muted, see
+    // above) and never vetoes on its own. Native JSON conversion
+    // can therefore produce at most four ASCII bytes and never traverses a
+    // page-controlled toJSON. Media inside child frames is covered natively.
+    var at = apply(now, performance, []);
+    // Many sites register beforeunload unconditionally. It guards something
+    // only once the user has entered input into this document.
+    // A script-filled field or an editor the user never typed into reloads
+    // to the same state, so user-data facts all require input first.
     return (callGetter(readyState, document) === 'complete' ? 1 : 0) |
-      ((beforeUnload.length !== 0 || typeof globalThis.onbeforeunload === 'function') ? 2 : 0) |
-      (dirtyForm ? 4 : 0) | (editable ? 8 : 0) | (media ? 16 : 0) |
-      (audioContext ? 32 : 0) | (capture ? 64 : 0) |
-      (childFrames ? 128 : 0) | (localUncertain ? 256 : 0);
+      ((editedEver && (beforeUnload.length !== 0 || typeof globalThis.onbeforeunload === 'function')) ? 2 : 0) |
+      ((editedEver && dirtyForm) ? 4 : 0) | ((editedEver && editable) ? 8 : 0) | (media ? 16 : 0) |
+      (audioContext ? 32 : 0) | (capture ? 64 : 0) | (frameInput ? 128 : 0) |
+      ((localUncertain || (editedEver && localIncomplete)) ? 256 : 0) |
+      (at - lastActivity < 1000 ? 512 : 0) | (mutedOnly ? 1024 : 0) |
+      (at - lastEdit < EDIT_GRACE_MS ? 2048 : 0);
   }
   try {
+    Object.defineProperty(report, 'top', {value: function(allowBootstrap) {
+      var mask = report();
+      if ((mask & ~1024) !== 1) return mask;
+      try {
+        var scroller = callGetter(scrollingElement, document);
+        if (!scroller || callGetter(scrollLeft, scroller) !== 0 || callGetter(scrollTop, scroller) !== 0) return 256;
+        var length = callGetter(historyLength, history);
+        return length === 1 || (allowBootstrap === true && length === 2) ? mask : 256;
+      } catch (_) { return 256; }
+    }, writable:false, configurable:false});
+    Object.freeze(report);
     Object.defineProperty(globalThis, key, {
       value: report, writable: false, configurable: false, enumerable: false
     });
@@ -339,6 +501,18 @@ pub(super) const DISCARD_SAFETY_QUERY_JS: &str = r#"(function(){
     return 256;
   }
 })()"#;
+
+#[cfg(target_os = "windows")]
+pub(super) const DISCARD_TOP_QUERY_JS: &str =
+    "(()=>{try{return globalThis.__zephium_discard_safety_v1__.top(false)}catch(_){return 256}})()";
+#[cfg(target_os = "windows")]
+pub(super) const DISCARD_BOOTSTRAP_TOP_QUERY_JS: &str =
+    "(()=>{try{return globalThis.__zephium_discard_safety_v1__.top(true)}catch(_){return 256}})()";
+
+// Suspension keeps every byte of page state, so only audible or capturing
+// work vetoes it; readiness, edits and uncertainty matter only to discard.
+#[cfg(target_os = "windows")]
+pub(super) const SUSPEND_ACTIVITY_QUERY_JS: &str = "(()=>{try{const mask=globalThis.__zephium_discard_safety_v1__();return typeof mask==='number'?((mask&(16|32|64))?mask:1):256}catch(_){return 256}})()";
 
 // Fetch and decode entirely inside the untrusted site renderer. The callback
 // surface is a fixed 32x32 RGBA raster; privileged Rust/chrome never parse a
@@ -1373,10 +1547,10 @@ mod tests {
             "shadowRoots.length >= MAX_SHADOW_ROOTS",
             "Document.prototype.createTreeWalker",
             "new WeakReference(root)",
-            "snapshotElements.length >= MAX_TRACKED",
+            "snapshotElements.length >= MAX_SNAPSHOT_ELEMENTS",
             "template[shadowrootmode]",
             "collect('input,textarea,select')",
-            "collect('[contenteditable]",
+            "callGetter(isContentEditable, host)",
             "collect('audio,video')",
         ] {
             assert!(

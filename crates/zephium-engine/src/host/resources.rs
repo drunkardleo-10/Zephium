@@ -15,10 +15,10 @@ use std::rc::Rc;
 /// capacity.
 #[cfg(feature = "agentic-browser")]
 pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
-    51 + if cfg!(target_os = "windows") { 9 } else { 0 };
+    83 + if cfg!(target_os = "windows") { 9 } else { 0 };
 #[cfg(not(feature = "agentic-browser"))]
 pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
-    43 + if cfg!(target_os = "windows") { 9 } else { 0 };
+    75 + if cfg!(target_os = "windows") { 9 } else { 0 };
 pub(super) const MAX_NATIVE_TEARDOWN_DEBTS: usize = 8;
 #[cfg(feature = "agentic-browser")]
 pub(super) const MAX_AGENT_CONTEXT_RESOURCES: usize = 8;
@@ -68,7 +68,9 @@ impl NativeResourceClass {
 
     pub(super) const fn limit(self) -> usize {
         match self {
-            Self::Tab => 32,
+            // A backstop, not a memory budget: OS memory pressure governs
+            // residency long before this many renderers are alive.
+            Self::Tab => 64,
             Self::WarmSpare => 1,
             Self::TeardownDebt => MAX_NATIVE_TEARDOWN_DEBTS,
             #[cfg(feature = "agentic-browser")]
@@ -316,7 +318,7 @@ mod tests {
 
     #[test]
     fn class_budgets_are_disjoint_and_sum_to_the_hard_ceiling() {
-        assert_eq!(NativeResourceClass::Tab.limit(), 32);
+        assert_eq!(NativeResourceClass::Tab.limit(), 64);
         assert_eq!(NativeResourceClass::WarmSpare.limit(), 1);
         assert_eq!(NativeResourceClass::TeardownDebt.limit(), 8);
         #[cfg(feature = "agentic-browser")]

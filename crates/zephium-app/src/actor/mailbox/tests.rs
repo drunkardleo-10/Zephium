@@ -14,6 +14,84 @@ fn test_shutdown_deadline() -> std::time::Instant {
 }
 
 #[test]
+fn sidebar_guide_cleanup_is_reserved_and_not_replaced_by_preview() {
+    assert!(command_is_critical(&Command::SidebarResizeGuide(None)));
+    let mut queue = VecDeque::from([Command::SidebarResizeGuide(None)]);
+    assert!(enqueue(
+        &mut queue,
+        Command::SidebarResizeGuide(Some(310.0)),
+        2,
+        false
+    )
+    .is_ok());
+    assert_eq!(queue.len(), 2);
+    assert!(matches!(
+        queue.front(),
+        Some(Command::SidebarResizeGuide(None))
+    ));
+}
+
+#[test]
+fn foreground_capacity_deadlines_are_bounded_and_wake_before_maintenance() {
+    let queue = CommandQueue::new();
+    let future = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    for n in 0..(crate::shell::MAX_VISIBLE_PANES + 4) {
+        queue.schedule_view_capacity(ItemId::from(n as u128 + 1), future);
+    }
+    assert_eq!(
+        queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .capacity_deadlines
+            .len(),
+        crate::shell::MAX_VISIBLE_PANES
+    );
+    let id = ItemId::from(1);
+    queue.schedule_view_capacity(id, std::time::Instant::now());
+    assert!(
+        matches!(queue.wait_for_timer(future), TimerWake::ViewCapacity { id: ready } if ready == id)
+    );
+    queue.cancel_view_capacity(ItemId::from(2));
+    assert_eq!(
+        queue
+            .inner
+            .timer_state
+            .lock()
+            .unwrap()
+            .capacity_deadlines
+            .len(),
+        crate::shell::MAX_VISIBLE_PANES - 2
+    );
+}
+
+#[test]
+fn normal_memory_pressure_replaces_warning_across_fifo_at_capacity() {
+    use zephium_core::ports::engine::MemoryPressure;
+    let mut queue = VecDeque::from([
+        Command::SetMemoryPressure(MemoryPressure::Critical),
+        Command::Open,
+    ]);
+    assert!(command_is_critical(&Command::SetMemoryPressure(
+        MemoryPressure::Normal
+    )));
+    assert!(enqueue(
+        &mut queue,
+        Command::SetMemoryPressure(MemoryPressure::Normal),
+        2,
+        true
+    )
+    .is_ok());
+    assert_eq!(queue.len(), 2);
+    assert!(matches!(queue.front(), Some(Command::Open)));
+    assert!(matches!(
+        queue.back(),
+        Some(Command::SetMemoryPressure(MemoryPressure::Normal))
+    ));
+}
+
+#[test]
 fn user_content_settlements_coalesce_by_scope_not_generation() {
     let scope = ContentScope::Profile(ProfileId::from(60));
     let event = |generation| EngineEvent::UserContentSettled {

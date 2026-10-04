@@ -517,13 +517,17 @@ impl Shell {
             self.cancel_scoped_search(&session);
         }
         if let Some(PendingDiscardProbe::Closing {
+            probe,
             recreate,
             deferred_navigation,
+            reload_on_refusal,
             ..
         }) = self.residency.discard_probes.get_mut(&id)
         {
             *recreate = true;
             *deferred_navigation = Some(input);
+            *reload_on_refusal = false;
+            self.engine.cancel_discard(id, *probe);
             return operation_result(
                 OperationOutcome::Deferred,
                 OperationReason::DiscardCompletionPending,
@@ -543,6 +547,15 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         if self.recreate_after_inflight_discard(id) {
+            if let Some(PendingDiscardProbe::Closing {
+                reload_on_refusal,
+                deferred_navigation,
+                ..
+            }) = self.residency.discard_probes.get_mut(&id)
+            {
+                *reload_on_refusal = true;
+                *deferred_navigation = None;
+            }
             return operation_result(
                 OperationOutcome::Deferred,
                 OperationReason::DiscardCompletionPending,
@@ -743,6 +756,7 @@ impl Shell {
         }
         self.tab_preferences.apply(&key, &value);
         self.apply_time_setting(&key, &value);
+        self.apply_performance_setting(&key, &value);
         // This projection is downstream of truthful store-queue admission.
         // The desktop composition root applies native theme state from this
         // signal, never optimistically from the IPC request itself.

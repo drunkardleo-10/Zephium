@@ -30,6 +30,7 @@ enum CoalescedKey {
     ChromePresentation(ItemId),
     PresentationFallback(ItemId),
     DiscardProbeTimeout(ItemId),
+    ViewCapacityRetry(ItemId),
     BlockerReady(ProfileId),
     BlockerStoreReady(ProfileId),
     BlockerPreferenceRetry(ProfileId),
@@ -53,7 +54,10 @@ enum CoalescedKey {
     Split(zephium_core::ids::WindowId),
     WindowSize,
     WindowVisible,
+    MemoryPressure,
     SidebarWidth,
+    SidebarGuide,
+    SidebarGuideEnd,
     WorkPaneRect,
     DragOver,
     DividerDrag,
@@ -109,7 +113,7 @@ const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_I
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
-    + 3
+    + 5 // Includes replaceable memory-pressure and guide-cleanup facts.
     + cfg!(feature = "work-execution") as usize;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
 const LIFECYCLE_COMMAND_CAPACITY: usize = COMMAND_QUEUE_CAPACITY - 1;
@@ -139,6 +143,7 @@ pub(crate) struct TimerState {
     favicon_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, u8)>,
     pub(crate) presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
     discard_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, DiscardProbeId)>,
+    capacity_deadlines: std::collections::HashMap<ItemId, std::time::Instant>,
     profile_deletion_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_preference_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_catalog_deadline: Option<(std::time::Instant, u64, u8)>,
@@ -175,6 +180,9 @@ pub(crate) enum TimerWake {
     DiscardProbe {
         id: ItemId,
         probe: DiscardProbeId,
+    },
+    ViewCapacity {
+        id: ItemId,
     },
     ProfileDeletion {
         profile: ProfileId,
@@ -222,6 +230,8 @@ const _: () = assert!(std::mem::size_of::<TryPushError>() <= 160);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveryKey {
     RuntimeRestart,
+    MemoryPressure,
+    SidebarGuideEnd,
     Url(ItemId),
     Presentation(ItemId),
     ChromePresentation(ItemId),
@@ -241,6 +251,8 @@ enum RecoveryKey {
 fn recovery_key(command: &Command) -> Option<RecoveryKey> {
     match command {
         Command::Engine(EngineEvent::RuntimeRestartRequired) => Some(RecoveryKey::RuntimeRestart),
+        Command::SetMemoryPressure(_) => Some(RecoveryKey::MemoryPressure),
+        Command::SidebarResizeGuide(None) => Some(RecoveryKey::SidebarGuideEnd),
         Command::Engine(EngineEvent::UrlChanged { id, .. }) => Some(RecoveryKey::Url(*id)),
         Command::Engine(
             EngineEvent::PresentationPending { id, .. } | EngineEvent::PresentationReady { id, .. },
@@ -256,7 +268,8 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
         Command::Engine(
             EngineEvent::ViewCreationFailed { id }
             | EngineEvent::Crashed { id }
-            | EngineEvent::ViewDiscarded { id, .. },
+            | EngineEvent::ViewDiscarded { id, .. }
+            | EngineEvent::ViewDiscardRefused { id, .. },
         ) => Some(RecoveryKey::ViewState(*id)),
         Command::Engine(EngineEvent::ProfileProcessExited { profile, .. }) => {
             Some(RecoveryKey::Profile(*profile))
@@ -501,6 +514,7 @@ impl CommandQueue {
         timer.favicon_deadlines.clear();
         timer.presentation_deadlines.clear();
         timer.discard_deadlines.clear();
+        timer.capacity_deadlines.clear();
         timer.profile_deletion_deadlines.clear();
         timer.blocker_preference_deadlines.clear();
         timer.blocker_catalog_deadline = None;
@@ -729,6 +743,33 @@ impl CommandQueue {
         timer.discard_deadlines.remove(&id);
     }
 
+    pub(crate) fn schedule_view_capacity(&self, id: ItemId, deadline: std::time::Instant) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        // Admission owns at most the visible-pane count of pending requests.
+        if timer.capacity_deadlines.contains_key(&id)
+            || timer.capacity_deadlines.len() < crate::shell::MAX_VISIBLE_PANES
+        {
+            timer.capacity_deadlines.insert(id, deadline);
+            self.inner.timer_ready.notify_one();
+        }
+    }
+
+    pub(crate) fn cancel_view_capacity(&self, id: ItemId) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        timer.capacity_deadlines.remove(&id);
+    }
+
     pub(crate) fn schedule_profile_deletion(
         &self,
         profile: ProfileId,
@@ -896,6 +937,17 @@ impl CommandQueue {
                     return TimerWake::DiscardProbe { id, probe };
                 }
             }
+            let next_capacity = timer
+                .capacity_deadlines
+                .iter()
+                .min_by_key(|(_, deadline)| **deadline)
+                .map(|(id, deadline)| (*id, *deadline));
+            if let Some((id, deadline)) = next_capacity {
+                if now >= deadline {
+                    timer.capacity_deadlines.remove(&id);
+                    return TimerWake::ViewCapacity { id };
+                }
+            }
             let next_profile_deletion = timer
                 .profile_deletion_deadlines
                 .iter()
@@ -963,6 +1015,9 @@ impl CommandQueue {
             if let Some((_, discard, _)) = next_discard {
                 deadline = deadline.min(discard);
             }
+            if let Some((_, capacity)) = next_capacity {
+                deadline = deadline.min(capacity);
+            }
             if let Some((_, profile_deletion, _)) = next_profile_deletion {
                 deadline = deadline.min(profile_deletion);
             }
@@ -1004,6 +1059,18 @@ fn enqueue(
     hard_capacity: usize,
     critical: bool,
 ) -> Result<(), Command> {
+    // Pressure is current OS state, not a user operation. Retain exactly the
+    // latest fact across FIFO boundaries, including recovery to Normal.
+    if matches!(command, Command::SetMemoryPressure(_)) {
+        if let Some(index) = commands
+            .iter()
+            .position(|queued| matches!(queued, Command::SetMemoryPressure(_)))
+        {
+            commands.remove(index);
+            commands.push_back(command);
+            return Ok(());
+        }
+    }
     // Work wakes carry no ordered state; the actual bounded slots are read
     // after every shell command. One wake suffices across user FIFO barriers.
     #[cfg(feature = "work-execution")]
@@ -1073,6 +1140,8 @@ fn command_is_critical(command: &Command) -> bool {
     matches!(
         command,
         Command::BlockerReady(_)
+            | Command::SetMemoryPressure(_)
+            | Command::SidebarResizeGuide(None)
             | Command::BlockerStoreReady(_)
             | Command::ProfileDeletionReady(_)
             | Command::PagePermissionCatalogLoaded { .. }
@@ -1103,6 +1172,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ProfileProcessExited { .. }
                     | EngineEvent::Crashed { .. }
                     | EngineEvent::ViewDiscarded { .. }
+                    | EngineEvent::ViewDiscardRefused { .. }
                     | EngineEvent::SplitChanged { .. }
             )
     )
@@ -1129,7 +1199,10 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::Engine(event) => CoalescedKey::of(event),
         Command::SetWindowSize(_) => Some(CoalescedKey::WindowSize),
         Command::SetWindowVisible(_) => Some(CoalescedKey::WindowVisible),
+        Command::SetMemoryPressure(_) => Some(CoalescedKey::MemoryPressure),
         Command::SetSidebarWidth(..) => Some(CoalescedKey::SidebarWidth),
+        Command::SidebarResizeGuide(Some(_)) => Some(CoalescedKey::SidebarGuide),
+        Command::SidebarResizeGuide(None) => Some(CoalescedKey::SidebarGuideEnd),
         Command::WorkPaneSetRect { .. } => Some(CoalescedKey::WorkPaneRect),
         Command::DragOver { .. } => Some(CoalescedKey::DragOver),
         Command::DividerDrag { .. } => Some(CoalescedKey::DividerDrag),
@@ -1140,6 +1213,7 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
             Some(CoalescedKey::ChromePresentation(*id))
         }
         Command::DiscardProbeTimeout { id, .. } => Some(CoalescedKey::DiscardProbeTimeout(*id)),
+        Command::ViewCapacityRetry(id) => Some(CoalescedKey::ViewCapacityRetry(*id)),
         Command::BlockerReady(profile) => Some(CoalescedKey::BlockerReady(*profile)),
         Command::BlockerStoreReady(profile) => Some(CoalescedKey::BlockerStoreReady(*profile)),
         Command::BlockerPreferenceRetry { profile, .. } => {

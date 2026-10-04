@@ -133,7 +133,7 @@ use zephium_ipc::{
 
 // More simultaneous native renderers are neither usable in the current tiled
 // layout nor safe to reconstruct synchronously after a restore/process loss.
-const MAX_VISIBLE_PANES: usize = 8;
+pub(crate) const MAX_VISIBLE_PANES: usize = 8;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(not(test))]
@@ -435,7 +435,7 @@ impl Shell {
             presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
-            residency: ResidencyState::default(),
+            residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
             browser_page: None,
@@ -799,6 +799,17 @@ impl Shell {
                 }
                 let _ = self.relayout_with(animate);
             }
+            Command::SidebarResizeGuide(width) => {
+                if let Some(win) = self.windows.focused() {
+                    let zone = width.filter(|width| width.is_finite()).map(|width| {
+                        let padding = win.metrics.padding;
+                        let x = (padding + zephium_core::layout::clamp_sidebar_width(width) - 2.0)
+                            .min((win.size.width - padding - 2.0).max(padding));
+                        Rect::new(x, padding, 2.0, (win.size.height - 2.0 * padding).max(0.0))
+                    });
+                    let _ = self.engine.set_resize_guide(win.id, zone);
+                }
+            }
             Command::DownloadCall {
                 expected_profile,
                 call,
@@ -1097,6 +1108,7 @@ impl Shell {
                 applied,
             ),
             Command::DiscardProbeTimeout { id, probe } => self.on_discard_probe_timeout(id, probe),
+            Command::ViewCapacityRetry(id) => self.on_view_capacity_retry(id),
             Command::ProfileDeletionReady(profile) => {
                 self.consume_profile_deletion_outcome(profile)
             }
@@ -1168,6 +1180,7 @@ impl Shell {
             } => self.on_time_report(profile, report, done),
             Command::SetAppActive(active) => self.set_app_active(active),
             Command::SetSystemAwake(awake) => self.set_system_awake(awake),
+            Command::SetMemoryPressure(pressure) => self.on_memory_pressure(pressure),
             Command::FocusWake => self.focus_wake(),
             // Accepted only through `Command::Operation`.
             Command::Focus(_) => {}
@@ -1243,7 +1256,12 @@ impl Shell {
                 if work.begin_wait() {
                     crate::work_trace::record(format_args!(
                         "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
-                        lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+                        lane.live,
+                        lane.settled,
+                        lane.lost,
+                        lane.queued,
+                        lane.group_failed,
+                        lane.group_sealed
                     ));
                 }
                 self.queued_pages.push_back(work);
@@ -1437,6 +1455,7 @@ impl Shell {
         crate::work_commands::shutdown();
         #[cfg(feature = "work-execution")]
         let lane = self.page_lane();
+        #[cfg(feature = "work-execution")]
         for mut page in std::mem::take(&mut self.queued_pages) {
             page.refuse(
                 crate::work_resources::product::RetainedRefusal::Discarded,

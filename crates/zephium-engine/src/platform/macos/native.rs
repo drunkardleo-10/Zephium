@@ -255,6 +255,18 @@ pub fn webkit(view: &wry::WebView) -> objc2::rc::Retained<objc2_web_kit::WKWebVi
     unsafe { objc2::rc::Retained::cast_unchecked(view.webview()) }
 }
 
+pub(crate) fn set_warm_spare_layout(webview: &wry::WebView, spare: bool) {
+    use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
+    // A zero-sized spare must flex its margins, not its dimensions. Otherwise
+    // AppKit derives a minimum content size from its fixed launch-size margins,
+    // preventing the entire window from shrinking below its initial dimensions.
+    webkit(webview).setAutoresizingMask(if spare {
+        Mask::ViewMaxXMargin | Mask::ViewMinYMargin
+    } else {
+        Mask::ViewWidthSizable | Mask::ViewHeightSizable
+    });
+}
+
 pub fn configure(
     webview: &wry::WebView,
     radius: f64,
@@ -351,7 +363,13 @@ pub fn set_media_suspended(view: &wry::WebView, suspended: bool) {
 /// Cross-check renderer heuristics with WebKit's public media playback and
 /// capture state. Playback is asynchronous; the caller's existing bounded
 /// deadline handles a missing native completion without retaining the view.
-pub fn query_document_activity(view: &wry::WebView, done: impl FnOnce(bool) + 'static) -> bool {
+/// `None` while capturing or once the view is gone; otherwise whether media
+/// is playing. WebKit reports muted playback as playing too, so callers pair
+/// this with the renderer's report before treating playback as a veto.
+pub fn query_document_playback(
+    view: &wry::WebView,
+    done: impl FnOnce(Option<bool>) + 'static,
+) -> bool {
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -363,19 +381,59 @@ pub fn query_document_activity(view: &wry::WebView, done: impl FnOnce(bool) + 's
             || wk.microphoneCaptureState() != WKMediaCaptureState::None
     };
     if capturing {
-        done(false);
+        done(None);
         return true;
     }
 
     let completion = Rc::new(RefCell::new(Some(done)));
     let callback_completion = completion.clone();
+    let weak = objc2::rc::Weak::from_retained(&wk);
     let callback = block2::RcBlock::new(move |state: WKMediaPlaybackState| {
         if let Some(done) = callback_completion.borrow_mut().take() {
-            done(state != WKMediaPlaybackState::Playing);
+            let still_idle = weak.load().is_some_and(|page| unsafe {
+                page.cameraCaptureState() == WKMediaCaptureState::None
+                    && page.microphoneCaptureState() == WKMediaCaptureState::None
+            });
+            done(still_idle.then_some(state == WKMediaPlaybackState::Playing));
         }
     });
     unsafe { wk.requestMediaPlaybackStateWithCompletionHandler(&callback) };
     true
+}
+
+/// Hidden pages are throttled by default and suspended once dormant. WebKit
+/// keeps a page running while it is audible or capturing, whatever this says,
+/// and resumes it as soon as it becomes visible.
+pub(crate) fn set_background_suspension(view: &wry::WebView, suspend: bool) {
+    use objc2_web_kit::WKInactiveSchedulingPolicy as Policy;
+    let target = if suspend {
+        Policy::Suspend
+    } else {
+        Policy::Throttle
+    };
+    let page = webkit(view);
+    // SAFETY: main-thread WebKit access; each view owns its preferences
+    // object, so this changes only this page's background scheduling.
+    unsafe {
+        let preferences = page.configuration().preferences();
+        if preferences.inactiveSchedulingPolicy() != target {
+            preferences.setInactiveSchedulingPolicy(target);
+        }
+    }
+}
+
+pub(crate) fn native_discard_idle(view: &wry::WebView) -> bool {
+    use objc2_web_kit::WKMediaCaptureState;
+    let page = webkit(view);
+    page.isHiddenOrHasHiddenAncestor()
+        && page
+            .window()
+            .is_none_or(|window| window.attachedSheet().is_none())
+        && unsafe {
+            !page.isLoading()
+                && page.cameraCaptureState() == WKMediaCaptureState::None
+                && page.microphoneCaptureState() == WKMediaCaptureState::None
+        }
 }
 
 pub fn add_user_script(

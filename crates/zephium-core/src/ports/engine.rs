@@ -16,6 +16,15 @@ use crate::permissions::{
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
 
+/// OS memory pressure, independent of tab count or process RSS estimates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemoryPressure {
+    #[default]
+    Normal,
+    Warning,
+    Critical,
+}
+
 /// A prepared extension package the user has consented to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebExtensionLoad {
@@ -694,6 +703,10 @@ pub trait Engine {
         region: Option<Rect>,
     ) -> NativeDispatch;
     fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch;
+    /// A transient guide in window coordinates; never changes pane geometry.
+    fn set_resize_guide(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Asks the next content layout applied to `window` to move rather than
     /// jump, because it follows a deliberate change of the window's shape
     /// and not a resize. Consumed by that layout whether or not it moved
@@ -723,10 +736,16 @@ pub trait Engine {
     /// must correlate `probe` with `EngineEvent::DiscardSafety` and recheck
     /// visibility/loading state before closing the view.
     fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool;
-    /// Retires the exact live view after a positive probe. Completion arrives
-    /// only after native destruction and the same-id lifecycle gate are both
-    /// settled, allowing lazy recreation without racing an asynchronous close.
+    /// Refreshes safety and prepares restoration before retiring a probed view.
+    /// Refusal keeps the view live; successful completion arrives only after
+    /// native destruction. False means admission failed without retirement.
     fn discard_view(&self, id: ItemId, probe: DiscardProbeId) -> bool;
+    /// Synchronously cancels this exact pending discard before retirement.
+    /// Its eventual terminal event still settles the caller's closing state.
+    fn cancel_discard(&self, _id: ItemId, _probe: DiscardProbeId) {}
+    /// Erases volatile restoration data on logical close or browsing-data deletion.
+    /// None clears the profile; this never closes an active page.
+    fn forget_discarded_state(&self, _profile: ProfileId, _item: Option<ItemId>) {}
     fn print(&self, id: ItemId) -> NativeDispatch;
     /// Atomically replaces one ownership scope's desired injected content.
     /// Queue admission is not native application; the terminal outcome is
@@ -748,9 +767,15 @@ pub trait Engine {
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}
     /// Hidden views the shell's idle policy wants suspended. The engine
-    /// suspends where it has a primitive (WebView2) and resumes implicitly
-    /// when a view becomes visible again.
+    /// suspends where it has a primitive (WebView2, WebKit scheduling policy)
+    /// and resumes implicitly when a view becomes visible again.
     fn set_dormant(&self, _ids: Vec<ItemId>) {}
+    /// Whether `set_dormant` actually suspends hidden renderers here.
+    fn suspends_hidden_views(&self) -> bool {
+        false
+    }
+    /// Drops speculative resources during OS pressure; never evicts user work.
+    fn set_memory_pressure(&self, _pressure: MemoryPressure) {}
     /// Replaces one profile's Shell-owned logical window/tab routing facts.
     ///
     /// This projection is deliberately incapable of creating a native view.
@@ -1190,6 +1215,13 @@ pub enum EngineEvent {
         can_discard: bool,
     },
     ViewDiscarded {
+        id: ItemId,
+        profile: ProfileId,
+        probe: DiscardProbeId,
+    },
+    /// Final native safety/restoration checks vetoed a requested discard.
+    /// The exact resident view remains alive; this is not a close acknowledgement.
+    ViewDiscardRefused {
         id: ItemId,
         profile: ProfileId,
         probe: DiscardProbeId,

@@ -151,6 +151,7 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return NativeWork::default();
         }
+        self.forget_removed_tab_state(id);
         self.native_openers.remove(&id);
         // An Essential is kept, not closed: the page ends and the site stays.
         let kept = self.kept_slot(id);
@@ -189,9 +190,9 @@ impl Shell {
             self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Closing { .. })
         ) {
-            // Native destruction is already admitted. Clear the logical view
-            // before `remove` so it does not issue a second same-id close.
-            self.items.mark_view_discarded(id);
+            // A final native veto may still retain this view. Explicit close
+            // owns ordinary retirement even while a discard is being checked.
+            self.cancel_discard_probe(id);
             self.residency.discard_probes.remove(&id);
             if let Some(queue) = &self.self_queue {
                 queue.cancel_discard_probe(id);
@@ -325,6 +326,7 @@ impl Shell {
             let _ = self.close(id);
             return;
         }
+        self.forget_removed_tab_state(id);
         let affected = self
             .windows
             .iter()
@@ -342,8 +344,8 @@ impl Shell {
             self.residency.discard_probes.get(&id),
             Some(PendingDiscardProbe::Closing { .. })
         ) {
-            // As in `close`: native destruction is already admitted.
-            self.items.mark_view_discarded(id);
+            // Explicit close also retires a view whose discard was vetoed.
+            self.cancel_discard_probe(id);
             self.residency.discard_probes.remove(&id);
             if let Some(queue) = &self.self_queue {
                 queue.cancel_discard_probe(id);
@@ -369,6 +371,19 @@ impl Shell {
             }
         }
         let _ = self.commit(effects);
+    }
+
+    fn forget_removed_tab_state(&self, id: ItemId) {
+        let mut pending = vec![id];
+        for _ in 0..zephium_core::session::MAX_SESSION_ITEMS {
+            let Some(item) = pending.pop() else {
+                break;
+            };
+            if let Some(profile) = self.profile_of_item(item) {
+                self.engine.forget_discarded_state(profile, Some(item));
+            }
+            pending.extend_from_slice(self.items.children(item));
+        }
     }
 
     /// Restores the newest closed tab owned by the focused profile and space.
@@ -545,6 +560,7 @@ impl Shell {
             let _ = self.items.remove(child);
             return;
         }
+        self.record_view_creation(child);
         self.items.set_popup_blocked(source, false);
         self.project_tab(source);
         self.native_openers.insert(

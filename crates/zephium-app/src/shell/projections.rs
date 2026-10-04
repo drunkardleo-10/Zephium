@@ -412,6 +412,7 @@ impl Shell {
             view.can_go_back = false;
             view.can_go_forward = false;
             view.icon = None;
+            view.availability = None;
         }
         view
     }
@@ -426,6 +427,12 @@ impl Shell {
         if self.crash.presentations.contains(&id) {
             view.title = "Page crashed".into();
         }
+        view.availability = self.capacity_presentation(id).or_else(|| {
+            (!tab.has_view()
+                && tab.url.is_some()
+                && tab.content == zephium_core::item::TabContent::Web)
+                .then_some(zephium_ipc::TabAvailability::Sleeping)
+        });
         view
     }
 
@@ -555,6 +562,7 @@ fn tab_view(
         },
         loading: tab.loading,
         popup_blocked: tab.popup_blocked,
+        availability: None,
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
         icon,

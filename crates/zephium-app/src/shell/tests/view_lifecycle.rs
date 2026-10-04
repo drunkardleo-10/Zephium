@@ -1,6 +1,317 @@
 use super::*;
 
 #[test]
+fn final_discard_veto_preserves_view_and_replays_latest_foreground_navigation() {
+    let (mut shell, engine, screen) = setup();
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.handle(Command::Bootstrap);
+    let candidate = active_id(&screen);
+    navigate_and_commit(&mut shell, candidate, "retained.example");
+    shell.items.set_title(candidate, "Retained document".into());
+    let resident = shell.residency.resident_since[&candidate];
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "foreground.example");
+    let (_, probe) = first_probing_discard(&shell);
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id: candidate,
+        probe,
+        can_discard: true,
+    }));
+    assert_eq!(shell.residency.resident_since[&candidate], resident);
+    shell.handle(Command::Activate(candidate));
+    shell.handle(Command::Navigate {
+        id: candidate,
+        input: "latest.example".into(),
+    });
+    let profile = shell.profile_of_item(candidate).unwrap();
+    shell.handle(Command::Engine(EngineEvent::ViewDiscardRefused {
+        id: candidate,
+        profile,
+        probe: DiscardProbeId(probe.0 + 1),
+    }));
+    assert!(shell.residency.discard_probes.contains_key(&candidate));
+    shell.handle(Command::Engine(EngineEvent::ViewDiscardRefused {
+        id: candidate,
+        profile,
+        probe,
+    }));
+    assert!(shell.items.tab(candidate).unwrap().has_view());
+    assert_eq!(
+        shell.items.tab(candidate).unwrap().title,
+        "Retained document"
+    );
+    assert_eq!(shell.residency.resident_since[&candidate], resident);
+    assert!(!shell.residency.discard_probes.contains_key(&candidate));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("cancel-discard {candidate} "))));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("navigate {candidate} https://latest.example/"))));
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with(&format!("create {candidate} ")))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn rejected_discard_admission_clears_closing_without_losing_residency() {
+    let (mut shell, engine, screen) = setup();
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.handle(Command::Bootstrap);
+    let candidate = active_id(&screen);
+    navigate_and_commit(&mut shell, candidate, "admission.example");
+    let resident = shell.residency.resident_since[&candidate];
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    let (_, probe) = first_probing_discard(&shell);
+    engine
+        .reject_discard_dispatch
+        .store(true, std::sync::atomic::Ordering::Release);
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id: candidate,
+        probe,
+        can_discard: true,
+    }));
+    assert!(shell.items.tab(candidate).unwrap().has_view());
+    assert_eq!(shell.residency.resident_since[&candidate], resident);
+    assert!(shell.residency.discard_probes.is_empty());
+    assert!(shell
+        .residency
+        .discard_protected_until
+        .contains_key(&candidate));
+}
+
+#[test]
+fn explicit_close_during_final_discard_check_still_closes_and_forgets_native_state() {
+    let (mut shell, engine, screen) = setup();
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.handle(Command::Bootstrap);
+    let candidate = active_id(&screen);
+    navigate_and_commit(&mut shell, candidate, "close-race.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    let (_, probe) = first_probing_discard(&shell);
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id: candidate,
+        probe,
+        can_discard: true,
+    }));
+    let profile = shell.profile_of_item(candidate).unwrap();
+    shell.handle(Command::Close(candidate));
+    assert!(shell.items.tab(candidate).is_none());
+    assert!(!shell.residency.discard_probes.contains_key(&candidate));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("close {candidate}")));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("forget-discarded {profile} {candidate}")));
+    shell.handle(Command::Engine(EngineEvent::ViewDiscardRefused {
+        id: candidate,
+        profile,
+        probe,
+    }));
+    assert!(shell.items.tab(candidate).is_none());
+}
+
+#[test]
+fn renderer_death_supersedes_final_discard_and_cannot_strand_recovery() {
+    let (mut shell, engine, screen) = setup();
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.handle(Command::Bootstrap);
+    let candidate = active_id(&screen);
+    navigate_and_commit(&mut shell, candidate, "crash-race.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    let (_, probe) = first_probing_discard(&shell);
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id: candidate,
+        probe,
+        can_discard: true,
+    }));
+    shell.handle(Command::Activate(candidate));
+    shell.handle(Command::Engine(EngineEvent::Crashed { id: candidate }));
+    assert!(!shell.residency.discard_probes.contains_key(&candidate));
+    assert!(shell.items.tab(candidate).unwrap().has_view());
+    shell.handle(Command::Reload(candidate));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("reload {candidate}")));
+}
+
+#[test]
+fn loading_background_documents_are_not_requested_to_suspend() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let candidate = active_id(&screen);
+    navigate_and_commit(&mut shell, candidate, "long-load.example");
+    shell.handle(Command::Open);
+    shell.items.set_loading(candidate, true);
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    shell.handle(Command::Tick);
+    assert!(!shell.residency.dormant_sent.contains(&candidate));
+    shell.items.set_loading(candidate, false);
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&candidate));
+}
+
+#[test]
+fn disabling_sleep_cancels_a_pending_close_without_reloading_hidden_tabs() {
+    let (mut shell, engine, screen) = setup();
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.handle(Command::Bootstrap);
+    let candidate = active_id(&screen);
+    navigate_and_commit(&mut shell, candidate, "hidden-context.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    let (_, probe) = first_probing_discard(&shell);
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id: candidate,
+        probe,
+        can_discard: true,
+    }));
+    shell.handle(Command::SetAppSetting {
+        key: "performance.sleep".into(),
+        value: "false".into(),
+    });
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("cancel-discard {candidate} {}", probe.0)));
+    // If physical retirement already won, its acknowledgment stays truthful;
+    // changing policy does not eagerly reconstruct an unseen page.
+    shell.handle(Command::Engine(EngineEvent::ViewDiscarded {
+        id: candidate,
+        profile: shell.profile_of_item(candidate).unwrap(),
+        probe,
+    }));
+    assert!(!shell.items.tab(candidate).unwrap().has_view());
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with(&format!("create {candidate} ")))
+            .count(),
+        1
+    );
+    let profile = shell.profile_of_item(candidate).unwrap();
+    shell.handle(Command::Close(candidate));
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("forget-discarded {profile} {candidate}")));
+}
+
+#[test]
+fn leaving_a_visible_split_starts_idle_grace_and_minimization_keeps_discard_protection() {
+    use zephium_core::ports::engine::MemoryPressure;
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "read-first.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "read-second.example");
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    shell.residency.warm_view_limit = 1;
+    let old = std::time::Instant::now() - std::time::Duration::from_secs(30 * 60);
+    for id in [first, second] {
+        shell.residency.last_focus.insert(id, old);
+        shell.residency.resident_since.insert(id, old);
+        shell.residency.inactive_since.insert(id, old);
+    }
+
+    shell.handle(Command::Unsplit);
+    assert!(
+        shell.residency.discard_probes.is_empty(),
+        "a long foreground read does not consume the background grace"
+    );
+    assert!(shell.residency.dormant_sent.is_empty());
+    assert_eq!(
+        shell.residency.last_focus[&first], old,
+        "hiding is not a focus event"
+    );
+    assert!(shell.residency.inactive_since[&first] > old);
+
+    shell.handle(Command::SetWindowVisible(false));
+    assert!(shell.discard_protected_leaves().contains(&second));
+    assert!(shell.residency.inactive_since[&second] > old);
+    assert!(
+        shell.residency.dormant_sent.is_empty(),
+        "minimization starts its own dormancy grace"
+    );
+    shell.handle(Command::SetMemoryPressure(MemoryPressure::Critical));
+    assert!(shell.residency.discard_probes.contains_key(&first));
+    assert!(!shell.residency.discard_probes.contains_key(&second));
+}
+
+#[test]
+fn never_focused_fresh_background_view_respects_idle_grace_until_real_pressure() {
+    use zephium_core::ports::engine::MemoryPressure;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "foreground.example");
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = LIVE_VIEW_PRESSURE_LIMIT;
+
+    let result = shell.operation_open_url_background("fresh-background.example".into());
+    assert_eq!(result.outcome, OperationOutcome::Deferred);
+    let background = shell
+        .items
+        .view_ids()
+        .into_iter()
+        .find(|id| *id != active)
+        .unwrap();
+    navigate_and_commit(&mut shell, background, "fresh-background.example");
+    shell.handle(Command::Tick);
+
+    assert_eq!(active_id(&screen), active);
+    assert!(
+        !shell.residency.last_focus.contains_key(&background),
+        "creation is not focus"
+    );
+    assert!(
+        shell.residency.discard_probes.is_empty(),
+        "the fresh background document has its full idle grace"
+    );
+    assert!(shell.residency.dormant_sent.is_empty());
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("probe-discard {background} "))));
+
+    shell.handle(Command::SetMemoryPressure(MemoryPressure::Critical));
+    assert!(
+        shell.residency.discard_probes.contains_key(&background),
+        "real pressure intentionally bypasses idle grace"
+    );
+}
+
+#[test]
 fn rejected_view_creation_rolls_back_the_live_view_synchronously() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
@@ -400,16 +711,10 @@ fn hidden_idle_views_go_dormant_and_wake_on_show() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
-    shell.handle(Command::Navigate {
-        id: first,
-        input: "example.com".into(),
-    });
+    navigate_and_commit(&mut shell, first, "example.com");
     shell.handle(Command::Open);
     let second = active_id(&screen);
-    shell.handle(Command::Navigate {
-        id: second,
-        input: "github.com".into(),
-    });
+    navigate_and_commit(&mut shell, second, "github.com");
 
     // nothing is idle yet: no dormancy requested
     assert!(!engine.calls().iter().any(|c| c.starts_with("dormant")));
@@ -441,10 +746,10 @@ fn hidden_idle_views_go_dormant_and_wake_on_show() {
 }
 
 #[test]
-fn live_view_budget_discards_only_exactly_acknowledged_hidden_pages() {
+fn idle_hidden_pages_beyond_the_warm_set_sleep_only_after_acknowledgement() {
     let (mut shell, _engine, screen) = setup();
-    shell.residency.live_view_soft_limit = 2;
-    shell.residency.live_view_pressure_limit = 3;
+    shell.residency.warm_view_limit = 2;
+    shell.residency.live_view_pressure_limit = LIVE_VIEW_PRESSURE_LIMIT;
     shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
@@ -456,12 +761,15 @@ fn live_view_budget_discards_only_exactly_acknowledged_hidden_pages() {
     }
     assert_eq!(shell.items.view_ids().len(), 6);
 
-    while shell.items.view_ids().len() > shell.residency.live_view_soft_limit {
+    // The foreground page plus the warm set stay resident; every older idle
+    // page sleeps, though the live count is below the pressure watermark.
+    while shell.items.view_ids().len() > shell.residency.warm_view_limit + 1 {
         let (id, probe) = first_probing_discard(&shell);
         acknowledge_safe_discard(&mut shell, id, probe);
     }
+    assert!(shell.residency.discard_probes.is_empty());
 
-    assert_eq!(shell.items.view_ids().len(), 2);
+    assert_eq!(shell.items.view_ids().len(), 3);
     assert_eq!(
         shell
             .items
@@ -476,7 +784,7 @@ fn live_view_budget_discards_only_exactly_acknowledged_hidden_pages() {
 #[test]
 fn unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down() {
     let (mut shell, engine, screen) = setup();
-    shell.residency.live_view_soft_limit = 1;
+    shell.residency.warm_view_limit = 1;
     shell.residency.live_view_pressure_limit = 1;
     shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
@@ -513,7 +821,7 @@ fn unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down() {
 #[test]
 fn missing_probe_callback_times_out_fail_closed_with_bounded_state() {
     let (mut shell, _engine, screen) = setup();
-    shell.residency.live_view_soft_limit = 1;
+    shell.residency.warm_view_limit = 1;
     shell.residency.live_view_pressure_limit = 1;
     shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
@@ -583,7 +891,7 @@ fn common_tab_counts_probe_before_and_never_exceed_the_resident_view_ceiling() {
 }
 
 #[test]
-fn resident_ceiling_rejects_excess_operation_without_removing_the_tab() {
+fn resident_ceiling_defers_foreground_create_and_expires_without_changing_saved_title() {
     let (mut shell, _engine, screen, operations) =
         setup_with_operation_log(Arc::new(FakeStore::default()));
     shell.handle(Command::Bootstrap);
@@ -596,6 +904,7 @@ fn resident_ceiling_rejects_excess_operation_without_removing_the_tab() {
     }
     shell.handle(Command::Open);
     let excess = active_id(&screen);
+    let original_title = shell.items.tab(excess).unwrap().title.clone();
     shell.handle(Command::Operation {
         operation_id: "resident-limit".into(),
         command: Box::new(Command::Navigate {
@@ -609,12 +918,219 @@ fn resident_ceiling_rejects_excess_operation_without_removing_the_tab() {
     assert_eq!(shell.items.view_ids().len(), LIVE_VIEW_ABSOLUTE_LIMIT);
     assert_eq!(
         operations.lock().unwrap().last().unwrap().outcome,
-        OperationOutcome::NativeAdmissionFailed
+        OperationOutcome::Deferred
     );
     assert_eq!(
         operations.lock().unwrap().last().unwrap().reason,
-        OperationReason::NativeDispatchRejected
+        OperationReason::NativeWorkPending
     );
+    assert_eq!(shell.items.tab(excess).unwrap().title, original_title);
+    assert!(matches!(
+        shell.capacity_presentation(excess),
+        Some(zephium_ipc::TabAvailability::WaitingForCapacity { .. })
+    ));
+    shell
+        .residency
+        .capacity_requests
+        .front_mut()
+        .unwrap()
+        .deadline = std::time::Instant::now();
+    shell.handle(Command::ViewCapacityRetry(excess));
+    assert!(shell.residency.capacity_requests.is_empty());
+    assert!(matches!(
+        shell.capacity_presentation(excess),
+        Some(zephium_ipc::TabAvailability::BlockedByCapacity { .. })
+    ));
+    assert_eq!(shell.items.tab(excess).unwrap().title, original_title);
+}
+
+#[test]
+fn foreground_capacity_waits_for_physical_close_and_replays_only_latest_intent() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "resident0.example");
+    for index in 1..LIVE_VIEW_ABSOLUTE_LIMIT {
+        shell.handle(Command::Open);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, &format!("resident{index}.example"));
+    }
+    shell.handle(Command::Open);
+    let excess = active_id(&screen);
+    for input in ["old-intent.example", "latest-intent.example"] {
+        shell.handle(Command::Navigate {
+            id: excess,
+            input: input.into(),
+        });
+    }
+    assert_eq!(shell.residency.capacity_requests.len(), 1);
+    let (candidate, probe) = first_probing_discard(&shell);
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id: candidate,
+        probe,
+        can_discard: true,
+    }));
+    assert!(
+        !shell.items.tab(excess).unwrap().has_view(),
+        "safe probe alone cannot release a slot"
+    );
+    shell.handle(Command::Engine(EngineEvent::ViewDiscarded {
+        id: candidate,
+        profile: shell.profile_of_item(candidate).unwrap(),
+        probe,
+    }));
+    assert!(shell.items.tab(excess).unwrap().has_view());
+    assert!(shell.residency.capacity_requests.is_empty());
+    assert_eq!(shell.items.view_ids().len(), LIVE_VIEW_ABSOLUTE_LIMIT);
+    let creates: Vec<_> = engine
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with(&format!("create {excess} ")))
+        .collect();
+    assert_eq!(creates.len(), 1);
+    assert!(creates[0].contains("https://latest-intent.example/"));
+}
+
+#[test]
+fn disabled_sleep_is_honored_until_critical_memory_pressure() {
+    use zephium_core::ports::engine::MemoryPressure;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::SetAppSetting {
+        key: "performance.sleep".into(),
+        value: "false".into(),
+    });
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "resident0.example");
+    for index in 1..LIVE_VIEW_ABSOLUTE_LIMIT {
+        shell.handle(Command::Open);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, &format!("resident{index}.example"));
+    }
+    shell.handle(Command::Open);
+    let excess = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: excess,
+        input: "waiting.example".into(),
+    });
+    assert_eq!(shell.residency.capacity_requests.len(), 1);
+    assert!(
+        shell.residency.discard_probes.is_empty(),
+        "a waiting page does not override the user's choice to keep tabs awake"
+    );
+    shell.handle(Command::SetMemoryPressure(MemoryPressure::Critical));
+    // The least recently used pages are probed first, in a bounded batch.
+    let Some(PendingDiscardProbe::Probing { probe, .. }) =
+        shell.residency.discard_probes.get(&first).cloned()
+    else {
+        panic!("critical pressure must probe the least recently used page");
+    };
+    acknowledge_safe_discard(&mut shell, first, probe);
+    assert!(shell.items.tab(excess).unwrap().has_view());
+    assert!(shell.residency.capacity_requests.is_empty());
+}
+
+#[test]
+fn memory_warning_uses_a_short_grace_instead_of_discarding_at_once() {
+    use zephium_core::ports::engine::MemoryPressure;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "warning0.example");
+    for n in 1..6 {
+        shell.handle(Command::Open);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, &format!("warning{n}.example"));
+    }
+    shell.handle(Command::SetMemoryPressure(MemoryPressure::Warning));
+    assert!(
+        shell.residency.discard_probes.is_empty(),
+        "pages left seconds ago stay resident under a warning"
+    );
+    let stale = std::time::Instant::now() - std::time::Duration::from_secs(3 * 60);
+    for times in [
+        &mut shell.residency.last_focus,
+        &mut shell.residency.resident_since,
+        &mut shell.residency.inactive_since,
+    ] {
+        if let Some(time) = times.get_mut(&first) {
+            *time = stale;
+        }
+    }
+    shell.handle(Command::Tick);
+    let (candidate, _) = first_probing_discard(&shell);
+    assert_eq!(candidate, first);
+    assert_eq!(shell.residency.discard_probes.len(), 1);
+}
+
+#[test]
+fn performance_preferences_load_durably_and_pressure_restores_preferred_targets() {
+    use zephium_core::ports::engine::MemoryPressure;
+    let store = Arc::new(FakeStore::default());
+    assert!(store.set_app_setting("performance.memory".into(), "keep-ready".into()));
+    assert!(store.set_app_setting("performance.after".into(), "30".into()));
+    let (mut shell, _, _) = setup_with(store.clone());
+    assert_eq!(shell.residency.warm_view_limit, 10);
+    assert_eq!(
+        shell.residency.discard_idle_min,
+        std::time::Duration::from_secs(30 * 60)
+    );
+    // Lossless suspension never waits longer than its own short grace.
+    assert_eq!(
+        shell.residency.dormant_min,
+        std::time::Duration::from_secs(5 * 60)
+    );
+    shell.handle(Command::SetMemoryPressure(MemoryPressure::Critical));
+    assert_eq!(shell.residency.warm_view_limit, 0);
+    shell.handle(Command::SetAppSetting {
+        key: "performance.memory".into(),
+        value: "save-memory".into(),
+    });
+    assert_eq!(shell.residency.warm_view_limit, 0);
+    shell.handle(Command::SetMemoryPressure(MemoryPressure::Normal));
+    assert_eq!(shell.residency.warm_view_limit, 2);
+    let (restarted, _, _) = setup_with(store);
+    assert_eq!(restarted.residency.warm_view_limit, 2);
+}
+
+#[test]
+fn awake_site_exceptions_cover_subdomains_and_disabling_sleep_cancels_probes() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let protected = active_id(&screen);
+    navigate_and_commit(&mut shell, protected, "mail.kept.example");
+    shell.handle(Command::SetAppSetting {
+        key: "performance.exceptions".into(),
+        value: "kept.example".into(),
+    });
+    shell.handle(Command::Open);
+    let candidate = active_id(&screen);
+    navigate_and_commit(&mut shell, candidate, "notkept.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    shell.handle(Command::Tick);
+    let (id, probe) = first_probing_discard(&shell);
+    assert_eq!(id, candidate);
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("probe-discard {protected} "))));
+    shell.handle(Command::SetAppSetting {
+        key: "performance.sleep".into(),
+        value: "false".into(),
+    });
+    assert!(shell.residency.discard_probes.is_empty());
+    assert!(shell.residency.dormant_sent.is_empty());
+    shell.handle(Command::Engine(EngineEvent::DiscardSafety {
+        id,
+        probe,
+        can_discard: true,
+    }));
+    assert!(shell.items.tab(candidate).unwrap().has_view());
 }
 
 #[test]
@@ -674,7 +1190,7 @@ fn optimistic_multi_leaf_batch_admits_available_slots_in_effect_order() {
 #[test]
 fn stale_or_navigation_cancelled_discard_probe_cannot_close_a_view() {
     let (mut shell, engine, screen) = setup();
-    shell.residency.live_view_soft_limit = 1;
+    shell.residency.warm_view_limit = 1;
     shell.residency.live_view_pressure_limit = 1;
     shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
@@ -728,7 +1244,7 @@ fn every_currently_visible_split_leaf_is_outside_the_discard_candidate_set() {
         other: first,
         axis: Axis::Row,
     });
-    shell.residency.live_view_soft_limit = 0;
+    shell.residency.warm_view_limit = 0;
     shell.residency.live_view_pressure_limit = 0;
     shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Tick);
@@ -744,7 +1260,7 @@ fn every_currently_visible_split_leaf_is_outside_the_discard_candidate_set() {
 #[test]
 fn acknowledged_discard_preserves_url_and_activation_recreates_lazily() {
     let (mut shell, engine, screen) = setup();
-    shell.residency.live_view_soft_limit = 1;
+    shell.residency.warm_view_limit = 1;
     shell.residency.live_view_pressure_limit = 1;
     shell.residency.discard_idle_min = std::time::Duration::ZERO;
     shell.handle(Command::Bootstrap);
@@ -785,16 +1301,10 @@ fn minimized_window_hides_before_dormancy_and_wakes_focused_view() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
-    shell.handle(Command::Navigate {
-        id: first,
-        input: "first.example".into(),
-    });
+    navigate_and_commit(&mut shell, first, "first.example");
     shell.handle(Command::Open);
     let second = active_id(&screen);
-    shell.handle(Command::Navigate {
-        id: second,
-        input: "second.example".into(),
-    });
+    navigate_and_commit(&mut shell, second, "second.example");
     shell.residency.dormant_min = std::time::Duration::ZERO;
 
     shell.handle(Command::SetWindowVisible(false));

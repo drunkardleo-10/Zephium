@@ -123,6 +123,7 @@ fn navigation_waits_for_exact_inflight_discard_instead_of_claiming_success() {
             probe: DiscardProbeId(77),
             recreate: false,
             deferred_navigation: None,
+            reload_on_refusal: false,
         },
     );
 
@@ -923,7 +924,7 @@ fn launcher_includes_essentials_and_folder_tabs_from_the_current_scope() {
 }
 
 #[test]
-fn deliberate_sidebar_changes_ask_the_content_to_travel_and_drags_do_not() {
+fn sidebar_shape_slides_precede_layout() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
@@ -940,7 +941,7 @@ fn deliberate_sidebar_changes_ask_the_content_to_travel_and_drags_do_not() {
     shell.handle(Command::SetSidebarWidth(300.0, false));
     assert!(
         motion(&engine).is_empty(),
-        "a drag step follows the pointer directly"
+        "an ordinary nonanimated width change does not request a shape journey"
     );
 
     shell.handle(Command::SetSidebarWidth(56.0, true));
@@ -956,6 +957,36 @@ fn deliberate_sidebar_changes_ask_the_content_to_travel_and_drags_do_not() {
         .rposition(|call| call.starts_with("layout@"))
         .unwrap();
     assert!(hinted < laid);
+}
+
+#[test]
+fn sidebar_resize_guide_does_not_mutate_width_or_layout() {
+    let (mut shell, engine, _) = setup();
+    shell.handle(Command::Bootstrap);
+    let width = shell.windows.focused().unwrap().metrics.sidebar_width;
+    let layouts = engine
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("layout@"))
+        .count();
+    shell.handle(Command::SidebarResizeGuide(Some(310.0)));
+    shell.handle(Command::SidebarResizeGuide(None));
+    assert_eq!(
+        shell.windows.focused().unwrap().metrics.sidebar_width,
+        width
+    );
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("layout@"))
+            .count(),
+        layouts
+    );
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("resize-guide@") && call.ends_with("None")));
 }
 
 #[test]

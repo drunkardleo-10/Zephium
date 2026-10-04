@@ -1683,6 +1683,18 @@ pub fn query_document_activity(view: &wry::WebView, done: impl FnOnce(bool) + 's
     true
 }
 
+mod replay;
+pub(crate) use replay::RequestWitness;
+
+pub(crate) fn discard_history_allows(view: &wry::WebView, owned_blank: bool) -> bool {
+    let core = view.webview();
+    let mut back = windows_core::BOOL::default();
+    let mut forward = windows_core::BOOL::default();
+    (unsafe { core.CanGoBack(&mut back).is_ok() && core.CanGoForward(&mut forward).is_ok() })
+        && !forward.as_bool()
+        && (!back.as_bool() || owned_blank)
+}
+
 #[cfg(test)]
 mod process_exit_tests {
     use super::*;

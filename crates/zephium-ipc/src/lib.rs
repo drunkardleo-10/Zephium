@@ -26,9 +26,22 @@ pub struct TabView {
     pub loading: bool,
     #[serde(default)]
     pub popup_blocked: bool,
+    /// Transient native residency state. It never replaces the committed URL
+    /// or title, and an explicit retry remains a fresh navigation intent.
+    #[serde(default)]
+    #[specta(optional)]
+    pub availability: Option<TabAvailability>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TabAvailability {
+    Sleeping,
+    WaitingForCapacity { url: String },
+    BlockedByCapacity { url: String },
 }
 
 /// Browser chrome's bounded tab renderer choice. Future extension-owned

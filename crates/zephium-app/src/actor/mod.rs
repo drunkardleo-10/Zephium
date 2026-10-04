@@ -1566,6 +1566,16 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                         Err(TryPushError::Closed(_)) => break,
                     }
                 }
+                TimerWake::ViewCapacity { id } => {
+                    match timer_queue.try_push(Command::ViewCapacityRetry(id)) {
+                        Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                        Err(TryPushError::Full(_)) => timer_queue.schedule_view_capacity(
+                            id,
+                            std::time::Instant::now() + std::time::Duration::from_millis(25),
+                        ),
+                        Err(TryPushError::Closed(_)) => break,
+                    }
+                }
                 TimerWake::ProfileDeletion {
                     profile,
                     generation,

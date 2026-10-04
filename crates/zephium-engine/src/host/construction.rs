@@ -201,7 +201,40 @@ impl EngineHost {
             if !spare.view.event_permit.allows_navigation(url) {
                 return;
             }
-            if let Err(error) = spare.view.load_url(url) {
+            #[cfg(target_os = "macos")]
+            {
+                // Prepare the real viewport while still hidden, before the first
+                // navigation can lay out a document in the spare's zero-sized frame.
+                if let Err(error) = spare.view.set_bounds(to_wry(bounds)) {
+                    spare.view.navigation.fail_synchronous(epoch);
+                    eprintln!("engine: spare viewport preparation failed: {error}");
+                    self.sink
+                        .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
+                    return;
+                }
+                crate::platform::imp::set_warm_spare_layout(&spare.view, false);
+                if !spare.view.event_permit.matches_token(&event_token) {
+                    return;
+                }
+            }
+            #[cfg(target_os = "macos")]
+            let restored = self.restore_discarded_state(
+                id,
+                partition,
+                url,
+                &spare.view.view,
+                &spare.view.event_permit,
+                &spare.view.navigation,
+            );
+            #[cfg(not(target_os = "macos"))]
+            let restored: Option<bool> = None;
+            if let Err(error) = match restored {
+                Some(true) => Ok(()),
+                Some(false) => Err(wry::Error::NativeObjectUnavailable(
+                    "native session restoration",
+                )),
+                None => spare.view.load_url(url),
+            } {
                 spare.view.navigation.fail_synchronous(epoch);
                 eprintln!("engine: spare navigation failed: {error}");
                 self.sink
@@ -258,6 +291,9 @@ impl EngineHost {
     // cost hides behind the page render.
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     pub(crate) fn ensure_spare(&mut self, partition: Partition) {
+        if self.memory_pressure != zephium_core::ports::engine::MemoryPressure::Normal {
+            return;
+        }
         // Keep at most one warm renderer process. A load in another profile
         // must not destroy and rebuild an existing spare: profile activity
         // would otherwise churn processes, CPU and private working sets while
@@ -290,6 +326,8 @@ impl EngineHost {
             EventPermit::inactive(),
             NativeViewPurpose::WarmSpare,
         ) {
+            #[cfg(target_os = "macos")]
+            crate::platform::imp::set_warm_spare_layout(&view, true);
             self.spare = Some(Spare {
                 partition,
                 view,
@@ -604,6 +642,10 @@ impl EngineHost {
             .or_default()
             .clone();
         let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        let replay_safety = Rc::new(super::discard::ReplaySafety::new(
+            !report_failure && !native_popup,
+            !native_popup,
+        ));
         if let Some(counter) = self.blocker_statistics.get(&partition.profile()) {
             site_scope.pause.set_statistics(counter.clone());
         }
@@ -863,10 +905,8 @@ impl EngineHost {
             }
         };
 
-        // No custom page background or native placeholder. Fresh navigations
-        // keep the real privileged New Tab surface until its exact URL
-        // projection is verified; the transparent presentation-gated stage
-        // then reveals only the attributed document.
+        // Website backgrounds remain native. Exact URL acknowledgement gates
+        // reveal; macOS briefly covers the attributed page until its first frame.
         #[cfg(target_os = "macos")]
         let builder = if let Some(opener) = popup_opener.as_ref() {
             use wry::WebViewBuilderExtMacos;
@@ -979,6 +1019,7 @@ impl EngineHost {
         // which frame is loading, so focus shuts only top-level documents.
         #[cfg(target_os = "macos")]
         {
+            let replay = replay_safety.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
                 if super::webext::intercept_auth_redirect(&target) {
                     return false;
@@ -987,6 +1028,9 @@ impl EngineHost {
                     && frame_navigation.admits_target(&target);
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
+                }
+                if admitted {
+                    replay.observe(&target, action);
                 }
                 admitted
             });
@@ -1316,6 +1360,8 @@ impl EngineHost {
             Partition::Ephemeral(_) => builder.with_incognito(true),
         };
 
+        #[cfg(target_os = "macos")]
+        let load_replay = replay_safety.clone();
         builder = builder.with_navigation_event_handler(move |event| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if event.phase == wry::NavigationEventPhase::Committed && event.url != "about:blank" {
@@ -1353,6 +1399,8 @@ impl EngineHost {
                     load_site_scope.navigating(&event.url);
                 }
                 NavigationTransition::Committed(epoch) => {
+                    #[cfg(target_os = "macos")]
+                    load_replay.commit();
                     load_site_scope.navigating(&event.url);
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
@@ -1376,6 +1424,8 @@ impl EngineHost {
                     restored,
                     request,
                 } => {
+                    #[cfg(target_os = "macos")]
+                    load_replay.abandon();
                     if let Some((_, url)) = load_navigation.committed_snapshot() {
                         load_site_scope.navigating(&url);
                     }
@@ -1632,6 +1682,12 @@ impl EngineHost {
             }
             return None;
         }
+        #[cfg(target_os = "windows")]
+        let request_witness = crate::platform::imp::RequestWitness::install(
+            wry::WebViewExtWindows::webview(&view),
+            !report_failure && !native_popup,
+        )
+        .ok();
         #[cfg(all(unix, not(target_os = "macos")))]
         if let Err(error) = crate::platform::imp::configure(
             &view,
@@ -1804,10 +1860,27 @@ impl EngineHost {
             }
             return None;
         };
+        #[cfg(target_os = "macos")]
+        let restored = self.restore_discarded_state(
+            id.get(),
+            partition,
+            url,
+            &view,
+            &event_permit,
+            &navigation,
+        );
+        #[cfg(not(target_os = "macos"))]
+        let restored: Option<bool> = None;
         if let Err(error) = if native_popup {
             Ok(())
         } else {
-            view.load_url(url)
+            match restored {
+                Some(true) => Ok(()),
+                Some(false) => Err(wry::Error::NativeObjectUnavailable(
+                    "native session restoration",
+                )),
+                None => view.load_url(url),
+            }
         } {
             navigation.fail_synchronous(epoch);
             eprintln!("engine: initial navigation failed: {error}");
@@ -1822,6 +1895,22 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            replay_safety,
+            discard_probe_lease: std::cell::RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            final_discard: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            discard_settle_timer: std::cell::RefCell::new(None),
+            #[cfg(target_os = "windows")]
+            request_witness,
+            #[cfg(target_os = "windows")]
+            windows_final_discard: None,
+            #[cfg(target_os = "windows")]
+            discard_deadline: None,
+            #[cfg(target_os = "windows")]
+            suspend_deadline: None,
+            #[cfg(target_os = "windows")]
+            suspend_attempt: None,
             site_scope,
             content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]
@@ -1834,6 +1923,8 @@ impl EngineHost {
             applied_zoom: 1.0,
             presentable: false,
             presentation_announced: None,
+            #[cfg(target_os = "macos")]
+            paint_cover: None,
             title_ready: None,
             nonpresentable_bootstrap: (!report_failure && !native_popup).then_some(epoch),
             #[cfg(target_os = "windows")]

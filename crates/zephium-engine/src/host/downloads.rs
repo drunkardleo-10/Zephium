@@ -150,6 +150,34 @@ pub(crate) struct Downloads {
 }
 
 impl Downloads {
+    /// A transfer or destination decision still owns this profile. Retaining
+    /// its view costs less than risking a stalled or revoked native operation.
+    #[cfg(target_os = "windows")]
+    pub(in crate::host) fn has_profile_activity(&self, profile: ProfileId) -> bool {
+        self.active.try_borrow().map_or(true, |active| {
+            active
+                .values()
+                .any(|transfer| transfer.partition.profile() == profile)
+        }) || self.calls.try_borrow().map_or(true, |calls| {
+            calls
+                .values()
+                .any(|call| call.partition.profile() == profile)
+        })
+    }
+    /// Admitted macOS transfers keep their WKDownload without the page; only
+    /// an unanswered destination decision still depends on it.
+    #[cfg(target_os = "macos")]
+    pub(in crate::host) fn has_pending_decision(&self, profile: ProfileId) -> bool {
+        self.active.try_borrow().map_or(true, |active| {
+            active
+                .values()
+                .any(|transfer| transfer.partition.profile() == profile && !transfer.authorized)
+        }) || self.calls.try_borrow().map_or(true, |calls| {
+            calls
+                .values()
+                .any(|call| call.partition.profile() == profile)
+        })
+    }
     pub(crate) fn new(store: SharedStore, notify: Notify) -> Rc<Self> {
         let (sender, receiver) = mpsc::channel();
         let manager = Rc::new(Self {

@@ -30,6 +30,10 @@ mod credentials;
 mod find;
 mod native;
 mod navigation;
+mod paint;
+pub(crate) use paint::{PageSnapshot, PaintCover};
+mod session_state;
+pub(crate) use session_state::{SessionCaptureRefusal, SessionState};
 #[cfg(feature = "agentic-browser")]
 mod semantic_action;
 #[cfg(feature = "agentic-browser")]
@@ -127,11 +131,13 @@ use dispatch2::DispatchObject as _;
 pub(crate) use native::run_page_permission_probe;
 #[cfg(feature = "native-isolation-probes")]
 pub(crate) use native::run_principal_isolation_probe;
+pub(crate) use native::set_warm_spare_layout;
 pub(crate) use native::webkit as native_webview;
 pub use native::{
-    add_user_script, configure, query_document_activity, set_media_suspended, stop_loading,
+    add_user_script, configure, query_document_playback, set_media_suspended, stop_loading,
     user_script_refusal, user_style_refusal,
 };
+pub(crate) use native::{native_discard_idle, set_background_suspension};
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
 use objc2_web_kit::{WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
@@ -156,6 +162,21 @@ impl Drop for ContentPolicyTimeout {
 
 pub(crate) fn schedule_content_policy_timeout(
     duration: Duration,
+    callback: impl FnOnce() + Send + 'static,
+) -> Option<ContentPolicyTimeout> {
+    schedule_timeout(duration, 100_000_000, callback)
+}
+
+pub(crate) fn schedule_presentation_timeout(
+    duration: Duration,
+    callback: impl FnOnce() + Send + 'static,
+) -> Option<ContentPolicyTimeout> {
+    schedule_timeout(duration, 5_000_000, callback)
+}
+
+fn schedule_timeout(
+    duration: Duration,
+    leeway_ns: u64,
     callback: impl FnOnce() + Send + 'static,
 ) -> Option<ContentPolicyTimeout> {
     let Ok(deadline) = dispatch2::DispatchTime::try_from(duration) else {
@@ -183,7 +204,7 @@ pub(crate) fn schedule_content_policy_timeout(
     unsafe {
         source.set_event_handler_with_block(block2::RcBlock::as_ptr(&handler));
     }
-    source.set_timer(deadline, u64::MAX, 100_000_000);
+    source.set_timer(deadline, u64::MAX, leeway_ns);
     source.activate();
     Some(ContentPolicyTimeout { source })
 }

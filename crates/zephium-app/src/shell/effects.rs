@@ -155,11 +155,19 @@ impl Shell {
                             "view-create: resident ceiling live={logical_residents} limit={LIVE_VIEW_ABSOLUTE_LIMIT}"
                         );
                         self.zoom.pending.remove(&id);
-                        self.items.view_creation_failed(id);
+                        let waiting = self.wait_for_view_capacity(id, url.clone());
+                        if !waiting {
+                            self.mark_capacity_blocked(id, url);
+                        }
                         rejected_creates.insert(id);
-                        native.rejected = true;
+                        if waiting {
+                            native.scheduled = true;
+                        } else {
+                            native.rejected = true;
+                        }
                         continue;
                     }
+                    self.clear_capacity_status(id);
                     if !self
                         .engine
                         .create_view(id, self.partition_of(id), &url, bounds)
@@ -173,6 +181,7 @@ impl Shell {
                         native.rejected = true;
                         continue;
                     }
+                    self.record_view_creation(id);
                     logical_residents += 1;
                     native.scheduled = true;
                     // restored or revived views keep their zoom
@@ -205,6 +214,7 @@ impl Shell {
                     }
                 }
                 Effect::Close { id } => {
+                    self.record_view_retirement(id);
                     self.zoom.pending.remove(&id);
                     native.record(self.engine.close(id));
                 }

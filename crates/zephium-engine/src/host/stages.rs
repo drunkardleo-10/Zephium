@@ -51,6 +51,11 @@ impl EngineHost {
     /// it cannot remain absent from the exact layout until an unrelated future
     /// resize. On WebKitGTK this handoff also owns the first offscreen map.
     pub(super) fn finish_new_view_insertion(&mut self, id: ItemId, event_token: &Arc<AtomicBool>) {
+        // A hidden page gets a throttled grace before `set_dormant` suspends it.
+        #[cfg(target_os = "macos")]
+        if let Some(view) = self.views.get(&id) {
+            crate::platform::imp::set_background_suspension(&view.view, false);
+        }
         let reconciled = self.reconcile_new_view_with_stages(id);
 
         // Stage attachment enters native UI code and may pump callbacks. A
@@ -423,6 +428,7 @@ impl EngineHost {
                 }
             }
             for id in woken {
+                self.cancel_suspend_guard(id);
                 self.refresh_missed_styles(id);
             }
         }
@@ -433,6 +439,13 @@ impl EngineHost {
     pub(crate) fn set_drop_indicator(&mut self, window: WindowId, zone: Option<Rect>) {
         if let Some(stage) = self.ensure_stage(window) {
             stage.set_drop_indicator(zone);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_resize_guide(&mut self, window: WindowId, zone: Option<Rect>) {
+        if let Some(stage) = self.ensure_stage(window) {
+            stage.set_resize_guide(zone);
         }
     }
 

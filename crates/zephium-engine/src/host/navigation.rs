@@ -479,6 +479,51 @@ impl EngineHost {
             );
             return;
         }
+        // URL/chrome authority is already established. Cover only the first
+        // native frame of a newly committed document; the page can render
+        // normally underneath, without a load-finished or screenshot gate.
+        #[cfg(target_os = "macos")]
+        let snapshot = self
+            .views
+            .get(&id)
+            .filter(|view| !view.presentable)
+            .and_then(|view| view.navigation.committed_snapshot())
+            .and_then(|(committed, url)| {
+                let (_, captured, snapshot) = self.restore_snapshots.remove(&id)?;
+                (committed == epoch && url == captured).then_some(snapshot)
+            });
+        #[cfg(target_os = "macos")]
+        let cover = self
+            .views
+            .get(&id)
+            .filter(|view| !view.presentable)
+            .and_then(|view| {
+                crate::platform::imp::PaintCover::begin(
+                    id,
+                    &view.view,
+                    self.stages.values().cloned(),
+                    snapshot,
+                )
+            });
+        if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let previous = self.views.get_mut(&id).and_then(|view| {
+                if view.presentable {
+                    // A duplicate acknowledgement must not shorten the same
+                    // document's current first-frame handoff.
+                    None
+                } else {
+                    std::mem::replace(&mut view.paint_cover, cover)
+                }
+            });
+            // Removing an old native cover may re-enter AppKit. Do not hold a
+            // view borrow or publish a permit until exact attribution is
+            // rechecked after that cleanup.
+            drop(previous);
+        }
         if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
             return;
         }

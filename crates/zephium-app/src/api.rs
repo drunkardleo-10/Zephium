@@ -246,6 +246,8 @@ pub enum Command {
     SetAppActive(bool),
     /// Whether the machine is awake and unlocked with its display on.
     SetSystemAwake(bool),
+    /// Native pressure notifications only; pages cannot choose resource policy.
+    SetMemoryPressure(zephium_core::ports::engine::MemoryPressure),
     Focus(zephium_ipc::FocusControl),
     /// The running focus session reached its next change.
     FocusWake,
@@ -317,6 +319,8 @@ pub enum Command {
     /// shape — a toggle, a snap, a tool opening — that the content should
     /// travel with, rather than by a drag that it should simply follow.
     SetSidebarWidth(f64, bool),
+    /// Transient Windows resize feedback only; no width or layout mutation.
+    SidebarResizeGuide(Option<f64>),
     ShowBrowserPage(Option<BrowserPage>),
     /// Shows the transient Work browser pane over an existing Space tab or a
     /// fresh tab navigated to `Url`. `rect` is window-local and clamped.
@@ -581,6 +585,8 @@ pub enum Command {
         id: ItemId,
         probe: DiscardProbeId,
     },
+    /// Deadline wake for one bounded foreground residency request.
+    ViewCapacityRetry(ItemId),
     /// Exact-generation wakeup for a native profile-erasure callback. The
     /// outcome itself stays in a bounded inbox so queue overload cannot lose
     /// the security-critical proof.

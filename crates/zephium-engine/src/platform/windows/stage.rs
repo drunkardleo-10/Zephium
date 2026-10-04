@@ -17,8 +17,9 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
-    DeleteObject, GetDC, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA, AC_SRC_OVER,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+    DeleteObject, GetDC, GetSysColor, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, COLOR_HIGHLIGHT,
+    DIB_RGB_COLORS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -145,6 +146,7 @@ struct State {
     layout_timer: Option<usize>,
     indicator: Option<HWND>,
     indicator_size: (i32, i32),
+    indicator_resize: bool,
     on_placement_failure: PlacementFailureCallback,
     /// Motion asked of the next `apply`, and the slide it started.
     pending_motion: Option<StageMotion>,
@@ -235,6 +237,7 @@ impl Stage {
             layout_timer: None,
             indicator: None,
             indicator_size: (0, 0),
+            indicator_resize: false,
             on_placement_failure: Rc::new(on_placement_failure),
             pending_motion: None,
             slide: None,
@@ -454,6 +457,14 @@ impl Stage {
     }
 
     pub fn set_drop_indicator(&self, zone: Option<Rect>) {
+        self.set_indicator(zone, false);
+    }
+
+    pub fn set_resize_guide(&self, zone: Option<Rect>) {
+        self.set_indicator(zone, true);
+    }
+
+    fn set_indicator(&self, zone: Option<Rect>, resize: bool) {
         let Ok(mut s) = self.state.try_borrow_mut() else {
             return;
         };
@@ -467,8 +478,8 @@ impl Stage {
             Some(zone) => {
                 let scale = scale_of(s.parent);
                 let mut top_left = POINT {
-                    x: ((s.origin.0 + zone.x) * scale).round() as i32,
-                    y: ((s.origin.1 + zone.y) * scale).round() as i32,
+                    x: ((if resize { zone.x } else { s.origin.0 + zone.x }) * scale).round() as i32,
+                    y: ((if resize { zone.y } else { s.origin.1 + zone.y }) * scale).round() as i32,
                 };
                 let _ = unsafe { ClientToScreen(s.parent, &mut top_left) };
                 let w = ((zone.width * scale).round() as i32).max(1);
@@ -483,12 +494,13 @@ impl Stage {
                         created
                     }
                 };
-                let resized = s.indicator_size != (w, h);
+                let resized = s.indicator_size != (w, h) || s.indicator_resize != resize;
                 s.indicator_size = (w, h);
+                s.indicator_resize = resize;
                 drop(s);
                 unsafe {
                     if resized {
-                        draw_indicator(hwnd, top_left.x, top_left.y, w, h, scale);
+                        draw_indicator(hwnd, top_left.x, top_left.y, w, h, scale, resize);
                     }
                     let _ = SetWindowPos(
                         hwnd,
@@ -1137,7 +1149,7 @@ fn finish_native_placement(
 
 /// Premultiplied BGRA rounded rect pushed through UpdateLayeredWindow:
 /// translucent white fill, brighter border, signed-distance antialiasing.
-fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64) {
+fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64, resize: bool) {
     let header = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: w,
@@ -1163,6 +1175,7 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64) {
         let radius = (INDICATOR_RADIUS * scale).min(w.min(h) as f64 / 2.0);
         let border = INDICATOR_BORDER * scale;
         let (half_w, half_h) = (w as f64 / 2.0, h as f64 / 2.0);
+        let accent = GetSysColor(COLOR_HIGHLIGHT);
         for row in 0..h as usize {
             for col in 0..w as usize {
                 let dx = (col as f64 + 0.5 - half_w).abs() - half_w + radius;
@@ -1171,9 +1184,20 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64) {
                 let d = dx.max(dy).min(0.0) + outside - radius;
                 let outer = (0.5 - d).clamp(0.0, 1.0);
                 let inner = (0.5 - (d + border)).clamp(0.0, 1.0);
-                let alpha = INDICATOR_STROKE * (outer - inner) + INDICATOR_FILL * inner;
+                let alpha = if resize {
+                    0.9 * outer
+                } else {
+                    INDICATOR_STROKE * (outer - inner) + INDICATOR_FILL * inner
+                };
                 let v = (alpha * 255.0).round() as u32;
-                pixels[row * w as usize + col] = (v << 24) | (v << 16) | (v << 8) | v;
+                pixels[row * w as usize + col] = if resize {
+                    let red = ((accent & 0xff) as f64 * alpha).round() as u32;
+                    let green = (((accent >> 8) & 0xff) as f64 * alpha).round() as u32;
+                    let blue = (((accent >> 16) & 0xff) as f64 * alpha).round() as u32;
+                    (v << 24) | (red << 16) | (green << 8) | blue
+                } else {
+                    (v << 24) | (v << 16) | (v << 8) | v
+                };
             }
         }
         let memory = CreateCompatibleDC(Some(screen));

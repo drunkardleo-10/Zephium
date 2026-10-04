@@ -7,7 +7,6 @@ use std::sync::Arc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::ids::ItemId;
-#[cfg(target_os = "windows")]
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::{UserContent, UserContentGeneration};
 
@@ -242,10 +241,16 @@ enum HostTaskKey {
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
     Discard(ItemId),
+    DiscardTerminal(ItemId),
+    DiscardState(ProfileId, Option<ItemId>),
     #[cfg(target_os = "windows")]
     Profile(ProfileId, crate::platform::imp::BrowserProcessGeneration),
     #[cfg(target_os = "windows")]
     Suspend(ItemId),
+    // Separate from `Suspend`: replacing a preflight or completion with its
+    // deadline (or the reverse) would leave the attempt's guard unsettled.
+    #[cfg(target_os = "windows")]
+    SuspendDeadline(ItemId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
 }
@@ -443,6 +448,15 @@ pub(crate) fn install(
             #[cfg(not(target_os = "windows"))]
             content_rule_cache_gc_removed_in_cycle: false,
             spare: None,
+            memory_pressure: zephium_core::ports::engine::MemoryPressure::Normal,
+            #[cfg(target_os = "macos")]
+            discarded_states: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            prepared_discard_states: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            restore_snapshots: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            discarded_state_revision: 0,
             user_content,
             shortcuts: Arc::default(),
             stages: HashMap::new(),
@@ -469,6 +483,8 @@ pub(crate) fn install(
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
+            suspend_uncertain: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             styles_missed: std::collections::HashSet::new(),
             #[cfg(not(target_os = "macos"))]
@@ -1032,6 +1048,32 @@ where
     );
 }
 
+pub(crate) fn with_discard_terminal<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::DiscardTerminal(id)),
+        f,
+    )
+}
+
+pub(crate) fn try_with_discard_state_erasure<F>(
+    profile: ProfileId,
+    item: Option<ItemId>,
+    f: F,
+) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::DiscardState(profile, item)),
+        f,
+    )
+}
+
 pub(super) fn with_renderer_exit<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -1070,15 +1112,27 @@ pub(super) fn with_profile_exit<F>(
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn with_suspend_result<F>(id: ItemId, f: F)
+pub(super) fn with_suspend_result<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
 {
-    let _ = with_priority(
-        HostTaskPriority::Maintenance,
+    with_priority(
+        HostTaskPriority::Lifecycle,
         Some(HostTaskKey::Suspend(id)),
         f,
-    );
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn with_suspend_deadline<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::SuspendDeadline(id)),
+        f,
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

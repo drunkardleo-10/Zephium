@@ -68,6 +68,12 @@ impl EngineHost {
 
     pub(crate) fn close(&mut self, id: ItemId) {
         #[cfg(target_os = "macos")]
+        {
+            self.discarded_states.remove(&id);
+            self.prepared_discard_states.remove(&id);
+            self.restore_snapshots.remove(&id);
+        }
+        #[cfg(target_os = "macos")]
         self.webext.close_page(id);
         #[cfg(target_os = "macos")]
         self.revoke_page_permission_requests_for_close(id);
@@ -94,6 +100,7 @@ impl EngineHost {
             self.desired_dormant.remove(&id);
             self.suspending.remove(&id);
             self.suspend_failed.remove(&id);
+            self.suspend_uncertain.remove(&id);
             self.styles_missed.remove(&id);
         }
         for stage in self.stages.values() {
@@ -205,10 +212,16 @@ impl EngineHost {
         self.desired_dormant.clear();
         self.suspending.clear();
         self.suspend_failed.clear();
+        self.suspend_uncertain.clear();
         (obligations, provenance_valid)
     }
 
     fn shutdown_common(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            self.discarded_states.clear();
+            self.prepared_discard_states.clear();
+        }
         #[cfg(target_os = "windows")]
         self.shutdown_windows_extensions();
         #[cfg(all(

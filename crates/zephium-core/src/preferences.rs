@@ -31,6 +31,10 @@ pub const KEYS: &[&str] = &[
     "focus.breaks",
     "focus.goal",
     "focus.blocked",
+    "performance.sleep",
+    "performance.after",
+    "performance.memory",
+    "performance.exceptions",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -72,8 +76,10 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
                     .contains(&minutes)
         }),
         "focus.goal" => matches!(value, "30" | "60" | "120" | "180" | "240" | "360"),
+        "performance.after" => matches!(value, "5" | "15" | "30" | "60"),
+        "performance.memory" => matches!(value, "balanced" | "save-memory" | "keep-ready"),
         // One site per line, each already in the form the shell matches on.
-        "focus.blocked" => {
+        "focus.blocked" | "performance.exceptions" => {
             let sites: Vec<&str> = value.lines().collect();
             sites.len() <= crate::time::MAX_BLOCKED_SITES
                 && !value.ends_with('\n')
@@ -94,6 +100,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "search.history"
         | "tabs.switch-to-open"
         | "time.track"
+        | "performance.sleep"
         | "focus.breaks" => {
             matches!(value, "true" | "false")
         }
@@ -104,6 +111,38 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn performance_preferences_validate_modes_timing_and_normalized_exceptions() {
+        for minutes in ["5", "15", "30", "60"] {
+            assert!(value_allowed("performance.after", minutes));
+        }
+        for value in ["0", "1", "05", "15 minutes", "120"] {
+            assert!(!value_allowed("performance.after", value));
+        }
+        for mode in ["balanced", "save-memory", "keep-ready"] {
+            assert!(value_allowed("performance.memory", mode));
+        }
+        assert!(!value_allowed("performance.memory", "unlimited"));
+        assert!(value_allowed("performance.sleep", "false"));
+        assert!(value_allowed(
+            "performance.exceptions",
+            "example.com\nmail.example.org"
+        ));
+        assert!(value_allowed("performance.exceptions", ""));
+        for value in [
+            "https://example.com",
+            "Example.com",
+            "example.com\nexample.com",
+            "example.com\n",
+        ] {
+            assert!(!value_allowed("performance.exceptions", value));
+        }
+        let oversized = (0..=crate::time::MAX_BLOCKED_SITES)
+            .map(|n| format!("site{n}.example"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!value_allowed("performance.exceptions", &oversized));
+    }
     #[test]
     fn focus_settings_hold_normalized_sites_and_bounded_numbers() {
         assert!(value_allowed("focus.blocked", ""));

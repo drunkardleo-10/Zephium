@@ -326,6 +326,7 @@ pub(crate) struct FakeEngine {
     skip_shutdown_callback: std::sync::atomic::AtomicBool,
     reject_create_dispatch: std::sync::atomic::AtomicBool,
     reject_navigation_dispatch: std::sync::atomic::AtomicBool,
+    reject_discard_dispatch: std::sync::atomic::AtomicBool,
     reject_native_dispatch: std::sync::atomic::AtomicBool,
     unsupported_presentation: std::sync::atomic::AtomicBool,
     runtime_restart_required: std::sync::atomic::AtomicBool,
@@ -723,12 +724,27 @@ impl Engine for FakeEngine {
     }
     fn discard_view(&self, id: ItemId, probe: DiscardProbeId) -> bool {
         self.log(format!("discard {id} {}", probe.0));
-        true
+        !self
+            .reject_discard_dispatch
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn cancel_discard(&self, id: ItemId, probe: DiscardProbeId) {
+        self.log(format!("cancel-discard {id} {}", probe.0));
+    }
+    fn forget_discarded_state(&self, profile: ProfileId, item: Option<ItemId>) {
+        self.log(format!(
+            "forget-discarded {profile} {}",
+            item.map_or_else(|| "all".into(), |id| id.to_string())
+        ));
     }
     fn set_dormant(&self, ids: Vec<ItemId>) {
         let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         ids.sort();
         self.log(format!("dormant {}", ids.join(",")));
+    }
+    fn set_resize_guide(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
+        self.log(format!("resize-guide@{window} {zone:?}"));
+        self.native_admission()
     }
     fn print(&self, _id: ItemId) -> NativeDispatch {
         self.native_admission()

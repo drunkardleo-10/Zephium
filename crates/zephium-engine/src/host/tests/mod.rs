@@ -341,24 +341,27 @@ fn macos_divider_capture_survives_geometry_only_relayout_but_not_topology_change
         .next()
         .expect("bounded macOS stage tree setter");
 
+    // A drag only moves a guide; the installed tree is untouched until
+    // mouseUp, so a geometry-only relayout cannot snap a drag back and only a
+    // topology change revokes the capture.
     assert!(set_tree.contains("!current.same_topology(next)"));
-    let geometry_only = set_tree
-        .split("if drag_active && !topology_changed")
-        .nth(1)
-        .expect("geometry-only drag guard")
-        .split("if topology_changed")
-        .next()
-        .expect("bounded geometry-only drag guard");
-    assert!(geometry_only.contains("return true;"));
+    assert_eq!(set_tree.matches("cancel_split_drag").count(), 1);
     let topology_change = set_tree
-        .split("if topology_changed")
+        .split("if topology_changed {")
         .nth(1)
         .expect("topology-change capture revocation");
-    assert!(topology_change.contains("drag.take()"));
-    assert!(
-        topology_change.find("drag.take()").unwrap()
-            < topology_change.find("*current = next").unwrap()
-    );
+    assert!(topology_change
+        .trim_start()
+        .starts_with("self.cancel_split_drag(false);"));
+    let dragged = source
+        .split("fn mouse_dragged(&self, event: &NSEvent)")
+        .nth(1)
+        .expect("macOS divider drag handler")
+        .split("fn mouse_up(&self, event: &NSEvent)")
+        .next()
+        .expect("bounded divider drag handler");
+    assert!(!dragged.contains("tree.try_borrow_mut"));
+    assert!(!dragged.contains("on_ratio"));
 
     let begin_update = source
         .split("pub fn begin_content_update(&self, visible: bool)")
@@ -371,7 +374,7 @@ fn macos_divider_capture_survives_geometry_only_relayout_but_not_topology_change
         .split("if !visible")
         .nth(1)
         .expect("hidden-stage capture revocation");
-    assert!(hidden.contains("drag.take()"));
+    assert!(hidden.contains("self.cancel_split_drag(false)"));
 }
 
 #[test]

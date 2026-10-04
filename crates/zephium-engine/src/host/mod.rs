@@ -55,6 +55,7 @@ pub(crate) use dispatch::make_unavailable_for_test;
     any(target_os = "macos", target_os = "windows")
 ))]
 pub(crate) use dispatch::try_with_agent_context_terminal;
+pub(crate) use dispatch::try_with_discard_state_erasure;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
 #[cfg(target_os = "macos")]
@@ -73,6 +74,8 @@ pub(crate) use scripts::protected_script_specs_for_native_probe;
 
 #[cfg(target_os = "windows")]
 use dispatch::queue_windows_cleanup_debt;
+#[cfg(target_os = "windows")]
+pub(crate) use dispatch::with_discard_terminal;
 use permits::{EventPermit, Sink};
 use profiles::ProfilePersistenceClass;
 pub(crate) use resources::NativeResourceLease;
@@ -126,6 +129,24 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    replay_safety: Rc<discard::ReplaySafety>,
+    discard_probe_lease: std::cell::RefCell<Option<discard::ProbeLease>>,
+    #[cfg(target_os = "macos")]
+    final_discard: Option<Rc<discard::FinalDiscard>>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    discard_settle_timer: std::cell::RefCell<Option<crate::platform::imp::ContentPolicyTimeout>>,
+    #[cfg(target_os = "windows")]
+    request_witness: Option<crate::platform::imp::RequestWitness>,
+    #[cfg(target_os = "windows")]
+    windows_final_discard: Option<Arc<discard::WindowsFinalDiscard>>,
+    #[cfg(target_os = "windows")]
+    discard_deadline: Option<crate::platform::imp::ContentPolicyTimeout>,
+    #[cfg(target_os = "windows")]
+    suspend_deadline: Option<crate::platform::imp::ContentPolicyTimeout>,
+    #[cfg(target_os = "windows")]
+    suspend_attempt: Option<Arc<discard::SuspendAttempt>>,
+    #[cfg(target_os = "macos")]
+    paint_cover: Option<crate::platform::imp::PaintCover>,
     site_scope: Rc<content_styles::ViewSiteScope>,
     content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
@@ -496,6 +517,24 @@ pub(crate) struct EngineHost {
     #[cfg(not(target_os = "windows"))]
     content_rule_cache_gc_removed_in_cycle: bool,
     spare: Option<Spare>,
+    memory_pressure: zephium_core::ports::engine::MemoryPressure,
+    #[cfg(target_os = "macos")]
+    discarded_states: HashMap<ItemId, discard::DiscardedState>,
+    #[cfg(target_os = "macos")]
+    prepared_discard_states: HashMap<ItemId, discard::DiscardedState>,
+    #[cfg(target_os = "macos")]
+    discarded_state_revision: u64,
+    // A restored tab's last frame and the URL it shows, awaiting that
+    // document's first commit. A redirect elsewhere discards it unseen.
+    #[cfg(target_os = "macos")]
+    restore_snapshots: HashMap<
+        ItemId,
+        (
+            zephium_core::ports::engine::Partition,
+            String,
+            crate::platform::imp::PageSnapshot,
+        ),
+    >,
     user_content: scripts::UserContentRegistry,
     /// Shared with every live view's key handler, so a rebinding reaches
     /// open pages without rebuilding them.
@@ -544,6 +583,8 @@ pub(crate) struct EngineHost {
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     suspend_failed: std::collections::HashSet<ItemId>,
+    #[cfg(target_os = "windows")]
+    suspend_uncertain: std::collections::HashSet<ItemId>,
     // Dormant views that skipped a cosmetic refresh, owed one when they wake.
     #[cfg(target_os = "windows")]
     styles_missed: std::collections::HashSet<ItemId>,

@@ -385,6 +385,9 @@ impl Shell {
             EngineEvent::ViewDiscarded { id, profile, probe } => {
                 self.on_view_discarded(id, profile, probe)
             }
+            EngineEvent::ViewDiscardRefused { id, profile, probe } => {
+                self.on_view_discard_refused(id, profile, probe)
+            }
             EngineEvent::PermissionRequested {
                 id,
                 profile,
@@ -563,6 +566,7 @@ impl Shell {
             EngineEvent::RuntimeRestartRequired => None,
             EngineEvent::ContentRulesSettled { profile, .. }
             | EngineEvent::ViewDiscarded { profile, .. }
+            | EngineEvent::ViewDiscardRefused { profile, .. }
             | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
             EngineEvent::UserContentSettled {
                 scope: ContentScope::Profile(profile),

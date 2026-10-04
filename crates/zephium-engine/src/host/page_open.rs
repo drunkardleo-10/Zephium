@@ -222,6 +222,8 @@ impl EngineHost {
         let guarded_permit = view.event_permit.clone();
         #[cfg(target_os = "windows")]
         let guarded_failure = self.native_terminal_failure.clone();
+        #[cfg(target_os = "macos")]
+        crate::platform::imp::set_background_suspension(&view.view, false);
         self.partitions.insert(child, partition);
         self.views.insert(child, view);
         permit.emit(

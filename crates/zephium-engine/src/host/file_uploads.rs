@@ -61,6 +61,11 @@ pub(super) struct FileUploadBroker {
 }
 
 impl FileUploadBroker {
+    pub(super) fn has_pending(&self) -> bool {
+        self.pending
+            .try_borrow()
+            .map_or(true, |pending| pending.is_some())
+    }
     pub(super) fn new(
         permit: EventPermit,
         navigation: NavigationEpochTracker,

@@ -61,6 +61,9 @@ impl Default for PagePermissionBroker {
 }
 
 impl PagePermissionBroker {
+    pub(super) fn has_pending_for(&self, item: ItemId) -> bool {
+        self.pending.values().any(|pending| pending.item == item)
+    }
     pub(super) fn pending_presence(&self) -> Arc<AtomicBool> {
         self.presence.clone()
     }

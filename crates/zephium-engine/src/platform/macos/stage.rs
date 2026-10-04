@@ -1,14 +1,24 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::{Retained, Weak};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly, Message};
-use objc2_app_kit::{NSColor, NSEvent, NSView};
-use objc2_foundation::{ns_string, MainThreadMarker, NSNumber, NSPoint, NSRect, NSSize, NSValue};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
+use objc2_app_kit::{
+    NSAppearanceCustomization, NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
+    NSWindowOrderingMode, NSWorkspace,
+};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{
+    ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSValue,
+};
 use objc2_quartz_core::{
     kCAFillModeForwards, CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, CATransaction,
 };
@@ -28,6 +38,104 @@ struct HostView {
     view: Retained<NSView>,
     presentation_permit: Arc<AtomicBool>,
 }
+
+#[derive(Clone)]
+struct PaintCover {
+    token: u64,
+    view: Retained<NSView>,
+    // A restored page's last frame fades into the live page; a plain colour
+    // cover is replaced within one frame and simply disappears.
+    fades: bool,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumNavigationPaintCover"]
+    struct PaintCoverView;
+
+    impl PaintCoverView {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {}
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, _event: &NSEvent) {}
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, _event: &NSEvent) {}
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, _event: &NSEvent) {}
+    }
+);
+
+struct DragObservers {
+    escape: Retained<AnyObject>,
+    resigned: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+    cursor: Option<DragCursor>,
+}
+
+struct DragCursor {
+    window: Retained<NSWindow>,
+    cursor: Retained<NSCursor>,
+    restore_rects: bool,
+}
+
+impl DragCursor {
+    #[allow(deprecated)]
+    fn new(window: Retained<NSWindow>, axis: split::Axis) -> Self {
+        let cursor = match axis {
+            split::Axis::Row => NSCursor::resizeLeftRightCursor(),
+            split::Axis::Col => NSCursor::resizeUpDownCursor(),
+        };
+        let restore_rects = window.areCursorRectsEnabled();
+        // During capture the pointer leaves the original gutter and crosses
+        // WKWebView cursor regions. The gesture owns the cursor until it ends.
+        if restore_rects {
+            window.disableCursorRects();
+        }
+        cursor.push();
+        Self {
+            window,
+            cursor,
+            restore_rects,
+        }
+    }
+}
+
+impl Drop for DragCursor {
+    fn drop(&mut self) {
+        NSCursor::pop_class();
+        if self.restore_rects {
+            self.window.enableCursorRects();
+        }
+    }
+}
+
+impl Drop for DragObservers {
+    fn drop(&mut self) {
+        // Restore the cursor stack before native deregistration can re-enter.
+        drop(self.cursor.take());
+        // SAFETY: these exact tokens were returned by AppKit/Foundation and
+        // are retired on the same main thread as their native registrations.
+        unsafe {
+            NSEvent::removeMonitor(&self.escape);
+            NSNotificationCenter::defaultCenter().removeObserver((*self.resigned).as_ref());
+        }
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumDividerFeedback"]
+    struct DividerFeedbackView;
+    impl DividerFeedbackView {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> *mut NSView { std::ptr::null_mut() }
+    }
+);
 
 #[derive(Default)]
 pub struct StageIvars {
@@ -63,6 +171,14 @@ pub struct StageIvars {
     geometry_pending: Cell<bool>,
     gap: Cell<f64>,
     drag: RefCell<Option<Divider>>,
+    drag_anchor: Cell<(f64, f64)>,
+    drag_generation: Cell<u64>,
+    drag_observers: RefCell<Option<DragObservers>>,
+    split_feedback: RefCell<Option<Retained<NSView>>>,
+    feedback_dragging: Cell<bool>,
+    divider_tracking: RefCell<Vec<(NSRect, Retained<NSTrackingArea>)>>,
+    tracking_busy: Cell<bool>,
+    covers: RefCell<HashMap<ItemId, PaintCover>>,
     indicator: RefCell<Option<Retained<NSView>>>,
     on_ratio: RefCell<Option<RatioCallback>>,
     on_stage_failure: RefCell<Option<StageFailureCallback>>,
@@ -83,66 +199,87 @@ define_class!(
     impl ContentStage {
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, _old: NSSize) {
+            self.cancel_split_drag(false);
             self.bump_layout_epoch();
             if self.position_panes() && self.ivars().paintable_changed.replace(false) {
                 let _ = self.sync_visibility();
             }
+        }
+
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+            self.sync_divider_tracking();
+        }
+
+        // Older macOS versions use the legacy native resize cursor selectors.
+        #[allow(deprecated)]
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let _: () = unsafe { msg_send![super(self), resetCursorRects] };
+            let tree = self.ivars().tree.try_borrow().ok().and_then(|tree| tree.as_deref().cloned());
+            let h = self.bounds().size.height;
+            if let Some(tree) = tree {
+                for d in split::dividers(&tree, self.region(), self.ivars().gap.get()).into_iter().take(7) {
+                    let cursor = match d.axis { split::Axis::Row => NSCursor::resizeLeftRightCursor(), split::Axis::Col => NSCursor::resizeUpDownCursor() };
+                    self.addCursorRect_cursor(NSRect::new(NSPoint::new(d.strip.x, h - d.strip.y - d.strip.height), NSSize::new(d.strip.width, d.strip.height)), &cursor);
+                }
+            }
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) { self.update_hover(event); }
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) { self.update_hover(event); }
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            if self.ivars().drag.try_borrow().is_ok_and(|drag| drag.is_none()) { self.cancel_split_drag(false); }
+        }
+        #[unsafe(method(cancelOperation:))]
+        fn cancel_operation(&self, _sender: Option<&AnyObject>) { self.cancel_split_drag(false); }
+        #[unsafe(method(viewDidMoveToWindow))]
+        fn view_did_move_to_window(&self) {
+            let _: () = unsafe { msg_send![super(self), viewDidMoveToWindow] };
+            // SAFETY: NSView parent-window access is main-thread confined.
+            if self.window().is_none() { self.cancel_split_drag(false); }
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            if self.ivars().stage_retry_terminal.get() {
-                return;
-            }
+            let _retained = self.retain();
+            if self.ivars().stage_retry_terminal.get() { return; }
+            self.cancel_split_drag(false);
+            let Some(hit) = self.pointer_divider(event) else { return };
+            let axis = hit.axis;
+            let rect = feedback_rect(&hit, true);
             let (px, py) = self.local_point(event);
-            let ivars = self.ivars();
-            let tree = ivars
-                .tree
-                .try_borrow()
-                .ok()
-                .and_then(|tree| tree.as_deref().cloned());
-            let region = self.region();
-            let hit = tree
-                .as_ref()
-                .and_then(|tree| split::divider_at(tree, region, ivars.gap.get(), px, py));
-            if let Ok(mut drag) = ivars.drag.try_borrow_mut() {
-                *drag = hit;
-            }
+            self.ivars().drag_anchor.set((px - hit.strip.x, py - hit.strip.y));
+            if let Ok(mut drag) = self.ivars().drag.try_borrow_mut() { *drag = Some(hit); } else { return; }
+            if !self.install_drag_observers(axis) { self.cancel_split_drag(false); return; }
+            self.show_split_feedback(rect, true);
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            if self.ivars().stage_retry_terminal.get() {
-                return;
-            }
+            let _retained = self.retain();
+            if self.ivars().stage_retry_terminal.get() { return; }
             let ivars = self.ivars();
-            let Some(grabbed) = ivars.drag.try_borrow().ok().and_then(|drag| drag.clone()) else {
-                return;
-            };
+            let Some(grabbed) = ivars.drag.try_borrow().ok().and_then(|drag| drag.clone()) else { return };
+            let generation = ivars.drag_generation.get();
+            let cursor = ivars.drag_observers.try_borrow().ok().and_then(|observers| observers.as_ref().and_then(|observers| observers.cursor.as_ref()).map(|cursor| cursor.cursor.clone()));
+            if let Some(cursor) = cursor { cursor.set(); }
+            if ivars.drag_generation.get() != generation { return; }
+            let Some(mut preview) = ivars.tree.try_borrow().ok().and_then(|tree| tree.as_deref().cloned()) else { return };
             let (px, py) = self.local_point(event);
             let region = self.region();
             let gap = ivars.gap.get();
-            let changed = if let Ok(mut tree) = ivars.tree.try_borrow_mut() {
-                let Some(tree) = tree.as_mut() else {
-                    return;
-                };
-                let Some(current) =
-                    split::divider_at_path(tree, region, gap, &grabbed.path)
-                else {
-                    return;
-                };
-                let ratio = split::ratio_for(current.axis, current.rect, gap, px, py);
-                tree.set_ratio(&current.path, ratio);
-                true
-            } else {
-                false
-            };
-            if !changed {
-                return;
-            }
-            self.bump_layout_epoch();
-            if self.position_panes() && self.ivars().paintable_changed.replace(false) {
-                let _ = self.sync_visibility();
+            let Some(current) = split::divider_at_path(&preview, region, gap, &grabbed.path) else { self.cancel_split_drag(false); return };
+            let ratio = anchored_drag_ratio(&current, gap, px, py, ivars.drag_anchor.get());
+            // This clone describes only the guide. The actual pane tree and
+            // every WK viewport remain unchanged until mouseUp.
+            preview.set_ratio(&grabbed.path, ratio);
+            if let Some(target) = split::divider_at_path(&preview, region, gap, &grabbed.path) {
+                self.show_split_feedback(feedback_rect(&target, true), true);
             }
         }
 
@@ -151,6 +288,7 @@ define_class!(
             if self.ivars().stage_retry_terminal.get() {
                 return;
             }
+            let _retained = self.retain();
             let ivars = self.ivars();
             let Some(drag) = ivars
                 .drag
@@ -171,19 +309,22 @@ define_class!(
                     let Some(current) = split::divider_at_path(tree, region, gap, &drag.path) else {
                         return false;
                     };
-                    let ratio = split::ratio_for(current.axis, current.rect, gap, px, py);
+                    let ratio = anchored_drag_ratio(&current, gap, px, py, ivars.drag_anchor.get());
                     tree.set_ratio(&current.path, ratio);
                     true
                 })
             } else {
                 false
             };
-            if changed {
-                self.bump_layout_epoch();
-                if self.position_panes() && self.ivars().paintable_changed.replace(false) {
-                    let _ = self.sync_visibility();
-                }
+            if changed { self.bump_layout_epoch(); }
+            let epoch = self.ivars().layout_epoch.get();
+            let content_epoch = self.ivars().content_update_epoch.get();
+            self.cancel_split_drag(true);
+            if !changed || !self.layout_epoch_is_current(epoch) { return; }
+            if self.position_panes() && self.ivars().paintable_changed.replace(false) {
+                let _ = self.sync_visibility();
             }
+            if !self.layout_epoch_is_current(epoch) || self.ivars().content_update_epoch.get() != content_epoch { return; }
             let tree = ivars
                 .tree
                 .try_borrow()
@@ -354,11 +495,10 @@ impl ContentStage {
         self.ivars().content_update_epoch.set(epoch);
         self.ivars().desired_container_visible.set(visible);
         if !visible {
-            // AppKit may not deliver mouseUp after the owning window is
-            // hidden/minimized. Do not let that abandoned native capture keep
-            // authorizing an old divider path when the stage is shown again.
-            if let Ok(mut drag) = self.ivars().drag.try_borrow_mut() {
-                drag.take();
+            // Native capture can disappear on hide/minimize without mouseUp.
+            self.cancel_split_drag(false);
+            if self.content_update_is_current(epoch) {
+                self.clear_covers();
             }
         }
         Some(epoch)
@@ -397,9 +537,6 @@ impl ContentStage {
     pub fn abort_content_update(&self, epoch: u64) {
         if self.content_update_is_current(epoch) {
             self.ivars().desired_container_visible.set(false);
-            if let Ok(mut drag) = self.ivars().drag.try_borrow_mut() {
-                drag.take();
-            }
             let superseding = self
                 .ivars()
                 .content_update_epoch
@@ -407,6 +544,7 @@ impl ContentStage {
                 .wrapping_add(1)
                 .max(1);
             self.ivars().content_update_epoch.set(superseding);
+            self.cancel_split_drag(false);
         }
         let _ = self.sync_container_visibility();
     }
@@ -429,29 +567,12 @@ impl ContentStage {
             (None, None) => false,
             (Some(_), None) | (None, Some(_)) => true,
         };
-        let drag_active = self
-            .ivars()
-            .drag
-            .try_borrow()
-            .is_ok_and(|drag| drag.is_some());
-        if drag_active && !topology_changed {
-            // During a native drag the stage owns the newest ratio while the
-            // shell intentionally waits for mouseUp. A resize can relayout
-            // with the shell's older ratio; retain the local tree and let
-            // resizeSubviews recompute geometry instead of snapping back.
-            return true;
-        }
-        if topology_changed {
-            let Ok(mut drag) = self.ivars().drag.try_borrow_mut() else {
-                // Never install a tree whose same binary path could still be
-                // authorized by an uncleared gesture.
-                return false;
-            };
-            drag.take();
-        }
         *current = next;
         drop(current);
         self.bump_layout_epoch();
+        if topology_changed {
+            self.cancel_split_drag(false);
+        }
         let _ = self.position_panes();
         !self.ivars().stage_retry_terminal.get()
     }
@@ -470,6 +591,155 @@ impl ContentStage {
             .views
             .try_borrow()
             .is_ok_and(|views| views.contains_key(&id))
+    }
+
+    pub fn wants_visible(&self, id: ItemId) -> bool {
+        self.ivars().desired_container_visible.get()
+            && self
+                .ivars()
+                .visible
+                .try_borrow()
+                .map_or(true, |ids| ids.contains(&id))
+    }
+
+    /// A transient visual cover never grants document presentation authority.
+    /// It is installed while the shared document permit is still revoked.
+    pub fn cover(&self, id: ItemId, token: u64, image: Option<&CGImage>) -> bool {
+        if self.ivars().stage_retry_terminal.get() || !self.wants_visible(id) {
+            return false;
+        }
+        let epoch = self.ivars().layout_epoch.get();
+        let Some(host) = self
+            .ivars()
+            .views
+            .try_borrow()
+            .ok()
+            .and_then(|v| v.get(&id).cloned())
+        else {
+            return false;
+        };
+        // SAFETY: retained parent access on the AppKit main thread.
+        if !unsafe { host.view.superview() }
+            .as_deref()
+            .is_some_and(|p| std::ptr::eq(p, &**self))
+        {
+            return false;
+        }
+        // This sibling absorbs pointer/scroll input until real page pixels
+        // are ready. It never takes keyboard focus away from browser chrome.
+        // SAFETY: standard NSView initialization of our main-thread subclass.
+        let cover: Retained<PaintCoverView> =
+            unsafe { msg_send![PaintCoverView::alloc(self.mtm()), init] };
+        let view = cover.into_super();
+        view.setWantsLayer(true);
+        view.setTranslatesAutoresizingMaskIntoConstraints(false);
+        view.setFrame(host.view.frame());
+        if let Some(layer) = view.layer() {
+            let color = NSColor::windowBackgroundColor();
+            layer.setBackgroundColor(Some(&color.CGColor()));
+            if let Some(image) = image {
+                let contents: &AnyObject = image.as_ref();
+                // SAFETY: a CGImage is valid layer contents; the layer retains it.
+                unsafe { layer.setContents(Some(contents)) };
+                // SAFETY: immutable framework constant.
+                layer.setContentsGravity(unsafe { objc2_quartz_core::kCAGravityResizeAspectFill });
+            }
+            if let Some(page_layer) = host.view.layer() {
+                layer.setCornerRadius(page_layer.cornerRadius());
+                // SAFETY: immutable framework constant.
+                layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+            }
+            layer.setMasksToBounds(true);
+        }
+        if !self.layout_epoch_is_current(epoch) || !self.wants_visible(id) {
+            return false;
+        }
+        // SAFETY: retained parent access on the AppKit main thread. Native
+        // frame/layer calls above may have transferred this page elsewhere.
+        if !unsafe { host.view.superview() }
+            .as_deref()
+            .is_some_and(|parent| std::ptr::eq(parent, &**self))
+            || !self.layout_epoch_is_current(epoch)
+        {
+            return false;
+        }
+        let Ok(mut covers) = self.ivars().covers.try_borrow_mut() else {
+            return false;
+        };
+        let previous = covers.insert(
+            id,
+            PaintCover {
+                token,
+                view: view.clone(),
+                fades: image.is_some(),
+            },
+        );
+        drop(covers);
+        self.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, Some(&host.view));
+        if let Some(previous) = previous {
+            previous.view.removeFromSuperview();
+        }
+        if !self.layout_epoch_is_current(epoch) || !self.wants_visible(id) {
+            self.uncover(id, token);
+            return false;
+        }
+        let retained = self
+            .ivars()
+            .covers
+            .try_borrow()
+            .is_ok_and(|covers| covers.get(&id).is_some_and(|cover| cover.token == token));
+        if !retained {
+            view.removeFromSuperview();
+        }
+        retained
+    }
+
+    pub fn uncover(&self, id: ItemId, token: u64) {
+        let view = self
+            .ivars()
+            .covers
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut covers| {
+                if covers.get(&id).is_some_and(|cover| cover.token == token) {
+                    covers.remove(&id)
+                } else {
+                    None
+                }
+            });
+        if let Some(cover) = view {
+            if cover.fades {
+                fade_out(&cover.view);
+            } else {
+                cover.view.removeFromSuperview();
+            }
+        }
+    }
+
+    fn clear_cover(&self, id: ItemId) {
+        let cover = self
+            .ivars()
+            .covers
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut covers| covers.remove(&id));
+        if let Some(cover) = cover {
+            cover.view.removeFromSuperview();
+        }
+    }
+
+    fn clear_covers(&self) {
+        let covers = self
+            .ivars()
+            .covers
+            .try_borrow_mut()
+            .ok()
+            .map(|mut covers| std::mem::take(&mut *covers));
+        if let Some(covers) = covers {
+            for cover in covers.into_values() {
+                cover.view.removeFromSuperview();
+            }
+        }
     }
 
     /// Returns whether the latest authoritative layout expects this item.
@@ -499,6 +769,7 @@ impl ContentStage {
 
     pub fn retire(&self) {
         self.ivars().stage_retry_terminal.set(true);
+        self.cancel_split_drag(false);
         self.ivars().stage_retry_scheduled.set(false);
         self.setHidden(true);
         self.removeFromSuperview();
@@ -546,6 +817,7 @@ impl ContentStage {
     }
 
     pub fn remove_view(&self, id: ItemId) {
+        self.clear_cover(id);
         if self.ivars().stage_retry_terminal.get() && !self.isHidden() {
             self.setHidden(true);
         }
@@ -575,6 +847,22 @@ impl ContentStage {
             return false;
         }
         let next = visible.iter().copied().collect::<HashSet<_>>();
+        let removed_covers = self
+            .ivars()
+            .covers
+            .try_borrow()
+            .ok()
+            .map(|covers| {
+                covers
+                    .keys()
+                    .copied()
+                    .filter(|id| !next.contains(id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for id in removed_covers {
+            self.clear_cover(id);
+        }
         let Some(changed) = self
             .ivars()
             .visible
@@ -621,6 +909,7 @@ impl ContentStage {
     /// a later resize/layout pass cannot reveal the new pixels using the
     /// previous document's readiness acknowledgement.
     pub fn set_pending(&self, id: ItemId) -> bool {
+        self.clear_cover(id);
         if self.ivars().stage_retry_terminal.get() {
             if !self.isHidden() {
                 self.setHidden(true);
@@ -728,6 +1017,314 @@ impl ContentStage {
         (local.x, self.bounds().size.height - local.y)
     }
 
+    fn pointer_divider(&self, event: &NSEvent) -> Option<Divider> {
+        let (x, y) = self.local_point(event);
+        let tree = self.ivars().tree.try_borrow().ok()?.as_deref()?.clone();
+        split::divider_at(&tree, self.region(), self.ivars().gap.get(), x, y)
+    }
+
+    fn update_hover(&self, event: &NSEvent) {
+        if self
+            .ivars()
+            .drag
+            .try_borrow()
+            .map_or(true, |drag| drag.is_some())
+        {
+            return;
+        }
+        if !self.ivars().desired_container_visible.get() || self.isHidden() {
+            self.cancel_split_drag(false);
+            return;
+        }
+        if let Some(divider) = self.pointer_divider(event) {
+            self.show_split_feedback(feedback_rect(&divider, false), false);
+        } else {
+            self.cancel_split_drag(false);
+        }
+    }
+
+    fn show_split_feedback(&self, rect: Rect, dragging: bool) {
+        let generation = self.ivars().drag_generation.get();
+        let existing = self
+            .ivars()
+            .split_feedback
+            .try_borrow()
+            .ok()
+            .and_then(|view| view.clone());
+        let created = existing.is_none();
+        let view = if let Some(view) = existing {
+            view
+        } else {
+            // SAFETY: standard initialization of a main-thread NSView subclass.
+            let view: Retained<DividerFeedbackView> =
+                unsafe { msg_send![DividerFeedbackView::alloc(self.mtm()), init] };
+            let view = view.into_super();
+            view.setWantsLayer(true);
+            view.setTranslatesAutoresizingMaskIntoConstraints(false);
+            if self.ivars().drag_generation.get() != generation
+                || !self.ivars().desired_container_visible.get()
+            {
+                return;
+            }
+            let Ok(mut feedback) = self.ivars().split_feedback.try_borrow_mut() else {
+                return;
+            };
+            if feedback.is_some() {
+                return;
+            }
+            *feedback = Some(view.clone());
+            drop(feedback);
+            self.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, None);
+            view
+        };
+        if !self.feedback_is_current(&view, generation) {
+            view.removeFromSuperview();
+            return;
+        }
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if let Some(layer) = view.layer() {
+            let changed_mode = self.ivars().feedback_dragging.replace(dragging) != dragging;
+            if created || changed_mode {
+                let paint = block2::RcBlock::new(|| {
+                    let color = if dragging {
+                        NSColor::controlAccentColor()
+                    } else {
+                        NSColor::secondaryLabelColor()
+                    };
+                    layer.setBackgroundColor(Some(&color.CGColor()));
+                });
+                self.effectiveAppearance()
+                    .performAsCurrentDrawingAppearance(&paint);
+                layer.setCornerRadius(1.5);
+            }
+            layer.setOpacity(if dragging { 0.9 } else { 0.65 });
+        }
+        let h = self.bounds().size.height;
+        view.setFrame(NSRect::new(
+            NSPoint::new(rect.x, h - rect.y - rect.height),
+            NSSize::new(rect.width, rect.height),
+        ));
+        CATransaction::commit();
+        if !self.feedback_is_current(&view, generation) {
+            view.removeFromSuperview();
+        }
+    }
+
+    fn feedback_is_current(&self, view: &NSView, generation: u64) -> bool {
+        self.ivars().drag_generation.get() == generation
+            && self.ivars().desired_container_visible.get()
+            && !self.ivars().stage_retry_terminal.get()
+            && self
+                .ivars()
+                .split_feedback
+                .try_borrow()
+                .is_ok_and(|feedback| {
+                    feedback
+                        .as_deref()
+                        .is_some_and(|current| std::ptr::eq(current, view))
+                })
+    }
+
+    fn cancel_split_drag(&self, animate: bool) {
+        if let Ok(mut drag) = self.ivars().drag.try_borrow_mut() {
+            drag.take();
+        }
+        self.ivars()
+            .drag_generation
+            .set(self.ivars().drag_generation.get().wrapping_add(1));
+        let feedback = self
+            .ivars()
+            .split_feedback
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut view| view.take());
+        let observers = self
+            .ivars()
+            .drag_observers
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut observers| observers.take());
+        // Native deregistration happens after every Rust capture has retired.
+        drop(observers);
+        if let Some(view) = feedback {
+            if !animate || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+                view.removeFromSuperview();
+            } else if let Some(layer) = view.layer() {
+                let done = view.clone();
+                let completed = block2::RcBlock::new(move || {
+                    done.removeFromSuperview();
+                });
+                let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+                // SAFETY: opacity takes NSNumber values; AppKit copies the completion block.
+                unsafe {
+                    fade.setFromValue(Some(&NSNumber::new_f64(layer.opacity() as f64)));
+                    fade.setToValue(Some(&NSNumber::new_f64(0.0)));
+                }
+                fade.setDuration(0.10);
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                unsafe {
+                    CATransaction::setCompletionBlock(Some(&completed));
+                }
+                layer.setOpacity(0.0);
+                layer.addAnimation_forKey(&fade, Some(ns_string!("zephium.split-guide.fade")));
+                CATransaction::commit();
+            } else {
+                view.removeFromSuperview();
+            }
+        }
+    }
+
+    fn install_drag_observers(&self, axis: split::Axis) -> bool {
+        // SAFETY: native window access is confined to the AppKit main thread.
+        let Some(window) = self.window() else {
+            return false;
+        };
+        let generation = self.ivars().drag_generation.get();
+        let weak = Weak::from_retained(&self.retain());
+        let escape = block2::RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: AppKit lends the event for the duration of this local callback.
+            let borrowed = unsafe { event.as_ref() };
+            if borrowed.keyCode() == 53 {
+                let canceled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(stage) = weak.load() {
+                        if stage.ivars().drag_generation.get() == generation {
+                            stage.cancel_split_drag(false);
+                            return true;
+                        }
+                    }
+                    false
+                }))
+                .unwrap_or(false);
+                if canceled {
+                    return std::ptr::null_mut();
+                }
+            }
+            event.as_ptr()
+        });
+        // SAFETY: a local, main-thread event monitor requires no global input permission.
+        let Some(escape) = (unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &escape)
+        }) else {
+            return false;
+        };
+        let weak = MainThreadBound::new(Weak::from_retained(&self.retain()), self.mtm());
+        let resigned = block2::RcBlock::new(move |_: NonNull<NSNotification>| {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                if let Some(stage) = weak.get(mtm).load() {
+                    if stage.ivars().drag_generation.get() == generation {
+                        stage.cancel_split_drag(false);
+                    }
+                }
+            }));
+        });
+        // SAFETY: public window notification; the copied block holds only a main-thread weak stage.
+        let resigned = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(NSWindowDidResignKeyNotification),
+                Some(&window),
+                None,
+                &resigned,
+            )
+        };
+        let observers = DragObservers {
+            escape,
+            resigned,
+            cursor: Some(DragCursor::new(window, axis)),
+        };
+        if self.ivars().drag_generation.get() != generation {
+            return false;
+        }
+        let Ok(mut retained) = self.ivars().drag_observers.try_borrow_mut() else {
+            return false;
+        };
+        *retained = Some(observers);
+        true
+    }
+
+    fn sync_divider_tracking(&self) {
+        if self.ivars().tracking_busy.replace(true) {
+            return;
+        }
+        struct Reset<'a>(&'a Cell<bool>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let _reset = Reset(&self.ivars().tracking_busy);
+        let tree = self
+            .ivars()
+            .tree
+            .try_borrow()
+            .ok()
+            .and_then(|tree| tree.as_deref().cloned());
+        let h = self.bounds().size.height;
+        let desired: Vec<_> = tree
+            .map(|tree| split::dividers(&tree, self.region(), self.ivars().gap.get()))
+            .unwrap_or_default()
+            .into_iter()
+            .take(7)
+            .filter(|d| d.strip.width > 0.0 && d.strip.height > 0.0)
+            .map(|d| {
+                NSRect::new(
+                    NSPoint::new(d.strip.x, h - d.strip.y - d.strip.height),
+                    NSSize::new(d.strip.width, d.strip.height),
+                )
+            })
+            .collect();
+        if self
+            .ivars()
+            .divider_tracking
+            .try_borrow()
+            .is_ok_and(|areas| {
+                areas
+                    .iter()
+                    .map(|(rect, _)| *rect)
+                    .eq(desired.iter().copied())
+            })
+        {
+            return;
+        }
+        let Some(old) = self
+            .ivars()
+            .divider_tracking
+            .try_borrow_mut()
+            .ok()
+            .map(|mut areas| std::mem::take(&mut *areas))
+        else {
+            return;
+        };
+        for (_, area) in old {
+            self.removeTrackingArea(&area);
+        }
+        let mut added = Vec::new();
+        for rect in desired {
+            let options = NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::MouseMoved
+                | NSTrackingAreaOptions::ActiveInKeyWindow;
+            // SAFETY: main-thread NSView owner implements the requested mouse callbacks.
+            let area = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    NSTrackingArea::alloc(),
+                    rect,
+                    options,
+                    Some(self),
+                    None,
+                )
+            };
+            self.addTrackingArea(&area);
+            added.push((rect, area));
+        }
+        if let Ok(mut areas) = self.ivars().divider_tracking.try_borrow_mut() {
+            *areas = added;
+        }
+    }
+
     fn position_panes(&self) -> bool {
         if self.ivars().stage_retry_terminal.get() {
             if !self.isHidden() {
@@ -742,6 +1339,10 @@ impl ContentStage {
         'attempt: for _ in 0..4 {
             let ivars = self.ivars();
             let epoch = ivars.layout_epoch.get();
+            let Some(views) = ivars.views.try_borrow().ok().map(|views| views.clone()) else {
+                self.defer_stage_retry(true);
+                return false;
+            };
             let Some(tree) = ivars
                 .tree
                 .try_borrow()
@@ -757,10 +1358,6 @@ impl ContentStage {
                 ivars.paintable_changed.set(changed);
                 ivars.geometry_pending.set(false);
                 return true;
-            };
-            let Some(views) = ivars.views.try_borrow().ok().map(|views| views.clone()) else {
-                self.defer_stage_retry(true);
-                return false;
             };
             let gap = ivars.gap.get();
             let bounds = self.bounds();
@@ -792,6 +1389,17 @@ impl ContentStage {
                             continue 'attempt;
                         }
                     }
+                    let cover = ivars
+                        .covers
+                        .try_borrow()
+                        .ok()
+                        .and_then(|covers| covers.get(&id).cloned());
+                    if let Some(cover) = cover {
+                        cover.view.setFrame(frame);
+                        if !self.layout_epoch_is_current(epoch) {
+                            continue 'attempt;
+                        }
+                    }
                 }
             }
             if self.layout_epoch_is_current(epoch) {
@@ -804,6 +1412,14 @@ impl ContentStage {
                 drop(current);
                 self.ivars().paintable_changed.set(changed);
                 self.ivars().geometry_pending.set(false);
+                self.sync_divider_tracking();
+                // SAFETY: native cursor invalidation uses this main-thread view.
+                if let Some(window) = self.window() {
+                    window.invalidateCursorRectsForView(self);
+                }
+                if !self.layout_epoch_is_current(epoch) {
+                    continue 'attempt;
+                }
                 return true;
             }
         }
@@ -1134,6 +1750,51 @@ impl ContentStage {
     }
 }
 
+// Preserve the exact point grabbed within the gutter; ratio_for expects the
+// leading edge, so feeding it the pointer itself shifts the divider on pickup.
+fn anchored_drag_ratio(divider: &Divider, gap: f64, px: f64, py: f64, anchor: (f64, f64)) -> f64 {
+    split::ratio_for(
+        divider.axis,
+        divider.rect,
+        gap,
+        px - anchor.0,
+        py - anchor.1,
+    )
+}
+
+fn feedback_rect(divider: &Divider, dragging: bool) -> Rect {
+    let r = divider.rect;
+    let strip = divider.strip;
+    match divider.axis {
+        split::Axis::Row => {
+            let height = if dragging {
+                r.height
+            } else {
+                28.0_f64.min(r.height)
+            };
+            Rect::new(
+                strip.x + strip.width / 2.0 - 1.0,
+                r.y + (r.height - height) / 2.0,
+                2.0,
+                height,
+            )
+        }
+        split::Axis::Col => {
+            let width = if dragging {
+                r.width
+            } else {
+                28.0_f64.min(r.width)
+            };
+            Rect::new(
+                r.x + (r.width - width) / 2.0,
+                strip.y + strip.height / 2.0 - 1.0,
+                width,
+                2.0,
+            )
+        }
+    }
+}
+
 fn same_rect(left: NSRect, right: NSRect) -> bool {
     left.origin.x == right.origin.x
         && left.origin.y == right.origin.y
@@ -1173,6 +1834,36 @@ fn translation(from: f64, to: f64, seconds: f64) -> Retained<CABasicAnimation> {
     animation
 }
 
+fn fade_out(view: &Retained<NSView>) {
+    let Some(layer) = view.layer() else {
+        view.removeFromSuperview();
+        return;
+    };
+    if NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+        view.removeFromSuperview();
+        return;
+    }
+    let done = view.clone();
+    let completed = block2::RcBlock::new(move || {
+        done.removeFromSuperview();
+    });
+    let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+    // SAFETY: opacity takes NSNumber values; Core Animation copies the block.
+    unsafe {
+        fade.setFromValue(Some(&NSNumber::new_f64(layer.opacity() as f64)));
+        fade.setToValue(Some(&NSNumber::new_f64(0.0)));
+    }
+    fade.setDuration(0.15);
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    unsafe {
+        CATransaction::setCompletionBlock(Some(&completed));
+    }
+    layer.setOpacity(0.0);
+    layer.addAnimation_forKey(&fade, Some(ns_string!("zephium.restore-cover.fade")));
+    CATransaction::commit();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,5 +1873,62 @@ mod tests {
     #[test]
     fn stage_class_registers() {
         let _ = <ContentStage as objc2::ClassType>::class();
+    }
+
+    #[test]
+    fn divider_feedback_is_centered_and_stays_inside_its_nested_branch() {
+        let first = ItemId::from(1);
+        let mut original = Pane::leaf(first);
+        original.split(first, ItemId::from(2), split::Axis::Row, false);
+        original.split(first, ItemId::from(3), split::Axis::Col, false);
+        let region = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let real_layout = split::layout(&original, region, 8.0);
+
+        let root = split::divider_at_path(&original, region, 8.0, &[]).unwrap();
+        assert_eq!(
+            feedback_rect(&root, false),
+            Rect::new(499.0, 386.0, 2.0, 28.0)
+        );
+        assert_eq!(
+            feedback_rect(&root, true),
+            Rect::new(499.0, 0.0, 2.0, 800.0)
+        );
+
+        for anchor in [0.0, 4.0, 7.5] {
+            assert!(
+                (anchored_drag_ratio(&root, 8.0, root.strip.x + anchor, 200.0, (anchor, 200.0))
+                    - 0.5)
+                    .abs()
+                    < 1e-12
+            );
+            assert!(
+                (anchored_drag_ratio(
+                    &root,
+                    8.0,
+                    root.strip.x + anchor + 100.0,
+                    200.0,
+                    (anchor, 200.0)
+                ) - (0.5 + 100.0 / 992.0))
+                    .abs()
+                    < 1e-12
+            );
+        }
+        let mut guide_only = original.clone();
+        guide_only.set_ratio(&[0], 0.75);
+        let nested = split::divider_at_path(&guide_only, region, 8.0, &[0]).unwrap();
+        assert_eq!(
+            feedback_rect(&nested, false),
+            Rect::new(234.0, 597.0, 28.0, 2.0)
+        );
+        assert_eq!(
+            feedback_rect(&nested, true),
+            Rect::new(0.0, 597.0, 496.0, 2.0)
+        );
+        assert!(
+            (anchored_drag_ratio(&nested, 8.0, 100.0, nested.strip.y + 4.0, (100.0, 4.0)) - 0.75)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(split::layout(&original, region, 8.0), real_layout);
     }
 }
