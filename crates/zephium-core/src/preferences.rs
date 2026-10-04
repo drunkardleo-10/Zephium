@@ -35,6 +35,9 @@ pub const KEYS: &[&str] = &[
     "performance.after",
     "performance.memory",
     "performance.exceptions",
+    "updates.auto-check",
+    "notice.seen-version",
+    "notice.security-dismissed",
 ];
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -88,6 +91,14 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
                         && !sites[..index].contains(site)
                 })
         }
+        // The Zephium version a notice was last acknowledged at.
+        "notice.seen-version" | "notice.security-dismissed" => {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+        }
         "search.suggestions"
         | "ui.reduce-motion"
         | "ui.newtab-greeting"
@@ -101,6 +112,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "tabs.switch-to-open"
         | "time.track"
         | "performance.sleep"
+        | "updates.auto-check"
         | "focus.breaks" => {
             matches!(value, "true" | "false")
         }
@@ -165,6 +177,22 @@ mod tests {
         assert!(value_allowed("time.retention", "365"));
         assert!(!value_allowed("time.retention", "7"));
         assert!(value_allowed("time.track", "false"));
+    }
+
+    #[test]
+    fn update_preferences_hold_a_switch_and_bounded_versions() {
+        assert!(value_allowed("updates.auto-check", "false"));
+        assert!(!value_allowed("updates.auto-check", "off"));
+        for key in ["notice.seen-version", "notice.security-dismissed"] {
+            assert!(KEYS.contains(&key));
+            assert!(value_allowed(key, "1.0.0"));
+            assert!(value_allowed(key, "1.0.0-beta.1+build.7"));
+            assert!(value_allowed(key, &"9".repeat(64)));
+            for value in ["", " 1.0.0", "1.0.0\n", "v1/0", "1.0.0_rc", "é"] {
+                assert!(!value_allowed(key, value), "{value:?}");
+            }
+            assert!(!value_allowed(key, &"9".repeat(65)));
+        }
     }
 
     #[test]
