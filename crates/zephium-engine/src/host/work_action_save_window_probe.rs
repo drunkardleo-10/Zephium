@@ -15,7 +15,9 @@ fn diagnostics_selected() -> bool {
 #[allow(clippy::print_stderr)]
 pub(super) fn passive_lifetime_start(eligible: bool, retained: bool, cancelled: bool) {
     if diagnostics_selected() {
-        eprintln!("isolated-fill-passive-lifetime: phase=terminal eligible={eligible} retained={retained} cancelled={cancelled} content=redacted");
+        eprintln!(
+            "isolated-fill-passive-lifetime: phase=terminal eligible={eligible} retained={retained} cancelled={cancelled} content=redacted"
+        );
     }
 }
 
@@ -28,7 +30,9 @@ pub(super) fn passive_lifetime_stop(
     settlement: bool,
 ) {
     if diagnostics_selected() {
-        eprintln!("isolated-fill-passive-lifetime: phase=cancel current={current} drain={drain} expired={expired} terminal={terminal} settlement={settlement} content=redacted");
+        eprintln!(
+            "isolated-fill-passive-lifetime: phase=cancel current={current} drain={drain} expired={expired} terminal={terminal} settlement={settlement} content=redacted"
+        );
     }
 }
 
@@ -57,7 +61,11 @@ impl SaveWindow {
         let window = Self::bounded(now, deadline);
         eprintln!(
             "isolated-fill-save-window: phase={} duration_ms=3000 mutation=none terminal=unchanged content=redacted",
-            if window.is_some() { "started" } else { "insufficient_deadline" }
+            if window.is_some() {
+                "started"
+            } else {
+                "insufficient_deadline"
+            }
         );
         window
     }

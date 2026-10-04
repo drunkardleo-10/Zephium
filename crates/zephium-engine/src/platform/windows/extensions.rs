@@ -25,7 +25,7 @@ fn wait<T>(rx: mpsc::Receiver<windows::core::Result<T>>) -> Result<T> {
         match rx.try_recv() {
             Ok(result) => return result.map_err(|e| e.to_string()),
             Err(mpsc::TryRecvError::Disconnected) => {
-                return Err("Native extension callback was lost.".into())
+                return Err("Native extension callback was lost.".into());
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }

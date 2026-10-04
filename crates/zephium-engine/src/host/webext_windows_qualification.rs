@@ -363,7 +363,10 @@ fn native_windows_runtime_recovery() {
     until(
         || {
             host(move |h| {
-                evaluate(&h.windows_extensions.installs[&key].bridge.view, "typeof window.__zephiumRefresh === 'function' && typeof preCrash === 'undefined'") == true
+                evaluate(
+                    &h.windows_extensions.installs[&key].bridge.view,
+                    "typeof window.__zephiumRefresh === 'function' && typeof preCrash === 'undefined'",
+                ) == true
             })
         },
         15,
@@ -409,7 +412,10 @@ fn native_windows_runtime_recovery() {
         ]
     });
     host(move |h| {
-        evaluate(&h.windows_extensions.installs[&key].bridge.view, "globalThis.qaSnapshots=0;globalThis.qaReports=0;globalThis.qaError=null;const send=chrome.runtime.sendMessage;chrome.runtime.sendMessage=function(...args){if(args[0]?.__zephiumActionSnapshot)qaSnapshots++;return Reflect.apply(send,this,args)};const post=chrome.webview.postMessage.bind(chrome.webview);chrome.webview.postMessage=function(message){if(JSON.parse(message).kind==='action')qaReports++;else qaError=message;post(message)};true");
+        evaluate(
+            &h.windows_extensions.installs[&key].bridge.view,
+            "globalThis.qaSnapshots=0;globalThis.qaReports=0;globalThis.qaError=null;const send=chrome.runtime.sendMessage;chrome.runtime.sendMessage=function(...args){if(args[0]?.__zephiumActionSnapshot)qaSnapshots++;return Reflect.apply(send,this,args)};const post=chrome.webview.postMessage.bind(chrome.webview);chrome.webview.postMessage=function(message){if(JSON.parse(message).kind==='action')qaReports++;else qaError=message;post(message)};true",
+        );
     });
     println!("RUNTIME_STEP native window identities {windows:?}");
     for index in 0..20 {
@@ -451,10 +457,15 @@ fn native_windows_runtime_recovery() {
         (1..=2).contains(&snapshots),
         "unbounded worker snapshots: {snapshots}"
     );
-    println!("RUNTIME_PASS missing icon: twenty native tab switches caused {snapshots} bounded startup snapshots");
+    println!(
+        "RUNTIME_PASS missing icon: twenty native tab switches caused {snapshots} bounded startup snapshots"
+    );
     // Keep native RPC and decoding paths; inject only a broken icon report.
     host(move |h| {
-        evaluate(&h.windows_extensions.installs[&key].bridge.view, "qaSnapshots=0;qaReports=0;const sendBroken=chrome.runtime.sendMessage;chrome.runtime.sendMessage=function(...args){const result=Reflect.apply(sendBroken,this,args);return args[0]?.__zephiumActionSnapshot?result.catch(()=>null).then(()=>({icon:{path:'missing-qualification.png'},perTabIcons:false})):result};true");
+        evaluate(
+            &h.windows_extensions.installs[&key].bridge.view,
+            "qaSnapshots=0;qaReports=0;const sendBroken=chrome.runtime.sendMessage;chrome.runtime.sendMessage=function(...args){const result=Reflect.apply(sendBroken,this,args);return args[0]?.__zephiumActionSnapshot?result.catch(()=>null).then(()=>({icon:{path:'missing-qualification.png'},perTabIcons:false})):result};true",
+        );
         evaluate(
             &h.views[&tab],
             "chrome.runtime.sendMessage({__zephiumActionChanged:true}).catch(()=>{});true",
@@ -505,7 +516,9 @@ fn native_windows_runtime_recovery() {
         )),
         2
     );
-    println!("RUNTIME_PASS injected broken icon: native fetch/decode failures stopped after two snapshots");
+    println!(
+        "RUNTIME_PASS injected broken icon: native fetch/decode failures stopped after two snapshots"
+    );
     host(move |h| {
         evaluate(&h.views[&tab], "window.close(); true");
     });
@@ -571,7 +584,12 @@ fn native_windows_runtime_recovery() {
                 let mut request = [0; 4096];
                 let _ = stream.read(&mut request);
                 let body = "<!doctype html><div id=ad>Advertisement</div><div id=other>Other</div>";
-                let _ = write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
             } else {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -604,7 +622,10 @@ fn native_windows_runtime_recovery() {
     until(
         || {
             host(move |h| {
-                evaluate(&h.views[&web], "!!document.querySelector('#ad') && getComputedStyle(document.querySelector('#ad')).display==='none'") == true
+                evaluate(
+                    &h.views[&web],
+                    "!!document.querySelector('#ad') && getComputedStyle(document.querySelector('#ad')).display==='none'",
+                ) == true
             })
         },
         15,
@@ -630,7 +651,10 @@ fn native_windows_runtime_recovery() {
     until(
         || {
             host(move |h| {
-                evaluate(&h.views[&web], "getComputedStyle(document.querySelector('#ad')).display !== 'none' && getComputedStyle(document.querySelector('#other')).display === 'none'") == true
+                evaluate(
+                    &h.views[&web],
+                    "getComputedStyle(document.querySelector('#ad')).display !== 'none' && getComputedStyle(document.querySelector('#other')).display === 'none'",
+                ) == true
             })
         },
         15,

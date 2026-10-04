@@ -148,9 +148,15 @@ impl EngineHost {
             };
             let args = serde_json::json!([token, session.url, hex]);
             match request {
-                ElementPickerRequest::Read {..} => format!("((p)=>globalThis.__zephium_content_style_v1__?.pickerEncoded(...p))({args})"),
-                ElementPickerRequest::Preview {enabled,..} => format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;return a?.preview(...p,{enabled})?a.pickerEncoded(...p):null;}})({args})"),
-                ElementPickerRequest::Stop {..} => format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;return a?.stopPicker(p[0],p[1])?a.pickerEncoded(...p):null;}})({args})"),
+                ElementPickerRequest::Read { .. } => format!(
+                    "((p)=>globalThis.__zephium_content_style_v1__?.pickerEncoded(...p))({args})"
+                ),
+                ElementPickerRequest::Preview { enabled, .. } => format!(
+                    "((p)=>{{const a=globalThis.__zephium_content_style_v1__;return a?.preview(...p,{enabled})?a.pickerEncoded(...p):null;}})({args})"
+                ),
+                ElementPickerRequest::Stop { .. } => format!(
+                    "((p)=>{{const a=globalThis.__zephium_content_style_v1__;return a?.stopPicker(p[0],p[1])?a.pickerEncoded(...p):null;}})({args})"
+                ),
                 ElementPickerRequest::Start => unreachable!(),
             }
         };

@@ -456,9 +456,16 @@ impl EngineHost {
         if Instant::now() >= read.deadline {
             #[cfg(feature = "agentic-browser-qa")]
             if read.refusal.is_none() {
-                eprintln!("work_observation phase=timeout ready={} dispatched={} callback_returned={} wakes={} presentation_facts={:?}",
-                    read.ready_since.is_some(), read.dispatched, read.callback_returned, read.wakes,
-                    read.presentation.as_ref().map(WorkObservationPresentation::liveness_facts));
+                eprintln!(
+                    "work_observation phase=timeout ready={} dispatched={} callback_returned={} wakes={} presentation_facts={:?}",
+                    read.ready_since.is_some(),
+                    read.dispatched,
+                    read.callback_returned,
+                    read.wakes,
+                    read.presentation
+                        .as_ref()
+                        .map(WorkObservationPresentation::liveness_facts)
+                );
             }
             // A look that never reached the page (it waited for another
             // page's presentation) ran nothing: it is not ready, not lost.
