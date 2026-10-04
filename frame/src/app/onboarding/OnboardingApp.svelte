@@ -3,7 +3,7 @@
   import "$styles/global.css";
   import { onMount, tick } from "svelte";
   import { commands } from "$shared/ipc/bindings";
-  import { IS_MAC } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import { theme } from "$domain/appearance";
   import { operations } from "$domain/operations";
   import { preferences } from "$domain/preferences";
@@ -77,6 +77,7 @@
 
 {#if ready && !finished}
   <Onboarding onfinish={finish}
-    >{#snippet windowControls()}{#if !IS_MAC}<WindowControls />{/if}{/snippet}</Onboarding
+    >{#snippet windowControls()}{#if !IS_MAC && !IS_WINDOWS}<WindowControls
+        />{/if}{/snippet}</Onboarding
   >
 {/if}

@@ -63,9 +63,11 @@
   ];
 
   if (!IS_MAC) {
-    const primaryShortcuts: ReadonlyArray<readonly [string, string]> = [
+    const primaryShortcuts: ReadonlyArray<readonly [string, string, boolean?]> = [
       ["t", "tab.new"],
       ["w", "tab.close"],
+      ["t", "tab.reopen", true],
+      ["s", "sidebar.toggleCompact", true],
       ["r", "nav.reload"],
       ["l", "url.focus"],
       ["=", "zoom.in"],
@@ -76,10 +78,14 @@
       [".", "nav.stop"],
     ];
 
-    for (const [key, command] of primaryShortcuts) {
+    for (const [key, command, shift = false] of primaryShortcuts) {
       chromeShortcuts.push({
         matches: (event) =>
-          event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === key,
+          event.ctrlKey &&
+          !event.metaKey &&
+          event.shiftKey === shift &&
+          !event.altKey &&
+          event.key.toLowerCase() === key,
         command,
       });
     }
@@ -88,7 +94,7 @@
   function handleKeydown(event: KeyboardEvent) {
     // The native content stage is suppressed while this browser-owned modal
     // is active. Keep chrome shortcuts from mutating tabs behind it as well.
-    if (consentActive) return;
+    if (consentActive || event.defaultPrevented || event.isComposing) return;
     if ((event.metaKey || event.ctrlKey) && event.key === ",") {
       event.preventDefault();
       void browserPage.open("settings");

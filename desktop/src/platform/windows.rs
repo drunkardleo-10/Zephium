@@ -1,3 +1,7 @@
+#[path = "windows_caption.rs"]
+mod caption;
+#[path = "windows_menus.rs"]
+mod menus;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -112,6 +116,13 @@ pub fn init(
     on_runtime_update: RuntimeUpdateCallback,
 ) -> bool {
     round_corners(window);
+    if !menus::install(window) {
+        crate::write_diagnostic(format_args!("chrome: using system menu rendering"));
+    }
+    if !caption::install(window) {
+        // A visual enhancement must never remove access to window controls.
+        let _ = window.set_decorations(true);
+    }
     let hardened = harden_privileged(window, expected_user_data_folder, on_runtime_update);
     apply_material(window, true);
     hardened
@@ -392,23 +403,23 @@ pub fn round_corners(window: &WebviewWindow) {
 // Acrylic with a deep tint; a high-alpha tint keeps the blur readable
 // instead of smeared. Applies from Win10 up.
 pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
-    use tauri::utils::config::{Color, WindowEffectsConfig};
-    use tauri::window::Effect;
     let tint = if dark {
-        Color(16, 16, 21, 245)
+        (24, 24, 28, 210)
     } else {
-        Color(245, 245, 249, 242)
+        (245, 245, 249, 210)
     };
-    let result = window.set_effects(WindowEffectsConfig {
-        effects: vec![Effect::Acrylic],
-        state: None,
-        radius: None,
-        color: Some(tint),
-    });
+    // Use the fallible native adapter directly; the Tauri effect dispatcher
+    // discards the underlying DWM error and can falsely report acrylic.
+    let contrast = menus::high_contrast();
+    let result = if contrast {
+        window_vibrancy::clear_acrylic(window)
+    } else {
+        window_vibrancy::apply_acrylic(window, Some(tint))
+    };
     if let Err(e) = &result {
         crate::write_diagnostic(format_args!("material: window effects unavailable: {e}"));
     }
-    let material = if result.is_ok() {
+    let material = if result.is_ok() && !contrast {
         crate::material::Material::Acrylic
     } else {
         crate::material::Material::None

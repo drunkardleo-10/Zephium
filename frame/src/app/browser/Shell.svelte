@@ -403,6 +403,11 @@
 </div>
 
 <style>
+  /* One continuous tint over the native acrylic, including the outer gutter. */
+  :global(html[data-material="acrylic"] body) {
+    background: color-mix(in srgb, var(--color-chrome) 28%, transparent);
+  }
+
   .sidebar-mode-body {
     display: flex;
     flex: 1;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import type { Snippet } from "svelte";
+  import { IS_WINDOWS } from "$shared/platform";
   import * as motion from "$session/motion.svelte";
   import { surface as browserPage } from "$domain/surface";
   import * as tools from "$session/tools.svelte";
@@ -139,13 +140,13 @@
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
   {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle {width} />{/if}
-  <SidebarHeader
-    compact={headerCompact}
-    launcher={!navigating && tools.activeTool() !== null}
-    ontoggle={toggleShape}
-    navigation={!navigating}
-    pageControls={!inWork}
-  />
+  {#if !settings || !IS_WINDOWS}<SidebarHeader
+      compact={headerCompact}
+      launcher={!navigating && tools.activeTool() !== null}
+      ontoggle={toggleShape}
+      navigation={!navigating}
+      pageControls={!inWork}
+    />{/if}
   {#if settings}
     {@render settingsNavigation()}
   {:else}

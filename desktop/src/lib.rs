@@ -4922,6 +4922,7 @@ pub fn run() {
             let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
             #[cfg(target_os = "windows")]
             let main_builder = main_builder
+                .decorations(false)
                 // Seed the native parent's first erase, not just WebView2's
                 // transparent renderer. Otherwise a hidden decorated window
                 // can reveal an unpainted white client surface until redraw.
