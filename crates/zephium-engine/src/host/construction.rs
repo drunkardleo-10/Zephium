@@ -2022,6 +2022,10 @@ impl EngineHost {
 
     /// Keep the exact bootstrap generation alive until a Work controller owns
     /// the same environment. All other callers retain immediate close behavior.
+    #[cfg_attr(
+        all(target_os = "windows", not(feature = "agentic-browser")),
+        allow(dead_code)
+    )]
     pub(super) fn begin_windows_work_profile_environment(
         &mut self,
         profile: zephium_core::ids::ProfileId,

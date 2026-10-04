@@ -183,6 +183,10 @@ impl Completion {
 
     /// Group real native terminals. Watchdog reports never release a sibling's physical debt.
     #[cfg(target_os = "windows")]
+    #[cfg_attr(
+        all(target_os = "windows", not(feature = "agentic-browser")),
+        allow(dead_code)
+    )]
     pub(crate) fn split(parent: Arc<Self>, count: usize) -> Vec<Arc<Self>> {
         let state = Arc::new(Mutex::new((count, true)));
         (0..count)
@@ -210,17 +214,29 @@ impl Completion {
             .collect()
     }
     #[cfg(target_os = "windows")]
+    #[cfg_attr(
+        all(target_os = "windows", not(feature = "agentic-browser")),
+        allow(dead_code)
+    )]
     pub(crate) fn terminal_outcome(&self) -> Option<ProfileDataErasureOutcome> {
         self.terminal.lock().unwrap_or_else(|p| p.into_inner()).0
     }
 
     /// Join the real native terminal; a public watchdog report is never cleanup proof.
     #[cfg(target_os = "windows")]
+    #[cfg_attr(
+        all(target_os = "windows", not(feature = "agentic-browser")),
+        allow(dead_code)
+    )]
     pub(crate) fn forward_terminal(&self, target: Arc<Self>) {
         self.observe_terminal(Box::new(move |outcome| target.finish(outcome)));
     }
 
     #[cfg(target_os = "windows")]
+    #[cfg_attr(
+        all(target_os = "windows", not(feature = "agentic-browser")),
+        allow(dead_code)
+    )]
     fn observe_terminal(&self, observer: ErasureDone) {
         let mut terminal = self.terminal.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(outcome) = terminal.0 {

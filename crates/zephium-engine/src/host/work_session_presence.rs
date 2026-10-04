@@ -12,7 +12,9 @@ use objc2_foundation::{MainThreadMarker, NSArray, NSSet, NSUUID};
 use objc2_web_kit::{WKWebsiteDataRecord, WKWebsiteDataStore, WKWebsiteDataTypeCookies};
 use zephium_core::ids::ProfileId;
 
-use super::{profiles::ProfilePersistenceClass, EngineHost};
+#[cfg(any(target_os = "macos", feature = "agentic-browser"))]
+use super::profiles::ProfilePersistenceClass;
+use super::EngineHost;
 
 /// Records WebKit returns for one store are bounded before they are scanned.
 #[cfg(target_os = "macos")]
@@ -124,23 +126,20 @@ pub(super) fn site_matches(host: &str, site: &str) -> bool {
                 .is_some_and(|rest| rest.ends_with('.')))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::site_matches;
-
-    #[test]
-    fn a_session_belongs_to_its_site_and_its_subdomains_only() {
-        assert!(site_matches("app.slack.com", "slack.com"));
-        assert!(site_matches("slack.com", "slack.com"));
-        assert!(site_matches("Slack.COM", ".slack.com"));
-        assert!(site_matches("127.0.0.1", "127.0.0.1"));
-        assert!(!site_matches("notslack.com", "slack.com"));
-        assert!(!site_matches("slack.com.evil.test", "slack.com"));
-        assert!(!site_matches("slack.com", ""));
-        assert!(!site_matches("slack.com", "app.slack.com"));
+/// Without the Work runtime there is no profile session to look up.
+#[cfg(all(target_os = "windows", not(feature = "agentic-browser")))]
+impl EngineHost {
+    pub(crate) fn work_sessions_present(
+        &mut self,
+        _profile: ProfileId,
+        hosts: Vec<String>,
+        reply: Sender<Vec<bool>>,
+    ) {
+        let _ = reply.send(vec![false; hosts.len()]);
     }
 }
-#[cfg(target_os = "windows")]
+
+#[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 impl EngineHost {
     pub(crate) fn work_sessions_present(
         &mut self,
@@ -263,7 +262,7 @@ impl EngineHost {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 fn work_presence_targets(
     base: &url::Url,
     descriptors: Vec<crate::platform::windows::work_seed_metadata::WorkStoreDescriptor>,
@@ -285,7 +284,7 @@ fn work_presence_targets(
     targets
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(all(test, target_os = "windows", feature = "agentic-browser"))]
 mod windows_presence_tests {
     #[test]
     fn remembered_stores_preserve_scheme_port_and_requested_host() {
@@ -315,5 +314,22 @@ mod windows_presence_tests {
         assert!(targets
             .iter()
             .all(|target| target.as_url().host_str() == Some("app.slack.com")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::site_matches;
+
+    #[test]
+    fn a_session_belongs_to_its_site_and_its_subdomains_only() {
+        assert!(site_matches("app.slack.com", "slack.com"));
+        assert!(site_matches("slack.com", "slack.com"));
+        assert!(site_matches("Slack.COM", ".slack.com"));
+        assert!(site_matches("127.0.0.1", "127.0.0.1"));
+        assert!(!site_matches("notslack.com", "slack.com"));
+        assert!(!site_matches("slack.com.evil.test", "slack.com"));
+        assert!(!site_matches("slack.com", ""));
+        assert!(!site_matches("slack.com", "app.slack.com"));
     }
 }
