@@ -8,29 +8,19 @@ unmaintained = "all"
 unsound = "all"
 unused-ignored-advisory = "deny"
 ignore = [
-    # Tauri/Wry's current Linux backend is GTK3. There is no maintained GTK3
-    # binding upgrade; replacing these exceptions requires the planned GTK4 /
-    # WebKitGTK 6 port, not a dependency bump.
-    { id = "RUSTSEC-2024-0411", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0412", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0413", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0414", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0415", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0416", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0417", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0418", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0419", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0420", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; GTK3 backend structural dependency; tracked by the GTK4/Wry migration release gate" },
-    { id = "RUSTSEC-2024-0429", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; unsound glib iterator API is transitive through GTK3 and is not used directly; remove with GTK4 migration" },
+    # The gtk-rs GTK3 "unmaintained" advisories (RUSTSEC-2024-0411..0420) were
+    # withdrawn on 2026-08-14. The GTK3 stack is Linux-only and stays in the
+    # graph until the planned GTK4 / WebKitGTK 6 port.
+    { id = "RUSTSEC-2024-0429", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; unsound glib 0.18 VariantStrIter API is transitive through the Linux-only GTK3 stack and is not used directly; fixed only in glib 0.20, remove with GTK4 migration" },
     # Tauri/Specta transitives with no safe upgrade in the current release
     # line. Keeping exact IDs makes every new advisory fail the gate.
-    { id = "RUSTSEC-2024-0436", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; transitive through Specta; no safe upgrade is currently available" },
-    { id = "RUSTSEC-2024-0370", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; transitive through GTK3 macros; no safe upgrade is currently available" },
-    { id = "RUSTSEC-2025-0075", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; transitive through Tauri urlpattern; awaiting upstream replacement" },
-    { id = "RUSTSEC-2025-0080", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; transitive through Tauri urlpattern; awaiting upstream replacement" },
-    { id = "RUSTSEC-2025-0081", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; transitive through Tauri urlpattern; awaiting upstream replacement" },
-    { id = "RUSTSEC-2025-0098", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; transitive through Tauri urlpattern; awaiting upstream replacement" },
-    { id = "RUSTSEC-2025-0100", reason = "owner=security; expires=2026-09-30; expires-unix=1790726400; transitive through Tauri urlpattern; awaiting upstream replacement" },
+    { id = "RUSTSEC-2024-0436", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; unmaintained paste proc-macro is transitive through Specta and Tauri; no patched release exists" },
+    { id = "RUSTSEC-2024-0370", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; unmaintained proc-macro-error is transitive through Linux-only GTK3 glib-macros; no patched release exists" },
+    { id = "RUSTSEC-2025-0075", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
+    { id = "RUSTSEC-2025-0080", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
+    { id = "RUSTSEC-2025-0081", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
+    { id = "RUSTSEC-2025-0098", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
+    { id = "RUSTSEC-2025-0100", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
 ]
 
 [licenses]
