@@ -30,10 +30,14 @@ fn time_counts_while_zephium_is_in_front_and_reaches_the_store_on_the_tick() {
     let id = active_id(&screen);
     navigate_and_commit(&mut shell, id, "https://m.youtube.com/watch");
 
+    let active = std::time::Instant::now();
     shell.handle(Command::SetAppActive(true));
     pause();
     shell.handle(Command::SetAppActive(false));
-    pause();
+    let active_ms = i64::try_from(active.elapsed().as_millis()).unwrap();
+    // Far longer than the active window, so counting it could not hide in
+    // a slow runner's scheduling slack.
+    std::thread::sleep(std::time::Duration::from_millis(400));
     shell.handle(Command::Tick);
 
     let totals = spent(&store);
@@ -41,7 +45,10 @@ fn time_counts_while_zephium_is_in_front_and_reaches_the_store_on_the_tick() {
     let (place, ms, opens) = &totals[0];
     assert_eq!(place, &Place::Site("youtube.com".into()));
     assert_eq!(*opens, 1);
-    assert!((40..80).contains(ms), "counted {ms} ms");
+    assert!(
+        (40..=active_ms).contains(ms),
+        "counted {ms} of {active_ms} ms"
+    );
 }
 
 #[test]
