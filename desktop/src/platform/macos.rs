@@ -1,3 +1,5 @@
+mod sidebar_resize;
+
 use std::cell::RefCell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +17,7 @@ use objc2_web_kit::{
     WKFrameInfo, WKMediaCaptureType, WKOpenPanelParameters, WKPermissionDecision, WKSecurityOrigin,
     WKUIDelegate, WKWebView,
 };
-use tauri::WebviewWindow;
+use tauri::{Manager as _, WebviewWindow};
 
 use zephium_app::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, PresentationChrome,
@@ -610,6 +612,59 @@ fn with_chrome_view<T>(generation: u64, f: impl FnOnce(&WKWebView) -> T) -> Opti
     still_published.then_some(result)
 }
 
+pub fn publish_sidebar_resize_revision(revision: u64) -> bool {
+    sidebar_resize::publish_revision(revision)
+}
+
+pub async fn configure_sidebar_resize(
+    window: &WebviewWindow,
+    width: f64,
+    enabled: bool,
+    revision: u64,
+    shell: zephium_app::Handle,
+) -> bool {
+    if !sidebar_resize::publish_revision(revision) {
+        return false;
+    }
+    let generation = CHROME_GENERATION.load(Ordering::Acquire);
+    let sender = window.clone();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let scheduled = window.run_on_main_thread(move || {
+        let installed = with_chrome_view(generation, |view| {
+            // SAFETY: the published chrome retains this exact main-thread WK view.
+            let Some(view) =
+                (unsafe { Retained::retain(view as *const WKWebView as *mut WKWebView) })
+            else {
+                return false;
+            };
+            let commit = std::rc::Rc::new(move |width, revision| {
+                if CHROME_GENERATION.load(Ordering::Acquire) != generation
+                    || !sidebar_resize::publish_revision(revision)
+                {
+                    return;
+                }
+                // A guide release is a snap to a new shape: the content
+                // travels there, which also covers the chrome's repaint.
+                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, true)) {
+                    crate::emit_to_privileged(
+                        sender.app_handle(),
+                        crate::MAIN_LABEL,
+                        "zephium:sidebar-width-selected",
+                        &serde_json::json!({"width": width, "revision": revision}),
+                    );
+                }
+            });
+            sidebar_resize::configure(&view, generation, width, enabled, revision, commit)
+        })
+        .unwrap_or(false);
+        let _ = send.send(installed);
+    });
+    if scheduled.is_err() {
+        return false;
+    }
+    receive.await.unwrap_or(false)
+}
+
 fn clear_chrome_view(generation: u64) {
     if MainThreadMarker::new().is_none()
         || generation == 0
@@ -634,6 +689,7 @@ fn clear_chrome_view(generation: u64) {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clear_if_current(generation);
                 slot.borrow_mut().take();
+                sidebar_resize::dispose(Some(generation));
             }
         }
     });
@@ -717,6 +773,7 @@ fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) -> bool {
     {
         view.setFrame(f);
     }
+    sidebar_resize::refresh();
     hold
 }
 

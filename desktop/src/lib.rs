@@ -1581,6 +1581,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             launcher_search,
             launcher_run,
             sidebar_set_width,
+            sidebar_resize,
+            sidebar_resize_guide,
             tab_drag_over,
             resource_call,
             notes::note_call,
@@ -2180,6 +2182,13 @@ fn extension_popup_anchor_in_bounds(
 
 fn sidebar_width_in_bounds(width: f64) -> bool {
     width.is_finite() && (MIN_SIDEBAR_WIDTH..=MAX_SIDEBAR_WIDTH).contains(&width)
+}
+
+fn sidebar_resize_revision(revision: f64) -> Option<u64> {
+    (revision.is_finite()
+        && revision.fract() == 0.0
+        && (1.0..=9_007_199_254_740_991.0).contains(&revision))
+    .then_some(revision as u64)
 }
 
 fn setting_value_allowed(key: &str, value: &str) -> bool {
@@ -4380,13 +4389,78 @@ fn panel_layout(
 
 #[tauri::command]
 #[specta::specta]
-fn sidebar_set_width(caller: WebviewWindow, shell: State<'_, Handle>, width: f64, animate: bool) {
+fn sidebar_set_width(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    width: f64,
+    animate: bool,
+    revision: f64,
+) {
+    let Some(revision) = sidebar_resize_revision(revision) else {
+        return;
+    };
     if !authorize(&caller, CallerPolicy::Main, "sidebar_set_width")
         || !sidebar_width_in_bounds(width)
     {
         return;
     }
+    #[cfg(target_os = "macos")]
+    if !platform::imp::publish_sidebar_resize_revision(revision) {
+        return;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = revision;
     shell.dispatch(Command::SetSidebarWidth(width, animate));
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn sidebar_resize(caller: WebviewWindow, width: f64, enabled: bool, revision: f64) -> bool {
+    let Some(revision) = sidebar_resize_revision(revision) else {
+        return false;
+    };
+    if !authorize(&caller, CallerPolicy::Main, "sidebar_resize") || !sidebar_width_in_bounds(width)
+    {
+        return false;
+    }
+    let Some(shell) = caller
+        .try_state::<Handle>()
+        .map(|state| state.inner().clone())
+    else {
+        return false;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        platform::imp::configure_sidebar_resize(&caller, width, enabled, revision, shell).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (shell, enabled, revision);
+        false
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+fn sidebar_resize_guide(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    width: Option<f64>,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "sidebar_resize_guide")
+        || width.is_some_and(|width| !sidebar_width_in_bounds(width))
+    {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        shell.dispatch(Command::SidebarResizeGuide(width))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (shell, width);
+        false
+    }
 }
 
 #[tauri::command]
