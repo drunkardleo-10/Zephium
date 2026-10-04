@@ -94,8 +94,9 @@ Windows builds are not code-signed yet, so SmartScreen may show "Windows
 protected your PC". Choose **More info**, then **Run anyway**. Signing is on
 the way.
 
-Intel Macs, Linux, iOS and Android are coming. Updates install automatically in
-the app. All releases are listed on the
+Intel Macs, Linux, iOS and Android are coming. Zephium downloads updates in the
+background and installs them when you choose **Relaunch to update**. All
+releases are listed on the
 [releases page](https://github.com/zephium-browser/Zephium/releases).
 
 ## Build from source

@@ -409,10 +409,17 @@ jobs:
 
           Verify a download with \`SHA256SUMS\` or \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`.
           EOF
-          # Never --prerelease, even for betas: releases/latest skips prereleases, and the website and updater depend on it.
+          # releases/latest skips prereleases, and the website and updater read it.
+          # Betas stay on it until the first stable release; after that they must
+          # never reach stable users.
+          prerelease=false
+          if [[ "${VERSION}" == *-* ]] && gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' | grep -qvE -- '-'; then
+            prerelease=true
+          fi
           gh release create "${TAG}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --draft \
+            --prerelease="${prerelease}" \
             --verify-tag \
             --title "Zephium ${VERSION}" \
             --notes-file "${RUNNER_TEMP}/notes.md"
