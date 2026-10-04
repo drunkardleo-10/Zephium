@@ -91,7 +91,11 @@ jobs:
           cargo xtask check-advisory-exceptions
       # The fork-lock gate inspects the Windows graph offline, so every target's
       # crates must be downloaded first.
-      - run: cargo fetch --locked
+      - run: |
+          cargo fetch --locked
+          for fork in adblock tauri tauri-runtime-wry wry; do
+            cargo fetch --locked --manifest-path "vendor/${fork}/Cargo.toml"
+          done
       - run: cargo xtask check-security-fork-locks
       - run: cargo xtask check-agentic-probe-boundary
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
