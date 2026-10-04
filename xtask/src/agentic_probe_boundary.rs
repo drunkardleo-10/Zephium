@@ -182,7 +182,7 @@ const ENGINE_WINDOWS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_semantic_probe.rs";
-const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
+const NIGHTLY_WORKFLOW: &str = ".github/workflows/nightly.yml";
 const WINDOWS_AGENTIC_QUALIFICATION_SCRIPT: &str = "scripts/qualification/windows-agentic.ps1";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
 const AGENTIC_DIAGNOSTIC_MODULES: [&str; 11] = [
@@ -587,7 +587,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?,
         &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
     )?;
-    validate_windows_probe_ci(&read(repository.join(CI_WORKFLOW))?)?;
+    validate_windows_probe_ci(&read(repository.join(NIGHTLY_WORKFLOW))?)?;
     validate_windows_physical_workflow(&read(
         repository.join(WINDOWS_AGENTIC_QUALIFICATION_SCRIPT),
     )?)?;
