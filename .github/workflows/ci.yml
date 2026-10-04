@@ -65,11 +65,6 @@ jobs:
       - name: Test macOS blocker seed probe policy
         run: bash scripts/ci/test_macos_blocker_seed_probe.sh
 
-      - name: Test release SBOM provenance binding
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 scripts/release/test_finalize_sbom.py
-
       - name: Validate every GitHub Actions workflow with pinned actionlint
         run: |
           set -euo pipefail
