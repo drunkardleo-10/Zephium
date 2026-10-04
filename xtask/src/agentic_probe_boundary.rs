@@ -9392,6 +9392,7 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
             } else if package == *app {
                 &[
                     "agentic-browser",
+                    "macos-page-permission-prompts",
                     "work-execution",
                     "work-planning",
                     "work-runtime",
