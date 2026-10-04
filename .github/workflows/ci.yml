@@ -54,7 +54,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # Build tools run while producing signed artifacts, so dev dependencies
       # are in scope.
-      - run: pnpm audit --audit-level high
+      # Shipped code gates the build; tooling advisories arrive as Dependabot PRs.
+      - run: pnpm audit --prod --audit-level high
       - name: Typecheck, lint and unit tests
         run: pnpm --dir frame run check
       - name: Windows semantic input guards
@@ -88,6 +89,9 @@ jobs:
         run: |
           cargo xtask check-engine-floors
           cargo xtask check-advisory-exceptions
+      # The fork-lock gate inspects the Windows graph offline, so every target's
+      # crates must be downloaded first.
+      - run: cargo fetch --locked
       - run: cargo xtask check-security-fork-locks
       - run: cargo xtask check-agentic-probe-boundary
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
