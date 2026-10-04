@@ -31,7 +31,7 @@ impl Gate {
     }
 
     fn participants(&self) -> Vec<&'static str> {
-        // On Windows the launcher remains a blank WebView until first use.
+        // The launcher may not have been created or loaded yet.
         // A window that never used a resource API cannot own a resource draft
         // and may not have a renderer close listener yet. Touched hidden hosts
         // still participate: hiding a view does not discard its pending edits.
@@ -97,6 +97,9 @@ pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'stati
         requests.push((label, token));
     }
     drop(gate);
+    if let Some(panel) = app.try_state::<super::overlay::Overlay>() {
+        panel.wake();
+    }
     for (label, token) in &requests {
         super::emit_to_privileged(&app, label, "zephium:resource-close", token);
     }
@@ -134,9 +137,18 @@ pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'stati
             for (label, token) in requests {
                 super::emit_to_privileged(&app, label, "zephium:resource-close-cancelled", &token);
             }
+            if let Some(panel) = app.try_state::<super::overlay::Overlay>() {
+                if !panel.snapshot().visible {
+                    panel.hide();
+                }
+            }
             app.dialog().message("Some changes in Notes, Tasks or Work could not be saved. Return to them to retry or resolve a conflict. Drafts in another profile must be saved from that profile.").title("Unsaved changes").kind(tauri_plugin_dialog::MessageDialogKind::Warning).show(|_|{});
         }
     });
+}
+
+pub(super) fn is_closing() -> bool {
+    gate().lock().unwrap_or_else(|e| e.into_inner()).requesting
 }
 
 #[cfg(test)]

@@ -1,8 +1,11 @@
-//! One persistent native window for the launcher. It hosts search only:
+//! A native launcher created on first use and put to sleep while hidden. It hosts search only:
 //! destinations are handed to the browser, which already has their views
 //! loaded, so nothing heavy is ever instantiated a second time here.
 mod geometry;
+mod idle;
 mod model;
+#[cfg(target_os = "windows")]
+mod viewport;
 use model::{Model, Owner};
 use std::sync::{Arc, Mutex};
 use tauri::{LogicalSize, Manager, PhysicalPosition, WebviewWindow};
@@ -13,12 +16,34 @@ use zephium_ipc::{
     SearchContext, ToolKind,
 };
 pub const PANEL_LABEL: &str = "panel";
-pub const PANEL_SIZE: (f64, f64) = (geometry::WIDTH, geometry::RESTING_HEIGHT);
+pub const PANEL_SIZE: (f64, f64) = (geometry::WIDTH, geometry::INITIAL_HEIGHT);
 #[cfg(target_os = "macos")]
 pub const PANEL_RADIUS: u16 = model::RADIUS;
 pub const EVENT_STATE: &str = "zephium:panel-state";
 #[derive(Default)]
 pub struct ContextCache(Mutex<Option<Owner>>);
+impl ContextCache {
+    /// A provider must match the current browser owner even before the panel exists.
+    pub fn search_private(&self, context: &SearchContext) -> Option<bool> {
+        let current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let owner = current.as_ref()?;
+        (owner.window == context.window_id
+            && owner.profile == context.profile_id
+            && owner.space == context.space_id)
+            .then_some(owner.private)
+    }
+    /// Browser search shares the focused owner, not the launcher's window lifetime.
+    pub fn newtab_context(&self, tab_id: &str, session: u64) -> Option<SearchContext> {
+        let owner = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+        Some(SearchContext {
+            window_id: owner.window,
+            profile_id: owner.profile,
+            space_id: owner.space,
+            session_id: format!("newtab:{tab_id}:{session}"),
+            request_id: String::new(),
+        })
+    }
+}
 struct Pending {
     id: String,
     background: bool,
@@ -34,6 +59,7 @@ struct State {
     focus_revision: u64,
     focus_timer: bool,
     closed: bool,
+    suspending: bool,
 }
 impl State {
     /// A new presentation never inherits an action still awaiting settlement.
@@ -57,18 +83,30 @@ impl Overlay {
             .and_then(|cache| cache.0.lock().ok()?.clone());
         let mut model = Model::default();
         model.set_owner(owner);
+        // The owned window clips a stable renderer viewport on Windows. Native
+        // height changes no longer trigger a second WebView2 surface resize.
+        #[cfg(target_os = "windows")]
+        {
+            let _ = window.as_ref().set_auto_resize(false);
+            if !viewport::install(&window) {
+                crate::write_diagnostic(format_args!(
+                    "launcher: stable viewport installation failed"
+                ));
+            }
+        }
         let this = Self {
             window,
             state: Arc::new(Mutex::new(State {
                 model,
                 pending: None,
-                content_height: geometry::RESTING_HEIGHT,
+                content_height: geometry::INITIAL_HEIGHT,
                 layout_revision: 0,
                 placement: None,
                 pending_document,
                 focus_revision: 0,
                 focus_timer: false,
                 closed: false,
+                suspending: false,
             })),
         };
         #[cfg(target_os = "macos")]
@@ -101,15 +139,34 @@ impl Overlay {
     pub fn window_app(&self) -> &tauri::AppHandle {
         self.window.app_handle()
     }
-    pub fn private(&self) -> bool {
-        self.state()
-            .model
-            .owner
-            .as_ref()
-            .is_none_or(|owner| owner.private)
-    }
     pub fn snapshot(&self) -> PanelState {
         self.state().model.snapshot()
+    }
+    /// A renderer acknowledgement, after its pending captures have settled.
+    pub fn idle(&self, revision: String) {
+        self.on_main(move |this| {
+            let mut state = this.state();
+            if crate::resource_close::is_closing()
+                || state.model.presented
+                || state.pending.is_some()
+                || state.suspending
+                || state.model.snapshot().revision != revision
+            {
+                return;
+            }
+            state.suspending = true;
+            drop(state);
+            let panel = this.clone();
+            idle::suspend(&this.window, move || {
+                panel.state().suspending = false;
+                if panel.snapshot().visible || crate::resource_close::is_closing() {
+                    idle::resume(&panel.window);
+                }
+            });
+        });
+    }
+    pub fn wake(&self) {
+        idle::resume(&self.window);
     }
     pub fn ready(&self) -> PanelState {
         self.state().model.ready = true;
@@ -117,9 +174,16 @@ impl Overlay {
         self.snapshot()
     }
     pub fn intent(&self, intent: PanelIntent) {
+        if let PanelIntent::Idle { revision } = intent {
+            self.idle(revision);
+            return;
+        }
         self.on_main(move |this| {
             let old = this.snapshot().session_id;
             match intent {
+                PanelIntent::Idle { .. } => {
+                    unreachable!("idle intents are handled before presentation")
+                }
                 PanelIntent::Search => this.state().begin(),
                 PanelIntent::Dismiss => {
                     this.state().model.hide();
@@ -197,7 +261,7 @@ impl Overlay {
             let showing = this.snapshot().visible && visible(&this.window);
             #[cfg(target_os = "macos")]
             crate::panel::layout(&layout, showing);
-            let (grows, revision) = {
+            let (_grows, _revision) = {
                 let mut state = this.state();
                 let grows = height > state.content_height;
                 state.content_height = height;
@@ -207,19 +271,27 @@ impl Overlay {
             if !showing {
                 return;
             }
-            if grows || !animated_shapes() {
+            #[cfg(target_os = "windows")]
+            {
+                this.resize_windows();
+            }
+            #[cfg(not(target_os = "windows"))]
+            if _grows || !animated_shapes() {
                 this.resize();
                 return;
             }
-            let later = this.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(SHAPES_SETTLE).await;
-                later.on_main(move |this| {
-                    if this.state().layout_revision == revision {
-                        this.resize();
-                    }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let later = this.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(SHAPES_SETTLE).await;
+                    later.on_main(move |this| {
+                        if this.state().layout_revision == _revision {
+                            this.resize();
+                        }
+                    });
                 });
-            });
+            }
         });
     }
     /// Onboarding steps its drawn launcher aside while the real one is up.
@@ -277,8 +349,7 @@ impl Overlay {
             };
             (state.model.ready, document)
         };
-        // Windows keeps the hardened native panel at about:blank until the
-        // first real request. Loading an unused second application graph at
+        // First use creates and hardens the native panel at about:blank. Loading an unused second application graph at
         // startup competes with the main surface and retains renderer state.
         // The authoritative model keeps the latest route/owner while loading;
         // panel_ready returns that snapshot before the first native reveal.
@@ -292,6 +363,9 @@ impl Overlay {
         }
         if !ready {
             return;
+        }
+        if snapshot.visible {
+            self.wake();
         }
         self.publish();
         if !snapshot.visible {
@@ -437,6 +511,7 @@ impl Overlay {
     }
     pub fn destroyed(&self) {
         self.state().closed = true;
+        idle::destroyed();
     }
     /// Places the launcher on the display under the pointer, where the user is
     /// looking, at the same height every time.
@@ -478,6 +553,14 @@ impl Overlay {
                 0.0
             },
         );
+        #[cfg(target_os = "windows")]
+        {
+            let _ = self.window.as_ref().set_bounds(tauri::Rect {
+                position: tauri::LogicalPosition::new(0.0, 0.0).into(),
+                size: LogicalSize::new(placement.width, placement.height(geometry::MAX_HEIGHT))
+                    .into(),
+            });
+        }
         let height = placement.height(self.state().content_height);
         let _ = self
             .window
@@ -490,6 +573,32 @@ impl Overlay {
         }
         self.state().placement = Some(placement);
     }
+    #[cfg(target_os = "windows")]
+    fn resize_windows(&self) {
+        let (placement, content) = {
+            let state = self.state();
+            (state.placement, state.content_height)
+        };
+        let Some(placement) = placement else {
+            return;
+        };
+        let height = placement.height(content);
+        let scale = self.window.scale_factor().unwrap_or(1.0);
+        if self
+            .window
+            .inner_size()
+            .is_ok_and(|size| (f64::from(size.height) / scale - height).abs() < 1.0)
+        {
+            return;
+        }
+        // Chromium has painted the target content in a stable viewport. Commit
+        // one clip change: independently animating DWM's material here exposes
+        // a trailing band after the DOM has already moved its footer.
+        let _ = self
+            .window
+            .set_size(LogicalSize::new(placement.width, height));
+    }
+    #[cfg(not(target_os = "windows"))]
     fn resize(&self) {
         let (placement, content) = {
             let state = self.state();
@@ -509,6 +618,7 @@ impl Overlay {
 }
 /// Slightly longer than the shapes' own settle, so the window never shrinks
 /// under a shape still moving.
+#[cfg(not(target_os = "windows"))]
 const SHAPES_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Native draws the launcher's material as separate shapes, which the window
@@ -649,5 +759,115 @@ fn application_active(panel_focused: bool, main_focused: bool) -> bool {
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
+    }
+}
+
+/// First-use construction stays on the UI thread; no unused launcher renderer.
+#[cfg(not(target_os = "linux"))]
+type BuildPanel = Box<dyn FnOnce() -> crate::SetupResult + Send>;
+#[cfg(not(target_os = "linux"))]
+pub struct Factory(Mutex<FactoryState>);
+#[cfg(not(target_os = "linux"))]
+type PanelAction = Box<dyn FnOnce(&Overlay) + Send>;
+#[cfg(not(target_os = "linux"))]
+struct FactoryState {
+    build: Option<BuildPanel>,
+    queued: Vec<PanelAction>,
+}
+#[cfg(not(target_os = "linux"))]
+impl Factory {
+    pub fn new(build: impl FnOnce() -> crate::SetupResult + Send + 'static) -> Self {
+        Self(Mutex::new(FactoryState {
+            build: Some(Box::new(build)),
+            queued: Vec::new(),
+        }))
+    }
+}
+pub fn request(app: &tauri::AppHandle, action: impl FnOnce(&Overlay) + Send + 'static) -> bool {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if crate::shutdown_started(&handle) {
+            return;
+        }
+        if let Some(panel) = handle.try_state::<Overlay>() {
+            action(&panel);
+            return;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Some(factory) = handle.try_state::<Factory>() {
+            let build = {
+                let mut factory = factory.0.lock().unwrap_or_else(|e| e.into_inner());
+                // WebView construction pumps native messages. Retain requests
+                // that reenter here while the first request is still building.
+                if factory.queued.len() >= 32 {
+                    return;
+                }
+                factory.queued.push(Box::new(action));
+                factory.build.take()
+            };
+            let Some(build) = build else {
+                return;
+            };
+            if let Err(error) = build() {
+                factory
+                    .0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .queued
+                    .clear();
+                crate::request_startup_failure(
+                    &handle,
+                    format_args!("launcher construction failed: {error}"),
+                );
+                return;
+            }
+            let queued =
+                std::mem::take(&mut factory.0.lock().unwrap_or_else(|e| e.into_inner()).queued);
+            if let Some(panel) = handle.try_state::<Overlay>() {
+                for action in queued {
+                    if crate::shutdown_started(&handle) {
+                        break;
+                    }
+                    action(&panel);
+                }
+            }
+        }
+    })
+    .is_ok()
+}
+
+#[cfg(test)]
+mod context_cache_tests {
+    use super::*;
+    #[test]
+    fn newtab_search_does_not_require_a_launcher_window() {
+        let cache = ContextCache::default();
+        assert!(cache.newtab_context("tab", 1).is_none());
+        *cache.0.lock().unwrap() = Some(Owner {
+            private: false,
+            window: "window".into(),
+            profile: "profile".into(),
+            name: "Personal".into(),
+            space: "space".into(),
+        });
+        let context = cache.newtab_context("tab", 7).unwrap();
+        assert_eq!(context.window_id, "window");
+        assert_eq!(context.profile_id, "profile");
+        assert_eq!(context.space_id, "space");
+        assert_eq!(context.session_id, "newtab:tab:7");
+        assert_eq!(cache.search_private(&context), Some(false));
+        cache.0.lock().unwrap().as_mut().unwrap().private = true;
+        assert_eq!(cache.search_private(&context), Some(true));
+        let mut stale = context.clone();
+        stale.profile_id = "another-profile".into();
+        assert_eq!(cache.search_private(&stale), None);
+        stale = context.clone();
+        stale.window_id = "another-window".into();
+        assert_eq!(cache.search_private(&stale), None);
+        stale = context.clone();
+        stale.space_id = "another-space".into();
+        assert_eq!(cache.search_private(&stale), None);
+        cache.0.lock().unwrap().as_mut().unwrap().space = "next".into();
+        assert_eq!(cache.newtab_context("tab", 8).unwrap().space_id, "next");
     }
 }

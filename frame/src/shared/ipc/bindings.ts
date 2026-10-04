@@ -1086,7 +1086,9 @@ export type PagePermissionPromptView = {
 	prompt: PagePermissionPromptEntryView | null,
 };
 
-export type PanelIntent = { type: "search" } | { type: "dismiss" } | 
+export type PanelIntent = 
+/**  The hidden renderer has settled its asynchronous work. */
+{ type: "idle"; revision: string } | { type: "search" } | { type: "dismiss" } | 
 /**
  *  Hands a destination to the browser, which already hosts its views, and
  *  puts the launcher away.

@@ -117,18 +117,20 @@ pub(super) fn schedule(
         };
         // Ownership is cheap to confirm and both branches need it, so it is
         // checked before either one waits.
-        let Some(overlay) = app.try_state::<crate::overlay::Overlay>() else {
+        let Some(private) = app
+            .try_state::<crate::overlay::ContextCache>()
+            .and_then(|cache| cache.search_private(&context))
+        else {
             return;
         };
-        let owner = overlay.snapshot();
-        let private = overlay.private();
-        if owner.profile_id.as_deref() != Some(&context.profile_id)
-            || owner.space_id.as_deref() != Some(&context.space_id)
-            || owner.window_id.as_deref() != Some(&context.window_id)
-            || (!context.session_id.starts_with("newtab:")
-                && (!owner.visible || owner.session_id != context.session_id))
-        {
-            return;
+        if !context.session_id.starts_with("newtab:") {
+            let Some(overlay) = app.try_state::<crate::overlay::Overlay>() else {
+                return;
+            };
+            let owner = overlay.snapshot();
+            if !owner.visible || owner.session_id != context.session_id {
+                return;
+            }
         }
         // The two branches hold their own windows. Sharing one made every
         // suggestion wait out the note window as well.

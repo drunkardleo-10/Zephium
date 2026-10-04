@@ -313,6 +313,10 @@ pub struct SearchContext {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PanelIntent {
+    /// The hidden renderer has settled its asynchronous work.
+    Idle {
+        revision: String,
+    },
     Search,
     Dismiss,
     /// Hands a destination to the browser, which already hosts its views, and

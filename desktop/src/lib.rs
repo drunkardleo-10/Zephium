@@ -3162,11 +3162,11 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             });
     }
     if id == "launcher.toggle" {
-        if let Some(overlay) = app.try_state::<overlay::Overlay>() {
-            overlay.toggle();
-            return accepted_ui_operation();
-        }
-        return rejected_operation();
+        return if overlay::request(app, |panel| panel.toggle()) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
     }
     if id == "split.choose" {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
@@ -3280,20 +3280,14 @@ fn newtab_search_context(
     {
         return None;
     }
-    let state = app.try_state::<overlay::Overlay>()?.snapshot();
     static NEXT_SEARCH_SESSION: AtomicU64 = AtomicU64::new(1);
     let session = NEXT_SEARCH_SESSION
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .ok()?;
-    Some(zephium_ipc::SearchContext {
-        window_id: state.window_id?,
-        profile_id: state.profile_id?,
-        space_id: state.space_id?,
-        session_id: format!("newtab:{tab_id}:{session}"),
-        request_id: String::new(),
-    })
+    app.try_state::<overlay::ContextCache>()?
+        .newtab_context(&tab_id, session)
 }
 
 #[tauri::command]
@@ -4033,14 +4027,13 @@ fn panel_ready(
 #[specta::specta]
 fn panel_intent(
     caller: WebviewWindow,
-    overlay: State<'_, overlay::Overlay>,
+    app: tauri::AppHandle,
     intent: zephium_ipc::PanelIntent,
 ) -> bool {
     if !authorize(&caller, CallerPolicy::Both, "panel_intent") {
         return false;
     }
-    overlay.intent(intent);
-    true
+    overlay::request(&app, move |panel| panel.intent(intent))
 }
 /// Onboarding's own page, which a first run opens in the main window
 /// instead of the browser.
@@ -5595,6 +5588,18 @@ pub fn run() {
                 }
             });
 
+            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
+            let panel_handle = handle.clone();
+            #[cfg(target_os = "linux")]
+            let panel_registration = global_registration.clone();
+            let create_panel = move || -> SetupResult {
+                let app = &panel_handle;
+                #[cfg(target_os = "linux")]
+                let handle = app.clone();
+                let window = app.get_webview_window(MAIN_LABEL).ok_or_else(|| std::io::Error::other("launcher owner is unavailable"))?;
+                let shutdown = app.state::<ShutdownCoordinator>();
+                #[cfg(target_os = "linux")]
+                let global_registration = panel_registration;
             if shutdown.terminal_started() {
                 return Err(std::io::Error::other(
                     "terminal shutdown started before privileged panel construction",
@@ -5624,6 +5629,7 @@ pub fn run() {
             setup_privileged_environments
                 .fetch_or(PRIVILEGED_PANEL_ENVIRONMENT, Ordering::Release);
             let panel_window = panel_builder
+                .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Suspend)
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .on_web_resource_request(|_, response| {
                     harden_privileged_headers(response.headers_mut())
@@ -5694,10 +5700,9 @@ pub fn run() {
                 );
             }
 
-            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
             let overlay = overlay::Overlay::new(
                 panel_window.clone(),
-                cfg!(target_os = "windows").then(|| panel_url.clone()),
+                cfg!(not(target_os = "linux")).then(|| panel_url.clone()),
             );
             let main_focus_overlay = overlay.clone();
             window.on_window_event(move |event| { if matches!(event, tauri::WindowEvent::Focused(_)) { main_focus_overlay.focus_changed(); } });
@@ -5719,6 +5724,20 @@ pub fn run() {
             app.manage(overlay);
             #[cfg(all(debug_assertions, target_os = "macos"))]
             log_webview_processes(&window, &panel_window);
+
+
+                apply_native_theme(app, &APP_STORE.get().and_then(|store| store.app_setting("appearance")).unwrap_or_else(|| "system".into()));
+                if shutdown.terminal_started() {
+                    return Err(std::io::Error::other("terminal shutdown started before trusted panel navigation").into());
+                }
+                #[cfg(target_os = "linux")]
+                panel_window.navigate(panel_url)?;
+                Ok(())
+            };
+            #[cfg(not(target_os = "linux"))]
+            app.manage(overlay::Factory::new(create_panel));
+            #[cfg(target_os = "linux")]
+            create_panel()?;
 
             #[cfg(not(target_os = "linux"))]
             {
@@ -5774,8 +5793,6 @@ pub fn run() {
                 )
                 .into());
             }
-            #[cfg(not(target_os = "windows"))]
-            panel_window.navigate(panel_url)?;
             if shutdown.terminal_started() {
                 return Err(std::io::Error::other(
                     "terminal shutdown overtook privileged panel navigation",
@@ -6918,7 +6935,7 @@ mod tests {
         assert!(actor_admission < panel_webview);
         assert!(shell_owner < panel_webview);
         assert!(panel_webview < pre_navigation_terminal_gate);
-        assert!(pre_navigation_terminal_gate < panel_navigation);
+        assert!(panel_navigation < pre_navigation_terminal_gate);
         assert!(panel_webview < panel_navigation);
         assert!(panel_navigation < post_panel_navigation_terminal_gate);
         assert!(post_panel_navigation_terminal_gate < main_navigation);

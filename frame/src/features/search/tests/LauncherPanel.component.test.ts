@@ -3,6 +3,8 @@ import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import { CheckListIcon, Note01Icon } from "@hugeicons/core-free-icons";
 import "$styles/panel.css";
+import { IS_MAC, IS_WINDOWS } from "$shared/platform";
+const primary = IS_MAC ? "Meta" : "Control";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import type { PanelLayout, PanelState, SearchResult } from "$shared/ipc/bindings";
 import LauncherPanel from "../components/LauncherPanel.svelte";
@@ -80,14 +82,14 @@ const visit = (title: string, url: string): SearchResult => ({
   action: { type: "OpenUrl", url },
 });
 
-async function reply(query: string, results: SearchResult[]) {
+async function reply(query: string, results: SearchResult[], completion: string | null = null) {
   await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe(query));
   const owner = { ...native.context, request_id: native.search.mock.calls.at(-1)![1] };
   emitNativeEvent("searchChanged", {
     context: owner,
     query,
     results,
-    completion: null,
+    completion,
     pending: false,
   });
   return owner;
@@ -129,7 +131,7 @@ test("an obsolete answer cannot put its rows back on screen", async () => {
   await expect.element(screen.getByRole("option", { name: /stale/u })).not.toBeInTheDocument();
 });
 
-test("home offers recent tabs and destinations, and the shapes follow the list", async () => {
+test("home offers recent tabs and destinations, growing only as results need space", async () => {
   const onTool = vi.fn();
   const screen = await render(LauncherPanel, { props: { context, destinations, onTool } });
   await reply("", [
@@ -164,9 +166,11 @@ test("home offers recent tabs and destinations, and the shapes follow the list",
   await expect.element(screen.getByText("Ownership, borrowing and lifetimes")).toBeVisible();
   const row = screen.container.querySelector<HTMLElement>(".row")!;
   expect(row.getBoundingClientRect().height).toBe(44);
-  await vi.waitFor(() =>
-    expect(native.layout.mock.calls.at(-1)![0].height).toBeGreaterThan(home.height ?? 0),
-  );
+  await vi.waitFor(() => {
+    const height = native.layout.mock.calls.at(-1)![0].height;
+    expect(height).toBeGreaterThan(home.height ?? 0);
+    if (IS_WINDOWS) expect(screen.container.querySelector(".launcher.entering")).toBeNull();
+  });
   // The action capsule names what Enter will do to the selected row.
   expect(screen.container.querySelector(".primary")?.textContent).toContain("Search");
 });
@@ -308,7 +312,8 @@ test("renders as one card where the platform draws a single material", async () 
   ]);
   await expect.element(screen.getByRole("option", { name: /Rust Book/u })).toBeVisible();
   const card = screen.container.querySelector<HTMLElement>(".launcher")!;
-  expect(getComputedStyle(card).borderTopLeftRadius).toBe("8px");
+  // Windows owns the rounded clip in DWM; CSS fills the renderer behind it.
+  expect(getComputedStyle(card).borderTopLeftRadius).toBe(IS_WINDOWS ? "0px" : "8px");
   await new Promise((done) => setTimeout(done, 300));
   await page.screenshot({ path: "../../../../../target/search-launcher-windows.png" });
   document.body.style.cssText = "";
@@ -322,12 +327,12 @@ test("a destination is handed to the browser", async () => {
   expect(onTool).toHaveBeenCalledExactlyOnceWith("notes");
 });
 
-test("Cmd+Enter opens behind the current tab and keeps the launcher", async () => {
+test("The primary modifier plus Enter opens behind the current tab and keeps the launcher", async () => {
   const onDismiss = vi.fn();
   const screen = await render(LauncherPanel, { props: { context, destinations, onDismiss } });
   await screen.getByRole("combobox").fill("rust");
   const owner = await reply("rust", [visit("Rust Book", "https://doc.rust-lang.org/book/")]);
-  await userEvent.keyboard("{ArrowDown}{Meta>}{Enter}{/Meta}");
+  await userEvent.keyboard(`{ArrowDown}{${primary}>}{Enter}{/${primary}}`);
   await vi.waitFor(() =>
     expect(native.run).toHaveBeenCalledExactlyOnceWith(
       { type: "OpenUrl", url: "https://doc.rust-lang.org/book/" },
@@ -339,11 +344,11 @@ test("Cmd+Enter opens behind the current tab and keeps the launcher", async () =
   expect(onDismiss).not.toHaveBeenCalled();
 });
 
-test("Cmd+K lists what can be done to the selected row", async () => {
+test("The primary modifier plus K lists what can be done to the selected row", async () => {
   const screen = await render(LauncherPanel, { props: { context, destinations } });
   await screen.getByRole("combobox").fill("rust");
   await reply("rust", [search("rust"), visit("Rust Book", "https://doc.rust-lang.org/book/")]);
-  await userEvent.keyboard("{ArrowDown}{Meta>}k{/Meta}");
+  await userEvent.keyboard(`{ArrowDown}{${primary}>}k{/${primary}}`);
   const menu = screen.getByRole("menu");
   await expect.element(menu.getByRole("menuitem", { name: /Open in Background/u })).toBeVisible();
   await expect.element(menu.getByRole("menuitem", { name: /Copy Link/u })).toBeVisible();
@@ -379,6 +384,24 @@ test("a launcher reopened a moment later resumes, and a fresh session asks again
   expect(native.search.mock.calls.at(-1)![0]).toBe("rust");
 });
 
+test("sleeping past the resume deadline clears a query even when its timer never fired", async () => {
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await screen.getByRole("combobox").fill("private old query");
+  await reply("private old query", [search("private old query")]);
+  await screen.rerender({ context: { ...context, revision: "0000000000000002", visible: false } });
+  // WebView suspension freezes timers, but wall time still advances.
+  const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 31_000);
+  try {
+    await screen.rerender({
+      context: { ...context, revision: "0000000000000003", session_id: "0000000000000003" },
+    });
+    await expect.element(screen.getByRole("combobox")).toHaveValue("");
+    await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe(""));
+  } finally {
+    now.mockRestore();
+  }
+});
+
 test("anything typed can be kept as a task, by its row or by Option+Enter", async () => {
   const onCapture = vi.fn(async (text: string) => text.replace(/ tomorrow$/u, ""));
   const screen = await render(LauncherPanel, { props: { context, destinations, onCapture } });
@@ -394,4 +417,54 @@ test("anything typed can be kept as a task, by its row or by Option+Enter", asyn
   // The page search the line most often means stayed where it was, untouched.
   expect(native.run).not.toHaveBeenCalled();
   await expect.element(screen.getByText("Added “Call the dentist” to Tasks")).toBeVisible();
+});
+
+test("typing through a selected completion keeps offering it, while Backspace rejects it", async () => {
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  const input = screen.getByRole("combobox");
+  const element = input.element() as HTMLInputElement;
+  const result = visit("GitHub", "https://github.com/");
+  await input.fill("gi");
+  await reply("gi", [search("gi"), result], "github.com");
+  await vi.waitFor(() => expect(element.value).toBe("github.com"));
+  expect([element.selectionStart, element.selectionEnd]).toEqual([2, 10]);
+  await userEvent.keyboard("t");
+  await reply("git", [search("git"), result], "github.com");
+  await vi.waitFor(() => expect(element.value).toBe("github.com"));
+  expect([element.selectionStart, element.selectionEnd]).toEqual([3, 10]);
+  await userEvent.keyboard("h");
+  await reply("gith", [search("gith"), result], "github.com");
+  await vi.waitFor(() => expect(element.value).toBe("github.com"));
+  expect([element.selectionStart, element.selectionEnd]).toEqual([4, 10]);
+  const previous = native.search.mock.calls.at(-1)![1];
+  await userEvent.keyboard("{Backspace}");
+  await vi.waitFor(() => expect(native.search.mock.calls.at(-1)![1]).not.toBe(previous));
+  await reply("gith", [search("gith"), result], "github.com");
+  await expect.element(input).toHaveValue("gith");
+  expect(native.run).not.toHaveBeenCalled();
+});
+
+test("Windows paints one continuous wash while the native clip follows content height", async () => {
+  if (!IS_WINDOWS) return;
+  document.documentElement.dataset.material = "acrylic";
+  await page.viewport(680, 600);
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await reply("", [visit("GitHub", "https://github.com/")]);
+  const launcher = screen.container.querySelector<HTMLElement>(".launcher")!;
+  await vi.waitFor(() => expect(native.layout.mock.calls.at(-1)![0].height).toBeGreaterThan(100));
+  expect(launcher.getBoundingClientRect().height).toBe(600);
+  expect(native.layout.mock.calls.at(-1)![0].height).toBeLessThan(300);
+  await screen.getByRole("combobox").fill("rust");
+  await reply(
+    "rust",
+    Array.from({ length: 20 }, (_, i) => visit("Result " + i, "https://example.com/" + i)),
+  );
+  await vi.waitFor(() => expect(native.layout.mock.calls.at(-1)![0].height).toBe(600));
+  const scroll = screen.container.querySelector<HTMLElement>(".scroll")!;
+  expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+  expect(getComputedStyle(scroll).scrollbarWidth).toBe("none");
+  await screen.getByRole("combobox").fill("few");
+  await reply("few", [search("few")]);
+  await vi.waitFor(() => expect(native.layout.mock.calls.at(-1)![0].height).toBeLessThan(300));
+  expect(launcher.getBoundingClientRect().height).toBe(600);
 });
