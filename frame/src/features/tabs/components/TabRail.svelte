@@ -78,6 +78,14 @@
         data-zephium-tab-id={tab.id}
         data-zephium-tab-url={tab.url ?? ""}
         data-zephium-projection-revision={tab.projection_revision}
+        data-closable="true"
+        onauxclick={(event) => {
+          if (event.button === 1) {
+            event.preventDefault();
+            event.stopPropagation();
+            tabs.close(tab.id);
+          }
+        }}
       >
         <button
           type="button"

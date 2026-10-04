@@ -20,6 +20,7 @@
   import { TabRail } from "$features/tabs";
   import { loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
+  import { installMiddleClickCloseTab } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
   import { requestTab } from "$session/work-tab.svelte";
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
@@ -79,6 +80,7 @@
       tabs.openChromeMenu(event.clientX, event.clientY, page);
     }),
   );
+  onMount(installMiddleClickCloseTab);
   onMount(() => {
     let disposed = false;
     let stop: (() => void) | undefined;

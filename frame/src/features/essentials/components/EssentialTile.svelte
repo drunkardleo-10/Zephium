@@ -47,6 +47,7 @@
   data-zephium-tab-id={tab.id}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
+  data-closable="false"
   class={["essential", className]}
   data-split-candidate={splitCandidate}
 >
