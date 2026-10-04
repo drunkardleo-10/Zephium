@@ -358,21 +358,17 @@ impl EngineHost {
                 .transpose()
             {
                 Ok(Some(plan)) => plan,
-                Ok(None) => zephium_core::blocker::DocumentStylePlan {
-                    css: Arc::from(""),
-                    generic_index: Arc::from("[]"),
-                    exceptions: Arc::from("[]"),
-                },
+                Ok(None) => zephium_core::blocker::DocumentStylePlan::empty(),
                 Err(_) => return None,
             };
-            let fingerprint = {
-                let mut hash = Sha256::new();
-                for text in [&plan.css, &plan.generic_index, &plan.exceptions] {
-                    hash.update((text.len() as u64).to_le_bytes());
-                    hash.update(text.as_bytes());
-                }
-                format!("{:x}", hash.finalize())
-            };
+            let fingerprint = plan.fingerprint().as_bytes().iter().fold(
+                String::with_capacity(64),
+                |mut output, byte| {
+                    use std::fmt::Write;
+                    let _ = write!(output, "{byte:02x}");
+                    output
+                },
+            );
             // The renderer reports only an identity. Native still computes the
             // exact URL-dependent plan, including generichide exceptions. A
             // same-document navigation or personal edit can then reuse the
@@ -499,7 +495,9 @@ fn document_style_script(
     } else {
         "a.subscription(p[0],p[1],p[2],p[3],p[4],p[5],p[6])"
     };
-    format!("((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s={subscription};const u=a.apply('personal',p[0],p[1],p[2],p[7],p[8]);return s===true&&u===true;}})({arguments})")
+    format!(
+        "((p)=>{{const a=globalThis.__zephium_content_style_v1__;if(!a)return false;const s={subscription};const u=a.apply('personal',p[0],p[1],p[2],p[7],p[8]);return s===true&&u===true;}})({arguments})"
+    )
 }
 
 fn css_digest(css: &str) -> String {
@@ -540,6 +538,9 @@ mod tests {
         let plan = zephium_core::blocker::DocumentStylePlan {
             css: Arc::from(".site-ad{display:none!important}"),
             generic_index: Arc::from("x".repeat(487_107)),
+            generic_index_digest: ContentRuleDigest::from_bytes(
+                Sha256::digest("x".repeat(487_107).as_bytes()).into(),
+            ),
             exceptions: Arc::from("[]"),
         };
         let identity = DocumentIdentity {

@@ -75,6 +75,7 @@ pub struct CosmeticPolicy {
     fingerprint: [u8; 32],
     selective: Engine,
     generic_index: Arc<str>,
+    generic_index_digest: zephium_core::blocker::ContentRuleDigest,
     fallback_generic: Vec<Rule>,
 }
 
@@ -361,6 +362,9 @@ impl CosmeticPolicy {
             fingerprint: Sha256::digest(&encoded).into(),
             encoded: encoded.into(),
             selective,
+            generic_index_digest: zephium_core::blocker::ContentRuleDigest::from_bytes(
+                Sha256::digest(generic_index.as_bytes()).into(),
+            ),
             generic_index,
             fallback_generic,
         });
@@ -391,20 +395,22 @@ impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
                 .host_str()
                 .ok_or(DocumentStyleFailure::InvalidDocument)?
                 .trim_end_matches('.');
+            let mut allowed = BTreeSet::new();
+            let mut excepted = BTreeSet::new();
             for rule in &self.fallback_generic {
-                let selector = &rule.selector;
-                if self
-                    .fallback_generic
-                    .iter()
-                    .any(|r| r.selector == *selector && !r.exception && r.matches(host))
-                    && !self
-                        .fallback_generic
-                        .iter()
-                        .any(|r| r.selector == *selector && r.exception && r.matches(host))
-                {
-                    selectors.insert(selector.clone());
+                if rule.matches(host) {
+                    if rule.exception {
+                        excepted.insert(rule.selector.as_str());
+                    } else {
+                        allowed.insert(rule.selector.as_str());
+                    }
                 }
             }
+            selectors.extend(
+                allowed
+                    .difference(&excepted)
+                    .map(|selector| (*selector).to_owned()),
+            );
         }
         let mut css = String::new();
         for selector in selectors {
@@ -421,6 +427,12 @@ impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
                 Arc::from("[]")
             } else {
                 self.generic_index.clone()
+            },
+            generic_index_digest: if resources.generichide {
+                // This constant-sized empty index is the same identity as pause.
+                zephium_core::blocker::DocumentStylePlan::empty().generic_index_digest
+            } else {
+                self.generic_index_digest
             },
             exceptions: serde_json::to_string(&exceptions)
                 .map_err(|_| DocumentStyleFailure::Unavailable)?
@@ -775,6 +787,14 @@ mod tests {
         let first = policy.document_plan("https://first.invalid/").unwrap();
         let second = policy.document_plan("https://second.invalid/").unwrap();
         assert!(Arc::ptr_eq(&first.generic_index, &second.generic_index));
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_ne!(
+            first.fingerprint(),
+            policy
+                .document_plan("https://example.com/")
+                .unwrap()
+                .fingerprint()
+        );
         assert!(policy
             .stylesheet("https://example.com/")
             .unwrap()
@@ -782,6 +802,59 @@ mod tests {
         let deeply_nested = format!("{}a{}", ":is(".repeat(33), ")".repeat(33));
         assert!(validate_personal_selector(&deeply_nested).is_none());
         assert!(validate_personal_selector(".ad\n##body").is_none());
+    }
+
+    #[test]
+    fn fallback_selectors_preserve_domain_exclusions_and_exceptions() {
+        let policy = CosmeticPolicy::compile([
+            "##.реклама\nexample.com#@#.реклама\n~safe.example.com##.баннер\nexample.com##.баннер\n@@||quiet.example^$generichide",
+        ])
+        .unwrap();
+        let regular = policy.document_plan("https://other.invalid/").unwrap();
+        assert!(regular.css.contains(".реклама{"));
+        assert!(regular.css.contains(".баннер{"));
+        let excepted = policy.document_plan("https://example.com/").unwrap();
+        assert!(!excepted.css.contains(".реклама{"));
+        assert!(excepted.css.contains(".баннер{"));
+        let excluded = policy.document_plan("https://safe.example.com/").unwrap();
+        // A matching site-specific positive rule still applies.
+        assert!(excluded.css.contains(".баннер{"));
+        let quiet = policy.document_plan("https://quiet.example/").unwrap();
+        assert_eq!(quiet, zephium_core::blocker::DocumentStylePlan::empty());
+        let restored = CosmeticPolicy::decode(&policy.encode().unwrap()).unwrap();
+        assert_eq!(
+            restored.document_plan("https://example.com/").unwrap(),
+            excepted
+        );
+    }
+
+    #[test]
+    fn subscription_identity_changes_with_index_and_generic_hide_controls() {
+        let plain = CosmeticPolicy::compile(["##.ad"]).unwrap();
+        let expanded = CosmeticPolicy::compile(["##.ad\n##.banner"]).unwrap();
+        let controlled =
+            CosmeticPolicy::compile(["##.ad\n@@||example.com/quiet$generichide"]).unwrap();
+        let regular = plain.document_plan("https://example.com/").unwrap();
+        assert_ne!(
+            regular.fingerprint(),
+            expanded
+                .document_plan("https://example.com/")
+                .unwrap()
+                .fingerprint()
+        );
+        assert_eq!(
+            regular.fingerprint(),
+            controlled
+                .document_plan("https://example.com/")
+                .unwrap()
+                .fingerprint()
+        );
+        assert_eq!(
+            controlled
+                .document_plan("https://example.com/quiet")
+                .unwrap(),
+            zephium_core::blocker::DocumentStylePlan::empty()
+        );
     }
 
     #[test]
