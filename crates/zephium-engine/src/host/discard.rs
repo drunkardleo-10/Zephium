@@ -6,6 +6,7 @@ use super::dispatch::with_discard_observation;
 #[cfg(target_os = "windows")]
 use super::dispatch::{with_suspend_deadline, with_suspend_result};
 use super::permits::EventPermit;
+#[cfg(any(not(target_os = "windows"), test))]
 use super::scripts::DISCARD_SAFETY_QUERY_JS;
 use super::EngineHost;
 

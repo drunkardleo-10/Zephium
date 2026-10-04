@@ -230,10 +230,11 @@ impl EngineHost {
             let restored: Option<bool> = None;
             if let Err(error) = match restored {
                 Some(true) => Ok(()),
+                #[cfg(target_os = "macos")]
                 Some(false) => Err(wry::Error::NativeObjectUnavailable(
                     "native session restoration",
                 )),
-                None => spare.view.load_url(url),
+                _ => spare.view.load_url(url),
             } {
                 spare.view.navigation.fail_synchronous(epoch);
                 eprintln!("engine: spare navigation failed: {error}");
@@ -1890,10 +1891,11 @@ impl EngineHost {
         } else {
             match restored {
                 Some(true) => Ok(()),
+                #[cfg(target_os = "macos")]
                 Some(false) => Err(wry::Error::NativeObjectUnavailable(
                     "native session restoration",
                 )),
-                None => view.load_url(url),
+                _ => view.load_url(url),
             }
         } {
             navigation.fail_synchronous(epoch);
