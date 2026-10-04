@@ -55,7 +55,6 @@ step="$(
   ' "${workflow}"
 )"
 test -n "${step}"
-grep -Fq "if: runner.os == 'macOS'" <<<"${step}"
 grep -Fq 'cargo xtask materialize-blocker-seed-webkit --output "${artifact}"' <<<"${step}"
 grep -Fq 'scripts/ci/probe_macos_blocker_seed.swift' <<<"${step}"
 grep -Fq '"${probe}" --self-test' <<<"${step}"
@@ -64,7 +63,7 @@ grep -Fq -- '-warnings-as-errors' <<<"${step}"
 
 test "$(
   grep -Fc 'cargo xtask materialize-blocker-seed-webkit --output "${artifact}"' "${workflow}"
-)" -eq 2
+)" -eq 1
 test "$(grep -Fc 'scripts/ci/probe_macos_blocker_seed.swift' "${workflow}")" -eq 1
 test "$(
   grep -Fc \

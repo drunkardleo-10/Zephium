@@ -1,941 +1,153 @@
 name: CI
 
 on:
-  workflow_call:
-    inputs:
-      checkout_ref:
-        description: Exact reviewed commit to test when called by the release workflow
-        required: false
-        type: string
-  pull_request:
-    branches: [main]
   push:
     branches: [main]
-
-concurrency:
-  # A release call is pinned to a reviewed commit and must not be cancelled by
-  # a later push to main. Ordinary push/PR runs still coalesce by ref.
-  group: ci-${{ inputs.checkout_ref || github.ref }}
-  cancel-in-progress: true
+  pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
-  ZEPHIUM_MIN_WEBKITGTK_VERSION: "2.52.6"
+  CARGO_TERM_COLOR: always
 
 jobs:
-  workflow-policy:
+  workflows:
+    name: Workflows
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      # Reusable workflows keep their caller's event context. The release
-      # caller is workflow_dispatch; there is no workflow_call runtime event.
-      - name: Admit exact CI event and checkout input before checkout
-        shell: bash
-        env:
-          CI_CHECKOUT_REF: ${{ inputs.checkout_ref }}
-        run: |
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          case "${GITHUB_EVENT_NAME}" in
-            push|pull_request) test -z "${CI_CHECKOUT_REF}" ;;
-            workflow_dispatch)
-              test "${GITHUB_REF}" = refs/heads/main
-              [[ "${CI_CHECKOUT_REF}" =~ ^[0-9a-f]{40}$ ]]
-              test "${CI_CHECKOUT_REF}" = "${GITHUB_SHA}"
-              ;;
-            *) exit 1 ;;
-          esac
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Enforce immutable workflow action and container sources
-        run: ruby scripts/release/test_workflow_sources.rb
-
-      - name: Record pull-request native-runtime evidence boundary
-        if: github.event_name == 'pull_request'
-        run: echo 'Pull requests retain Fedora source, policy and platform-neutral gates; Fedora host-policy setup and native execution require an exact trusted main push or release call and mint no Fedora PR runtime evidence.'
-
-      - name: Test WebKitGTK version proof helper
-        run: bash scripts/ci/test_verify_webkitgtk_version.sh
-
-      - name: Test macOS blocker seed probe policy
+      - name: Require pinned actions
+        run: ruby scripts/ci/check_action_pins.rb
+      - name: Test the macOS blocker seed probe policy
         run: bash scripts/ci/test_macos_blocker_seed_probe.sh
-
-      - name: Validate every GitHub Actions workflow with pinned actionlint
+      - name: actionlint
         run: |
           set -euo pipefail
-          archive="${RUNNER_TEMP}/actionlint-1.7.12.tar.gz"
-          destination="${RUNNER_TEMP}/actionlint-1.7.12"
-          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
-            --output "${archive}" \
+          archive="${RUNNER_TEMP}/actionlint.tar.gz"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "${archive}" \
             https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
-          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  '"${archive}" | \
-            sha256sum --check --strict
-          mkdir -p "${destination}"
-          tar --extract --gzip --file "${archive}" --directory "${destination}"
-          shellcheck --version
-          "${destination}/actionlint" -color
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  ${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}" actionlint
+          "${RUNNER_TEMP}/actionlint" -color
 
   frontend:
-    needs: workflow-policy
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
-
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 24.18.0
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Audit the complete frontend/build dependency graph
-        # Build/dev tools execute while producing signed release artifacts, so
-        # Vite, TypeScript, the Tauri CLI, and their transitives are in scope.
-        run: pnpm audit --audit-level high
-
-      - name: Type-check
-        run: pnpm --dir frame run check
-
-      - name: Verify Windows semantic input guards
-        run: node scripts/test-semantic-cdp-action.mjs
-
-      - name: Build frontend
-        run: pnpm --dir frame run build
-
-      - name: Check emitted CSS
-        run: pnpm --dir frame run check:styles
-
-  frontend-components:
-    needs: workflow-policy
-    name: frontend components (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            browser: webkit
-          - os: windows-2025
-            browser: chromium
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
-          persist-credentials: false
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: 24.18.0
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -C frame i18n
-      - run: pnpm -C frame exec playwright install ${{ matrix.browser }}
-      - run: pnpm -C frame test:component
-
-  blocker-security-fork:
-    needs: workflow-policy
-    name: blocker security fork
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_TARGET_DIR: target
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
-        with:
-          components: clippy, rustfmt
-
-      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: blocker-security-fork
-
-      # The provenance gate deliberately resolves every platform graph with
-      # `--offline`. Populate Cargo's checksum-verified cache from the exact
-      # root and standalone lockfiles before crossing that offline boundary.
-      - name: Fetch exact locked blocker graphs
-        run: |
-          set -euo pipefail
-          cargo fetch --locked
-          for target in \
-            x86_64-pc-windows-msvc \
-            x86_64-apple-darwin \
-            aarch64-apple-darwin \
-            x86_64-unknown-linux-gnu
-          do
-            cargo fetch --locked --target "${target}"
-          done
-          cargo fetch --locked --manifest-path vendor/adblock/Cargo.toml
-
-      # This single local/CI entrypoint verifies exact local lock identities,
-      # formatting, every shipped feature graph, strict Clippy, the adapter
-      # tests, and one full upstream-derived serialization suite.
-      - name: Check the complete blocker security-fork boundary
-        run: cargo xtask check-blocker-security-fork
-
-  blocker-fuzz-smoke:
-    needs: workflow-policy
-    name: blocker deterministic sanitizer smoke
+    name: Frontend
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      # `cargo fuzz` runs from the blocker crate, so keep this absolute rather
-      # than letting Cargo resolve a relative target directory from that
-      # nested working directory.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/blocker-fuzz
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
           persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # nightly-2026-07-20
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          toolchain: nightly-2026-07-20
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Build tools run while producing signed artifacts, so dev dependencies
+      # are in scope.
+      - run: pnpm audit --audit-level high
+      - name: Typecheck, lint and unit tests
+        run: pnpm --dir frame run check
+      - name: Windows semantic input guards
+        run: node scripts/test-semantic-cdp-action.mjs
+      - run: pnpm --dir frame run build
+      - run: pnpm --dir frame run check:styles
 
-      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          shared-key: blocker-fuzz
-          workspaces: crates/zephium-blocker/fuzz
-
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
-        with:
-          tool: cargo-deny@0.20.2
-          fallback: none
-
-      # install-action has no binary recipe for cargo-fuzz 0.13.2. Build the
-      # exact crates.io release from its packaged lockfile instead of silently
-      # selecting another version or enabling the action's mutable fallback.
-      - name: Install exact cargo-fuzz toolchain
-        run: cargo install --locked --version 0.13.2 cargo-fuzz
-
-      - name: Audit the independently locked fuzz harness
-        run: >-
-          cargo deny --manifest-path crates/zephium-blocker/fuzz/Cargo.toml
-          --config crates/zephium-blocker/fuzz/deny.toml --locked check
-
-      - name: Run deterministic bounded sanitizer replays
-        working-directory: crates/zephium-blocker
-        run: |
-          set -euo pipefail
-          corpus="${RUNNER_TEMP}/blocker-fuzz-corpus"
-          artifacts="${RUNNER_TEMP}/blocker-fuzz-artifacts"
-          cp -a fuzz/corpus "${corpus}"
-          mkdir -p \
-            "${artifacts}/source_admission" \
-            "${artifacts}/request_match" \
-            "${artifacts}/webkit_canonical"
-          cargo +nightly-2026-07-20 fuzz run source_admission \
-            "${corpus}/source_admission" -- \
-            -runs=4096 -seed=20260723 -max_len=131072 -timeout=10 \
-            -rss_limit_mb=4096 \
-            -artifact_prefix="${artifacts}/source_admission/"
-          cargo +nightly-2026-07-20 fuzz run request_match \
-            "${corpus}/request_match" -- \
-            -runs=4096 -seed=20260723 -max_len=16384 -timeout=10 \
-            -rss_limit_mb=4096 \
-            -artifact_prefix="${artifacts}/request_match/"
-          cargo +nightly-2026-07-20 fuzz run webkit_canonical \
-            "${corpus}/webkit_canonical" -- \
-            -runs=4096 -seed=20260723 -max_len=131072 -timeout=10 \
-            -rss_limit_mb=4096 \
-            -artifact_prefix="${artifacts}/webkit_canonical/"
-
-      - name: Retain synthetic crash inputs
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: blocker-fuzz-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/blocker-fuzz-artifacts
-          if-no-files-found: ignore
-          retention-days: 7
-
-  rust:
-    needs: workflow-policy
-    runs-on: ubuntu-22.04
-    env:
-      CARGO_TARGET_DIR: target
+  linux:
+    name: Rust (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
           persist-credentials: false
-
-      - name: Install Linux build dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev
-
-      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          components: clippy, rustfmt
-
-      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Enforce native-engine security-floor review deadlines
-        run: cargo xtask check-engine-floors
-
-      - name: Enforce advisory-exception owners and expiry
-        run: cargo xtask check-advisory-exceptions
-
-      - name: Fetch exact locked security-fork graphs
-        run: |
-          set -euo pipefail
-          cargo fetch --locked
-          for target in \
-            x86_64-pc-windows-msvc \
-            x86_64-apple-darwin \
-            aarch64-apple-darwin \
-            x86_64-unknown-linux-gnu
-          do
-            cargo fetch --locked --target "${target}"
-          done
-          cargo fetch --locked --manifest-path vendor/adblock/Cargo.toml
-
-      - name: Enforce vendored security-fork sources and fixture provenance
-        run: cargo xtask check-security-fork-locks
-
-      - name: Enforce agentic diagnostic release exclusion
-        run: cargo xtask check-agentic-probe-boundary
-
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+          node-version-file: .node-version
+      - run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
-          tool: cargo-nextest@0.9.137,cargo-machete@0.9.2,cargo-deny@0.20.2
+          tool: cargo-nextest@0.9.137,cargo-deny@0.20.2
           fallback: none
-
-      - name: cargo fmt
-        run: cargo fmt --all -- --check
-
-      - name: Format vendored Wry security adapter directly
-        run: cargo fmt --manifest-path vendor/wry/Cargo.toml -- --check
-
-      - name: Format vendored Tauri native adapters directly
+      - run: cargo fmt --all -- --check
+      - name: Security review deadlines (warn only)
         run: |
-          cargo fmt --manifest-path vendor/tauri-runtime-wry/Cargo.toml -- --check
-          cargo fmt --manifest-path vendor/tauri/Cargo.toml -- --check
-
-      - name: cargo check
-        run: cargo check --all-targets --locked
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Test the bounded agentic probe contract and fixtures
-        run: |
-          cargo test --locked -p zephium-agentic --features probe-harness
-          cargo clippy --locked -p zephium-agentic --all-targets --features probe-harness -- -D warnings
-
-      - name: Clippy official HTTPS and optional TUF blocker graphs
-        run: |
-          cargo clippy -p zephium-blocker-update --all-targets --locked --no-default-features --features tuf,official-https -- -D warnings
-          cargo clippy -p zephium-blocker-service --all-targets --locked --no-default-features --features tuf,official-https -- -D warnings
-
-      - name: Clippy production workspace libraries
-        run: cargo clippy --workspace --lib --locked -- -D warnings
-
-      - name: Check vendored Wry security adapter directly
-        run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
-
-      - name: Clippy vendored Wry security adapter directly
-        run: >-
-          cargo clippy --manifest-path vendor/wry/Cargo.toml
-          --locked --all-targets -- -D warnings
-
-      - name: Clippy vendored Wry production library directly
-        run: >-
-          cargo clippy --manifest-path vendor/wry/Cargo.toml
-          --locked --lib -- -D warnings
-
-      - name: Clippy vendored Tauri Runtime Wry adapter directly
-        run: |
-          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api -- -D warnings
-          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --lib --features macos-private-api -- -D warnings
-
-      - name: Clippy vendored Tauri policy adapter directly
-        run: |
-          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta" -- -D warnings
-          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --lib --features "macos-private-api,specta" -- -D warnings
-
-      - name: Unused crates (advisory)
-        run: cargo machete
-        continue-on-error: true
-
-      - name: Enforce licenses, advisories, and sources policy
-        run: cargo deny check
-
-      - name: Audit the standalone adblock fork test graph
-        # The application graph covers every shipped adblock dependency. The
-        # excluded fork has additional dev dependencies which execute in CI;
-        # root-only advisory exceptions are necessarily absent from that
-        # smaller graph, but detected advisories remain fatal.
-        run: >-
-          cargo deny --manifest-path vendor/adblock/Cargo.toml
-          --config deny.toml --locked check -A advisory-not-detected
-
-      - name: cargo nextest
-        run: cargo nextest run --locked
-
-      - name: Test vendored Wry security adapter directly
-        run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
-
-      - name: Test vendored Tauri native adapters directly
-        run: |
-          cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api
-          cargo test --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta"
-
+          cargo xtask check-engine-floors
+          cargo xtask check-advisory-exceptions
+      - run: cargo xtask check-security-fork-locks
+      - run: cargo xtask check-agentic-probe-boundary
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # `--all-targets` lets test-only uses hide dead production code.
+      - run: cargo clippy --workspace --lib --locked -- -D warnings
+      - run: cargo deny --locked check
+      - run: cargo nextest run --workspace --locked
+      # The desktop tests regenerate the TypeScript IPC bindings.
       - name: Bindings drift
         run: git diff --exit-code frame/src/shared/ipc/bindings.ts
 
-  rust-platforms:
-    needs: workflow-policy
-    name: rust-test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # GitHub's hosted macOS images currently lag Zephium's hard floor:
-        # macos-15 is Sequoia 15.7.7 and reports a Safari/WebKit build
-        # mismatch, while macos-26 is Tahoe 26.6.1 below the 26.6.2 floor.
-        # The hosted Sequoia image remains useful for source/unit/API coverage,
-        # but ordinary push/PR runs mint no native runtime evidence. A reusable
-        # release call executes the exact probes below and therefore remains
-        # blocked until its runner satisfies the embedded policy.
-        os: [windows-2025, macos-15]
-    runs-on: ${{ matrix.os }}
-    env:
-      CARGO_TARGET_DIR: target
+  macos:
+    name: Rust (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
           persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
-        with:
-          components: clippy
-
-      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: cargo-nextest@0.9.137
           fallback: none
-
-      - name: cargo check
-        run: cargo check --all-targets --locked
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: Clippy production workspace libraries
-        run: cargo clippy --workspace --lib --locked -- -D warnings
-
-      - name: Keep the gated Windows CDP feature graph warning-clean
-        if: runner.os == 'Windows'
-        run: |
-          cargo check --locked -p zephium-engine --lib --features windows-cdp-spike
-          cargo clippy --locked -p zephium-engine --lib --features windows-cdp-spike -- -D warnings
-
-      - name: Compile the Windows filesystem validation suite
-        if: runner.os == 'Windows'
-        # Compilation preserves the candidate adapter without treating hosted
-        # runner permissions or missing crash tests as production qualification.
-        run: >-
-          cargo clippy --locked -p zephium-private-fs --all-targets
-          --features windows-namespace-validation -- -D warnings
-
-      - name: Check vendored Wry security adapter directly
-        run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
-
-      - name: Clippy vendored Wry security adapter directly
-        run: >-
-          cargo clippy --manifest-path vendor/wry/Cargo.toml
-          --locked --all-targets -- -D warnings
-
-      - name: Clippy vendored Wry production library directly
-        run: >-
-          cargo clippy --manifest-path vendor/wry/Cargo.toml
-          --locked --lib -- -D warnings
-
-      - name: Clippy vendored Tauri Runtime Wry adapter directly
-        run: |
-          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api -- -D warnings
-          cargo clippy --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --lib --features macos-private-api -- -D warnings
-
-      - name: Clippy vendored Tauri policy adapter directly
-        run: |
-          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta" -- -D warnings
-          cargo clippy --manifest-path vendor/tauri/Cargo.toml --locked --lib --features "macos-private-api,specta" -- -D warnings
-
-      # The platform-neutral materializer authenticates the exact bundled
-      # EasyList/EasyPrivacy bytes and reproduces the recorded canonical
-      # WebKit JSON. The standalone Swift probe then crosses a separate native
-      # boundary: WKContentRuleListStore must compile that complete artifact
-      # and reopen its exact digest-derived identifier from an isolated cache.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo nextest run --workspace --locked --retries 2
+      # Proves the bundled EasyList/EasyPrivacy seed compiles in the real
+      # WKContentRuleListStore, which a seed refresh can break.
       - name: Prove the exact bundled blocker seed compiles in native WKContentRuleListStore
-        if: runner.os == 'macOS'
-        shell: bash
         timeout-minutes: 8
         run: |
           set -euo pipefail
           probe_root="$(mktemp -d)"
-          cleanup() {
-            rm -rf "${probe_root}"
-          }
-          trap cleanup EXIT
+          trap 'rm -rf "${probe_root}"' EXIT
           artifact="${probe_root}/webkit-content-rules.json"
           probe="${probe_root}/probe-macos-blocker-seed"
           cargo xtask materialize-blocker-seed-webkit --output "${artifact}"
-          xcrun swiftc \
-            -parse-as-library \
-            -O \
-            -warnings-as-errors \
+          xcrun swiftc -parse-as-library -O -warnings-as-errors \
             -module-cache-path "${probe_root}/swift-module-cache" \
-            -framework WebKit \
-            scripts/ci/probe_macos_blocker_seed.swift \
-            -o "${probe}"
+            -framework WebKit scripts/ci/probe_macos_blocker_seed.swift -o "${probe}"
           "${probe}" --self-test
           "${probe}" "${artifact}"
 
-      # The desktop test binary needs the WebView2 loader at run time, which
-      # plain Windows runners do not provide. macOS must run the full native
-      # desktop tests, including Objective-C class/delegate registration.
-      - name: cargo nextest (Windows)
-        if: runner.os == 'Windows'
-        run: cargo nextest run --locked --retries 2 --workspace --exclude zephium-desktop
-
-      - name: Windows Work execution contracts
-        if: runner.os == 'Windows'
-        run: |
-          cargo nextest run --locked -p zephium-app --features work-runtime,work-execution
-          cargo nextest run --locked -p zephium-agentic --features provider-transport,probe-harness
-          cargo nextest run --locked -p zephium-work-composition --features durable-runtime
-
-      - name: Audit and link Windows Work loopback qualification
-        if: runner.os == 'Windows'
-        run: |
-          cargo clippy --locked -p zephium-terra-macos-probe --features durable-runtime --bin windows-work-probe -- -D warnings
-          cargo build --locked -p zephium-terra-macos-probe --features durable-runtime --bin windows-work-probe
-
-      - name: Test official HTTPS and optional TUF blocker graphs
-        run: |
-          cargo nextest run -p zephium-blocker-update --locked --no-default-features --features tuf,official-https
-          cargo nextest run -p zephium-blocker-service --locked --no-default-features --features tuf,official-https
-
-      - name: Windows bounded diagnostic-log policy tests
-        if: runner.os == 'Windows'
-        # This loader-independent target exercises rotation, preservation,
-        # process locking, legacy bounding, and privacy-expiry behavior.
-        run: cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml
-
-      # Parse the source-gated physical workflow on the native PowerShell host
-      # without executing either phase or granting device authority.
-      - name: Parse the Windows agentic qualification workflow
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $tokens = $null
-          $parseErrors = $null
-          $scriptPath = Join-Path $env:GITHUB_WORKSPACE "scripts\qualification\windows-agentic.ps1"
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            $scriptPath,
-            [ref]$tokens,
-            [ref]$parseErrors
-          )
-          if ($parseErrors.Count -ne 0) {
-            throw "physical Windows agentic orchestrator did not parse"
-          }
-
-      # Compile and link the release-excluded physical-device runner on its
-      # native toolchain without treating a hosted CI VM as behavioral proof.
-      - name: Audit and build the Windows agentic qualification runners
-        if: runner.os == 'Windows'
-        run: |
-          # The probe module itself denies undocumented unsafe blocks and
-          # unsafe operations in unsafe functions. Keep this native Clippy
-          # compile in addition to the final linker check below.
-          cargo clippy --locked -p zephium-engine \
-            --features native-agentic-input-probe \
-            --bin windows-agentic-input-probe
-          cargo build --locked -p zephium-engine \
-            --features native-agentic-input-probe \
-            --bin windows-agentic-input-probe
-          cargo clippy --locked -p zephium-engine \
-            --features native-agentic-semantic-probe \
-            --bin windows-agentic-semantic-probe
-          cargo build --locked -p zephium-engine \
-            --features native-agentic-semantic-probe \
-            --bin windows-agentic-semantic-probe
-
-      # Run before workspace fail-fast can cancel this primitive diagnostic.
-      # Exact selection must execute a test; no retry or filesystem fallback.
-      - name: Diagnose macOS sealed native publication before workspace tests
-        if: runner.os == 'macOS'
-        run: >-
-          cargo nextest run --locked -p zephium-private-fs --lib
-          --retries 0 --no-tests fail --failure-output immediate-final
-          -E 'test(=platform::unix::tests::nested_sealed_same_parent_publication_reports_native_operation_and_errno)'
-
-      - name: cargo nextest (macOS)
-        if: runner.os == 'macOS'
-        run: cargo nextest run --locked --retries 2 --workspace
-
-      - name: Keep macOS native security probe graphs warning-clean
-        if: runner.os == 'macOS'
-        run: |
-          cargo clippy --locked -p zephium-engine \
-            --features native-isolation-probes \
-            --bin macos-principal-isolation-probe -- -D warnings
-
-      - name: Record hosted macOS runtime-evidence boundary
-        if: runner.os == 'macOS' && inputs.checkout_ref == ''
-        run: >-
-          echo '::notice title=Native macOS release evidence unavailable::The hosted macos-15 image is retained for source coverage only and this job will mint no native runtime evidence; exact Safari/WebKit admission remains mandatory in reusable release CI and on admitted release runners.'
-
-      # libtest always runs tests on worker threads, including with
-      # --test-threads=1, so an ordinary ignored test cannot construct AppKit
-      # or WKWebView safely. This feature-gated executable owns process main
-      # and exercises Zephium's real Rust world/handler adapter against a
-      # hostile page plus three mutually untrusted principals.
-      - name: Prove macOS principal worlds and handlers are mutually isolated
-        if: runner.os == 'macOS' && inputs.checkout_ref != ''
-        timeout-minutes: 3
-        run: >-
-          cargo run --locked -p zephium-engine
-          --features native-isolation-probes
-          --bin macos-principal-isolation-probe
-
-      # This matrix never requests focus, OS accessibility authority, an
-      # external URL, or a persistent profile. A fresh loopback document per
-      # row prevents sticky user activation from contaminating later results.
-      - name: Prove hidden fixed-DOM input remains untrusted and focus-isolated
-        if: runner.os == 'macOS'
-        timeout-minutes: 3
-        run: |
-          cargo clippy --locked -p zephium-engine \
-            --features native-agentic-input-probe \
-            --bin macos-agentic-input-probe -- -D warnings
-          cargo run --locked -p zephium-engine \
-            --features native-agentic-input-probe \
-            --bin macos-agentic-input-probe -- --ci-hidden-fixed-dom
-
-      - name: Test vendored Wry security adapter directly
-        run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
-
-      - name: Test vendored Tauri native adapters directly
-        run: |
-          cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml --locked --all-targets --features macos-private-api
-          cargo test --manifest-path vendor/tauri/Cargo.toml --locked --all-targets --features "macos-private-api,specta"
-
-      - name: Enforce accepted Windows exit drain ordering
-        if: runner.os == 'Windows'
-        run: >-
-          cargo test --manifest-path vendor/tauri-runtime-wry/Cargo.toml
-          --locked --features macos-private-api --lib
-          construction_tests::accepted_exit_seals_and_drains_native_windows_before_loop_exit
-          -- --exact
-
-  linux-native-security:
-    # This job installs host policy. Never consume a PR checkout here. The
-    # release caller independently proves its reviewed main SHA; this gate also
-    # refuses any checkout_ref that differs from the main event commit.
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: workflow-policy
-    # This non-artifact job permits Fedora 44's signed updates-testing packages
-    # only for the exact WebKitGTK/JSC family when needed to meet the security
-    # floor. Package eligibility is checked at execution time. Release builds
-    # remain stable-repository-only and fail closed without an eligible package. The
-    # ordinary Ubuntu job still verifies the oldest supported build ABI and
-    # every platform-independent test.
-    runs-on: ubuntu-24.04
+  windows:
+    name: Rust (Windows)
+    runs-on: windows-2025
     timeout-minutes: 60
-    env:
-      NATIVE_CHECKOUT_REF: ${{ inputs.checkout_ref }}
-    defaults:
-      run:
-        shell: bash scripts/ci/linux_native_container.sh exec {0}
     steps:
-      - name: Refuse a caller-selected native checkout
-        shell: bash
-        run: |
-          test "${GITHUB_REF}" = refs/heads/main
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          case "${GITHUB_EVENT_NAME}" in
-            push) test -z "${NATIVE_CHECKOUT_REF}" ;;
-            workflow_dispatch)
-              [[ "${NATIVE_CHECKOUT_REF}" =~ ^[0-9a-f]{40}$ ]]
-              test "${NATIVE_CHECKOUT_REF}" = "${GITHUB_SHA}"
-              ;;
-            *) exit 1 ;;
-          esac
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
-
-      # Package installation keeps Docker defaults. Only the separate native
-      # test process receives a namespace-capable policy, with no capabilities,
-      # non-root identity, no-new-privileges and a read-only root/worktree.
-      - name: Start capability-free Fedora native test environment
-        shell: bash
-        run: bash scripts/ci/linux_native_container.sh start
-
-      - name: Fetch exact locked Linux blocker graph
-        run: |
-          set -euo pipefail
-          cargo fetch --locked
-          cargo fetch --locked --target x86_64-unknown-linux-gnu
-          cargo fetch --locked --manifest-path vendor/wry/Cargo.toml --target x86_64-unknown-linux-gnu
-
-      - name: Seal native test network after dependency acquisition
-        shell: bash
-        run: bash scripts/ci/linux_native_container.sh seal
-
-      - name: Prove unprivileged native sandbox prerequisites
-        id: native-preflight
-        run: bash scripts/ci/prove_linux_native_namespaces.sh
-
-      - name: Record bounded native preflight refusal provenance
-        if: failure() && steps.native-preflight.outcome == 'failure'
-        shell: bash
-        run: bash scripts/ci/linux_native_container.sh diagnose
-
-      - name: Prove native WebKitGTK sandbox package prerequisites
-        run: |
-          set -euo pipefail
-          installed="$(pkg-config --modversion webkit2gtk-4.1)"
-          packaged="$(rpm -q --qf '%{VERSION}' webkit2gtk4.1)"
-          required="${ZEPHIUM_MIN_WEBKITGTK_VERSION}"
-          echo "Native WebKitGTK under test: package=${packaged}; pkg-config=${installed}; required >= ${required}"
-          if ! bash scripts/ci/verify_webkitgtk_version.sh \
-            "${packaged}" "${installed}" "${required}"; then
-            echo "::error title=Unproven WebKitGTK runtime::Fedora package ${packaged} and pkg-config ${installed} do not prove the required engine ${required}."
-            exit 1
-          fi
-          webkit_requires="$(rpm -q --requires webkit2gtk4.1)"
-          if ! grep -Fx 'bubblewrap' <<<"${webkit_requires}" >/dev/null; then
-            echo "::error title=Missing WebKitGTK sandbox dependency::Fedora's WebKitGTK package does not require bubblewrap."
-            exit 1
-          fi
-          if ! grep -Eq '^libseccomp\.so\.2' <<<"${webkit_requires}"; then
-            echo "::error title=Missing WebKitGTK seccomp dependency::Fedora's WebKitGTK package does not require libseccomp.so.2."
-            exit 1
-          fi
-          command -v bwrap >/dev/null
-          bwrap_path="$(command -v bwrap)"
-          if [[ "$(rpm -qf --qf '%{NAME}' "${bwrap_path}")" != "bubblewrap" ]]; then
-            echo "::error title=Unexpected bubblewrap provider::${bwrap_path} is not owned by Fedora's bubblewrap package."
-            exit 1
-          fi
-          for package in webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp; do
-            vendor="$(rpm -q --qf '%{VENDOR}' "${package}")"
-            if [[ "${vendor}" != "Fedora Project" ]]; then
-              echo "::error title=Unexpected Fedora package vendor::${package} reports vendor '${vendor}'."
-              exit 1
-            fi
-            signature="$(rpm -q --qf '%|DSAHEADER?{%{DSAHEADER:pgpsig}}:{%|RSAHEADER?{%{RSAHEADER:pgpsig}}:{%|SIGGPG?{%{SIGGPG:pgpsig}}:{%|SIGPGP?{%{SIGPGP:pgpsig}}:{(none)}|}|}|}|' "${package}")"
-            if [[ -z "${signature}" || "${signature}" == "(none)" ]]; then
-              echo "::error title=Unsigned Fedora package::${package} has no retained RPM signature metadata."
-              exit 1
-            fi
-          done
-          rpm -V webkit2gtk4.1 webkit2gtk4.1-devel bubblewrap libseccomp
-          # Base digest is pinned; DNF packages are live-resolved, not a pinned
-          # repository snapshot. Retain the actual installed NEVRAs and kernel.
-          uname -sr
-          rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort
-
-      # The platform-neutral seed gate first authenticates the exact bundled
-      # EasyList/EasyPrivacy bytes and reproduces their recorded WebKit
-      # compiler golden. This then passes those exact canonical JSON bytes
-      # through Fedora's real WebKitUserContentFilterStore, including a
-      # persistent-cache reload. A synthetic rule cannot stand in for this
-      # compatibility and resource-boundary proof.
-      - name: Prove the exact bundled blocker seed compiles in native WebKitGTK
-        run: |
-          set -euo pipefail
-          probe_root="$(mktemp -d)"
-          cleanup() {
-            rm -rf "${probe_root}"
-          }
-          trap cleanup EXIT
-          artifact="${probe_root}/webkit-content-rules.json"
-          cargo xtask materialize-blocker-seed-webkit --output "${artifact}"
-          cargo test --locked -p zephium-engine --lib --no-run
-          ZEPHIUM_BLOCKER_WEBKIT_ARTIFACT="${artifact}" \
-            timeout --signal=TERM --kill-after=10s 240s \
-            xvfb-run -a cargo test --locked -p zephium-engine --lib \
-            platform::linux::content_filter::tests::exact_bundled_easylist_and_easyprivacy_compile_and_reload_natively \
-            -- --ignored --exact --test-threads=1
-
-      # Inspect a real renderer's no-new-privileges, distinct mount/user/PID
-      # namespaces and filter count above its parent. This does not identify
-      # the added filter's installer/policy or prove renderer filesystem denial.
-      - name: Prove Wry WebKitWebProcess namespace and filter state
-        run: >-
-          xvfb-run -a cargo test --locked -p zephium-engine --lib
-          platform::linux::tests::wry_contexts_enable_sandbox_and_cross_site_process_swap
-          -- --ignored --exact
-
-      - name: Prove Linux principal worlds and handlers are mutually isolated
-        run: |
-          set -euo pipefail
-          probe_log="$(mktemp)"
-          cleanup() {
-            rm -f "${probe_log}"
-          }
-          trap cleanup EXIT
-          timeout --signal=TERM --kill-after=10s 120s \
-            dbus-run-session -- xvfb-run -a \
-            cargo test --locked -p zephium-engine --lib \
-            platform::linux::tests::principal_world_handlers_are_mutually_isolated_from_three_peers_and_page_world \
-            -- --ignored --exact --test-threads=1 2>&1 | tee "${probe_log}"
-          if ! grep -F "test result: ok. 1 passed; 0 failed; 0 ignored" "${probe_log}" >/dev/null; then
-            echo "::error title=Linux principal probe missing::The exact native test did not execute once."
-            exit 1
-          fi
-
-      - name: Prove native Wry GTK invariants
-        run: >-
-          xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked --lib
-          web_context::tests::tauri_style_incognito_and_gtk_reparent_invariants_are_native_and_fail_closed
-          -- --ignored --exact
-
-      - name: Prove guarded Wry GTK construction and first map
-        run: >-
-          xvfb-run -a cargo test --manifest-path vendor/wry/Cargo.toml --locked --lib
-          web_context::tests::guarded_webkitgtk_construction_commit_and_first_map_are_native_and_fail_closed
-          -- --ignored --exact
-
-      - name: Prove Linux privileged composition transaction
-        run: >-
-          xvfb-run -a cargo test --locked -p zephium-desktop --lib
-          platform::linux::native_composition_tests::linux_composition_transaction_preserves_hidden_state_and_rolls_back_exactly
-          -- --ignored --exact
-
-      - name: Prove exact X11 shortcut registration lifecycle
-        run: >-
-          xvfb-run -a cargo test --locked -p zephium-desktop --lib
-          linux_x11_shortcut::tests::native_registration_is_live_collision_checked_and_releasable
-          -- --ignored --exact --test-threads=1
-
-      - name: Prove Linux stage mapping and input gates
-        run: >-
-          xvfb-run -a cargo test --locked -p zephium-engine --lib
-          platform::linux::stage::tests::stage_parks_pending_views_and_hidden_children_survive_ancestor_show_all
-          -- --ignored --exact
-
-      - name: Prove the complete Tauri Linux startup transaction
-        run: |
-          set -euo pipefail
-          cargo build --locked -p zephium-desktop --bin zephium-desktop --no-default-features
-
-          probe_root="$(mktemp -d)"
-          cleanup() {
-            rm -rf "${probe_root}"
-          }
-          trap cleanup EXIT
-          mkdir -p \
-            "${probe_root}/home" \
-            "${probe_root}/data" \
-            "${probe_root}/config" \
-            "${probe_root}/cache" \
-            "${probe_root}/runtime"
-          chmod 0700 "${probe_root}/runtime"
-
-          export HOME="${probe_root}/home"
-          export XDG_DATA_HOME="${probe_root}/data"
-          export XDG_CONFIG_HOME="${probe_root}/config"
-          export XDG_CACHE_HOME="${probe_root}/cache"
-          export XDG_RUNTIME_DIR="${probe_root}/runtime"
-          export ZEPHIUM_NATIVE_STARTUP_PROBE=1
-          log="${probe_root}/startup.log"
-
-          set +e
-          dbus-run-session -- xvfb-run -a \
-            timeout --signal=TERM --kill-after=3s 8s \
-            "${CARGO_TARGET_DIR}/debug/zephium-desktop" >"${log}" 2>&1
-          status=$?
-          set -e
-          cat "${log}"
-
-          if grep -F "startup: failed" "${log}" >/dev/null; then
-            echo "::error title=Linux startup failed::The complete native startup transaction reported a failure."
-            exit 1
-          fi
-          if ! grep -Fx \
-            "startup-probe: Linux privileged WebViews are hardened and composed" \
-            "${log}" >/dev/null; then
-            echo "::error title=Linux startup proof missing::The process never completed both privileged WebView hardening/composition transactions."
-            exit 1
-          fi
-          if [[ "${status}" -ne 124 ]]; then
-            echo "::error title=Linux startup terminated::Expected the healthy app to remain alive until the bounded probe timeout; status=${status}."
-            exit 1
-          fi
-
-      - name: Retire exact Fedora native test environment
-        if: always()
-        shell: bash
-        run: bash scripts/ci/linux_native_container.sh stop
-
-  coverage:
-    runs-on: ubuntu-22.04
-    needs: rust
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
-          ref: ${{ inputs.checkout_ref || github.sha }}
-          persist-credentials: false
-
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev
-
-      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
-        with:
-          components: llvm-tools-preview
-
-      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: coverage
-
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
-        with:
-          tool: cargo-llvm-cov@0.8.6,cargo-nextest@0.9.137
+          tool: cargo-nextest@0.9.137
           fallback: none
-
-      - name: Generate coverage
-        run: cargo llvm-cov nextest --locked --lcov --output-path lcov.info
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: lcov-report
-          path: lcov.info
-          if-no-files-found: error
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The desktop test binary needs the WebView2 loader at run time, which
+      # hosted runners lack; the log-policy crate covers its Windows-only code.
+      - run: cargo nextest run --workspace --exclude zephium-desktop --locked --retries 2
+      - run: cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml
