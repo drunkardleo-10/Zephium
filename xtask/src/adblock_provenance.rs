@@ -1003,7 +1003,7 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
         &["aws-lc-rs", "jiff", "tempfile", "zephium-core"],
         "zephium-blocker-update dev-dependency table",
     )?;
-    require_dependency_version(dev_dependencies, "aws-lc-rs", "=1.17.3")?;
+    require_dependency_version(dev_dependencies, "aws-lc-rs", "=1.18.1")?;
     require_dependency_version(dev_dependencies, "jiff", "0.2")?;
     require_workspace_dependency(dev_dependencies, "tempfile", &[])?;
 
@@ -1160,12 +1160,13 @@ fn validate_private_fs_validation_manifest(repository: &Path) -> Result<(), Stri
     let features = require_table(&manifest, "features")?;
     require_key_set(
         features,
-        &["windows-namespace-validation"],
+        &["windows-namespace-validation", "windows-work-test-fixtures"],
         "private filesystem validation feature table",
     )?;
     // There is deliberately no default feature or production forwarding alias.
     // The crate independently rejects optimized builds with this gate enabled.
-    require_string_array(features, "windows-namespace-validation", &[])
+    require_string_array(features, "windows-namespace-validation", &[])?;
+    require_string_array(features, "windows-work-test-fixtures", &[])
 }
 
 fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
@@ -2271,9 +2272,9 @@ fn verify_blocker_product_lock(repository: &Path) -> Result<(), String> {
         ("zephium-update-transport", "0.1.0"),
     ];
     const REGISTRY: [(&str, &str); 5] = [
-        ("aws-lc-rs", "1.17.3"),
+        ("aws-lc-rs", "1.18.1"),
         ("reqwest", "0.13.4"),
-        ("rustls", "0.23.42"),
+        ("rustls", "0.23.45"),
         ("rustls-platform-verifier", "0.7.0"),
         ("tough", "0.24.0"),
     ];

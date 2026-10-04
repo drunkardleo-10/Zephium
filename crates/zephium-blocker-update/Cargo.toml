@@ -29,7 +29,7 @@ url.workspace = true
 zephium-update-transport = { workspace = true, optional = true }
 
 [dev-dependencies]
-aws-lc-rs = "=1.17.3"
+aws-lc-rs = "=1.18.1"
 jiff = "0.2"
 tempfile.workspace = true
 zephium-core.workspace = true
