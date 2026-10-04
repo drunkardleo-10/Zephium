@@ -56,6 +56,7 @@ controls product intent.
 ## Ad blocking
 
 - [Ad and tracker protection](adblock.md): the native network blocker, cosmetic hiding and release gates.
+- [Cosmetic index delivery](adblock-cosmetic-index.md): keeping the generic cosmetic index out of every page.
 - [Blocker fuzz harness](../crates/zephium-blocker/fuzz/README.md): running the fuzz targets.
 
 ## Contributing and maintenance
