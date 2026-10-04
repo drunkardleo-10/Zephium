@@ -165,7 +165,24 @@ macro_rules! diagnostic {
 // Only the thumb may paint. Every other part stays transparent so the page
 // background shows through the gutter; an unstyled scrollbar background is
 // what rendered as a detached band along the edge.
-const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px;background:transparent}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}::-webkit-scrollbar-button{display:none}";
+macro_rules! scrollbar_base_css {
+    () => {
+        "::-webkit-scrollbar{width:10px;height:10px;background:transparent}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-button{display:none}"
+    };
+}
+
+// WebKit fills the main frame's styled scroll corner with the view's white
+// base color before painting it, so any corner style shows white beside a
+// dark page. Unstyled, the corner lets the page background through.
+#[cfg(target_os = "macos")]
+const SCROLLBAR_CSS: &str = scrollbar_base_css!();
+
+// Chromium paints an unstyled corner with its default theme square.
+#[cfg(not(target_os = "macos"))]
+const SCROLLBAR_CSS: &str = concat!(
+    scrollbar_base_css!(),
+    "::-webkit-scrollbar-corner{background:transparent}"
+);
 
 static APP_STARTED: OnceLock<std::time::Instant> = OnceLock::new();
 static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
@@ -6536,8 +6553,10 @@ mod tests {
             crate::frame_sources::PANEL_HTML,
             crate::frame_sources::ONBOARDING_HTML,
         ] {
-            assert!(!html.to_ascii_lowercase().contains("<style"),
-                "Tauri adds nonces to inline style blocks; this disables the configured unsafe-inline and can strand dropdown pointer locks");
+            assert!(
+                !html.to_ascii_lowercase().contains("<style"),
+                "Tauri adds nonces to inline style blocks; this disables the configured unsafe-inline and can strand dropdown pointer locks"
+            );
         }
         for css in [
             include_str!("../../frame/src/styles/global.css"),
