@@ -20,14 +20,16 @@ Current deadlines are encoded next to their evidence in:
 - `crates/zephium-core/src/webkitgtk.rs`
 - `deny.toml` for temporary advisory exceptions
 
-CI enforces these dates with:
+These commands check the dates. In CI an expired date is a warning; `--strict`
+makes it a failure. The weekly `Security review` workflow runs both strictly
+and opens an "Engine security review due" issue when either has expired:
 
 ```sh
-cargo xtask check-engine-floors
-cargo xtask check-advisory-exceptions
+cargo xtask check-engine-floors [--strict]
+cargo xtask check-advisory-exceptions [--strict]
 ```
 
-The production workflow uses the stricter release-only gate:
+The release workflow runs the release-only gate, which applies both strictly:
 
 ```sh
 cargo xtask check-release-engine-security
@@ -39,11 +41,11 @@ continue on the newest admitted runtime, but an unavailable vendor patch is
 never treated as production release evidence.
 
 Calendar alerts should be set for seven days before every encoded deadline.
-The alerts are operational backup only; CI remains the authoritative
-fail-closed control.
+The alerts are operational backup only; the release gate remains the
+authoritative fail-closed control.
 
 These calendar gates are deliberately stricter than installed-runtime
-behavior. An overdue review blocks CI and release publication, but does not
+behavior. An overdue review blocks release publication, but does not
 make time alone terminate an already installed browser. Runtime still rejects
 known-obsolete or malformed engines, preview/development channels, provenance
 failures, security overrides, and missing mandatory native capabilities.
@@ -94,7 +96,7 @@ For each platform:
 
 If the vendor has disclosed fixes but has not yet published a supported stable
 runtime, the release remains blocked. Do not extend the review date merely to
-make CI green. Development may continue on a documented non-release branch,
+pass the release gate. Development may continue on a documented non-release branch,
 but no signed production artifact may bypass the gate.
 
 ## Dependency advisories
@@ -119,7 +121,7 @@ fails:
 2. Determine whether the dependency executes in development, CI, release
    production, or the shipped application.
 3. Upgrade or remove it and regenerate the lockfile deliberately.
-4. Re-run frontend checks, the production build, and the release-script tests.
+4. Re-run the frontend checks and the production build.
 5. If no fixed dependency graph exists, keep production release blocked. Do
    not lower the audit severity or omit development dependencies as a release
    workaround.
@@ -145,124 +147,17 @@ and endurance tests.
 
 GitHub-hosted macOS images may temporarily lag the embedded hard floor or ship
 a Safari application whose build does not match the loaded WebKit framework.
-Ordinary push and pull-request CI may still use such an image for source,
-Clippy, unit, and API-availability coverage, but it must label that boundary and
-mint no native runtime evidence. The reusable production-release CI call still
-executes exact runtime admission, principal isolation, and WKWebExtension probes
-and fails closed until an admitted runner is available. Never lower a floor,
-ignore a build mismatch, or relabel hosted source coverage as release evidence
-to make branch CI green.
+CI uses such an image for source, Clippy, unit, and API-availability coverage
+only; it mints no native runtime evidence. Run exact runtime admission and
+principal isolation (`cargo xtask ci`) on an admitted Mac before tagging a
+release. Never lower a floor, ignore a build mismatch, or relabel hosted source
+coverage as release evidence to make CI green.
 
-### macOS native publication pre-gate
+### Linux
 
-The hosted repository test refused sealed-tree publication with the deliberately
-opaque public `Filesystem(Io)` classification. Full-suite fail-fast cancelled
-the lower-level native diagnostic before it ran. CI now runs the exact
-`zephium-private-fs` nested sealed-tree NOREPLACE diagnostic immediately before
-the macOS workspace suite, with zero retries and failure on an empty selection.
-A failed primitive reports its operation and numeric errno without a path;
-success separately proves rejection of an occupied destination. The unchanged
-repository test remains in the full suite. This is filesystem evidence for the
-hosted runner, not browser/application qualification, and changes no production
-publication semantics or recovery policy.
-
-### Fedora native CI sandbox environment
-
-The 2026-09-07 hosted run at `fd9010f` compiled the Linux native test binary but
-aborted when bubblewrap could not create a nested namespace inside GitHub's
-default Docker job. This was an environment refusal, not passing confinement
-evidence. [Docker's default seccomp policy](https://docs.docker.com/engine/security/seccomp/)
-deliberately restricts namespace creation; adding `SYS_ADMIN`, disabling WebKit's
-sandbox, or accepting that inherited filter as WebKit evidence is not a fix.
-
-Host-policy setup and native execution run only on an exact main-branch push or
-reviewed main release call. Reusable CI retains the release caller's
-`workflow_dispatch` event context, not a distinct `workflow_call` runtime event.
-The source-policy job validates input before its first checkout, and every
-other job depends directly or transitively on that admission. Invalid release
-inputs therefore fail explicitly before any checkout, rather than causing a
-checkout-resolution failure or silently skipping the proof. Release calls
-require a nonempty lowercase 40-hex `checkout_ref` equal to `github.sha`; pushes
-require empty input. The native job checks out `github.sha` only, and its helper
-independently checks the same input contract, event,
-branch and actual checkout before **any** mode, including host-policy cleanup.
-Pull requests retain source/policy/platform-neutral gates and explicitly mint
-no Fedora native-runtime evidence. They never run this host-policy job.
-
-The native job pins the Fedora **base image digest**, then live-resolves packages
-with `dnf upgrade` and the explicit WebKitGTK/JSC updates-testing transaction.
-Those dependency versions and repository state are not pinned or reproducible
-from the base digest alone. Package installation uses ordinary Docker policies,
-then the native gates run as UID/GID 10001 in a separate container:
-all capability sets dropped, no-new-privileges, read-only root and source/toolchain
-mounts, isolated writable home/build/temp, no host devices, Docker socket, tokens,
-or host PID/network namespace. Dependency acquisition has network access; the
-bridge is explicitly disconnected and Cargo goes offline before native gates.
-The unchanged Fedora package/vendor/signature/integrity and engine-floor checks
-still precede WebKit execution. The job logs the installed package NEVRAs and
-actual shared host-kernel release for traceability, not as a repository pin.
-
-The subsequent hosted preflight passed the capability/NNP/seccomp checks but
-bubblewrap refused its fresh procfs mount with `Operation not permitted`.
-Docker's default proc masks/read-only submounts are a distinct restriction:
-Linux's [`mount_too_revealing` check](https://github.com/torvalds/linux/blob/v6.8/fs/namespace.c)
-rejects a newly exposed procfs when inherited locked child mounts obscure the
-existing one. [BuildKit documents this exact nested rootless failure](https://github.com/moby/buildkit/blob/master/docs/rootless.md).
-The test launch therefore explicitly uses
-[`systempaths=unconfined`](https://docs.docker.com/reference/cli/docker/container/run/#security-opt),
-removing Docker's masked and read-only **system-path lists**. This is an explicit
-**containment tradeoff**, not preservation of every previous boundary, even
-though it grants no outer capability. Removing proc masks can expose dangerous
-kernel files; nonroot identity, zero outer capabilities and no-new-privileges
-remain mandatory. Reinstalling those proc submounts would recreate the kernel
-condition that prevents the fresh nested procfs, so they remain absent in this
-trusted, disposable-VM job. Non-proc masks are feasible and restored separately:
-`/sys/firmware` and, where present, `/sys/devices/virtual/powercap` receive empty
-read-only, nosuid/nodev/noexec tmpfs mounts with mode 000. A missing firmware
-directory or any failed mount refuses launch; no fallback exists. Preflight
-requires the exact masks and rejects child mounts that could expose their data.
-Root, worktree and sysfs must each have exactly one read-only mount entry;
-duplicate entries are rejected, including a writable overmount. Preflight
-also requires one full procfs root with
-no proc submounts and checks the actual named AppArmor label before and inside
-the original one-shot bubblewrap invocation. No host procfs bind or alternate
-PID-namespace proof substitutes for mounting the new procfs.
-
-That test container intentionally has no outer seccomp filter and uses a named
-`flags=(unconfined)` AppArmor user-namespace grant. It has **no outer container
-seccomp or LSM confinement**. Loading that profile modifies host policy only in
-this trusted job; it does not change global AppArmor settings or userns sysctls.
-The disposable hosted VM is the outer boundary for repository test code, as for
-ordinary non-container CI; this container is a controlled Fedora userspace, **not
-a claimed additional hostile-code sandbox**. This explicit exception is scoped
-to the capability-free, network-sealed native test job, never release artifacts
-or product startup. A custom partial syscall allowlist would still require the
-mount/pivot/user-namespace LSM exceptions while obscuring which filter the probe
-actually measured. See Ubuntu's [user-namespace policy](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/)
-and bubblewrap's [unprivileged namespace model](https://github.com/containers/bubblewrap).
-
-An early timed bubblewrap preflight must demonstrate different user/mount/PID
-namespaces, non-root identity, zero capabilities, no-new-privileges, no external
-interface and zero inherited seccomp filters. The renderer test independently
-requires no-new-privileges, different user/mount/PID namespaces, and a filter
-count above its parent. The count excludes inheritance alone; it does **not**
-identify the filter's installer, content or WebKit provenance. The former
-observer-side `/proc/<renderer>/root/path` read denial was invalid as renderer
-filesystem evidence: userns/ptrace rules can deny the observer even when the
-renderer could read the file. That assertion and its evidence claim are removed.
-A real in-renderer or equivalent-credential filesystem-denial probe remains a
-separate qualification requirement. These native state checks do not prove it.
-Within an admitted trusted job, a refusal remains red; no fallback, automatic
-retry or replacement context-property proof exists.
-Workflow-policy mutations pin these restrictions. Local macOS source checks do
-not qualify this Linux environment: the next hosted execution must supply the
-actual namespace and native-test evidence before it is called green.
-If that exact preflight fails, a trusted host-only diagnostic checks the
-container's requested/loaded profile and empty system-path lists, then summarizes
-at most 256 kernel records since that container's start. Only counts and closed
-profile/operation classes are printed; unrelated records, paths and arbitrary
-profile strings are not emitted. Missing or rate-limited audit records cannot
-prove absence of AppArmor denial, and this diagnostic never turns refusal green.
+Zephium does not ship on Linux. CI compiles and unit-tests the workspace there
+but runs no native WebKitGTK sandbox job and produces no Linux runtime
+evidence.
 
 The Linux Wayland device pass must also force GlobalShortcuts portal denial
 (and separately restart the portal process) and verify that the configured
@@ -290,10 +185,11 @@ For every candidate, retain:
 - the exact commit and annotated tag;
 - native runtime and OS versions for every runner/device;
 - engine-floor and advisory review output;
-- locked dependency manifests and SBOMs;
+- the locked dependency manifests (`Cargo.lock`, `pnpm-lock.yaml`);
 - packaged hostile/native and profile-erasure results;
 - resource/endurance measurements;
-- signing, notarization, provenance, and installer verification output.
+- the release workflow run: signing, notarization, entitlement, updater
+  signature, and provenance verification output.
 
 Any source, lockfile, floor, exception, build image, signing input, or workflow
 change invalidates the prior evidence and requires a new candidate run.

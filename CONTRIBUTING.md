@@ -37,7 +37,7 @@ Supported development platforms are macOS (Apple Silicon) and Windows 10/11. Lin
 - **pnpm**: enable it through Corepack (`corepack enable`); the exact version comes from `packageManager` in `package.json`.
 - **Tauri platform requirements**: on macOS, the Xcode Command Line Tools (`xcode-select --install`). On Windows, the Microsoft C++ Build Tools (the "Desktop development with C++" workload) and the WebView2 runtime, which ships with current Windows 10 and 11. See the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for details.
 
-The runtime security floor is enforced in development too. If startup exits with status 78, update your OS or WebView2 runtime.
+An outdated OS or WebView2 runtime starts with an update notice; only an unsupported one stops startup, with an explanation and exit status 78.
 
 ### Build and run
 
