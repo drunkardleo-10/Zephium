@@ -11,7 +11,7 @@ private let identifierPrefix = "app.zephium.rules.v1."
 private let artifactDigestDomain = Data("zephium-webkit-content-rules".utf8)
 private let artifactFormatVersion: UInt32 = 4
 private let expectedReleaseArtifactDigest =
-    "46ae68d21f9f81cb816c113d9cd4d4246fe61e9b13c26f8db314e42a67186a29"
+    "8948ef5b2c50bcd9626fa3b3843936d8c4578f1cbcc70a6fa0aeed4d0807b98a"
 
 private enum ProbeFailure: Error, CustomStringConvertible {
     case message(String)
