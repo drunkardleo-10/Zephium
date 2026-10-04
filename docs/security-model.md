@@ -824,13 +824,22 @@ Store/repository reopen while denying stale authority. They use a bounded
 native fake; production adapters remain disabled, so the low-level and service
 APIs are still not a release-enablement claim.
 
-Logical content views have three explicit watermarks. Twelve is the warm soft target;
-above it, hidden idle pages become discard candidates. Above the pressure watermark of
-24, eligible hidden pages may be probed without waiting for the long-idle grace. The
-absolute application admission ceiling is 32, including the eight-slot visible
-split/recovery allowance: an additional create is rejected synchronously rather than
-growing without bound, and an unsafe page is never force-discarded to make room. The
-engine independently caps native resources at 57 (65 with agentic contexts) while counting live views, a warm
+Logical content views have a warm set and two watermarks. The most recently used hidden
+pages (four by default, two to save memory, ten to keep tabs ready) stay resident; every
+older hidden page becomes a discard candidate after the chosen idle grace, whatever the
+tab count. Above the pressure watermark of 24, under critical OS memory pressure, or while
+a foreground page waits for a slot, the least recently used eligible page is probed
+without waiting. A system memory warning shortens the grace to two minutes. Kept-awake
+sites never sleep, and with sleeping off only critical pressure discards. The absolute
+application admission ceiling is 64 live views, a backstop rather than a memory budget:
+a foreground create waits briefly for a verified close, and an unsafe page is never
+force-discarded to make room. A discard probe protects only state a reload would lose: a
+page that is itself a POST result, audible media, capture, a child frame the user has
+focused, and, once the user has entered input or drawn in that document, dirty forms,
+edited rich text, beforeunload handlers, and any inspection that could not prove those
+clean. The
+engine independently caps native resources at 75 (83 with agentic contexts, plus nine
+extension pages on Windows) while counting live views, a warm
 spare, in-construction reservations, and WebView2 cleanup debt that may still own a
 controller. These are deterministic resource bounds, not evidence that the resulting
 RSS, CPU, wakeup, or battery budgets have passed.
@@ -1821,8 +1830,8 @@ updates mitigate some of these risks but do not remove them.
 - [ ] Mutating IPC reserves the process-local result ledger before FIFO admission;
       pending/processed dispositions remain queryable until main chrome acknowledges them,
       and no process-local operation result is described as cross-restart durable.
-- [ ] View lifecycle changes preserve the 12/24/32 application watermarks, the separate
-      57-resource native ceiling (65 with agentic contexts), visible-leaf protection, exact discard probes, and the
+- [ ] View lifecycle changes preserve the warm set, the 24/64 application watermarks, the separate
+      75-resource native ceiling (83 with agentic contexts), visible-leaf protection, exact discard probes, and the
       rule that unsafe pages are not force-discarded to admit new work.
 - [ ] Reentrant native work keeps typed normal/maintenance/observation/lifecycle/close/
       shutdown priority, keyed displacement rules, and a reserved non-droppable shutdown

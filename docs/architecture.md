@@ -425,19 +425,25 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
   new-tab view. The webview is created lazily on first navigation (built:
   `view: bool` on Tab).
 - Three tiers, built (shell = policy via idle clock + maintenance tick;
-  engine = mechanism): hidden views get a low-memory hint on the visibility
-  transition; hidden AND idle (5 min) views suspend where a primitive exists
-  (WebView2 `TrySuspend`, auto-resume on visible; WebKit suspends hidden
-  processes itself). Twelve live views is the soft warm target. Above it,
-  hidden pages idle for 15 minutes may enter an exact generation/navigation
-  discard-safety probe; above the pressure watermark of 24, eligible hidden
-  pages may be probed without that long-idle grace. At most four probes run at
-  once, visible split leaves are protected, and an uncertain page is never
-  force-discarded. A successful discard drops the view but keeps the item;
-  activation recreates it and reapplies zoom.
-- The application refuses a 33rd logical view synchronously. Its absolute 32
-  ceiling includes eight slots for the largest visible split/recovery batch.
-  The native engine has an independent ceiling of 57 (65 with agentic contexts), counting live views, a
+  engine = mechanism). Hidden views drop their tiles and are throttled at once
+  (WebView2 low-memory hint; WebKit's throttle scheduling policy). Hidden AND
+  idle (5 min) views are suspended losslessly: WebView2 `TrySuspend`, or
+  WebKit's suspend scheduling policy, which still runs audible or capturing
+  pages; both resume when shown. Older hidden pages beyond a small warm set of
+  recent ones (4, or 2 to save memory, 10 to keep tabs ready) are discarded
+  after the chosen idle grace, whatever the tab count, after an exact
+  generation/navigation discard-safety probe. Above the pressure watermark of
+  24 or under critical OS pressure they are probed without that grace; a
+  memory warning shortens it to two minutes. At most four probes run at once,
+  visible split leaves are protected, kept-awake sites never sleep, and an
+  unsafe page is never force-discarded. A successful discard drops the view
+  but keeps the item; activation recreates it, restores native back/forward
+  state where it was safely captured (showing the tab's last frame until the
+  restored document paints), and reapplies zoom.
+- The application admits at most 64 live views, a backstop for kept-awake and
+  protected pages rather than a memory budget; a foreground create waits
+  briefly for a verified close at that ceiling.
+  The native engine has an independent ceiling of 75 (83 with agentic contexts), counting live views, a
   warm spare, construction reservations, and WebView2 cleanup debt that may
   still own a controller. These constants are admission bounds; the packaged
   1/10/50/100-tab and 24-hour resource measurements remain release work.
@@ -919,7 +925,7 @@ WebKit may cache the wrapper and its last URL after `closePopup`, so production
 holds the process-wide `ExtensionPopup` resource lease only for the presented
 interval and treats the documented close call—not wrapper deallocation—as the
 presentation-resource release boundary. Only one such lease exists inside the
-same hard native-resource ceiling (57, or 65 with agentic contexts).
+same hard native-resource ceiling (75, or 83 with agentic contexts).
 
 Toolbar projection is a replaceable Shell-owned cohort keyed by the exact
 profile, logical tab, browser-surface generation, runtime generation, and
