@@ -424,24 +424,6 @@ pub(crate) fn attest_environment(
     environment: &ICoreWebView2Environment,
     expected_user_data_folder: &Path,
 ) -> windows_core::Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| {
-            windows_core::Error::new(
-                windows::Win32::Foundation::E_ACCESSDENIED,
-                "system clock is before the Unix epoch; cannot enforce the WebView2 security review deadline",
-            )
-        })?
-        .as_secs();
-    if now < zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS {
-        return Err(windows_core::Error::new(
-            windows::Win32::Foundation::E_ACCESSDENIED,
-            format!(
-                "system clock predates the reviewed WebView2 security release {}; correct the clock before browsing",
-                zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_ON
-            ),
-        ));
-    }
     let environment7 = environment.cast::<ICoreWebView2Environment7>()?;
     // Wry's upstream fallback silently ignores InPrivate/profile options.
     // The reviewed runtime floor supports Environment10, so absence is a

@@ -108,20 +108,18 @@ thread_local! {
     static PRIVILEGED_UI_DELEGATES: RefCell<Vec<PrivilegedDelegateState>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Reject a stale or unrecognized system WebKit before Tauri creates any
-/// privileged or content WKWebView.
+/// Reject an unsupported system WebKit before Tauri creates any privileged or
+/// content WKWebView, and report an outdated one as an update advisory.
 ///
-/// Safari's marketing version alone is not sufficient evidence: the app
-/// bundle and the WebKit framework loaded for `WKWebView` must report the same
-/// canonical build. On Sonoma and Sequoia that binds Apple's Safari security
-/// release to the embedder; Tahoe's WebKit floor comes from the OS update.
+/// Safari's marketing version alone is not sufficient evidence: the Safari
+/// bundle and the WebKit framework loaded for `WKWebView` should report the
+/// same canonical build. On Sonoma and Sequoia that binds Apple's Safari
+/// security release to the embedder; Tahoe's WebKit comes from the OS update.
 pub fn enforce_runtime_security_floor(
 ) -> Result<zephium_core::runtime_security::RuntimeSecurityAdvisories, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("system UTC clock predates the Unix epoch: {error}"))?
-        .as_secs();
-    enforce_security_clock(now)?;
+        .map_or(0, |elapsed| elapsed.as_secs());
 
     let reported_os = NSProcessInfo::processInfo().operatingSystemVersion();
     let major = u32::try_from(reported_os.majorVersion)
@@ -158,31 +156,9 @@ pub fn enforce_runtime_security_floor(
     )
     .map_err(|error| {
         format!(
-            "macOS/WebKit runtime admission rejected macOS {operating_system}, Safari {safari_version} (Safari build {safari_build}, loaded WebKit build {webkit_build}): {error}; required Sonoma >= {} + Safari >= {}, Sequoia >= {} + Safari >= {}, or Tahoe >= {} (security release {}, sources: {}, {}, {}). Update macOS and Safari before starting Zephium",
-            zephium_core::macos::SONOMA_SECURITY_FLOOR_TEXT,
-            zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
-            zephium_core::macos::SEQUOIA_SECURITY_FLOOR_TEXT,
-            zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
-            zephium_core::macos::TAHOE_SECURITY_FLOOR_TEXT,
-            zephium_core::macos::SECURITY_FLOOR_PUBLISHED_ON,
-            zephium_core::macos::SECURITY_FLOOR_SOURCE_URL,
-            zephium_core::macos::SAFARI_SECURITY_SOURCE_URL,
-            zephium_core::macos::TAHOE_SECURITY_SOURCE_URL,
+            "macOS {operating_system} with Safari {safari_version} is not supported ({error}). Zephium needs macOS Sonoma 14 or later with Safari 26 or later"
         )
     })
-}
-
-fn enforce_security_clock(now: u64) -> Result<(), String> {
-    // A clock older than the hard floor cannot prove that the reviewed
-    // release existed. Review expiry is advisory at runtime and remains a
-    // strict CI/release gate.
-    if now < zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS {
-        return Err(format!(
-            "system UTC clock predates the macOS/WebKit security review published on {}; correct the clock before starting Zephium",
-            zephium_core::macos::SECURITY_FLOOR_PUBLISHED_ON,
-        ));
-    }
-    Ok(())
 }
 
 fn require_bundle_identifier(
@@ -841,27 +817,6 @@ mod tests {
         assert_eq!(origin.generation, 7);
         origin.clear_if_current(7);
         assert_eq!(origin, ChromeOrigin::empty());
-    }
-
-    #[test]
-    fn runtime_security_clock_rejects_only_rollback_before_the_hard_floor() {
-        assert!(
-            enforce_security_clock(zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS)
-                .is_ok()
-        );
-        assert!(enforce_security_clock(
-            zephium_core::macos::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS - 1
-        )
-        .is_err());
-        assert!(enforce_security_clock(
-            zephium_core::macos::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS - 1,
-        )
-        .is_ok());
-        assert!(enforce_security_clock(
-            zephium_core::macos::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
-        )
-        .is_ok());
-        assert!(enforce_security_clock(u64::MAX).is_ok());
     }
 
     #[test]

@@ -2,11 +2,11 @@
 //!
 //! Apple ships current WebKit security fixes as a Safari update on Sonoma and
 //! Sequoia, but as a macOS update on Tahoe. Admission therefore checks both
-//! product versions and requires the installed Safari build to match the
-//! WebKit framework build that actually owns `WKWebView`. The hard floor and
-//! latest reviewed recommendation are separate: an overdue maintenance review
-//! is visible to privileged chrome and blocks releases, but does not become a
-//! wall-clock runtime kill switch.
+//! product versions and compares the installed Safari build with the WebKit
+//! framework build that actually owns `WKWebView`. Only an unsupported major
+//! release blocks startup; a runtime below the reviewed security floor starts
+//! with an update advisory, because refusing to open the browser protects
+//! nobody and strands the user.
 
 use std::fmt;
 use std::str::FromStr;
@@ -226,16 +226,7 @@ pub enum AdmissionError {
     InvalidSafariBuild(BuildVersionError),
     InvalidWebKitBuild(BuildVersionError),
     UnsupportedOperatingSystemMajor(u32),
-    BelowOperatingSystemFloor {
-        found: ProductVersion,
-        required: ProductVersion,
-    },
     UnsupportedSafariMajor(u32),
-    BelowSafariFloor {
-        found: ProductVersion,
-        required: ProductVersion,
-    },
-    SafariWebKitBuildMismatch,
 }
 
 impl fmt::Display for AdmissionError {
@@ -255,27 +246,12 @@ impl fmt::Display for AdmissionError {
                     "macOS major {major} has not been security-reviewed"
                 )
             }
-            Self::BelowOperatingSystemFloor { found, required } => {
-                write!(
-                    formatter,
-                    "macOS {found} is below security floor {required}"
-                )
-            }
             Self::UnsupportedSafariMajor(major) => {
                 write!(
                     formatter,
                     "Safari major {major} has not been security-reviewed"
                 )
             }
-            Self::BelowSafariFloor { found, required } => {
-                write!(
-                    formatter,
-                    "Safari {found} is below security floor {required}"
-                )
-            }
-            Self::SafariWebKitBuildMismatch => formatter.write_str(
-                "Safari and the loaded WebKit framework report different build versions",
-            ),
         }
     }
 }
@@ -287,8 +263,8 @@ impl std::error::Error for AdmissionError {}
 /// `safari_build` must come from the protected system Safari bundle and
 /// `webkit_build` from the bundle owning the loaded `WKWebView` class. Their
 /// equality is what connects Safari's marketing version to the shared WebKit
-/// framework used by the embedder. Known-obsolete versions remain hard
-/// failures; maintenance age and newer stable releases are bounded advisories.
+/// framework used by the embedder. Unsupported majors are hard failures;
+/// outdated point releases, review age and newer lines are advisories.
 pub fn assess_runtime(
     operating_system: &str,
     safari: &str,
@@ -302,14 +278,17 @@ pub fn assess_runtime(
     let safari = parse_safari_version(safari).map_err(AdmissionError::InvalidSafariVersion)?;
     validate_build_version(safari_build).map_err(AdmissionError::InvalidSafariBuild)?;
     validate_build_version(webkit_build).map_err(AdmissionError::InvalidWebKitBuild)?;
-    if safari_build != webkit_build {
-        return Err(AdmissionError::SafariWebKitBuildMismatch);
-    }
-
     let mut advisories = RuntimeSecurityAdvisories::new().with_optional(overdue_review_advisory(
         unix_seconds,
         SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
     ));
+    // A mismatch usually means Safari was updated and macOS has not restarted
+    // yet, so the loaded WebKit cannot be tied to Safari's version.
+    if safari_build != webkit_build {
+        advisories.insert(RuntimeSecurityAdvisory::update_recommended(
+            RuntimeSecurityUpdateTarget::OperatingSystem,
+        ));
+    }
     let versions = match operating_system.major() {
         14 => Some((SONOMA_SECURITY_FLOOR, SONOMA_RECOMMENDED)),
         15 => Some((SEQUOIA_SECURITY_FLOOR, SEQUOIA_RECOMMENDED)),
@@ -321,13 +300,7 @@ pub fn assess_runtime(
         major => return Err(AdmissionError::UnsupportedOperatingSystemMajor(major)),
     };
     if let Some((required, recommended)) = versions {
-        if operating_system < required {
-            return Err(AdmissionError::BelowOperatingSystemFloor {
-                found: operating_system,
-                required,
-            });
-        }
-        if operating_system < recommended {
+        if operating_system < required.max(recommended) {
             advisories.insert(RuntimeSecurityAdvisory::update_recommended(
                 RuntimeSecurityUpdateTarget::OperatingSystem,
             ));
@@ -343,13 +316,9 @@ pub fn assess_runtime(
     if safari.major() > SAFARI_SECURITY_FLOOR.major() {
         advisories.insert(RuntimeSecurityAdvisory::unreviewed_runtime());
     }
-    if matches!(operating_system.major(), 14 | 15) && safari < SAFARI_SECURITY_FLOOR {
-        return Err(AdmissionError::BelowSafariFloor {
-            found: safari,
-            required: SAFARI_SECURITY_FLOOR,
-        });
-    }
-    if matches!(operating_system.major(), 14 | 15) && safari < SAFARI_RECOMMENDED {
+    if matches!(operating_system.major(), 14 | 15)
+        && safari < SAFARI_SECURITY_FLOOR.max(SAFARI_RECOMMENDED)
+    {
         advisories.insert(RuntimeSecurityAdvisory::update_recommended(
             RuntimeSecurityUpdateTarget::OperatingSystem,
         ));
@@ -434,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn admits_only_reviewed_fully_patched_release_lines() {
+    fn admits_reviewed_release_lines_without_advisories() {
         for (os, safari) in [
             ("14.8.9", "26.6.1"),
             ("14.9.0", "26.6.2"),
@@ -443,35 +412,44 @@ mod tests {
             ("26.6.2", "26.6.1"),
             ("26.6.3", "26.6.2"),
         ] {
-            assert!(assess_at_review(os, safari, BUILD, BUILD).is_ok());
+            assert_eq!(
+                assess_at_review(os, safari, BUILD, BUILD),
+                Ok(RuntimeSecurityAdvisories::new())
+            );
         }
     }
 
     #[test]
-    fn rejects_old_and_unsupported_os_or_safari_lines() {
-        for (os, safari, expected) in [
-            ("14.8.8", "26.6.1", "os"),
-            ("15.7.8", "26.6.1", "os"),
-            ("26.6.1", "26.6.1", "os"),
-            ("14.8.9", "26.6", "safari"),
-            ("15.7.9", "26.6", "safari"),
-            ("13.9.9", "26.6.1", "major"),
-            ("16.0.0", "26.6.1", "major"),
+    fn outdated_os_or_safari_recommends_an_update_instead_of_blocking() {
+        let update = RuntimeSecurityAdvisories::from_advisory(
+            RuntimeSecurityAdvisory::update_recommended(
+                RuntimeSecurityUpdateTarget::OperatingSystem,
+            ),
+        );
+        for (os, safari) in [
+            ("14.0.0", "26.6.1"),
+            ("14.8.8", "26.6.1"),
+            ("15.7.8", "26.6.1"),
+            ("26.6.1", "26.6.1"),
+            ("14.8.9", "26.0"),
+            ("15.7.9", "26.6"),
         ] {
-            let error = assess_at_review(os, safari, BUILD, BUILD).unwrap_err();
-            match expected {
-                "os" => assert!(matches!(
-                    error,
-                    AdmissionError::BelowOperatingSystemFloor { .. }
-                )),
-                "safari" => assert!(matches!(error, AdmissionError::BelowSafariFloor { .. })),
-                "major" => assert!(matches!(
-                    error,
-                    AdmissionError::UnsupportedOperatingSystemMajor(_)
-                )),
-                _ => unreachable!(),
-            }
+            assert_eq!(assess_at_review(os, safari, BUILD, BUILD), Ok(update));
         }
+    }
+
+    #[test]
+    fn rejects_unsupported_os_or_safari_majors() {
+        for (os, safari) in [("13.9.9", "26.6.1"), ("16.0.0", "26.6.1")] {
+            assert!(matches!(
+                assess_at_review(os, safari, BUILD, BUILD),
+                Err(AdmissionError::UnsupportedOperatingSystemMajor(_))
+            ));
+        }
+        assert_eq!(
+            assess_at_review("15.7.9", "18.6", BUILD, BUILD),
+            Err(AdmissionError::UnsupportedSafariMajor(18))
+        );
     }
 
     #[test]
@@ -534,10 +512,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unmatched_or_malformed_bundle_builds() {
+    fn rejects_malformed_bundle_builds_and_flags_mismatched_ones() {
         assert_eq!(
             assess_at_review("26.6.2", "26.6.1", "21624.1", "21624.2"),
-            Err(AdmissionError::SafariWebKitBuildMismatch)
+            Ok(RuntimeSecurityAdvisories::from_advisory(
+                RuntimeSecurityAdvisory::update_recommended(
+                    RuntimeSecurityUpdateTarget::OperatingSystem,
+                ),
+            ))
         );
         for malformed in [
             "",

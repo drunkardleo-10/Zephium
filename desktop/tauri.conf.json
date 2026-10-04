@@ -75,7 +75,7 @@
       "../assets/blocker-seed/v1/NOTICE": "licenses/blocker/EasyList-EasyPrivacy-NOTICE.txt"
     },
     "macOS": {
-      "minimumSystemVersion": "14.8.9"
+      "minimumSystemVersion": "14.0"
     },
     "linux": {
       "appimage": {

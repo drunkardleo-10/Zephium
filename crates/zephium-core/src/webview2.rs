@@ -254,10 +254,6 @@ impl FromStr for WebView2Version {
 pub enum AdmissionError {
     InvalidVersion(VersionParseError),
     PreviewChannel(Channel),
-    BelowSecurityFloor {
-        found: WebView2Version,
-        required: WebView2Version,
-    },
 }
 
 impl fmt::Display for AdmissionError {
@@ -268,17 +264,14 @@ impl fmt::Display for AdmissionError {
                 formatter,
                 "the {channel} browser channel is not an Evergreen WebView2 Runtime"
             ),
-            Self::BelowSecurityFloor { found, required } => write!(
-                formatter,
-                "reported runtime {found} is below security floor {required}"
-            ),
         }
     }
 }
 
 impl std::error::Error for AdmissionError {}
 
-/// Admit only a stable runtime at or above the currently reviewed floor.
+/// Admit any well-formed Evergreen stable runtime. An outdated one is reported
+/// by [`assess_runtime`] as an update advisory rather than refused.
 pub fn admit_runtime(reported: &str) -> Result<WebView2Version, AdmissionError> {
     let version = reported
         .parse::<WebView2Version>()
@@ -286,17 +279,11 @@ pub fn admit_runtime(reported: &str) -> Result<WebView2Version, AdmissionError> 
     if let Some(channel) = version.channel() {
         return Err(AdmissionError::PreviewChannel(channel));
     }
-    if !version.is_at_least(SECURITY_FLOOR) {
-        return Err(AdmissionError::BelowSecurityFloor {
-            found: version,
-            required: SECURITY_FLOOR,
-        });
-    }
     Ok(version)
 }
 
-/// Apply the hard Stable-channel floor and independently report maintenance
-/// state as a non-fatal advisory.
+/// Admit the runtime and report an outdated version or maintenance state as
+/// non-fatal advisories.
 pub fn assess_runtime(
     reported: &str,
     unix_seconds: u64,
@@ -308,7 +295,7 @@ pub fn assess_runtime(
     ));
     if version.components()[0] > REVIEWED_STABLE_MAJOR {
         advisories.insert(RuntimeSecurityAdvisory::unreviewed_runtime());
-    } else if !version.is_at_least(LATEST_REVIEWED) {
+    } else if !version.is_at_least(LATEST_REVIEWED) || !version.is_at_least(SECURITY_FLOOR) {
         advisories.insert(RuntimeSecurityAdvisory::update_recommended(
             RuntimeSecurityUpdateTarget::BrowserRuntime,
         ));
@@ -468,13 +455,20 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_old_invalid_and_preview_runtimes() {
+    fn admission_rejects_only_invalid_and_preview_runtimes() {
         assert_eq!(admit_runtime(SECURITY_FLOOR_TEXT), Ok(SECURITY_FLOOR));
         assert!(admit_runtime(LATEST_REVIEWED_TEXT).is_ok());
-        assert!(matches!(
-            admit_runtime("154.0.4258.52"),
-            Err(AdmissionError::BelowSecurityFloor { .. })
-        ));
+        assert_eq!(
+            assess_runtime("120.0.2210.91", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
+            Ok((
+                WebView2Version::stable(120, 0, 2210, 91),
+                RuntimeSecurityAdvisories::from_advisory(
+                    RuntimeSecurityAdvisory::update_recommended(
+                        RuntimeSecurityUpdateTarget::BrowserRuntime,
+                    ),
+                ),
+            ))
+        );
         assert_eq!(
             admit_runtime("154.0.4258.53 beta"),
             Err(AdmissionError::PreviewChannel(Channel::Beta))

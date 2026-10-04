@@ -68,23 +68,13 @@ pub fn finalize_privileged_environment_observers(expected_labels: &[&str]) -> bo
 }
 
 /// Query the runtime selected by WebView2 before Tauri creates any controller.
-/// Capability checks still run per-view; this is the independently maintained
-/// security-patch floor for all privileged and untrusted content views.
+/// Capability checks still run per-view; an outdated runtime is reported as
+/// an update advisory instead of refused.
 pub fn enforce_runtime_security_floor(
 ) -> Result<zephium_core::runtime_security::RuntimeSecurityAdvisories, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| {
-            "system clock is before the Unix epoch; cannot assess WebView2 runtime security"
-                .to_owned()
-        })?
-        .as_secs();
-    if now < zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS {
-        return Err(format!(
-            "system clock predates the reviewed WebView2 security release {}; correct the clock before browsing",
-            zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_ON
-        ));
-    }
+        .map_or(0, |elapsed| elapsed.as_secs());
     if let Some(name) = zephium_core::webview2::first_present_environment_override(|name| {
         std::env::var_os(name).is_some()
     }) {
@@ -97,10 +87,7 @@ pub fn enforce_runtime_security_floor(
     let (_, advisory) =
         zephium_core::webview2::assess_runtime(&reported, now).map_err(|error| {
             format!(
-                "WebView2 runtime admission rejected {reported:?}: {error}; required >= {} (security release {}, source: {}). Update the Evergreen WebView2 Runtime before starting Zephium",
-                zephium_core::webview2::SECURITY_FLOOR_TEXT,
-                zephium_core::webview2::SECURITY_FLOOR_PUBLISHED_ON,
-                zephium_core::webview2::SECURITY_FLOOR_SOURCE_URL,
+                "WebView2 runtime {reported:?} is not supported ({error}). Zephium needs the stable Evergreen WebView2 Runtime"
             )
         })?;
     Ok(advisory)
