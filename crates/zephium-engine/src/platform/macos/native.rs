@@ -363,9 +363,10 @@ pub fn set_media_suspended(view: &wry::WebView, suspended: bool) {
 /// Cross-check renderer heuristics with WebKit's public media playback and
 /// capture state. Playback is asynchronous; the caller's existing bounded
 /// deadline handles a missing native completion without retaining the view.
-/// `None` while capturing or once the view is gone; otherwise whether media
-/// is playing. WebKit reports muted playback as playing too, so callers pair
-/// this with the renderer's report before treating playback as a veto.
+/// `None` while capturing or once the view is gone; otherwise whether the
+/// page may be producing sound. WebKit's audibility SPI answers exactly,
+/// child frames and Web Audio included. Without it the public playback state
+/// also counts muted media, so callers pair it with the renderer's report.
 pub fn query_document_playback(
     view: &wry::WebView,
     done: impl FnOnce(Option<bool>) + 'static,
@@ -382,6 +383,14 @@ pub fn query_document_playback(
     };
     if capturing {
         done(None);
+        return true;
+    }
+    // SAFETY: main-thread WebKit access; the SPI is used only when present.
+    let audibility: bool =
+        unsafe { objc2::msg_send![&*wk, respondsToSelector: objc2::sel!(_isPlayingAudio)] };
+    if audibility {
+        let audible: bool = unsafe { objc2::msg_send![&*wk, _isPlayingAudio] };
+        done(Some(audible));
         return true;
     }
 
