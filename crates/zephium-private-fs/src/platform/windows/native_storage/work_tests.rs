@@ -190,6 +190,7 @@ fn fixed_known_folder_entry_keeps_general_namespace_closed() {
 }
 
 #[test]
+#[ignore = "recreating a just-deleted file races delete-pending handles (antivirus on hosted runners); run on the Windows QA machine with --run-ignored"]
 fn fixed_database_refuses_orphan_sidecars_and_hard_links() {
     let fixture = OwnedSession::new();
     let anchor = fixture.anchor();
