@@ -8,7 +8,9 @@ mod agent_cookie_preflight;
 mod agent_navigation;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 mod agent_screenshot_buffer;
+// Only the Windows runtime calls the action helpers; Windows tests keep them honest.
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 mod agent_semantic_cdp_protocol;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]

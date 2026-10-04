@@ -2235,7 +2235,7 @@ mod tests {
     #[test]
     fn owned_view_fill_is_private_isolated_recipe_without_page_entry_point() {
         let source = SEMANTIC_RUNTIME_PROGRAM.source();
-        assert!(source.contains("function runFixedFill(target, descriptor, request)"));
+        assert!(source.contains("function runFixedFill(target, descriptor, request, finish)"));
         assert!(source.contains("resolveKeyAtGeneration(request.t, request.g) !== target"));
         assert!(
             source.contains("descriptorMatches(request.f, runtimeDescriptor(target, request.g))")
