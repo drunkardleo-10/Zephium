@@ -240,6 +240,7 @@ enum HostTaskKey {
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
     Discard(ItemId),
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     DiscardTerminal(ItemId),
     DiscardState(ProfileId, Option<ItemId>),
     #[cfg(target_os = "windows")]
@@ -1064,6 +1065,7 @@ where
     );
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub(crate) fn with_discard_terminal<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,

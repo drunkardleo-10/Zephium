@@ -32,6 +32,7 @@ impl ContentPause {
     pub(crate) fn set_statistics(&self, counter: zephium_core::blocker::BlockedLoadCounter) {
         let _ = self.0.statistics.set(counter);
     }
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub(crate) fn statistics(&self) -> Option<&zephium_core::blocker::BlockedLoadCounter> {
         self.0.statistics.get()
     }

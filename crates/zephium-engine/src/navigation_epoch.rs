@@ -417,6 +417,7 @@ impl NavigationEpochTracker {
     /// Captures the newest attempted main-frame navigation in this physical
     /// view generation. Unlike `current`, this never rolls back to a restored
     /// document after provisional failure.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub(crate) fn activity_snapshot(&self) -> Option<NavigationActivity> {
         let state = self
             .state
@@ -424,6 +425,7 @@ impl NavigationEpochTracker {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         (!state.revoked).then_some(state.activity).flatten()
     }
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 
     pub(crate) fn matches_activity(&self, activity: NavigationActivity) -> bool {
         self.activity_snapshot() == Some(activity)

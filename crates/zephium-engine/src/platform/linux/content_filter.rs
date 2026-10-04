@@ -8,9 +8,9 @@ use webkit2gtk::gio::prelude::CancellableExt as _;
 use webkit2gtk::glib::translate::ToGlibPtr;
 use webkit2gtk::{glib, WebViewExt as _};
 use wry::WebViewExtUnix;
-use zephium_core::blocker::{
-    ContentRuleApplyFailure, ContentRules, ContentRulesPayload, DeclarativeRuleFormat,
-};
+use zephium_core::blocker::ContentRuleApplyFailure;
+#[cfg(test)]
+use zephium_core::blocker::{ContentRules, ContentRulesPayload, DeclarativeRuleFormat};
 
 struct FilterStore(NonNull<webkit2gtk::ffi::WebKitUserContentFilterStore>);
 
