@@ -56,6 +56,10 @@ struct State {
     committed_at: Option<Instant>,
     /// Open while an admitted action runs on a ready site-session page.
     follow: Option<Follow>,
+    #[cfg(target_os = "windows")]
+    write_dispatched: bool,
+    #[cfg(target_os = "windows")]
+    write_navigation: Option<(wry::NavigationId, u64, ContextNavigationTarget)>,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     url_observation_failure: Option<crate::WorkUrlObservationFailure>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -141,6 +145,15 @@ pub(crate) struct WorkDocumentStamp {
     native_id: wry::NavigationId,
     epoch: u64,
 }
+/// Visual projection of an admitted native document, including its loading
+/// paint. This stamp cannot authorize semantic observations or input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) struct WorkPreviewDocumentStamp {
+    native_id: wry::NavigationId,
+    epoch: u64,
+    location_revision: u64,
+}
 /// Content-free revision captured before one bounded native URL quiet period.
 /// It is not document authority and cannot itself authorize a sample.
 #[derive(Clone, Debug)]
@@ -191,6 +204,10 @@ impl Default for WorkDocumentNavigation {
             hand_on_pending: false,
             committed_at: None,
             follow: None,
+            #[cfg(target_os = "windows")]
+            write_dispatched: false,
+            #[cfg(target_os = "windows")]
+            write_navigation: None,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             url_observation_failure: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -241,6 +258,12 @@ struct Follow {
 }
 
 impl State {
+    fn clear_write_navigation(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            self.write_navigation = None;
+        }
+    }
     /// A site-session GET the gate follows: the tracked load's own server
     /// redirect, or a script redirect before the document settles. After it
     /// is ready, page-initiated loads are cancelled and the page stays.
@@ -267,6 +290,7 @@ impl State {
                 self.site_loads = loads;
                 self.superseded = self.native_id.take();
                 self.finalization_generation = generation;
+                self.clear_write_navigation();
                 self.location_revision = 0;
                 self.requested = true;
                 self.phase = Phase::Armed;
@@ -313,6 +337,7 @@ impl State {
             self.superseded = self.native_id.take();
             self.effective = None;
             self.finalization_generation = generation;
+            self.clear_write_navigation();
             self.location_revision = 0;
             self.site_loads = loads;
             self.requested = true;
@@ -345,6 +370,7 @@ impl State {
         self.superseded = self.native_id.take();
         self.effective = None;
         self.finalization_generation = generation;
+        self.clear_write_navigation();
         self.location_revision = 0;
         self.site_loads = 0;
         self.requested = true;
@@ -368,6 +394,11 @@ impl WorkDocumentNavigation {
     ) {
         if let Ok(mut state) = self.0.lock() {
             state.handed_on = false;
+            state.clear_write_navigation();
+            #[cfg(target_os = "windows")]
+            {
+                state.write_dispatched = false;
+            }
             state.follow = (state.policy
                 == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
                 && state.phase == Phase::Ready)
@@ -455,6 +486,32 @@ impl WorkDocumentNavigation {
             })
     }
 
+    #[cfg(any(test, not(target_os = "windows")))]
+    pub(crate) fn document_stamp(&self) -> Option<WorkDocumentStamp> {
+        let state = self.0.lock().ok()?;
+        if state.phase != Phase::Ready {
+            return None;
+        }
+        Some(WorkDocumentStamp {
+            native_id: state.native_id?,
+            epoch: state.navigation_epoch,
+        })
+    }
+    #[cfg(any(test, target_os = "windows"))]
+    pub(crate) fn preview_document_stamp(&self) -> Option<WorkPreviewDocumentStamp> {
+        let state = self.0.lock().ok()?;
+        if !matches!(
+            state.phase,
+            Phase::Committed | Phase::Finalizing | Phase::Sampling | Phase::Ready
+        ) {
+            return None;
+        }
+        Some(WorkPreviewDocumentStamp {
+            native_id: state.native_id?,
+            epoch: state.navigation_epoch,
+            location_revision: state.location_revision,
+        })
+    }
     pub(crate) fn observation_stamp(&self, context: ContextJoin) -> Option<WorkDocumentStamp> {
         let state = self.0.lock().ok()?;
         (state.phase == Phase::Ready
@@ -503,6 +560,7 @@ impl WorkDocumentNavigation {
         state.requested = false;
         state.admission_kind = Some(AdmissionKind::ProgrammaticGet);
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.clear_write_navigation();
         state.location_revision = 0;
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         {
@@ -543,6 +601,7 @@ impl WorkDocumentNavigation {
         state.requested = false;
         state.admission_kind = Some(AdmissionKind::HistoryBackGet);
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.clear_write_navigation();
         state.location_revision = 0;
         state.phase = Phase::Armed;
         Ok(())
@@ -610,6 +669,7 @@ impl WorkDocumentNavigation {
         state.admission_kind = Some(AdmissionKind::ProgrammaticGet);
         state.policy = policy;
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.clear_write_navigation();
         state.location_revision = 0;
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         {
@@ -618,11 +678,18 @@ impl WorkDocumentNavigation {
         state.phase = Phase::Armed;
         Ok(())
     }
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn allows(&self, target: &str) -> bool {
         let Ok(mut state) = self.0.lock() else {
             return false;
         };
+        #[cfg(target_os = "windows")]
+        if state.phase == Phase::Human {
+            return state
+                .human
+                .as_mut()
+                .is_some_and(|human| human.allows(target, Some(true)));
+        }
         if state.phase == Phase::Bootstrap && target == "about:blank" && state.bootstrap_available {
             state.bootstrap_available = false;
             return true;
@@ -638,10 +705,79 @@ impl WorkDocumentNavigation {
             return true;
         }
         if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession {
+            #[cfg(target_os = "windows")]
+            if state.phase == Phase::Ready && state.follow.is_some() {
+                let confirmed = state
+                    .follow
+                    .as_ref()
+                    .is_some_and(|follow| follow.post || follow.consent);
+                return state.follow_from_action(target, !confirmed);
+            }
             return state.site_follows(target);
         }
         // A refused unsolicited navigation grants no replacement document.
         false
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn allows_windows_request(
+        &self,
+        raw: &str,
+        method: &str,
+        main_document: Option<bool>,
+    ) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        if matches!(state.phase, Phase::Retired | Phase::Refused) {
+            return false;
+        }
+        if main_document == Some(false) {
+            return true;
+        }
+        if matches!(method, "GET" | "HEAD" | "OPTIONS") {
+            return true;
+        }
+        if state.phase == Phase::Human {
+            return state
+                .human
+                .as_mut()
+                .is_some_and(|human| human.allows_windows_request(raw, main_document));
+        }
+        // WebView2 may expose the request before browser-generated Fetch
+        // Metadata headers exist. Their absence supplies no frame identity.
+        // Instead correlate only an already-admitted main NavigationStarting
+        // with this exact URI, native ID and generation while it is Loading.
+        // A same-URI subframe can consume this one-shot token (availability),
+        // but cannot grant a new destination, action or cross-origin write.
+        let joined_navigation = main_document.is_none()
+            && state.phase == Phase::Loading
+            && state.handed_on
+            && state
+                .write_navigation
+                .as_ref()
+                .is_some_and(|(id, generation, target)| {
+                    state.native_id == Some(*id)
+                        && state.finalization_generation == *generation
+                        && target.as_url().as_str() == raw
+                });
+        if main_document != Some(true) && !joined_navigation {
+            return false;
+        }
+        let same_site = state.target.as_ref().is_some_and(|target| {
+            ContextNavigationTarget::parse(raw)
+                .is_ok_and(|request| zephium_agentic::same_work_site(target, &request))
+        });
+        let confirmed = state
+            .follow
+            .as_ref()
+            .is_some_and(|follow| follow.post || follow.consent);
+        if same_site && confirmed && !state.write_dispatched {
+            state.write_dispatched = true;
+            state.clear_write_navigation();
+            true
+        } else {
+            false
+        }
     }
     /// Apple policy admission joins the exact armed transition class with the
     /// native request cause, method and frame. URL equality alone cannot turn
@@ -748,6 +884,15 @@ impl WorkDocumentNavigation {
     pub(crate) fn observe(&self, event: wry::NavigationEvent) -> Result<(bool, bool), ()> {
         use wry::NavigationEventPhase as E;
         let mut state = self.0.lock().map_err(|_| ())?;
+        #[cfg(target_os = "windows")]
+        if state
+            .write_navigation
+            .as_ref()
+            .is_some_and(|(id, _, _)| *id == event.id)
+            && event.phase != E::Started
+        {
+            state.clear_write_navigation();
+        }
         if matches!(state.phase, Phase::Refused | Phase::Retired) {
             return Ok((false, false));
         }
@@ -820,6 +965,18 @@ impl WorkDocumentNavigation {
             (Phase::Armed, E::Started) if exact && state.requested && state.native_id.is_none() => {
                 state.native_id = Some(event.id);
                 state.phase = Phase::Loading;
+                #[cfg(target_os = "windows")]
+                if state.handed_on
+                    && state
+                        .follow
+                        .as_ref()
+                        .is_some_and(|follow| follow.post || follow.consent)
+                {
+                    state.write_navigation = ContextNavigationTarget::parse(&event.url)
+                        .ok()
+                        .filter(|target| target.as_url().as_str() == event.url)
+                        .map(|target| (event.id, state.finalization_generation, target));
+                }
                 Ok((false, false))
             }
             (Phase::Loading, E::Committed) if exact && state.native_id == Some(event.id) => {
@@ -848,6 +1005,7 @@ impl WorkDocumentNavigation {
                 Ok((false, true))
             }
             _ => {
+                state.clear_write_navigation();
                 state.phase = Phase::Refused;
                 Ok((false, true))
             }
@@ -962,6 +1120,7 @@ impl WorkDocumentNavigation {
     /// Back/forward availability is browser-chrome state, not document
     /// authority. Work deliberately ignores it in every phase, including the
     /// revision-fenced finalization window.
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) const fn history_availability_changed(&self) -> bool {
         false
     }
@@ -1051,6 +1210,7 @@ impl WorkDocumentNavigation {
     }
     pub(crate) fn refuse(&self) {
         if let Ok(mut state) = self.0.lock() {
+            state.clear_write_navigation();
             state.phase = Phase::Refused;
         }
     }
@@ -1083,6 +1243,7 @@ impl WorkDocumentNavigation {
     pub(crate) fn retire(&self) -> bool {
         match self.0.lock() {
             Ok(mut state) => {
+                state.clear_write_navigation();
                 state.phase = Phase::Retired;
                 state.human = None;
                 true
@@ -1153,6 +1314,49 @@ mod tests {
             gate.observe(event(1, phase, URL)).unwrap();
         }
         gate
+    }
+    #[test]
+    fn preview_stamp_requires_committed_identity_without_authorizing_semantics() {
+        let gate = armed();
+        assert!(gate.preview_document_stamp().is_none());
+        gate.observe(event(1, E::Started, URL)).unwrap();
+        assert!(gate.preview_document_stamp().is_none());
+        gate.observe(event(1, E::Committed, URL)).unwrap();
+        let committed = gate.preview_document_stamp().unwrap();
+        assert!(gate.document_stamp().is_none());
+        assert!(!gate.ready(Some(URL)));
+        gate.observe(event(1, E::Finished, URL)).unwrap();
+        assert_eq!(gate.preview_document_stamp(), Some(committed));
+        assert!(gate.document_stamp().is_some());
+        let (source, request) = next_request();
+        gate.arm_successor(source, &request).unwrap();
+        assert!(gate.preview_document_stamp().is_none());
+        let next = request.target().as_url().as_str();
+        assert!(gate.allows(next));
+        gate.observe(event(2, E::Started, next)).unwrap();
+        gate.observe(event(2, E::Committed, next)).unwrap();
+        assert_ne!(gate.preview_document_stamp(), Some(committed));
+        gate.retire();
+        assert!(gate.preview_document_stamp().is_none());
+    }
+
+    #[test]
+    fn preview_stamp_rejects_same_document_query_race() {
+        let gate =
+            armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        // Public query policy finalizes separately before becoming Ready.
+        if gate.finalization_pending() {
+            gate.finalize(|| Some(URL.into())).unwrap();
+        }
+        let prior = gate.preview_document_stamp().unwrap();
+        assert_eq!(
+            gate.location_changed(Some("https://example.test/frozen?q=changed")),
+            Ok(false)
+        );
+        assert_ne!(gate.preview_document_stamp(), Some(prior));
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn apple_action(
@@ -1367,6 +1571,116 @@ mod tests {
         settle(&gate, start);
         assert!(gate.ready(Some(start)) && !gate.failed());
     }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_missing_destination_requires_exact_loading_action_navigation_once() {
+        let start = "http://127.0.0.1:4242/gconsent";
+        let save = "http://127.0.0.1:4242/consent/save";
+        for consent in [false, true] {
+            let gate = site_gate(start);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            gate.open_follow(
+                !consent,
+                consent,
+                zephium_agentic::SemanticActionFollow::default(),
+            );
+            assert!(!gate.allows_windows_request(save, "POST", None));
+            assert!(gate.allows(save));
+            assert!(!gate.allows_windows_request(save, "POST", None));
+            gate.observe(event(2, E::Started, save)).unwrap();
+            assert!(!gate.allows_windows_request("http://127.0.0.1:4242/unrelated", "POST", None));
+            assert!(!gate.allows_windows_request(
+                "http://127.0.0.1:4243/consent/save",
+                "POST",
+                None
+            ));
+            assert!(gate.allows_windows_request(save, "POST", None));
+            assert!(!gate.allows_windows_request(save, "POST", None));
+            assert!(!gate.allows_windows_request(save, "POST", Some(true)));
+            for phase in [E::Committed, E::Finished] {
+                gate.observe(event(2, phase, save)).unwrap();
+            }
+            settle(&gate, save);
+            assert!(!gate.allows_windows_request(save, "POST", None));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_missing_destination_rejects_stale_cancelled_or_unconfirmed_join() {
+        let start = "https://example.test/consent";
+        let save = "https://example.test/save";
+        let ready = || {
+            let gate = site_gate(start);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            gate
+        };
+        let gate = ready();
+        gate.open_follow(
+            false,
+            false,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
+        assert!(!gate.allows(save));
+        assert!(!gate.allows_windows_request(save, "POST", None));
+        for terminal in [E::Cancelled, E::Committed, E::Finished] {
+            let gate = ready();
+            gate.open_follow(
+                false,
+                true,
+                zephium_agentic::SemanticActionFollow::default(),
+            );
+            assert!(gate.allows(save));
+            gate.observe(event(2, E::Started, save)).unwrap();
+            gate.observe(event(2, terminal, save)).unwrap();
+            assert!(!gate.allows_windows_request(save, "POST", None));
+            assert!(gate.0.lock().unwrap().write_navigation.is_none());
+        }
+        let gate = ready();
+        gate.open_follow(
+            false,
+            true,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
+        assert!(gate.allows(save));
+        gate.observe(event(2, E::Started, save)).unwrap();
+        gate.0.lock().unwrap().finalization_generation += 1;
+        assert!(!gate.allows_windows_request(save, "POST", None));
+        gate.retire();
+        assert!(!gate.allows_windows_request(save, "POST", None));
+        assert!(gate.0.lock().unwrap().write_navigation.is_none());
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_method_fence_only_admits_one_confirmed_main_document_write() {
+        let start = "https://www.google.com/travel/flights";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        let write = "https://www.google.com/save";
+        assert!(gate.allows_windows_request(write, "POST", Some(false)));
+        assert!(gate.allows_windows_request(write, "GET", Some(true)));
+        assert!(!gate.allows_windows_request(write, "POST", Some(true)));
+        assert!(!gate.allows_windows_request(write, "POST", None));
+        gate.open_follow(
+            true,
+            false,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
+        assert!(!gate.allows_windows_request("https://evil.test/save", "POST", Some(true)));
+        assert!(!gate.allows_windows_request(write, "POST", None));
+        assert!(gate.allows_windows_request(write, "POST", Some(true)));
+        assert!(!gate.allows_windows_request(write, "POST", Some(true)));
+        assert!(gate.allows_windows_request(write, "POST", Some(false)));
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
     fn a_consent_host_saves_the_choice_with_one_post_on_any_action() {
         use wry::AppleNavigationType as T;

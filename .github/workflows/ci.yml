@@ -111,6 +111,9 @@ jobs:
       - name: Type-check
         run: pnpm --dir frame run check
 
+      - name: Verify Windows semantic input guards
+        run: node scripts/test-semantic-cdp-action.mjs
+
       - name: Build frontend
         run: pnpm --dir frame run build
 
@@ -522,6 +525,19 @@ jobs:
       - name: cargo nextest (Windows)
         if: runner.os == 'Windows'
         run: cargo nextest run --locked --retries 2 --workspace --exclude zephium-desktop
+
+      - name: Windows Work execution contracts
+        if: runner.os == 'Windows'
+        run: |
+          cargo nextest run --locked -p zephium-app --features work-runtime,work-execution
+          cargo nextest run --locked -p zephium-agentic --features provider-transport,probe-harness
+          cargo nextest run --locked -p zephium-work-composition --features durable-runtime
+
+      - name: Audit and link Windows Work loopback qualification
+        if: runner.os == 'Windows'
+        run: |
+          cargo clippy --locked -p zephium-terra-macos-probe --features durable-runtime --bin windows-work-probe -- -D warnings
+          cargo build --locked -p zephium-terra-macos-probe --features durable-runtime --bin windows-work-probe
 
       - name: Test official HTTPS and optional TUF blocker graphs
         run: |

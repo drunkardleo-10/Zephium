@@ -59,6 +59,39 @@ pub(crate) fn open_verified_regular(path: &Path) -> Option<File> {
     (before == opened && opened == after).then_some(file)
 }
 
+/// A writable handle is confined to the already-validated owned TUF stage.
+/// General catalog/CAS readers retain their read-only access and sharing.
+#[cfg(all(target_os = "windows", feature = "tuf"))]
+pub(crate) fn open_verified_staged_for_sync(
+    path: &Path,
+    observed: &File,
+    max_bytes: u64,
+) -> Option<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+    let expected = identity_for_file(observed)?;
+    if identity_for_path(path)? != expected {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        // Freeze mutation/replacement while synchronizing the same native object.
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if metadata.len() == 0
+        || metadata.len() > max_bytes
+        || identity_for_file(&file)? != expected
+        || identity_for_path(path)? != expected
+    {
+        return None;
+    }
+    Some(file)
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowsFileIdentity {
@@ -138,4 +171,25 @@ pub(crate) fn verified_identity_for_file(file: &File) -> Option<WindowsFileIdent
 #[cfg(not(any(unix, target_os = "windows")))]
 pub(crate) fn open_verified_regular(_path: &Path) -> Option<File> {
     None
+}
+
+#[cfg(all(test, target_os = "windows", feature = "tuf"))]
+mod staged_sync_tests {
+    #[test]
+    fn synchronizer_refuses_a_replaced_stage_and_keeps_general_readers_read_only() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().expect("test directory");
+        let path = directory.path().join("root.json");
+        std::fs::write(&path, b"first verified object").expect("write first object");
+        let mut original = super::open_verified_regular(&path).expect("verified reader");
+        assert!(original.write_all(b"must not write").is_err());
+        let sync = super::open_verified_staged_for_sync(&path, &original, 1024)
+            .expect("exact writable synchronization handle");
+        sync.sync_all().expect("native file synchronization");
+        drop(sync);
+        std::fs::rename(&path, directory.path().join("previous.json"))
+            .expect("replace stage identity");
+        std::fs::write(&path, b"different object").expect("write replacement");
+        assert!(super::open_verified_staged_for_sync(&path, &original, 1024).is_none());
+    }
 }

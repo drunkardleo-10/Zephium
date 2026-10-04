@@ -66,12 +66,14 @@ impl WorkFileGrant {
     /// Admits each folder that is an existing directory under the home
     /// folder and outside the denylist; refused ones come back by name.
     pub fn admit(folders: &[String]) -> (Self, Vec<String>) {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = grant_home().and_then(|home| home.canonicalize().ok());
+        let permitted = permitted_folders(home.as_deref());
+        let protected = protected_folders(home.as_deref());
         let mut roots = Vec::new();
         let mut written = Vec::new();
         let mut refused = Vec::new();
         for folder in folders {
-            match admit_root(folder, home.as_deref()) {
+            match admit_root(folder, home.as_deref(), &permitted, &protected) {
                 Some(root) => {
                     if !roots.contains(&root) {
                         roots.push(root);
@@ -95,9 +97,10 @@ impl WorkFileGrant {
     pub(crate) fn resolve(&self, path: &str, may_create: bool) -> Result<PathBuf, WorkFileError> {
         validate_file_path(path).map_err(|_| WorkFileError::Denied)?;
         let candidate = Path::new(path);
-        if candidate
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        if !candidate.is_absolute()
+            || candidate
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
         {
             return Err(WorkFileError::Denied);
         }
@@ -107,7 +110,7 @@ impl WorkFileGrant {
             .roots
             .iter()
             .chain(&self.written)
-            .any(|root| candidate.starts_with(root))
+            .any(|root| path_contains(root, candidate))
         {
             return Err(WorkFileError::Denied);
         }
@@ -143,6 +146,7 @@ impl WorkFileGrant {
         let mut lines = Vec::new();
         let mut cut = false;
         while let Some((dir, level)) = pending.pop() {
+            let _directories = pin_directories(&dir)?;
             let entries = std::fs::read_dir(&dir).map_err(|_| WorkFileError::Io)?;
             let mut entries: Vec<_> = entries
                 .take(MAX_LIST_ENTRIES + 1)
@@ -160,7 +164,7 @@ impl WorkFileGrant {
                 let Ok(meta) = entry.file_type() else {
                     continue;
                 };
-                if meta.is_symlink() {
+                if entry_is_link(&entry, &meta) {
                     continue;
                 }
                 if lines.len() == MAX_LIST_ENTRIES {
@@ -173,6 +177,8 @@ impl WorkFileGrant {
                     .unwrap_or(entry.path().as_path())
                     .to_string_lossy()
                     .into_owned();
+                #[cfg(windows)]
+                let relative = relative.replace('\\', "/");
                 lines.push(if meta.is_dir() {
                     format!("{relative}/")
                 } else {
@@ -299,6 +305,9 @@ impl WorkFileGrant {
         let mut text = String::new();
         let mut cut = false;
         'walk: while let Some(dir) = pending.pop() {
+            let Ok(_directories) = pin_directories(&dir) else {
+                continue;
+            };
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -311,7 +320,7 @@ impl WorkFileGrant {
                 let Ok(meta) = entry.file_type() else {
                     continue;
                 };
-                if meta.is_symlink() {
+                if entry_is_link(&entry, &meta) {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -325,6 +334,8 @@ impl WorkFileGrant {
                     continue;
                 }
                 let relative = entry.path().strip_prefix(&root).unwrap().to_path_buf();
+                #[cfg(windows)]
+                let relative = PathBuf::from(relative.to_string_lossy().replace('\\', "/"));
                 if filter.as_ref().is_some_and(|f| !f.is_match(&relative)) {
                     continue;
                 }
@@ -485,6 +496,7 @@ impl WorkFileGrant {
         if file != change.file {
             return Err(WorkFileError::Changed);
         }
+        let _directories = pin_mutation_directory(file.parent().ok_or(WorkFileError::Denied)?)?;
         let current = match read_text(&file) {
             Ok((_, digest, _)) => Some(digest),
             Err(WorkFileError::NotFound) => None,
@@ -498,6 +510,8 @@ impl WorkFileGrant {
             let (bytes, digest, _) = read_text(&file)?;
             (file, WorkFileKindV1::Written, Some(digest), bytes)
         } else if let Some(to) = change.destination {
+            let _destination_directories =
+                pin_mutation_directory(to.parent().ok_or(WorkFileError::Denied)?)?;
             if self.resolve(&to.to_string_lossy(), true)? != to {
                 return Err(WorkFileError::Changed);
             }
@@ -582,26 +596,322 @@ impl WorkFileGrant {
     }
 }
 
-fn admit_root(folder: &str, home: Option<&Path>) -> Option<PathBuf> {
+#[cfg(not(windows))]
+fn grant_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn grant_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(home.into());
+    }
+    known_folder(&windows::Win32::UI::Shell::FOLDERID_Profile)
+}
+
+fn permitted_folders(home: Option<&Path>) -> Vec<PathBuf> {
+    let folders: Vec<_> = home.map(Path::to_path_buf).into_iter().collect();
+    #[cfg(windows)]
+    let mut folders = folders;
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads};
+        #[cfg(test)]
+        if std::env::var_os("HOME").is_some() {
+            return folders;
+        }
+        for id in [FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads] {
+            if let Some(folder) = known_folder(&id).and_then(|folder| folder.canonicalize().ok()) {
+                folders.push(folder);
+            }
+        }
+    }
+    folders
+}
+
+fn protected_folders(home: Option<&Path>) -> Vec<PathBuf> {
+    let folders: Vec<_> = home
+        .into_iter()
+        .flat_map(|home| {
+            DENIED_UNDER_HOME
+                .iter()
+                .map(move |denied| home.join(denied))
+        })
+        .collect();
+    #[cfg(windows)]
+    let mut folders = folders;
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::{
+            FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_RoamingAppData,
+        };
+        if let Some(home) = home {
+            folders.push(home.join("AppData"));
+            folders.push(home.join(".zephium-native-v1"));
+        }
+        let native = !cfg!(test) || std::env::var_os("HOME").is_none();
+        if native {
+            for id in [
+                FOLDERID_LocalAppData,
+                FOLDERID_LocalAppDataLow,
+                FOLDERID_RoamingAppData,
+            ] {
+                if let Some(folder) = known_folder(&id) {
+                    folders.push(folder);
+                }
+            }
+        }
+        let canonical: Vec<_> = folders
+            .iter()
+            .filter_map(|folder| folder.canonicalize().ok())
+            .collect();
+        folders.extend(canonical);
+    }
+    folders
+}
+
+#[cfg(windows)]
+fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    let path = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.ok()?;
+    let value = unsafe { path.as_wide() };
+    let folder = PathBuf::from(std::ffi::OsString::from_wide(value));
+    unsafe { CoTaskMemFree(Some(path.0.cast())) };
+    Some(folder)
+}
+
+fn admit_root(
+    folder: &str,
+    home: Option<&Path>,
+    permitted: &[PathBuf],
+    protected: &[PathBuf],
+) -> Option<PathBuf> {
     validate_file_path(folder).ok()?;
+    if !Path::new(folder).is_absolute() {
+        return None;
+    }
     let root = std::fs::canonicalize(folder).ok()?;
     if !root.is_dir() {
         return None;
     }
-    let home = std::fs::canonicalize(home?).ok()?;
-    let relative = root.strip_prefix(&home).ok()?;
-    if relative.as_os_str().is_empty() {
-        // The whole home folder is never a grant.
-        return None;
-    }
-    let relative = relative.to_string_lossy();
-    if DENIED_UNDER_HOME
-        .iter()
-        .any(|denied| relative == *denied || relative.starts_with(&format!("{denied}/")))
+    let home = home?;
+    if same_path(&root, home)
+        || !permitted.iter().any(|folder| root.starts_with(folder))
+        || protected.iter().any(|folder| path_contains(folder, &root))
     {
         return None;
     }
+    let _directories = pin_directories(&root).ok()?;
     Some(root)
+}
+
+#[cfg(not(windows))]
+fn path_contains(root: &Path, path: &Path) -> bool {
+    path.starts_with(root)
+}
+
+#[cfg(windows)]
+fn path_contains(root: &Path, path: &Path) -> bool {
+    let mut parts = path.components();
+    root.components().all(|part| {
+        parts
+            .next()
+            .is_some_and(|candidate| windows_path_part_eq(part.as_os_str(), candidate.as_os_str()))
+    })
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    path_contains(left, right) && path_contains(right, left)
+}
+
+#[cfg(windows)]
+fn windows_path_part_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+    // Canonical paths use a verbatim prefix; written paths ordinarily do not.
+    let normalize = |part: &std::ffi::OsStr| {
+        part.to_string_lossy()
+            .replace('/', "\\")
+            .strip_prefix(r"\\?\UNC\")
+            .map(|unc| format!(r"\\{unc}"))
+            .unwrap_or_else(|| {
+                part.to_string_lossy()
+                    .replace('/', "\\")
+                    .trim_start_matches(r"\\?\")
+                    .to_owned()
+            })
+    };
+    let left = normalize(left);
+    let right = normalize(right);
+    let left: Vec<_> = std::ffi::OsStr::new(&left).encode_wide().collect();
+    let right: Vec<_> = std::ffi::OsStr::new(&right).encode_wide().collect();
+    unsafe { CompareStringOrdinal(&left, &right, true) == CSTR_EQUAL }
+}
+
+fn entry_is_link(entry: &std::fs::DirEntry, kind: &std::fs::FileType) -> bool {
+    if kind.is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        };
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            return true;
+        };
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
+            return false;
+        }
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(FILE_SHARE_READ.0)
+            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+            .open(entry.path())
+            .map_or(true, |file| !safe_reparse(&file))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        false
+    }
+}
+
+#[cfg(not(windows))]
+fn pin_directories(_path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
+    Ok(Vec::new())
+}
+
+#[cfg(windows)]
+fn pin_directories(path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
+    pin_directories_with_write(path, false)
+}
+
+#[cfg(windows)]
+fn pin_directories_with_write(
+    path: &Path,
+    mutation: bool,
+) -> Result<Vec<std::fs::File>, WorkFileError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let mut paths: Vec<_> = path.ancestors().filter(|path| path.is_absolute()).collect();
+    if paths.len() > 128 {
+        return Err(WorkFileError::Denied);
+    }
+    paths.reverse();
+    let mut pinned = Vec::with_capacity(paths.len());
+    let leaf = paths.len().saturating_sub(1);
+    for (index, path) in paths.into_iter().enumerate() {
+        let share = if mutation || index < leaf {
+            FILE_SHARE_READ | FILE_SHARE_WRITE
+        } else {
+            FILE_SHARE_READ
+        };
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ.0)
+            .share_mode(share.0)
+            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+            .open(path)
+            .map_err(|_| WorkFileError::Denied)?;
+        let metadata = file.metadata().map_err(|_| WorkFileError::Denied)?;
+        if !metadata.is_dir() || !safe_reparse(&file) {
+            return Err(WorkFileError::Denied);
+        }
+        pinned.push(file);
+    }
+    Ok(pinned)
+}
+
+fn pin_mutation_directory(path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
+    #[cfg(not(windows))]
+    let pinned = pin_directories(path)?;
+    #[cfg(windows)]
+    {
+        let mut pinned = pin_directories_with_write(path, true)?;
+        pinned.push(mutation_marker(path)?);
+        Ok(pinned)
+    }
+    #[cfg(not(windows))]
+    Ok(pinned)
+}
+
+#[cfg(windows)]
+fn mutation_marker(path: &Path) -> Result<std::fs::File, WorkFileError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+    };
+    // A held child keeps the parent nonempty, so its reparse tag cannot change.
+    let marker = path.join(format!(".zephium-pin-{}", WorkArtifactId::generate()));
+    let marker_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags((FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT).0)
+        .open(&marker)
+        .map_err(|_| WorkFileError::Denied)?;
+    if !opened_at(&marker_file, &marker) {
+        return Err(WorkFileError::Denied);
+    }
+    Ok(marker_file)
+}
+
+#[cfg(windows)]
+fn safe_reparse(file: &std::fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO,
+    };
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle()),
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    }
+    .is_err()
+    {
+        return false;
+    }
+    info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 || cloud_reparse_tag(info.ReparseTag)
+}
+
+#[cfg(windows)]
+fn opened_at(file: &std::fs::File, expected: &Path) -> bool {
+    use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED};
+    let mut name = vec![0; 32768];
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            HANDLE(file.as_raw_handle()),
+            &mut name,
+            FILE_NAME_NORMALIZED,
+        )
+    } as usize;
+    length != 0
+        && length < name.len()
+        && std::ffi::OsString::from_wide(&name[..length]) == expected.as_os_str()
+}
+
+#[cfg(windows)]
+fn cloud_reparse_tag(tag: u32) -> bool {
+    // Cloud placeholders retain their name; junctions and other tags are refused.
+    tag & !0x0000_f000 == 0x9000_001a
 }
 fn file_name(path: &Path) -> String {
     path.file_name()
@@ -611,7 +921,45 @@ fn file_name(path: &Path) -> String {
 }
 /// Bytes, digest and, for UTF-8 text without NUL, the content.
 fn read_text(file: &Path) -> Result<(u32, String, Option<String>), WorkFileError> {
-    let meta = std::fs::metadata(file).map_err(|_| WorkFileError::NotFound)?;
+    let _directories = pin_directories(file.parent().ok_or(WorkFileError::Denied)?)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    let _original = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        };
+        options.share_mode(FILE_SHARE_READ.0);
+        let original = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(FILE_SHARE_READ.0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(file)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    WorkFileError::NotFound
+                } else {
+                    WorkFileError::Io
+                }
+            })?;
+        if !safe_reparse(&original) {
+            return Err(WorkFileError::Denied);
+        }
+        original
+    };
+    let input = options.open(file).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            WorkFileError::NotFound
+        } else {
+            WorkFileError::Io
+        }
+    })?;
+    #[cfg(windows)]
+    if !opened_at(&input, file) {
+        return Err(WorkFileError::Denied);
+    }
+    let meta = input.metadata().map_err(|_| WorkFileError::Io)?;
     if !meta.is_file() {
         return Err(WorkFileError::NotAFile);
     }
@@ -620,8 +968,7 @@ fn read_text(file: &Path) -> Result<(u32, String, Option<String>), WorkFileError
     }
     use std::io::Read;
     let mut bytes = Vec::new();
-    std::fs::File::open(file)
-        .map_err(|_| WorkFileError::Io)?
+    input
         .take(MAX_READ_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| WorkFileError::Io)?;
@@ -639,6 +986,7 @@ fn read_text(file: &Path) -> Result<(u32, String, Option<String>), WorkFileError
 fn write_atomic(file: &Path, bytes: &[u8], expected: Option<&str>) -> Result<(), WorkFileError> {
     use std::io::Write;
     let parent = file.parent().ok_or(WorkFileError::Denied)?;
+    let _directories = pin_mutation_directory(parent)?;
     let temp = parent.join(format!(".zephium-{}", WorkArtifactId::generate()));
     let result = (|| {
         let mut output = std::fs::OpenOptions::new()
@@ -646,6 +994,10 @@ fn write_atomic(file: &Path, bytes: &[u8], expected: Option<&str>) -> Result<(),
             .create_new(true)
             .open(&temp)
             .map_err(|_| WorkFileError::Io)?;
+        #[cfg(windows)]
+        if !opened_at(&output, &temp) {
+            return Err(WorkFileError::Denied);
+        }
         if let Ok(meta) = std::fs::metadata(file) {
             output
                 .set_permissions(meta.permissions())
@@ -670,6 +1022,11 @@ fn write_atomic(file: &Path, bytes: &[u8], expected: Option<&str>) -> Result<(),
                 }
             })
         } else {
+            #[cfg(windows)]
+            {
+                move_windows(&temp, file, true)
+            }
+            #[cfg(not(windows))]
             std::fs::rename(&temp, file).map_err(|_| WorkFileError::Io)
         }
     })();
@@ -679,6 +1036,10 @@ fn write_atomic(file: &Path, bytes: &[u8], expected: Option<&str>) -> Result<(),
     result
 }
 fn move_exclusive(from: &Path, to: &Path) -> Result<(), WorkFileError> {
+    #[cfg(windows)]
+    {
+        move_windows(from, to, false)
+    }
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -695,7 +1056,7 @@ fn move_exclusive(from: &Path, to: &Path) -> Result<(), WorkFileError> {
             Err(WorkFileError::Io)
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         std::fs::hard_link(from, to).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
@@ -706,6 +1067,31 @@ fn move_exclusive(from: &Path, to: &Path) -> Result<(), WorkFileError> {
         })?;
         std::fs::remove_file(from).map_err(|_| WorkFileError::Io)
     }
+}
+
+#[cfg(windows)]
+fn move_windows(from: &Path, to: &Path, replace: bool) -> Result<(), WorkFileError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let from: Vec<_> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<_> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut flags = MOVEFILE_WRITE_THROUGH;
+    if replace {
+        flags |= MOVEFILE_REPLACE_EXISTING;
+    }
+    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), flags) }.map_err(|error| {
+        if error.code() == ERROR_ALREADY_EXISTS.to_hresult()
+            || error.code() == ERROR_FILE_EXISTS.to_hresult()
+        {
+            WorkFileError::Exists
+        } else {
+            WorkFileError::Io
+        }
+    })
 }
 pub struct PreparedChange {
     original: String,
@@ -950,11 +1336,216 @@ mod tests {
             WorkFileError::NotFound
         );
         let link = home.path().join("Documents/project/escape");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(home.path().join(".ssh"), &link).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // A junction exercises directory escapes without symlink privileges.
+            let result = std::process::Command::new("cmd.exe")
+                .args([
+                    "/D",
+                    "/C",
+                    "mklink",
+                    "/J",
+                    "Documents\\project\\escape",
+                    ".ssh",
+                ])
+                .current_dir(home.path())
+                .creation_flags(0x0800_0000)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "junction fixture: {result:?}");
+        }
         assert_eq!(
             grant.list(&link.to_string_lossy()).unwrap_err(),
             WorkFileError::Denied
         );
+        std::fs::write(home.path().join(".ssh/secret.txt"), "escape-only-needle").unwrap();
+        assert!(!grant
+            .list_at(&project.to_string_lossy(), 3)
+            .unwrap()
+            .text
+            .contains("escape/"));
+        assert_eq!(
+            grant
+                .search(&project.to_string_lossy(), "escape-only-needle")
+                .unwrap()
+                .bytes,
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_grants_admit_native_paths_and_refuse_protected_descendants() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (home, grant, project) = home_grant();
+        for protected in [
+            ".ssh/keys",
+            ".config/gcloud/accounts",
+            "AppData/Roaming/app.zephium",
+            ".zephium-native-v1",
+            ".ZEPHIUM-NATIVE-V1/app.zephium.webext-qa/session",
+        ] {
+            let folder = home.path().join(protected);
+            std::fs::create_dir_all(&folder).unwrap();
+            let (grant, refused) = WorkFileGrant::admit(&[folder.to_string_lossy().into_owned()]);
+            assert!(grant.is_empty(), "{protected}");
+            assert_eq!(refused.len(), 1);
+        }
+        let sibling = home.path().join(".zephium-native-v1-public");
+        std::fs::create_dir(&sibling).unwrap();
+        let (sibling_grant, refused) =
+            WorkFileGrant::admit(&[sibling.to_string_lossy().into_owned()]);
+        assert!(!sibling_grant.is_empty());
+        assert!(refused.is_empty());
+        let path = project.join("README.md");
+        assert!(grant.read(&path.to_string_lossy()).is_ok());
+        assert!(grant
+            .read(&path.to_string_lossy().replace('\\', "/"))
+            .is_ok());
+        assert!(grant.read(&path.to_string_lossy().to_uppercase()).is_ok());
+        assert_eq!(
+            grant
+                .read(&format!("{}:secret", path.display()))
+                .unwrap_err(),
+            WorkFileError::Denied
+        );
+        assert_eq!(
+            grant.read(&format!("{}.", path.display())).unwrap_err(),
+            WorkFileError::Denied
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn redirected_known_folders_are_explicit_policy_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let redirected = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let redirected = redirected.path().canonicalize().unwrap();
+        let path = redirected.to_string_lossy();
+        assert!(admit_root(&path, Some(&home), std::slice::from_ref(&home), &[]).is_none());
+        assert!(admit_root(&path, Some(&home), &[home.clone(), redirected.clone()], &[]).is_some());
+        assert!(admit_root(
+            &home.to_string_lossy(),
+            Some(&home),
+            std::slice::from_ref(&home),
+            &[]
+        )
+        .is_none());
+        assert!(admit_root(
+            &path,
+            Some(&home),
+            &[home.clone(), redirected.clone()],
+            std::slice::from_ref(&redirected)
+        )
+        .is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pinned_directory_cannot_be_replaced_during_a_file_operation() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("files");
+        std::fs::create_dir(&folder).unwrap();
+        let pins = pin_directories(&folder.canonicalize().unwrap()).unwrap();
+        assert!(std::fs::rename(&folder, root.path().join("replaced")).is_err());
+        drop(pins);
+        std::fs::rename(&folder, root.path().join("replaced")).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn set_junction(directory: &Path, target: &Path) -> windows::core::Result<()> {
+        use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        use windows::Win32::System::IO::DeviceIoControl;
+        let directory = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+            .open(directory)
+            .map_err(|_| windows::core::Error::from_win32())?;
+        let target = target.to_string_lossy();
+        let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
+        let substitute: Vec<u8> = std::ffi::OsStr::new(&format!(r"\??\{target}"))
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let print: Vec<u8> = std::ffi::OsStr::new(target)
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut data = Vec::new();
+        data.extend(0xa000_0003u32.to_le_bytes());
+        data.extend(((8 + substitute.len() + 2 + print.len() + 2) as u16).to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend((substitute.len() as u16).to_le_bytes());
+        data.extend(((substitute.len() + 2) as u16).to_le_bytes());
+        data.extend((print.len() as u16).to_le_bytes());
+        data.extend(substitute);
+        data.extend(0u16.to_le_bytes());
+        data.extend(print);
+        data.extend(0u16.to_le_bytes());
+        let mut returned = 0;
+        unsafe {
+            DeviceIoControl(
+                HANDLE(directory.as_raw_handle()),
+                0x0009_00a4,
+                Some(data.as_ptr().cast()),
+                data.len() as u32,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn approved_mutation_guard_blocks_in_place_junctions_and_cleans_redirected_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("files");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let folder = folder.canonicalize().unwrap();
+        let outside = outside.canonicalize().unwrap();
+        let read_pins = pin_directories(&folder).unwrap();
+        assert!(set_junction(&folder, &outside).is_err());
+        drop(read_pins);
+        let guard = pin_mutation_directory(&folder).unwrap();
+        assert!(set_junction(&folder, &outside).is_err());
+        drop(guard);
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+        let pins = pin_directories_with_write(&folder, true).unwrap();
+        set_junction(&folder, &outside).unwrap();
+        assert!(matches!(
+            mutation_marker(&folder),
+            Err(WorkFileError::Denied)
+        ));
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        assert!(pin_mutation_directory(&folder).is_err());
+        drop(pins);
+        std::fs::remove_dir(&folder).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cloud_placeholders_are_distinct_from_name_surrogates() {
+        for variant in 0..=15 {
+            assert!(cloud_reparse_tag(0x9000_001a | (variant << 12)));
+        }
+        for tag in [0xa000_0003, 0xa000_000c, 0x8000_001b, 0x9000_001b] {
+            assert!(!cloud_reparse_tag(tag));
+        }
     }
 
     #[test]

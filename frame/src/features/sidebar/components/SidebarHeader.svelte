@@ -11,7 +11,7 @@
   import { tabs } from "$domain/tabs";
   import { blocker, siteMenuState } from "$domain/blocker";
   import { commands } from "$shared/ipc/bindings";
-  import { IS_MAC } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import IconButton from "$shared/ui/IconButton";
   import ModeTabs from "./ModeTabs.svelte";
   import WindowControls from "$shared/ui/WindowControls";
@@ -45,8 +45,8 @@
 
 <!--
   macOS keeps AppKit's traffic lights through the overlay title bar, so the
-  leading 52px of the top row belongs to the system. Elsewhere the window
-  controls are ours, and at rail width they move into the collapsed menu
+  leading 52px of the top row belongs to the system. Windows reveals native
+  controls at the top-right edge. On Linux the controls are ours, and at rail width they move into the collapsed menu
   because three buttons cannot fit beside anything else.
 -->
 {#if compact}
@@ -133,7 +133,7 @@
         />
       </div>{/if}
 
-    {#if !IS_MAC}
+    {#if !IS_MAC && !IS_WINDOWS}
       <WindowControls />
     {/if}
   </header>

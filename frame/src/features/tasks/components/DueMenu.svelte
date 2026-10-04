@@ -13,6 +13,7 @@
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import "$shared/ui/Menu/popover.css";
+  import { menuMaterialFor } from "$shared/ui/Menu/material";
   import {
     addDays,
     dayName,
@@ -53,6 +54,8 @@
   } = $props();
 
   let open = $state(false);
+  let triggerElement = $state<HTMLButtonElement | null>(null);
+  let material = $state<"opaque" | undefined>();
   const starts = weekStart();
   // The month the panel is looking at, which the reader can move away from the
   // one holding the current date. Seeded once here and reset on each open.
@@ -125,7 +128,10 @@
   }
 
   function openChange(next: boolean) {
-    if (next) return;
+    if (next) {
+      material = menuMaterialFor(triggerElement);
+      return;
+    }
     const shown = time === null ? "" : timeLabel(time);
     if (clock.trim() !== shown) setTime(clock);
   }
@@ -159,11 +165,12 @@
 </script>
 
 <Popover.Root bind:open onOpenChange={openChange}>
-  <Popover.Trigger>
+  <Popover.Trigger bind:ref={triggerElement}>
     {#snippet child({ props })}{@render trigger({ props })}{/snippet}
   </Popover.Trigger>
   <Popover.Portal>
     <Popover.Content
+      data-menu-material={material}
       class="ui-menu ui-popover due-menu"
       sideOffset={6}
       align="end"

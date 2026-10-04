@@ -401,10 +401,10 @@ pub use wkwebview::{PrintMargin, PrintOptions, WryWebView};
 
 #[cfg(target_os = "windows")]
 pub(crate) mod webview2;
-#[cfg(target_os = "windows")]
-use self::webview2::*;
 #[cfg(all(target_os = "windows", feature = "windows-cleanup-qualification"))]
 pub use self::webview2::fail_next_webview2_controller_close_for_qualification;
+#[cfg(target_os = "windows")]
+use self::webview2::*;
 
 #[cfg(target_os = "windows")]
 pub use self::webview2::{

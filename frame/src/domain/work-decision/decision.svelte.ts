@@ -1,5 +1,9 @@
 import { commands } from "$shared/ipc/bindings";
-import type { WorkDecisionChoiceV1, WorkDecisionPreferenceV1 } from "$shared/ipc/bindings";
+import type {
+  WorkDecisionChoiceV1,
+  WorkDecisionPreferenceV1,
+  WorkFailureV1,
+} from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 
@@ -14,6 +18,8 @@ export class WorkDecisionSession {
   preference = $state.raw<WorkDecisionPreferenceV1 | null>(null);
   unavailable = $state(false);
   busy = $state(false);
+  keyFailure = $state<WorkFailureV1 | "unconfirmed" | null>(null);
+  private readSequence = 0;
   private active = false;
   private generation = 0;
   private stop: (() => void) | null = null;
@@ -39,15 +45,17 @@ export class WorkDecisionSession {
 
   private async read() {
     const generation = this.generation;
+    const sequence = ++this.readSequence;
     const response = await observe(
       Promise.resolve().then(() => commands.workDecisionPreference(this.profile)),
       TIMEOUT,
       this.lifetime.signal,
     );
     if (response.state !== "received") {
-      if (generation === this.generation) this.unavailable = true;
+      if (generation === this.generation && sequence === this.readSequence) this.unavailable = true;
       return;
     }
+    if (sequence !== this.readSequence) return;
     this.adopt(generation, response.value);
   }
 
@@ -55,6 +63,7 @@ export class WorkDecisionSession {
   async choose(choice: WorkDecisionChoiceV1) {
     if (this.busy) return;
     this.busy = true;
+    ++this.readSequence;
     const generation = this.generation;
     const response = await observe(
       Promise.resolve().then(() => commands.workSetDecisionPreference(this.profile, choice)),
@@ -62,11 +71,48 @@ export class WorkDecisionSession {
       this.lifetime.signal,
     );
     if (generation === this.generation) this.busy = false;
+    ++this.readSequence;
     if (response.state !== "received") {
       if (generation === this.generation) this.unavailable = true;
       return;
     }
     this.adopt(generation, response.value);
+  }
+
+  /** Keys are inbound only; no saved secret is retained in this projection. */
+  async setKey(secret: string) {
+    return this.changeKey(() => commands.workSetDecisionKey(this.profile, secret));
+  }
+
+  async clearKey() {
+    return this.changeKey(() => commands.workClearDecisionKey(this.profile));
+  }
+
+  private async changeKey(command: () => Promise<WorkDecisionPreferenceV1>): Promise<boolean> {
+    if (!this.active || this.busy) return false;
+    this.busy = true;
+    this.keyFailure = null;
+    ++this.readSequence;
+    const generation = this.generation;
+    const response = await observe(Promise.resolve().then(command), TIMEOUT, this.lifetime.signal);
+    if (!this.active || generation !== this.generation) return false;
+    this.busy = false;
+    ++this.readSequence;
+    if (response.state !== "received") {
+      this.keyFailure = "unconfirmed";
+      return false;
+    }
+    const value = response.value;
+    if (value.version !== 1 || value.profile !== this.profile) {
+      this.keyFailure = "unavailable";
+      return false;
+    }
+    if (value.error) {
+      this.keyFailure = value.error;
+      return false;
+    }
+    this.adopt(generation, value);
+    return true;
   }
 
   private adopt(generation: number, response: WorkDecisionPreferenceV1) {
@@ -87,5 +133,7 @@ export class WorkDecisionSession {
     this.lifetime.abort();
     this.preference = null;
     this.busy = false;
+    this.keyFailure = null;
+    ++this.readSequence;
   }
 }

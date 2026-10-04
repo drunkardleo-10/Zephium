@@ -1,6 +1,13 @@
 use super::*;
 use zephium_ipc::work::*;
 
+#[cfg_attr(
+    not(all(
+        feature = "work-product",
+        any(target_os = "macos", target_os = "windows")
+    )),
+    allow(dead_code)
+)]
 enum Operation {
     Read,
     Present(WorkHumanPageIdV1, WorkHumanRegionV1),
@@ -19,7 +26,10 @@ async fn human_command(
             return Err(WorkError::Unavailable);
         }
         let profile = selected_work(&app, &expected_profile, work).await?;
-        #[cfg(all(feature = "work-product", target_os = "macos"))]
+        #[cfg(all(
+            feature = "work-product",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         {
             let owner = app.state::<WorkProductState>();
             let browser = &owner.providers.browser;
@@ -40,7 +50,10 @@ async fn human_command(
             };
             Ok((accepted, browser.human_pages(profile, work)?))
         }
-        #[cfg(not(all(feature = "work-product", target_os = "macos")))]
+        #[cfg(not(all(
+            feature = "work-product",
+            any(target_os = "macos", target_os = "windows")
+        )))]
         {
             let _ = (profile, operation);
             Err(WorkError::Unavailable)

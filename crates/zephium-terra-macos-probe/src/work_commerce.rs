@@ -32,6 +32,7 @@ const FIELDS: [(&str, &str, SemanticRole, SemanticReadField); 3] = [
         SemanticReadField::VisibleText,
     ),
 ];
+#[cfg(target_os = "macos")]
 pub(super) const OBJECTIVE: &str = "Read the public Vercel demo commerce catalog and the exact Acme Circles T-Shirt product page. At the catalog checkpoint, verify the product link includes its displayed price, then navigate exactly once to https://demo.vercel.store/product/acme-geometric-circles-t-shirt. Only at the product checkpoint call extract with initial scope and trusted schema 1. Return three complete exact-copy text fields: product_name from the product heading accessible name, displayed_price from the standalone price paragraph including currency, and material_description from the material-composition paragraph. Cite exactly one distinct current source per field. The host independently verifies departure, fresh arrival and all three values. Use only current delivered evidence. Do not infer availability, compare catalog prices, select a variant, add to cart, search, follow redirects, navigate again, read, expand a subtree, paraphrase or modify anything. Earlier document evidence is retired after navigation.";
 
 pub(super) fn route() -> Result<AgentNavigationRoute, AgentWorkFailure> {

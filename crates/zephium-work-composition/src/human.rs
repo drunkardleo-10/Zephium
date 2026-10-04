@@ -1,4 +1,4 @@
-use crate::MacosWorkComposition;
+use crate::NativeWorkComposition;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -155,7 +155,7 @@ fn snapshot(page: &Page, key: Key) -> Option<WorkHumanPageV1> {
         can_continue: state.can_continue && !page.released,
     })
 }
-impl MacosWorkComposition {
+impl NativeWorkComposition {
     pub fn release_presented_human_pages(&self) {
         if let Ok(mut pages) = self.human_pages.0.lock() {
             for page in pages.entries.values_mut() {

@@ -311,7 +311,14 @@ pub use agent_work_journal::{
 ))]
 pub use provider_transport::load_macos_probe_openai_credential;
 #[cfg(all(feature = "provider-transport", feature = "probe-harness"))]
+pub use provider_transport::load_probe_openai_credential;
+#[cfg(all(feature = "provider-transport", feature = "probe-harness"))]
 pub use provider_transport::{exact_loopback_url, ProviderEndpoints};
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::{
+    load_development_openai_credential, load_development_typesafe_credential,
+    AgentProviderVaultError,
+};
 #[cfg(all(feature = "provider-transport", target_os = "macos"))]
 pub use provider_transport::{
     load_macos_development_openai_credential, load_macos_development_typesafe_credential,

@@ -288,7 +288,7 @@ pub(super) fn configure(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn configure_validation(conn: &Connection) -> rusqlite::Result<()> {
+pub(super) fn configure_validation(conn: &Connection) -> rusqlite::Result<()> {
     use rusqlite::config::DbConfig;
 
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;

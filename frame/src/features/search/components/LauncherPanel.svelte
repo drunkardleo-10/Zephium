@@ -7,7 +7,7 @@
   import Icon from "$shared/ui/Icon";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import { IS_MAC } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import ResultList from "./ResultList.svelte";
   import LauncherActions, { type LauncherAction } from "./LauncherActions.svelte";
   import { launcherDestinations } from "../lib/destinations";
@@ -66,6 +66,7 @@
   let content = $state<HTMLElement>();
   let contentHeight = $state(0);
   let windowWidth = $state(0);
+  let windowHeight = $state(0);
   let menu = $state(false);
   let menuHeight = $state(0);
   let commandHeld = $state(false);
@@ -81,7 +82,10 @@
   let detached = $derived(material === "liquid_glass" || material === "vibrancy");
   let inset = $derived(detached ? Math.max(0, (windowWidth - WIDTH) / 2) : 0);
   let gap = $derived(detached ? GAP : 0);
-  let sheetMax = $derived(WINDOW_MAX - 2 * inset - FIELD - gap);
+  let nativeClip = $derived(IS_WINDOWS && !detached);
+  let sheetMax = $derived(
+    Math.max(0, (nativeClip ? windowHeight : WINDOW_MAX) - 2 * inset - FIELD - gap),
+  );
   let sheetHeight = $derived(
     Math.min(sheetMax, Math.max(contentHeight + FOOTER, menu ? menuHeight + FOOTER + 8 : 0)),
   );
@@ -161,9 +165,9 @@
         if (bound === next.session_id) return;
         bound = next.session_id;
         menu = false;
-        entering = true;
+        entering = !IS_WINDOWS;
         clearTimeout(arrival);
-        arrival = setTimeout(() => (entering = false), ARRIVAL_MS);
+        if (entering) arrival = setTimeout(() => (entering = false), ARRIVAL_MS);
         surface.begin(next);
         input?.focus();
         input?.select();
@@ -208,8 +212,28 @@
     };
     const key = JSON.stringify(layout);
     if (key === reported) return;
-    reported = key;
-    void commands.panelLayout(layout).catch(() => {});
+    const send = () => {
+      reported = key;
+      void commands.panelLayout(layout).catch(() => {
+        if (reported === key) reported = "";
+      });
+    };
+    // Hidden WebViews may stop animation frames. Store the next opening size
+    // now, without waking the renderer or waiting on a suspended paint loop.
+    if (!context?.visible) {
+      send();
+      return;
+    }
+    // Let Chromium paint the target rows before native uncovers more of the
+    // fixed viewport. Coalesce replacements; hidden/suspended hosts run no loop.
+    let paint = 0;
+    const frame = requestAnimationFrame(() => {
+      paint = requestAnimationFrame(send);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(paint);
+    };
   });
 
   function runAction(action: LauncherAction) {
@@ -288,6 +312,7 @@
 
 <svelte:window
   bind:innerWidth={windowWidth}
+  bind:innerHeight={windowHeight}
   onkeydown={keydown}
   onkeyup={(event) => (commandHeld = IS_MAC ? event.metaKey : event.ctrlKey)}
 />
@@ -302,6 +327,7 @@
     if (event.target === event.currentTarget) onDismiss();
   }}
   data-layout={detached ? "detached" : "fused"}
+  data-native-clip={nativeClip}
   style:--inset={`${inset}px`}
 >
   <div class="capsule">
@@ -333,7 +359,7 @@
   </div>
 
   <div class="sheet" style:height={`${sheetHeight}px`} style:margin-top={`${gap}px`}>
-    <div class="scroll" style:max-height={`${sheetMax - FOOTER}px`}>
+    <div class="scroll" style:max-height={`${Math.max(0, sheetMax - FOOTER)}px`}>
       <div class="content" bind:this={content}>
         {#if failure()}
           <div class="failure" role="alert">
@@ -427,7 +453,7 @@
   .launcher[data-layout="fused"] {
     --row-radius: calc(var(--panel-radius, var(--radius-panel)) - 4px);
 
-    height: 100vh;
+    height: fit-content;
     overflow: hidden;
     border-radius: var(--panel-radius, var(--radius-panel));
     background: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
@@ -436,6 +462,15 @@
 
   :global(:root:is([data-material="acrylic"], [data-material="mica"]))
     .launcher[data-layout="fused"] {
+    box-shadow: none;
+  }
+
+  /* One wash covers the stable Windows renderer surface. The HWND alone
+     owns its visible bottom edge and rounded rim, so a resize cannot reveal
+     an untinted strip between independently sized CSS and native cards. */
+  .launcher[data-native-clip="true"] {
+    height: 100vh;
+    border-radius: 0;
     box-shadow: none;
   }
 
@@ -503,7 +538,11 @@
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-width: thin;
+    scrollbar-width: none;
+  }
+
+  .scroll::-webkit-scrollbar {
+    display: none;
   }
 
   /* Six points in from a 24-point sheet, so a row's 18-point corner is

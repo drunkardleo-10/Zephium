@@ -48,12 +48,121 @@ pub const MAX_WORK_FILE_QUERY_BYTES: usize = 256;
 pub fn validate_file_path(path: &str) -> Result<(), WorkError> {
     if path.is_empty()
         || path.len() > MAX_WORK_FILE_PATH_BYTES
-        || !path.starts_with('/')
+        || !((path.starts_with('/') && !path.starts_with("//")) || windows_file_path(path))
         || path.chars().any(char::is_control)
     {
         return Err(WorkError::Invalid);
     }
     Ok(())
+}
+
+fn windows_file_path(path: &str) -> bool {
+    let path = path.replace('/', r"\");
+    let path = path.as_str();
+    let extended = path.strip_prefix(r"\\?\");
+    let path = extended.unwrap_or(path);
+    let tail = if let Some(unc) = extended.and_then(|path| path.strip_prefix(r"UNC\")) {
+        unc
+    } else if let Some(unc) = path.strip_prefix(r"\\") {
+        unc
+    } else {
+        let bytes = path.as_bytes();
+        if bytes.len() < 3
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || !matches!(bytes[2], b'/' | b'\\')
+        {
+            return false;
+        }
+        return windows_file_components(&path[3..]);
+    };
+    let mut parts = tail.split(['/', '\\']);
+    let (Some(server), Some(share)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    !server.is_empty() && !share.is_empty() && windows_file_components(tail)
+}
+
+#[cfg(test)]
+mod file_path_tests {
+    use super::*;
+
+    #[test]
+    fn native_paths_are_absolute_and_do_not_address_devices_or_streams() {
+        for path in [
+            "/Users/person/Documents/report.txt",
+            r"C:\Users\person\Documents\report.txt",
+            "C:/Users/person/Documents/report.txt",
+            r"\\?\C:\Users\person\Documents\report.txt",
+            r"\\server\share\Documents\report.txt",
+            r"\\?\UNC\server\share\Documents\report.txt",
+        ] {
+            assert_eq!(validate_file_path(path), Ok(()), "{path}");
+        }
+        for path in [
+            "relative/report.txt",
+            r"C:Documents\report.txt",
+            r"\Documents\report.txt",
+            r"\\server",
+            r"UNC\server\share\report.txt",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\report.txt",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\report.txt",
+            r"C:\Documents\report.txt:secret",
+            r"C:\Documents\NUL.txt",
+            r"C:\Documents\..\report.txt",
+            r"C:\Documents\report.txt.",
+            "C:\\Documents\\report.txt\n",
+        ] {
+            assert_eq!(validate_file_path(path), Err(WorkError::Invalid), "{path}");
+        }
+    }
+}
+
+fn windows_file_components(path: &str) -> bool {
+    path.split(['/', '\\']).all(|part| {
+        !part.contains([':', '*', '?', '"', '<', '>', '|'])
+            && !matches!(part, "." | "..")
+            && !part.ends_with(['.', ' '])
+            && !matches!(
+                part.split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(' ')
+                    .to_ascii_uppercase()
+                    .as_str(),
+                "CON"
+                    | "PRN"
+                    | "AUX"
+                    | "NUL"
+                    | "CONIN$"
+                    | "CONOUT$"
+                    | "COM1"
+                    | "COM2"
+                    | "COM3"
+                    | "COM4"
+                    | "COM5"
+                    | "COM6"
+                    | "COM7"
+                    | "COM8"
+                    | "COM9"
+                    | "COM¹"
+                    | "COM²"
+                    | "COM³"
+                    | "LPT1"
+                    | "LPT2"
+                    | "LPT3"
+                    | "LPT4"
+                    | "LPT5"
+                    | "LPT6"
+                    | "LPT7"
+                    | "LPT8"
+                    | "LPT9"
+                    | "LPT¹"
+                    | "LPT²"
+                    | "LPT³"
+            )
+    })
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]

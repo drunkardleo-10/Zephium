@@ -16,22 +16,7 @@ use zephium_agent_runtime::{AgentRuntimeConfig, AgentRuntimeStopReason};
 use zephium_app::{AgentWorkApplicationConfig, AgentWorkApplicationPhase, ShutdownOutcome};
 use zephium_work_composition::{MacosWorkComposition, TrustedWorkRequest};
 
-pub(super) struct NoChrome;
-impl zephium_core::ports::chrome::Chrome for NoChrome {
-    fn position(&self, _: zephium_core::ports::chrome::ChromeFrame) -> bool {
-        false
-    }
-}
-impl zephium_app::PresentationChrome for NoChrome {
-    fn apply_tab_for_presentation(
-        &self,
-        _: zephium_app::ChromePresentation,
-        _: zephium_app::ChromePresentationCallback,
-    ) -> zephium_app::ChromePresentationDispatch {
-        zephium_app::ChromePresentationDispatch::Rejected
-    }
-}
-
+pub(super) use super::loopback_support::NoChrome;
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
     run_mode(Qualification::Actions)
 }
@@ -703,39 +688,4 @@ fn verify_prepared_result(result: &zephium_agentic::SemanticOwnedExtractionResul
 
 // The merged product enables protection by default. Give isolated probes the
 // same authenticated bundled rules so Work policy readiness can settle.
-pub(super) fn seeded_blocker(
-    data: &std::path::Path,
-) -> Result<Arc<zephium_blocker_service::ManagedBlocker>, super::ProbeFailure> {
-    use zephium_blocker_service::{
-        EmbeddedReleaseAsset, LicensePolicy, ReleaseCatalogSeed, UpdateLimits,
-    };
-    let seed = ReleaseCatalogSeed::from_embedded_gzip(
-        include_bytes!("../../../assets/blocker-seed/v1/catalog.json"),
-        include_bytes!("../../../assets/blocker-seed/v1/release-seed.json"),
-        vec![
-            EmbeddedReleaseAsset::new(
-                "easylist.txt",
-                include_bytes!("../../../assets/blocker-seed/v1/easylist.txt.gz"),
-            ),
-            EmbeddedReleaseAsset::new(
-                "easyprivacy.txt",
-                include_bytes!("../../../assets/blocker-seed/v1/easyprivacy.txt.gz"),
-            ),
-        ],
-        UpdateLimits {
-            max_manifest_bytes: 16 * 1024,
-            max_sources: 2,
-            max_source_bytes: 4 * 1024 * 1024,
-            max_total_source_bytes: 4 * 1024 * 1024,
-            ..UpdateLimits::default()
-        },
-        LicensePolicy::new(["CC-BY-SA-3.0"]).map_err(|_| super::ProbeFailure::Authority)?,
-    )
-    .map_err(|_| super::ProbeFailure::Authority)?;
-    zephium_blocker_service::ManagedBlocker::with_release_seed(
-        seed,
-        zephium_blocker::CompiledArtifactCacheConfig::new(data.join("compiled"))
-            .map_err(|_| super::ProbeFailure::Authority)?,
-    )
-    .map_err(|_| super::ProbeFailure::Runtime)
-}
+pub(super) use super::loopback_support::seeded_blocker;

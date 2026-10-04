@@ -3,6 +3,8 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import ObjectsSheet from "./ObjectsSheet.svelte";
+// Compile the lazy renderer before the interaction readiness deadline starts.
+import "../components/objects/Media.svelte";
 import type { MediaView } from "../lib/board/types";
 
 vi.mock("$shared/ipc/bindings", async () => {

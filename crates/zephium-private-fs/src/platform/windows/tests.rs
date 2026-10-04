@@ -36,6 +36,62 @@ mod validation {
     }
 
     #[test]
+    fn directory_reopen_keeps_held_identity_after_ambient_replacement() {
+        let (temp, directory, root) = fixture();
+        let expected = identity(&directory, Some(true)).unwrap();
+        let security = security::snapshot(&directory).unwrap();
+        let moved = temp.path().join("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        let reopened = native::reopen_writable(&directory).unwrap();
+        assert_eq!(identity(&reopened, Some(true)).unwrap(), expected);
+        assert!(security::snapshot(&reopened).unwrap() == security);
+        let ambient = absolute_directory(&root, false).unwrap();
+        assert_ne!(identity(&ambient, Some(true)).unwrap(), expected);
+        drop(create_new_regular(&reopened, &moved, "owned").unwrap());
+        assert!(moved.join("owned").is_file());
+        assert!(!root.join("owned").exists());
+    }
+
+    #[test]
+    fn directory_reopen_refuses_sealed_write_without_changing_security() {
+        let (_temp, directory, _root) = fixture();
+        set_directory_mode(&directory, DirectoryMode::Sealed).unwrap();
+        let expected = identity(&directory, Some(true)).unwrap();
+        let security = security::snapshot(&directory).unwrap();
+        assert!(matches!(
+            native::reopen_writable(&directory),
+            Err(PrivateFsError::PrimitiveUnavailable)
+        ));
+        assert_eq!(identity(&directory, Some(true)).unwrap(), expected);
+        assert!(security::snapshot(&directory).unwrap() == security);
+        assert_eq!(security::mode(&directory), Ok(true));
+        set_directory_mode(&directory, DirectoryMode::Writable).unwrap();
+        assert_eq!(
+            identity(&native::reopen_writable(&directory).unwrap(), Some(true)).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn unlinked_held_file_preserves_settlement_identity_without_new_admission() {
+        let (_temp, directory, root) = fixture();
+        let (file, expected) = create_new_regular(&directory, &root, "payload").unwrap();
+        let (held, observed) =
+            open_regular(&directory, &root, "payload", OpenPurpose::Read).unwrap();
+        assert_eq!(observed, expected);
+        native::delete(&file).unwrap();
+        drop(file);
+        let file = held;
+        assert!(relative_name_is_absent(&directory, "payload"));
+        assert_eq!(identity(&file, Some(false)), Err(PrivateFsError::Unsafe));
+        assert!(same_open_identity(&file, expected));
+        let mut wrong = expected;
+        wrong.file_id[0] ^= 1;
+        assert!(!same_open_identity(&file, wrong));
+    }
+
+    #[test]
     fn uncertain_create_is_clean_only_when_the_exact_name_is_absent() {
         let (_temp, directory, root) = fixture();
         assert_eq!(
@@ -219,6 +275,10 @@ mod validation {
         let Some(root) = std::env::var_os("ZEPHIUM_PRIVATE_FS_LOCK_TEST_ROOT") else {
             return;
         };
+        if let Some(slot) = std::env::var_os("ZEPHIUM_PRIVATE_FS_LOCK_TEST_SLOT") {
+            first_creation_child(std::path::Path::new(&root), &slot);
+            return;
+        }
         let expected_busy = std::env::var_os("ZEPHIUM_PRIVATE_FS_LOCK_TEST_BUSY").is_some();
         let result = LockedPrivateNamespace::open_or_create(std::path::PathBuf::from(root));
         if expected_busy {
@@ -347,5 +407,277 @@ mod validation {
         .unwrap_or_else(|error| panic!("{:?}", error.error));
         assert_eq!(report.directories_removed, 1);
         assert!(relative_name_is_absent(&directory, "incoming"));
+    }
+
+    // Own only handles returned by this fixture's spawn. Failure cleanup uses
+    // that OS handle, never a process selected by name or a reused PID.
+    struct FixtureProcess(std::process::Child);
+
+    impl FixtureProcess {
+        fn wait(&mut self) -> std::process::ExitStatus {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture child deadline"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    impl Drop for FixtureProcess {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while std::time::Instant::now() < deadline {
+                    if matches!(self.0.try_wait(), Ok(Some(_))) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                eprintln!(
+                    "private-fs-fixture: child_cleanup_not_acknowledged pid={}",
+                    self.0.id()
+                );
+            }
+        }
+    }
+
+    fn wait_fixture_file(path: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !path.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture handshake deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn lock_process(root: &std::path::Path, slot: Option<&str>) -> FixtureProcess {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "platform::windows::tests::validation::namespace_lock_child",
+                "--nocapture",
+            ])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .env("ZEPHIUM_PRIVATE_FS_LOCK_TEST_ROOT", root)
+            .env_remove("ZEPHIUM_PRIVATE_FS_LOCK_TEST_BUSY")
+            .env_remove("ZEPHIUM_PRIVATE_FS_LOCK_TEST_SLOT");
+        if let Some(slot) = slot {
+            command.env("ZEPHIUM_PRIVATE_FS_LOCK_TEST_SLOT", slot);
+        }
+        FixtureProcess(command.spawn().unwrap())
+    }
+
+    fn first_creation_child(root: &std::path::Path, slot: &std::ffi::OsStr) {
+        let slot = slot.to_str().unwrap();
+        assert!(matches!(slot, "0" | "1"));
+        let control = root.parent().unwrap();
+        std::fs::write(control.join(format!("ready-{slot}")), b"ready").unwrap();
+        wait_fixture_file(&control.join("go"));
+        let admitted = LockedPrivateNamespace::open_or_create(root);
+        let outcome = match &admitted {
+            Ok(_) => "owned".to_owned(),
+            Err(PrivateFsError::LockUnavailable) => "busy".to_owned(),
+            Err(PrivateFsError::SettlementUnknown) => "uncertain".to_owned(),
+            Err(PrivateFsError::IdentityAmbiguous) => "ambiguous".to_owned(),
+            Err(error) => format!("refused:{error:?}"),
+        };
+        let pending = control.join(format!("outcome-{slot}-pending"));
+        std::fs::write(&pending, outcome).unwrap();
+        std::fs::rename(pending, control.join(format!("outcome-{slot}"))).unwrap();
+        if admitted.is_ok() {
+            // Parent must terminate this exact child while its lease is held,
+            // proving OS owner loss rather than normal Rust destructor cleanup.
+            wait_fixture_file(&control.join("release"));
+        }
+    }
+
+    #[test]
+    fn simultaneous_first_lock_creation_and_terminated_owner_recover_exactly() {
+        const MARKER: &[u8] = b"zephium-private-fs\nlock-format=1\n";
+        for _ in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("first-namespace");
+            assert!(!root.exists());
+            let mut children = [
+                lock_process(&root, Some("0")),
+                lock_process(&root, Some("1")),
+            ];
+            for slot in 0..2 {
+                wait_fixture_file(&temp.path().join(format!("ready-{slot}")));
+            }
+            std::fs::write(temp.path().join("go"), b"go").unwrap();
+            let outcomes = [0, 1].map(|slot| {
+                let path = temp.path().join(format!("outcome-{slot}"));
+                wait_fixture_file(&path);
+                std::fs::read_to_string(path).unwrap()
+            });
+            eprintln!("private-fs-fixture: first_creation_outcomes={outcomes:?}");
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|outcome| *outcome == "owned")
+                    .count(),
+                1,
+                "first-creation outcomes: {outcomes:?}"
+            );
+            // Opening the staging handle across the winner's atomic rename
+            // can conservatively refuse exact-name authority before any lease
+            // exists (IdentityAmbiguous's documented activation contract).
+            // Refusal is acceptable only with one proven owner and exact,
+            // unstranded recovery below; unrelated failures still fail here.
+            assert!(
+                outcomes.iter().all(|outcome| matches!(
+                    outcome.as_str(),
+                    "owned" | "busy" | "uncertain" | "ambiguous"
+                )),
+                "first-creation outcomes: {outcomes:?}"
+            );
+            assert!(matches!(
+                LockedPrivateNamespace::open_or_create(&root),
+                Err(PrivateFsError::LockUnavailable)
+            ));
+            let (directory, _) = open_directory(&root).unwrap();
+            let before = open_regular(
+                &directory,
+                &root,
+                ".zephium-private-fs-lock-v1",
+                OpenPurpose::Read,
+            )
+            .unwrap()
+            .1;
+            for (child, outcome) in children.iter_mut().zip(outcomes) {
+                if outcome == "owned" {
+                    child.0.kill().unwrap();
+                    assert!(!child.wait().success());
+                } else {
+                    assert!(child.wait().success());
+                }
+            }
+            let recovered = LockedPrivateNamespace::open_or_create(&root).unwrap();
+            recovered.directory().sync().unwrap();
+            drop(recovered);
+            assert_eq!(
+                std::fs::read(root.join(".zephium-private-fs-lock-v1")).unwrap(),
+                MARKER
+            );
+            assert!(!root.join(".zephium-private-fs-lock-staging-v1").exists());
+            assert_eq!(
+                open_regular(
+                    &directory,
+                    &root,
+                    ".zephium-private-fs-lock-v1",
+                    OpenPurpose::Read
+                )
+                .unwrap()
+                .1,
+                before
+            );
+            assert!(lock_process(&root, None).wait().success());
+        }
+    }
+
+    #[test]
+    fn canonical_and_staging_lock_residue_admit_only_exact_protocol_bytes() {
+        const MARKER: &[u8] = b"zephium-private-fs\nlock-format=1\n";
+        const CANONICAL: &str = ".zephium-private-fs-lock-v1";
+        const STAGING: &str = ".zephium-private-fs-lock-staging-v1";
+        let mut payloads: Vec<Vec<u8>> = (0..=MARKER.len())
+            .map(|length| MARKER[..length].to_vec())
+            .collect();
+        payloads.extend([b"unrelated payload".to_vec(), [MARKER, b"extra"].concat()]);
+        for name in [CANONICAL, STAGING] {
+            for payload in &payloads {
+                let (_temp, directory, root) = fixture();
+                let (mut file, before) = create_new_regular(&directory, &root, name).unwrap();
+                file.write_all(payload).unwrap();
+                sync_regular(&file).unwrap();
+                sync_directory(&directory).unwrap();
+                drop(file);
+                let admitted = LockedPrivateNamespace::open_or_create(&root);
+                if payload == MARKER || (name == STAGING && MARKER.starts_with(payload)) {
+                    let owner = admitted.unwrap();
+                    drop(owner);
+                    assert_eq!(std::fs::read(root.join(CANONICAL)).unwrap(), MARKER);
+                    assert!(!root.join(STAGING).exists());
+                    assert_eq!(
+                        open_regular(&directory, &root, CANONICAL, OpenPurpose::Read)
+                            .unwrap()
+                            .1,
+                        before
+                    );
+                    LockedPrivateNamespace::open_or_create(&root).unwrap();
+                } else {
+                    assert!(matches!(admitted, Err(PrivateFsError::Unsafe)));
+                    assert_eq!(std::fs::read(root.join(name)).unwrap(), *payload);
+                    assert_eq!(
+                        open_regular(&directory, &root, name, OpenPurpose::Read)
+                            .unwrap()
+                            .1,
+                        before
+                    );
+                    assert!(!root
+                        .join(if name == CANONICAL {
+                            STAGING
+                        } else {
+                            CANONICAL
+                        })
+                        .exists());
+                }
+            }
+        }
+    }
+
+    fn make_junction(link: &std::path::Path, target: &std::path::Path) {
+        use std::os::windows::process::CommandExt;
+        assert!(!link.exists());
+        let mut child = FixtureProcess(
+            std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:ZEPHIUM_TEST_JUNCTION_LINK -Value $env:ZEPHIUM_TEST_JUNCTION_TARGET | Out-Null"])
+                .env("ZEPHIUM_TEST_JUNCTION_LINK", link)
+                .env("ZEPHIUM_TEST_JUNCTION_TARGET", target)
+                .creation_flags(0x0800_0000)
+                .spawn().unwrap(),
+        );
+        assert!(
+            child.wait().success(),
+            "ordinary-account junction creation failed"
+        );
+        assert!(std::fs::symlink_metadata(link).unwrap().file_attributes() & 0x400 != 0);
+    }
+
+    #[test]
+    fn native_junction_leaf_root_and_ancestor_are_refused_without_target_mutation() {
+        let (temp, directory, root) = fixture();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, b"outside unchanged").unwrap();
+        let leaf = root.join("junction");
+        let alias = temp.path().join("root-junction");
+        make_junction(&leaf, &outside);
+        make_junction(&alias, &root);
+        assert!(open_child_directory(&directory, &root, "junction").is_err());
+        assert!(inspect_child(&directory, &root, "junction").is_err());
+        assert!(create_new_regular(&directory, &root, "junction").is_err());
+        assert!(LockedPrivateNamespace::open_or_create(&alias).is_err());
+        assert!(LockedPrivateNamespace::open_or_create(leaf.join("new-namespace")).is_err());
+        assert!(!outside.join("new-namespace").exists());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside unchanged");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        // Remove each junction itself, never recursively traverse its target.
+        std::fs::remove_dir(&leaf).unwrap();
+        std::fs::remove_dir(&alias).unwrap();
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside unchanged");
     }
 }

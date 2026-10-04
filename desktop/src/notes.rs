@@ -166,7 +166,9 @@ pub(crate) async fn note_call(
     if !call.validate() {
         return failed(NoteError::Invalid);
     }
-    resource_close::touch(caller.label());
+    if !resource_close::touch(&app, caller.label()) {
+        return failed(NoteError::Unavailable);
+    }
     let Some(expected_profile) =
         ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
     else {

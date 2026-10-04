@@ -1265,15 +1265,15 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version and meet the reviewed Microsoft Stable security floor. The current
-  hard floor and latest reviewed recommendation are `152.0.4191.66`, published
-  September 4, 2026. An older runtime is rejected rather than admitted with an
+  hard floor and latest reviewed recommendation are `154.0.4258.53`, published
+  October 1, 2026. An older runtime is rejected rather than admitted with an
   update advisory. A newer stable major receives
   an unreviewed-runtime advisory. Preview-channel and malformed strings fail closed.
   The process also rejects documented WebView2
   environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
-  expire this review after September 10; runtime reports an overdue-review
+  expire this review after October 9, 2026; runtime reports an overdue-review
   advisory instead. A clock before the hard-floor publication still fails
   closed. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
@@ -1281,15 +1281,13 @@ These inherited properties must not be overstated:
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
   incorporated the update on July 16. Microsoft listed CVE-2026-85046 as
   exploited in the wild in Stable `152.0.4191.62` on September 2, then published
-  the reviewed `152.0.4191.66` Stable security release above on September 4.
-  Microsoft publishes no
-  WebView2-specific per-CVE applicability matrix; Zephium therefore treats the
-  shared Edge/WebView2 runtime release as a conservative floor rather than claiming
-  each listed CVE applies to WebView2. Microsoft's first-party WebView2 download
-  update catalog independently confirmed exact `152.0.4191.66` runtime builds
-  for x86, x64, and ARM64 during the September 4 review. That review raised both
-  the hard floor and current recommendation to Microsoft's September 4 Stable
-  security release.
+  Stable security updates through `154.0.4258.53` on October 1.
+  Microsoft publishes no WebView2-specific per-CVE applicability matrix;
+  Zephium therefore treats the shared runtime release as a conservative floor
+  rather than claiming each listed CVE applies to WebView2. The October 2 review
+  independently confirmed matching x86, x64, and ARM64 WebView2 packages in the
+  Microsoft Update Catalog and raised both the floor and recommendation. See
+  [the review evidence](windows-webview2-security-review-2026-10-02.md).
   The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into

@@ -197,6 +197,7 @@ pub(crate) fn request(
 }
 
 impl WorkActionTask {
+    #[cfg(target_os = "macos")]
     pub(crate) fn native_for_test() -> SemanticActionNativeRequest {
         Self::retained_for_test().into_parts().0
     }

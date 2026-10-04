@@ -497,11 +497,266 @@ fn signal_callback_panic(callback: &PanicCallback) {
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| callback()));
 }
 
+#[path = "work_frame_image.rs"]
+mod work_frame_image;
+
+type FrameCompletion = Box<dyn FnOnce(work_frame_image::FrameImage)>;
+const MAX_FRAME_IMAGE_WORKERS: usize = 2;
+static FRAME_IMAGE_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// At most eight source streams/byte jobs and two active decoders globally.
+// Each stream owns <=16MiB; each decoder has <=48MiB codec working allocation,
+// <=35.2MiB RGBA, <=1.6MiB resized pixels and <=1MiB encoded output. These are
+// separate limits, not a claim that max_alloc bounds the entire codec pipeline.
+const MAX_FRAME_CAPTURE_JOBS: usize = 8;
+static FRAME_CAPTURE_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+struct FrameCaptureJob;
+impl FrameCaptureJob {
+    fn acquire() -> Option<Self> {
+        FRAME_CAPTURE_JOBS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_FRAME_CAPTURE_JOBS).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+impl Drop for FrameCaptureJob {
+    fn drop(&mut self) {
+        FRAME_CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn complete_frame(completion: FrameCompletion, image: work_frame_image::FrameImage) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| completion(image)));
+}
+
+struct FrameImageWorker;
+impl FrameImageWorker {
+    fn acquire() -> Option<Self> {
+        FRAME_IMAGE_WORKERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_FRAME_IMAGE_WORKERS).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+impl Drop for FrameImageWorker {
+    fn drop(&mut self) {
+        FRAME_IMAGE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// The worker owns bytes only. The original completion and its document/resource
+/// fences remain on the originating STA, and capture debt remains set until it
+/// is delivered here. No native object or non-Send callback crosses threads.
+struct FrameDelivery {
+    reply: std::sync::mpsc::Receiver<work_frame_image::FrameImage>,
+    completion: RefCell<Option<FrameCompletion>>,
+    timer: RefCell<Option<super::ContentPolicyTimeout>>,
+}
+impl FrameDelivery {
+    fn finish(&self, image: work_frame_image::FrameImage) {
+        self.timer.borrow_mut().take();
+        let completion = self.completion.borrow_mut().take();
+        if let Some(completion) = completion {
+            complete_frame(completion, image);
+        }
+    }
+    fn poll(self: Rc<Self>) {
+        self.timer.borrow_mut().take();
+        match self.reply.try_recv() {
+            Ok(image) => self.finish(image),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.finish(None),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                let next = self.clone();
+                let timer = super::schedule_content_policy_timeout(
+                    std::time::Duration::from_millis(16),
+                    move || next.poll(),
+                );
+                if timer.is_some() {
+                    *self.timer.borrow_mut() = timer;
+                } else {
+                    self.finish(None);
+                }
+            }
+        }
+    }
+}
+
+fn deliver_frame_thumbnail(
+    png: Vec<u8>,
+    dimensions: (u32, u32),
+    completion: FrameCompletion,
+    capture_job: FrameCaptureJob,
+) {
+    let Some(permit) = FrameImageWorker::acquire() else {
+        complete_frame(completion, None);
+        return;
+    };
+    let (send, reply) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name("work-frame-image".into())
+        .spawn(move || {
+            let _permit = permit;
+            let _capture_job = capture_job;
+            let image = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                work_frame_image::thumbnail(png, dimensions)
+            }))
+            .ok()
+            .flatten();
+            let _ = send.send(image);
+        });
+    if worker.is_err() {
+        complete_frame(completion, None);
+        return;
+    }
+    // Dropping the JoinHandle detaches this finite, allocation-bounded byte
+    // job; the receiver owns its completion and retains the host capture debt.
+    drop(worker);
+    Rc::new(FrameDelivery {
+        reply,
+        completion: RefCell::new(Some(completion)),
+        timer: RefCell::new(None),
+    })
+    .poll();
+}
+
+/// A canvas frame uses a separate bounded person-image budget; semantic evidence is unchanged.
+pub(crate) fn capture_work_frame(
+    view: &wry::WebView,
+    completion: impl FnOnce(Option<(u32, u32, Vec<u8>)>) + 'static,
+) -> bool {
+    let mut bounds = windows::Win32::Foundation::RECT::default();
+    // SAFETY: the exact controller and initialized output remain on its owning
+    // STA. Bounds are physical pixels, including the host's DPI conversion.
+    let bounds_ok = unsafe { view.controller().Bounds(&mut bounds) }.is_ok();
+    let dimensions = (
+        bounds
+            .right
+            .checked_sub(bounds.left)
+            .and_then(|n| u32::try_from(n).ok()),
+        bounds
+            .bottom
+            .checked_sub(bounds.top)
+            .and_then(|n| u32::try_from(n).ok()),
+    );
+    let (Some(width), Some(height)) = dimensions else {
+        complete_frame(Box::new(completion), None);
+        return false;
+    };
+    if !bounds_ok || !work_frame_image::input_dimensions(width, height) {
+        complete_frame(Box::new(completion), None);
+        return false;
+    }
+    let dimensions = (width, height);
+    let Some(capture_job) = FrameCaptureJob::acquire() else {
+        complete_frame(Box::new(completion), None);
+        return false;
+    };
+    let shared = Rc::new(SharedCaptureStream::new(work_frame_image::RAW_PNG_BYTES));
+    let stream: IStream = BoundedCaptureStream {
+        shared: shared.clone(),
+    }
+    .into();
+    let pending = Rc::new(RefCell::new(Some((
+        Box::new(completion) as Box<dyn FnOnce(Option<(u32, u32, Vec<u8>)>)>,
+        stream.clone(),
+        shared,
+        capture_job,
+    ))));
+    let callback = pending.clone();
+    let handler = webview2_com::CapturePreviewCompletedHandler::create(Box::new(move |result| {
+        let Some((completion, _stream, shared, capture_job)) = callback
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut pending| pending.take())
+        else {
+            return Ok(());
+        };
+        let png = if result.is_ok() && shared.failure.get().is_none() {
+            shared
+                .buffer
+                .try_borrow_mut()
+                .ok()
+                .map(|mut buffer| buffer.take_bytes())
+        } else {
+            None
+        };
+        if let Some(png) = png {
+            deliver_frame_thumbnail(png, dimensions, completion, capture_job);
+        } else {
+            complete_frame(completion, None);
+        }
+        Ok(())
+    }));
+    // SAFETY: exact live WebView2/stream/handler on the same STA. The callback retains its bounded stream through completion.
+    let dispatched = unsafe {
+        view.webview()
+            .CapturePreview(
+                COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                &stream,
+                &handler,
+            )
+            .is_ok()
+    };
+    if !dispatched {
+        if let Some((completion, _, _, _)) = pending.borrow_mut().take() {
+            complete_frame(completion, None);
+        }
+    }
+    dispatched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use windows::Win32::System::Com::STATFLAG_NONAME;
 
+    #[test]
+    fn frame_delivery_disconnect_finishes_once_on_the_originating_thread() {
+        let (send, reply) = std::sync::mpsc::sync_channel(1);
+        drop(send);
+        let count = Rc::new(Cell::new(0));
+        let called = count.clone();
+        let original_thread = std::thread::current().id();
+        let delivery = Rc::new(FrameDelivery {
+            reply,
+            completion: RefCell::new(Some(Box::new(move |image| {
+                assert!(image.is_none());
+                assert_eq!(std::thread::current().id(), original_thread);
+                called.set(called.get() + 1);
+            }))),
+            timer: RefCell::new(None),
+        });
+        delivery.clone().poll();
+        delivery.finish(None);
+        assert_eq!(count.get(), 1);
+        assert!(delivery.timer.borrow().is_none());
+    }
+
+    #[test]
+    fn frame_completion_is_taken_before_reentry_and_contains_panics() {
+        let (_send, reply) = std::sync::mpsc::sync_channel(1);
+        let delivery = Rc::new_cyclic(|weak: &std::rc::Weak<FrameDelivery>| {
+            let reenter = weak.clone();
+            FrameDelivery {
+                reply,
+                completion: RefCell::new(Some(Box::new(move |_| {
+                    reenter.upgrade().unwrap().finish(None);
+                    panic!("fixture callback panic");
+                }))),
+                timer: RefCell::new(None),
+            }
+        });
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| delivery.finish(None))).is_ok());
+        assert!(delivery.completion.borrow().is_none());
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
+            complete_frame(Box::new(|_| panic!("fixture refusal callback panic")), None);
+        }))
+        .is_ok());
+    }
     fn stream(limit: usize) -> (Rc<SharedCaptureStream>, IStream) {
         let shared = Rc::new(SharedCaptureStream::new(limit));
         let stream = BoundedCaptureStream {

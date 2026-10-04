@@ -165,17 +165,12 @@ pub(crate) async fn media_open(
     Ok(opened)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn open_with_os(path: &std::path::Path) -> bool {
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = std::process::Command::new("open");
         command.arg(path);
-        command
-    };
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", ""]).arg(path);
         command
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -188,6 +183,74 @@ fn open_with_os(path: &std::path::Path) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_os(path: &std::path::Path) -> bool {
+    windows_shell_path(path, false)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_shell_path(path: &std::path::Path, reveal: bool) -> bool {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        SHOpenFolderAndSelectItems, SHParseDisplayName, ShellExecuteW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let Some(path) = windows_shell_wide(path) else {
+        return false;
+    };
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if initialized.is_err() && initialized != RPC_E_CHANGED_MODE {
+        return false;
+    }
+    let opened = if reveal {
+        let mut item = std::ptr::null_mut();
+        if unsafe { SHParseDisplayName(PCWSTR(path.as_ptr()), None, &mut item, 0, None) }.is_err() {
+            false
+        } else {
+            let opened = unsafe { SHOpenFolderAndSelectItems(item, None, 0) }.is_ok();
+            unsafe { CoTaskMemFree(Some(item.cast())) };
+            opened
+        }
+    } else {
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(path.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        result.0 as isize > 32
+    };
+    if initialized.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    opened
+}
+
+#[cfg(target_os = "windows")]
+fn windows_shell_wide(path: &std::path::Path) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
+    if wide.is_empty() || wide.len() > 32766 || wide.contains(&0) {
+        return None;
+    }
+    if wide.starts_with(&[92, 92, 63, 92, 85, 78, 67, 92]) {
+        wide.drain(..6);
+        wide[0] = 92;
+    } else if wide.starts_with(&[92, 92, 63, 92]) {
+        wide.drain(..4);
+    }
+    wide.push(0);
+    Some(wide)
 }
 
 fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
@@ -285,7 +348,7 @@ fn resolve(
 fn serve_page_frame(
     app: &AppHandle,
     rest: &str,
-    width: Option<u32>,
+    _width: Option<u32>,
 ) -> tauri::http::Response<Cow<'static, [u8]>> {
     let mut parts = rest.split('/');
     let ids = (parts.next(), parts.next());
@@ -302,10 +365,10 @@ fn serve_page_frame(
             return respond(503, Vec::new(), "text/plain");
         };
         match state.page_frame(attempt, step) {
-            Some(png) => match width.and_then(|width| thumb::scaled(png.as_ref(), width)) {
-                Some((small, mime)) => respond(200, small, mime),
-                None => respond(200, png.as_ref().clone(), "image/png"),
-            },
+            // Native Work captures already have fixed pixel/byte ceilings.
+            // Preserve their text and fine edges through DPI and canvas zoom;
+            // card-width JPEG copies would discard that information again.
+            Some(png) => respond(200, png.as_ref().clone(), "image/png"),
             None => {
                 #[cfg(feature = "work-development-traces")]
                 super::work_provider::record_diagnostic(format_args!(
@@ -317,7 +380,7 @@ fn serve_page_frame(
     }
     #[cfg(not(feature = "work-product"))]
     {
-        let _ = (app, ids, width);
+        let _ = (app, ids);
         respond(404, Vec::new(), "text/plain")
     }
 }
@@ -698,7 +761,7 @@ pub(crate) async fn work_pick_folder(
     Ok(Some(admit_folder(path.to_string_lossy().into_owned())))
 }
 
-/// Reveals an admitted folder, or a file inside one, in Finder.
+/// Reveals an admitted folder, or a file inside one, in the native file manager.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn work_reveal_path(
@@ -713,12 +776,18 @@ pub(crate) async fn work_reveal_path(
     {
         return Ok(false);
     }
-    #[cfg(not(all(feature = "work-product", target_os = "macos")))]
+    #[cfg(not(all(
+        feature = "work-product",
+        any(target_os = "macos", target_os = "windows")
+    )))]
     {
         let _ = path;
         Ok(false)
     }
-    #[cfg(all(feature = "work-product", target_os = "macos"))]
+    #[cfg(all(
+        feature = "work-product",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     {
         let target = std::path::PathBuf::from(&path);
         let folder = if target.is_dir() {
@@ -734,6 +803,13 @@ pub(crate) async fn work_reveal_path(
         if grant.is_empty() {
             return Ok(false);
         }
+        #[cfg(target_os = "windows")]
+        {
+            tokio::task::spawn_blocking(move || windows_shell_path(&target, true))
+                .await
+                .map_err(|_| ())
+        }
+        #[cfg(target_os = "macos")]
         Ok(std::process::Command::new("/usr/bin/open")
             .arg("-R")
             .arg(&target)

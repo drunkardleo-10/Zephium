@@ -1,13 +1,19 @@
 //! Bounded command execution. No app credentials or app state are injected.
 pub mod policy;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(any(unix, windows, test))]
 use sha2::{Digest, Sha256};
+#[cfg(any(unix, windows, test))]
+use std::{collections::VecDeque, ffi::OsStr};
+#[cfg(any(unix, windows))]
 use std::{
-    collections::VecDeque,
-    ffi::{OsStr, OsString},
-    future::Future,
-    path::Path,
+    ffi::OsString,
     time::{Duration, Instant},
 };
+use std::{future::Future, path::Path};
+#[cfg(target_os = "windows")]
+pub use windows::run;
 use zephium_core::work::runtime::*;
 
 pub struct CommandResult {
@@ -15,12 +21,14 @@ pub struct CommandResult {
     pub note: String,
     pub succeeded: bool,
 }
+#[cfg(any(unix, windows, test))]
 struct Output {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     hash: Sha256,
     bytes: u64,
 }
+#[cfg(any(unix, windows, test))]
 impl Output {
     fn new() -> Self {
         Self {
@@ -82,6 +90,7 @@ impl Output {
 }
 
 /// Defense in depth on inherited state. Login startup files are the person's trusted configuration.
+#[cfg(any(unix, windows, test))]
 fn environment_allowed(name: &OsStr, value: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -112,16 +121,21 @@ fn environment_allowed(name: &OsStr, value: &OsStr) -> bool {
     {
         return false;
     }
-    let value = value.to_string_lossy().to_ascii_lowercase();
+    let value = value
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     !value.contains("/library/application support")
         && !value.contains("/library/keychains")
         && !value.contains("app.zephium")
 }
+#[cfg(any(unix, windows))]
 fn environment() -> Vec<(OsString, OsString)> {
     std::env::vars_os()
         .filter(|(k, v)| environment_allowed(k, v))
         .collect()
 }
+#[cfg(unix)]
 fn shell() -> OsString {
     std::env::var_os("SHELL")
         .filter(|s| {
@@ -215,6 +229,8 @@ mod groups {
 pub(crate) fn shutdown() {
     #[cfg(unix)]
     groups::shutdown();
+    #[cfg(target_os = "windows")]
+    windows::shutdown();
 }
 
 #[cfg(unix)]
@@ -322,7 +338,7 @@ where
         succeeded,
     })
 }
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub async fn run<C, CF, P, PF>(
     _: &Path,
     _: &str,

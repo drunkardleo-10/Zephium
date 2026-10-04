@@ -30,6 +30,7 @@
   import WorkEdge from "./WorkEdge.svelte";
   import { arrivals } from "../lib/arrival";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
+  import { IS_MAC } from "$shared/platform";
   import CanvasControls from "./CanvasControls.svelte";
   import SelectionBar from "./SelectionBar.svelte";
   import {
@@ -794,7 +795,7 @@
       panOnDrag={pointerTool === "hand"}
       selectionOnDrag={pointerTool === "select"}
       selectionKey="Shift"
-      multiSelectionKey={["Meta", "Shift"]}
+      multiSelectionKey={[IS_MAC ? "Meta" : "Control", "Shift"]}
       panActivationKey=" "
       selectionMode={SelectionMode.Partial}
       onselectionstart={() => (marquee = true)}

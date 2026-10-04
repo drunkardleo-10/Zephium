@@ -82,6 +82,16 @@ struct State {
 }
 
 pub(crate) struct WorkResourceGuard {
+    #[cfg(all(
+        target_os = "windows",
+        feature = "native-agentic-work-lifetime-diagnostic"
+    ))]
+    pub(super) frame_capture: Mutex<Option<std::sync::Weak<AtomicBool>>>,
+    #[cfg(all(
+        target_os = "windows",
+        feature = "native-agentic-work-lifetime-diagnostic"
+    ))]
+    pub(super) frame_capture_dispatched: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     pub(super) failure_cause:
         Mutex<Option<super::work_resource_failure_diagnostic::WorkResourceFailureCause>>,
@@ -90,6 +100,8 @@ pub(crate) struct WorkResourceGuard {
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(super) construction_evidence: Mutex<Option<super::resource_witness::ConstructionEvidence>>,
     admission: std::sync::Weak<AgentPortAdmission>,
+    #[cfg(target_os = "windows")]
+    notification_native_dispatch: Option<MainThreadDispatch>,
     resource: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
@@ -125,11 +137,23 @@ impl WorkResourceGuard {
         Self {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_cause: Mutex::new(None),
+            #[cfg(all(
+                target_os = "windows",
+                feature = "native-agentic-work-lifetime-diagnostic"
+            ))]
+            frame_capture: Mutex::new(None),
+            #[cfg(all(
+                target_os = "windows",
+                feature = "native-agentic-work-lifetime-diagnostic"
+            ))]
+            frame_capture_dispatched: Mutex::new(None),
             #[cfg(feature = "native-agentic-work-resource-probe")]
             construction_evidence_claimed: AtomicBool::new(false),
             #[cfg(feature = "native-agentic-work-resource-probe")]
             construction_evidence: Mutex::new(None),
             admission: Arc::downgrade(admission),
+            #[cfg(target_os = "windows")]
+            notification_native_dispatch: None,
             resource: request.resource().clone(),
             storage: request.storage(),
             isolated_public: request.isolated_public(),
@@ -163,6 +187,56 @@ impl WorkResourceGuard {
     pub(crate) fn resource(&self) -> &WorkBrowserResourceJoin {
         &self.resource
     }
+    pub(crate) fn notify_frame_projection(&self) {
+        if let Some(health) = &self.health {
+            health.notify_projection();
+        }
+    }
+    #[cfg(all(
+        target_os = "windows",
+        feature = "native-agentic-work-lifetime-diagnostic"
+    ))]
+    pub(crate) fn bind_frame_capture_diagnostic(&self, pending: &Arc<AtomicBool>) {
+        if let Ok(mut slot) = self.frame_capture.lock() {
+            *slot = Some(Arc::downgrade(pending));
+        }
+    }
+    #[cfg(all(
+        target_os = "windows",
+        feature = "native-agentic-work-lifetime-diagnostic"
+    ))]
+    pub(crate) fn notify_frame_capture_dispatched_diagnostic(&self) {
+        let pending = self
+            .frame_capture
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade));
+        if !pending.is_some_and(|pending| pending.load(Ordering::Acquire)) {
+            return;
+        }
+        // A qualifier may close its own original session at this exact native
+        // dispatch edge. Never hold diagnostic or authority locks across it.
+        let callback = self
+            .frame_capture_dispatched
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(callback) = callback {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn frame_projection_current(&self) -> bool {
+        self.session_current()
+            && self.port_open()
+            && self.is_healthy()
+            && self.state.lock().is_ok_and(|state| {
+                !matches!(
+                    state.phase,
+                    Phase::Destroying | Phase::Destroyed | Phase::Quarantined
+                )
+            })
+    }
     fn health_current(&self) -> bool {
         self.health
             .as_ref()
@@ -188,6 +262,23 @@ impl WorkResourceGuard {
             }
         }
     }
+    /// Session retirement must not keep the guard (and its session) alive.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn retirement_notification(
+        self: &Arc<Self>,
+        task: impl FnOnce() + Send + 'static,
+    ) -> Option<Box<dyn FnOnce() + Send>> {
+        let dispatch = self.notification_native_dispatch.clone()?;
+        let guard = Arc::downgrade(self);
+        Some(Box::new(move || {
+            if !dispatch(Box::new(task)) {
+                if let Some(guard) = guard.upgrade() {
+                    guard.fail();
+                }
+            }
+        }))
+    }
+
     pub(crate) fn dispatch_notification(&self, task: impl FnOnce() + Send + 'static) {
         #[cfg(test)]
         if let Some(dispatch) = self.notification_dispatch.lock().unwrap().clone() {
@@ -196,7 +287,18 @@ impl WorkResourceGuard {
             }
             return;
         }
+        #[cfg(target_os = "macos")]
         dispatch2::DispatchQueue::main().exec_async(task);
+        #[cfg(target_os = "windows")]
+        {
+            let Some(dispatch) = &self.notification_native_dispatch else {
+                self.fail();
+                return;
+            };
+            if !dispatch(Box::new(task)) {
+                self.fail();
+            }
+        }
     }
     pub(crate) fn port_open(&self) -> bool {
         self.admission.upgrade().is_some_and(|admission| {
@@ -461,6 +563,23 @@ impl WorkResourceGuard {
                         ) | (Operation::ContinueAfterHuman, Phase::ContinuingAfterHuman)
                     )
             })
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(crate) fn revocation_drain_facts(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+    ) -> Option<[bool; 8]> {
+        let state = self.state.lock().ok()?;
+        Some([
+            self.health_current(),
+            !state.uncertain && state.phase == Phase::Revoking,
+            state.lease.as_ref() == Some(lease),
+            state.retirement_delivery.as_ref() == Some(lease),
+            state.reads == 0,
+            state.navigation.is_none(),
+            state.action.is_none(),
+            state.callbacks == 0,
+        ])
     }
     pub(crate) fn lease_drained(&self, lease: &WorkBrowserExecutionLease) -> bool {
         self.health_current()
@@ -800,21 +919,27 @@ pub(super) struct WorkIngress {
     rows: BTreeMap<ContextId, Arc<WorkResourceGuard>>,
 }
 impl AgentPortAdmission {
-    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[cfg(all(test, feature = "native-agentic-work-lifetime-diagnostic"))]
     pub(super) fn resource_failure_cause(
         &self,
         resource: &WorkBrowserResourceJoin,
     ) -> Option<super::work_resource_failure_diagnostic::WorkResourceFailureCause> {
-        let guard = self
-            .work
+        let guard = self.resource_diagnostic_guard(resource)?;
+        let result = *guard.failure_cause.lock().ok()?;
+        result
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    pub(super) fn resource_diagnostic_guard(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+    ) -> Option<Arc<WorkResourceGuard>> {
+        self.work
             .lock()
             .ok()?
             .rows
             .get(&resource.identity().context())
-            .filter(|guard| guard.resource() == resource)?
-            .clone();
-        let result = *guard.failure_cause.lock().ok()?;
-        result
+            .filter(|guard| guard.resource() == resource)
+            .cloned()
     }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(super) fn witness_resource(
@@ -1172,6 +1297,10 @@ impl EngineAgentBrowserPort {
                     return reject(request, ContextPortFailure::ResourceExhausted);
                 }
                 let mut guard = WorkResourceGuard::new(&request, &self.admission);
+                #[cfg(target_os = "windows")]
+                {
+                    guard.notification_native_dispatch = Some(self.dispatch.clone());
+                }
                 guard.health = health;
                 guard.health_permit = health_permit;
                 let guard = Arc::new(guard);
@@ -1252,6 +1381,10 @@ impl EngineAgentBrowserPort {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .take()
                     {
+                        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                        {
+                            task.guard.record_failure_cause(super::work_resource_failure_diagnostic::WorkResourceFailureCause::NativeAdmission(ContextPortFailure::NativeRefused));
+                        }
                         task.complete(Outcome::Refused);
                     }
                 }

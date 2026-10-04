@@ -59,6 +59,11 @@ impl Hub {
                 ));
             }
             self.validate_session_transition(&prepared.registry)?;
+            // Only the live, validated deletion request may establish this
+            // protected cleanup intent. Imported AppData tombstones alone
+            // cannot authorize deleting bodies from the private Work journal.
+            #[cfg(all(target_os = "windows", feature = "work-execution"))]
+            self.authorize_windows_work_artifact_deletion(profile)?;
             self.commit_prepared_session(prepared, Some(profile))?;
             Ok(ProfileDeletionAuthorizeOutcome::Authorized)
         } else if already_authorized {
@@ -208,6 +213,11 @@ impl Hub {
                     "completed profile deletion lost its process generation",
                 ));
             };
+            // The protected Windows journal is a separate database. Its
+            // idempotent purge must settle while this exact durable deletion
+            // obligation still exists, before removing the final tombstone.
+            #[cfg(all(target_os = "windows", feature = "work-execution"))]
+            self.purge_windows_work_artifacts(entry.profile)?;
             resolutions.push((
                 entry.profile,
                 prior_process,
@@ -354,6 +364,11 @@ impl Hub {
         if self.registry.contains(&profile) {
             return Err(invalid_data("active profile cannot complete deletion"));
         }
+        // Registry removal already prevents new artifact publication. Keep
+        // the original durable deletion row until both stores have settled;
+        // a crash or unavailable journal repeats this purge on the next try.
+        #[cfg(all(target_os = "windows", feature = "work-execution"))]
+        self.purge_windows_work_artifacts(profile)?;
         if deletion.local_unlink_process.is_some() && require_restart_confirmation {
             // The first process has already completed its local phase. Only a
             // Hub carrying a different process generation may clear this

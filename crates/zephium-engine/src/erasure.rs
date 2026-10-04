@@ -117,6 +117,8 @@ fn sync_removed_root(root: &Path) -> io::Result<()> {
 /// cannot invoke the public completion a second time.
 pub(crate) struct Completion {
     done: Mutex<Option<ErasureDone>>,
+    #[cfg(target_os = "windows")]
+    terminal: Mutex<(Option<ProfileDataErasureOutcome>, Vec<ErasureDone>)>,
     active: Arc<AtomicBool>,
     settled: Mutex<bool>,
     settled_changed: Condvar,
@@ -136,6 +138,8 @@ impl Completion {
     ) -> Arc<Self> {
         let completion = Arc::new(Self {
             done: Mutex::new(Some(done)),
+            #[cfg(target_os = "windows")]
+            terminal: Mutex::new((None, Vec::new())),
             active,
             settled: Mutex::new(false),
             settled_changed: Condvar::new(),
@@ -177,6 +181,71 @@ impl Completion {
         completion
     }
 
+    /// Group real native terminals. Watchdog reports never release a sibling's physical debt.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn split(parent: Arc<Self>, count: usize) -> Vec<Arc<Self>> {
+        let state = Arc::new(Mutex::new((count, true)));
+        (0..count)
+            .map(|_| {
+                let child = Self::start(Box::new(|_| {}), Arc::new(AtomicBool::new(true)));
+                let group = state.clone();
+                let parent = parent.clone();
+                child.observe_terminal(Box::new(move |outcome| {
+                    let terminal = {
+                        let mut state = group.lock().unwrap_or_else(|p| p.into_inner());
+                        state.0 = state.0.saturating_sub(1);
+                        state.1 &= outcome == ProfileDataErasureOutcome::Verified;
+                        (state.0 == 0).then_some(state.1)
+                    };
+                    if let Some(clean) = terminal {
+                        parent.finish(if clean {
+                            ProfileDataErasureOutcome::Verified
+                        } else {
+                            ProfileDataErasureOutcome::Failed
+                        });
+                    }
+                }));
+                child
+            })
+            .collect()
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn terminal_outcome(&self) -> Option<ProfileDataErasureOutcome> {
+        self.terminal.lock().unwrap_or_else(|p| p.into_inner()).0
+    }
+
+    /// Join the real native terminal; a public watchdog report is never cleanup proof.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn forward_terminal(&self, target: Arc<Self>) {
+        self.observe_terminal(Box::new(move |outcome| target.finish(outcome)));
+    }
+
+    #[cfg(target_os = "windows")]
+    fn observe_terminal(&self, observer: ErasureDone) {
+        let mut terminal = self.terminal.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(outcome) = terminal.0 {
+            drop(terminal);
+            observer(outcome);
+        } else {
+            terminal.1.push(observer);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn record_terminal(&self, outcome: ProfileDataErasureOutcome) {
+        let observers = {
+            let mut terminal = self.terminal.lock().unwrap_or_else(|p| p.into_inner());
+            if terminal.0.is_some() {
+                return;
+            }
+            terminal.0 = Some(outcome);
+            std::mem::take(&mut terminal.1)
+        };
+        for observer in observers {
+            observer(outcome);
+        }
+    }
+
     pub(crate) fn attempt_flag(&self) -> Arc<AtomicBool> {
         self.active.clone()
     }
@@ -206,6 +275,8 @@ impl Completion {
             *settled = true;
             self.settled_changed.notify_all();
         }
+        #[cfg(target_os = "windows")]
+        self.record_terminal(outcome);
         if let Some(done) = done {
             done(outcome);
         }
@@ -231,6 +302,8 @@ impl Completion {
             *settled = true;
             self.settled_changed.notify_all();
         }
+        #[cfg(target_os = "windows")]
+        self.record_terminal(outcome);
         if let Some(done) = done {
             let _ = std::thread::Builder::new()
                 .name("zephium-erasure-completion".into())
@@ -495,6 +568,62 @@ mod tests {
         completion.finish(ProfileDataErasureOutcome::Verified);
         assert!(!active.load(Ordering::Acquire));
         assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn grouped_erasure_timeout_retains_debt_and_joins_a_late_native_terminal() {
+        let (tx, rx) = mpsc::channel();
+        let parent = Completion::start_with_timeout(
+            Box::new(move |outcome| {
+                tx.send(outcome).unwrap();
+            }),
+            Arc::new(AtomicBool::new(true)),
+            Duration::from_millis(10),
+        );
+        let children = Completion::split(parent.clone(), 2);
+        children[0].finish(ProfileDataErasureOutcome::Verified);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(200)).unwrap(),
+            ProfileDataErasureOutcome::TimedOut
+        );
+        assert!(parent.is_active());
+        assert_eq!(parent.terminal_outcome(), None);
+        let joined = Completion::start(Box::new(|_| {}), Arc::new(AtomicBool::new(true)));
+        parent.forward_terminal(joined.clone());
+        children[1].finish(ProfileDataErasureOutcome::Verified);
+        assert!(!parent.is_active());
+        assert_eq!(
+            joined.terminal_outcome(),
+            Some(ProfileDataErasureOutcome::Verified)
+        );
+        children[1].finish(ProfileDataErasureOutcome::Failed);
+        assert_eq!(
+            joined.terminal_outcome(),
+            Some(ProfileDataErasureOutcome::Verified)
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
+        let late = Completion::start(Box::new(|_| {}), Arc::new(AtomicBool::new(true)));
+        parent.forward_terminal(late.clone());
+        assert_eq!(
+            late.terminal_outcome(),
+            Some(ProfileDataErasureOutcome::Verified)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn grouped_erasure_failure_still_waits_for_every_native_terminal() {
+        let parent = Completion::start(Box::new(|_| {}), Arc::new(AtomicBool::new(true)));
+        let children = Completion::split(parent.clone(), 2);
+        children[0].finish(ProfileDataErasureOutcome::Failed);
+        assert!(parent.is_active());
+        children[1].finish(ProfileDataErasureOutcome::Verified);
+        assert_eq!(
+            parent.terminal_outcome(),
+            Some(ProfileDataErasureOutcome::Failed)
+        );
+        assert!(!parent.is_active());
     }
 
     #[test]

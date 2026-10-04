@@ -34,14 +34,40 @@ pub(crate) struct WebView2ResourceSample {
 
 type ProcessCohort = [(u32, i32); MAX_RESOURCE_WEBVIEW2_PROCESSES as usize];
 
+/// Closed native measurement failures; carries no process or content identity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ResourceSampleFailure {
+    ProcessQueryHandle,
+    ProcessMemoryQuery,
+    Environment8Interface,
+    ResidentSumOverflow,
+    ResidentByteCeiling,
+    ProcessCohortChanged,
+    ProcessHandleClose,
+    ResidentSampleEmpty,
+    ProcessInfosQuery,
+    ProcessCountQuery,
+    ProcessCountCeilingOrEmpty,
+    ProcessEntryQuery,
+    ProcessKindQuery,
+    ProcessIdentityQuery,
+    ProcessIdentityInvalid,
+    DuplicateProcessIdentity,
+    BrowserCountNotOne,
+    HelperProcessesEmpty,
+}
+
 struct ProbeProcessHandle(HANDLE);
 
 impl ProbeProcessHandle {
-    fn open(process_id: u32) -> Option<Self> {
+    fn open(process_id: u32, failure: &mut Option<ResourceSampleFailure>) -> Option<Self> {
         // SAFETY: the nonzero PID came from WebView2's bounded process
         // snapshot; inheritance is disabled and the requested right is
         // query-only.
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if handle.is_null() {
+            *failure = Some(ResourceSampleFailure::ProcessQueryHandle);
+        }
         (!handle.is_null()).then_some(Self(handle))
     }
 
@@ -63,7 +89,7 @@ impl ProbeProcessHandle {
         self.release()
     }
 
-    fn resident_bytes(&self) -> Option<u64> {
+    fn resident_bytes(&self, failure: &mut Option<ResourceSampleFailure>) -> Option<u64> {
         let mut counters = PROCESS_MEMORY_COUNTERS::default();
         let counter_bytes = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;
         counters.cb = counter_bytes;
@@ -71,6 +97,7 @@ impl ProbeProcessHandle {
         // valid writable storage of exactly `counter_bytes` and no pointer is
         // retained.
         if unsafe { GetProcessMemoryInfo(self.raw(), &mut counters, counter_bytes) } == 0 {
+            *failure = Some(ResourceSampleFailure::ProcessMemoryQuery);
             return None;
         }
         u64::try_from(counters.WorkingSetSize).ok()
@@ -91,18 +118,45 @@ impl Drop for ProbeProcessHandle {
 /// Native measurement failure is represented as `Ok(None)` so the owning
 /// qualifier can emit its own closed failure shape; cancellation/deadline
 /// failure is returned without erasing its type.
+#[cfg(feature = "native-agentic-input-probe")]
 pub(crate) fn sample_webview2_resources<E>(
     environment: &ICoreWebView2Environment,
     check_control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<WebView2ResourceSample>, E> {
+    let mut failure = None;
+    sample_resources_inner(environment, check_control, &mut failure)
+}
+
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) fn sample_webview2_resources_diagnostic<E>(
+    environment: &ICoreWebView2Environment,
+    check_control: &mut impl FnMut() -> Result<(), E>,
+) -> Result<
+    (
+        Option<WebView2ResourceSample>,
+        Option<ResourceSampleFailure>,
+    ),
+    E,
+> {
+    let mut failure = None;
+    let sample = sample_resources_inner(environment, check_control, &mut failure)?;
+    Ok((sample, failure))
+}
+
+fn sample_resources_inner<E>(
+    environment: &ICoreWebView2Environment,
+    check_control: &mut impl FnMut() -> Result<(), E>,
+    failure: &mut Option<ResourceSampleFailure>,
 ) -> Result<Option<WebView2ResourceSample>, E> {
     check_control()?;
     let environment = environment.cast::<ICoreWebView2Environment8>();
     check_control()?;
     let Ok(environment) = environment else {
+        *failure = Some(ResourceSampleFailure::Environment8Interface);
         return Ok(None);
     };
     let Some((process_cohort, process_count, helper_processes)) =
-        webview2_process_cohort(&environment, check_control)?
+        webview2_process_cohort(&environment, check_control, failure)?
     else {
         return Ok(None);
     };
@@ -121,28 +175,30 @@ pub(crate) fn sample_webview2_resources<E>(
         .zip(active_process_cohort.iter().map(|entry| entry.0))
     {
         check_control()?;
-        let opened_handle = ProbeProcessHandle::open(process_id);
+        let opened_handle = ProbeProcessHandle::open(process_id, failure);
         check_control()?;
         let Some(handle) = opened_handle else {
             return Ok(None);
         };
-        let process_resident_bytes = handle.resident_bytes();
+        let process_resident_bytes = handle.resident_bytes(failure);
         check_control()?;
         let Some(process_resident_bytes) = process_resident_bytes else {
             return Ok(None);
         };
         let Some(total_resident_bytes) = resident_bytes.checked_add(process_resident_bytes) else {
+            *failure = Some(ResourceSampleFailure::ResidentSumOverflow);
             return Ok(None);
         };
         resident_bytes = total_resident_bytes;
         if resident_bytes > MAX_RESOURCE_RESIDENT_BYTES {
+            *failure = Some(ResourceSampleFailure::ResidentByteCeiling);
             return Ok(None);
         }
         *slot = Some(handle);
     }
 
     let Some((rejoined_process_cohort, rejoined_count, rejoined_helper_processes)) =
-        webview2_process_cohort(&environment, check_control)?
+        webview2_process_cohort(&environment, check_control, failure)?
     else {
         return Ok(None);
     };
@@ -150,12 +206,17 @@ pub(crate) fn sample_webview2_resources<E>(
         || rejoined_helper_processes != helper_processes
         || rejoined_process_cohort.get(..process_count_usize) != Some(active_process_cohort)
     {
+        *failure = Some(ResourceSampleFailure::ProcessCohortChanged);
         return Ok(None);
     }
     let all_handles_closed = close_process_handles(active_handles);
     check_control()?;
     if !all_handles_closed {
+        *failure = Some(ResourceSampleFailure::ProcessHandleClose);
         return Ok(None);
+    }
+    if resident_bytes == 0 {
+        *failure = Some(ResourceSampleFailure::ResidentSampleEmpty);
     }
     Ok((resident_bytes != 0).then_some(WebView2ResourceSample {
         processes: process_count,
@@ -166,6 +227,7 @@ pub(crate) fn sample_webview2_resources<E>(
 fn webview2_process_cohort<E>(
     environment: &ICoreWebView2Environment8,
     check_control: &mut impl FnMut() -> Result<(), E>,
+    failure: &mut Option<ResourceSampleFailure>,
 ) -> Result<Option<(ProcessCohort, u8, u8)>, E> {
     check_control()?;
     // SAFETY: the live COM environment owns the returned snapshot collection
@@ -173,6 +235,7 @@ fn webview2_process_cohort<E>(
     let processes = unsafe { environment.GetProcessInfos() };
     check_control()?;
     let Ok(processes) = processes else {
+        *failure = Some(ResourceSampleFailure::ProcessInfosQuery);
         return Ok(None);
     };
     let mut count = 0_u32;
@@ -181,12 +244,14 @@ fn webview2_process_cohort<E>(
     let count_result = unsafe { processes.Count(&mut count) };
     check_control()?;
     if count_result.is_err() {
+        *failure = Some(ResourceSampleFailure::ProcessCountQuery);
         return Ok(None);
     }
     let Some(process_count) = u8::try_from(count)
         .ok()
         .filter(|count| (1..=MAX_RESOURCE_WEBVIEW2_PROCESSES).contains(count))
     else {
+        *failure = Some(ResourceSampleFailure::ProcessCountCeilingOrEmpty);
         return Ok(None);
     };
 
@@ -199,6 +264,7 @@ fn webview2_process_cohort<E>(
         let process = unsafe { processes.GetValueAtIndex(index) };
         check_control()?;
         let Ok(process) = process else {
+            *failure = Some(ResourceSampleFailure::ProcessEntryQuery);
             return Ok(None);
         };
         let mut kind = Default::default();
@@ -208,6 +274,7 @@ fn webview2_process_cohort<E>(
         let kind_result = unsafe { process.Kind(&mut kind) };
         check_control()?;
         if kind_result.is_err() {
+            *failure = Some(ResourceSampleFailure::ProcessKindQuery);
             return Ok(None);
         }
         if kind == COREWEBVIEW2_PROCESS_KIND_BROWSER {
@@ -222,9 +289,11 @@ fn webview2_process_cohort<E>(
         let process_id_result = unsafe { process.ProcessId(&mut process_id) };
         check_control()?;
         if process_id_result.is_err() {
+            *failure = Some(ResourceSampleFailure::ProcessIdentityQuery);
             return Ok(None);
         }
         let Some(process_id) = u32::try_from(process_id).ok().filter(|id| *id != 0) else {
+            *failure = Some(ResourceSampleFailure::ProcessIdentityInvalid);
             return Ok(None);
         };
         let Some(slot) = usize::try_from(index)
@@ -243,15 +312,18 @@ fn webview2_process_cohort<E>(
         .windows(2)
         .any(|pair| pair[0].0 == pair[1].0)
     {
+        *failure = Some(ResourceSampleFailure::DuplicateProcessIdentity);
         return Ok(None);
     }
     if browser_processes != 1 {
+        *failure = Some(ResourceSampleFailure::BrowserCountNotOne);
         return Ok(None);
     }
     let Some(helper_processes) = process_count
         .checked_sub(browser_processes)
         .filter(|count| *count != 0)
     else {
+        *failure = Some(ResourceSampleFailure::HelperProcessesEmpty);
         return Ok(None);
     };
     Ok(Some((process_cohort, process_count, helper_processes)))

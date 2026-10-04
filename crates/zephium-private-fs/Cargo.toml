@@ -7,6 +7,8 @@ license.workspace = true
 [features]
 # Non-shipping gate for the live Windows adapter validation campaign.
 windows-namespace-validation = []
+# Closed QA-session ownership/retirement for Windows test dependencies only.
+windows-work-test-fixtures = []
 
 [dependencies]
 thiserror.workspace = true
@@ -29,4 +31,6 @@ windows = { version = "=0.61.3", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
 ] }

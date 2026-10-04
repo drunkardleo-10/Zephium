@@ -2,6 +2,7 @@
   import { Select } from "bits-ui";
   import Mark from "../Menu/Mark.svelte";
   import "../Menu/popover.css";
+  import { menuMaterialFor } from "../Menu/material";
   let {
     label,
     labelHidden = false,
@@ -18,19 +19,24 @@
     onchange?: (value: string) => void;
   } = $props();
   const uid = $props.id();
+  let triggerElement = $state<HTMLButtonElement | null>(null);
+  let material = $state<"opaque" | undefined>();
   let current = $derived(options.find((option) => option.value === value)?.label ?? "");
 </script>
 
 <div class="field">
   <label for={uid} class:sr-only={labelHidden}>{label}</label>
   <Select.Root
+    onOpenChange={(open) => {
+      if (open) material = menuMaterialFor(triggerElement);
+    }}
     type="single"
     bind:value
     {disabled}
     items={[...options]}
     onValueChange={(next) => onchange?.(next)}
   >
-    <Select.Trigger id={uid} class="ui-select" aria-label={label}>
+    <Select.Trigger bind:ref={triggerElement} id={uid} class="ui-select" aria-label={label}>
       <span class="value">{current}</span>
       <svg
         class="chevron"
@@ -50,6 +56,7 @@
     </Select.Trigger>
     <Select.Portal>
       <Select.Content
+        data-menu-material={material}
         class="ui-menu ui-select-menu"
         align="start"
         sideOffset={6}

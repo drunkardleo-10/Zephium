@@ -39,13 +39,24 @@ mod style_worker;
 mod webext;
 #[cfg(target_os = "windows")]
 mod webext_windows;
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub(crate) mod work_frames;
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 mod work_resource;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod work_session_presence;
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+mod work_windows;
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub(crate) use work_resource::notify_work_resource;
 
 #[cfg(test)]
@@ -442,7 +453,10 @@ pub(crate) struct EngineHost {
         any(target_os = "macos", target_os = "windows")
     ))]
     agent_contexts: HashMap<zephium_agentic::ContextId, agent_context::AgentOwnedContext>,
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     work_resources: HashMap<zephium_agentic::ContextId, work_resource::WorkNativeResource>,
     // Native cookie callbacks retain their exact port task and deadline owner
     // outside the context map. At most two exist and each destination context
@@ -565,7 +579,7 @@ pub(crate) struct EngineHost {
         HashMap<zephium_agentic::ContextRunId, work_resource::AnonymousWorkStore>,
     /// Finished page loads per profile and host in ordinary tabs: a count,
     /// never a URL, path or page fact.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     work_site_loads: HashMap<(ProfileId, String), u64>,
     #[cfg(target_os = "macos")]
     webext: webext::WebextHost,
@@ -604,11 +618,22 @@ pub(crate) struct EngineHost {
     browser_version_observers: HashMap<ProfileId, crate::platform::imp::BrowserVersionObserver>,
     #[cfg(target_os = "windows")]
     environments: HashMap<ProfileId, ICoreWebView2Environment>,
+    #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+    work_site_stores:
+        HashMap<(ProfileId, String), std::rc::Rc<crate::platform::windows::WorkStoreSeed>>,
+    #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+    anonymous_work_environments:
+        HashMap<zephium_agentic::ContextRunId, work_windows::AnonymousWorkEnvironment>,
     #[cfg(target_os = "windows")]
     browser_processes: HashMap<ProfileId, crate::platform::imp::BrowserProcess>,
     #[cfg(target_os = "windows")]
     browser_process_exit_observers:
         HashMap<ProfileId, crate::platform::imp::BrowserProcessExitObserver>,
+    // Exact process/proof pairs have moved to the one shutdown worker. Native
+    // observers still record their proofs; late UI bookkeeping cannot retake
+    // or poison those already-transferred obligations.
+    #[cfg(target_os = "windows")]
+    windows_process_shutdown_started: bool,
     // ProcessFailed retires controllers, but only the exact Environment5
     // BrowserProcessExited proof authorizes replacements. Retain every logical
     // id across that gap and emit it after the construction gate is reopened.

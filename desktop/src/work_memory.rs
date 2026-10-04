@@ -1,18 +1,24 @@
-//! The interface's WebKit process holds decoded pictures and the resources
+//! The interface holds decoded pictures and the resources
 //! they came from for a long time after a work is left. The interface asks
 //! for them back when it has left a work or been idle.
 use tauri::WebviewWindow;
 
-/// Empties the memory cache of the calling interface web view, and nothing
-/// else: cookies, storage and disk caches stay, and no page's data store is
-/// reached (each page has its own).
+/// Reclaims idle UI memory or restores its active memory target. Cookies,
+/// storage and disk caches stay; no agent page's store is reached.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn work_release_memory(caller: WebviewWindow) -> bool {
+pub(crate) async fn work_release_memory(caller: WebviewWindow, idle: bool) -> bool {
     if !super::authorize(&caller, super::CallerPolicy::Main, "work_release_memory") {
         return false;
     }
-    release(&caller)
+    #[cfg(target_os = "windows")]
+    {
+        release_windows(&caller, idle).await
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        !idle || release(&caller)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -38,7 +44,82 @@ fn release(window: &WebviewWindow) -> bool {
         .is_ok()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn release(_window: &WebviewWindow) -> bool {
     false
+}
+
+#[cfg(target_os = "windows")]
+async fn release_windows(window: &WebviewWindow, idle: bool) -> bool {
+    use webview2_com::{
+        CallDevToolsProtocolMethodCompletedHandler,
+        Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+        },
+    };
+    use windows::core::{w, Interface};
+    let (send, receive) = tokio::sync::oneshot::channel();
+    if window
+        .with_webview(move |view| {
+            let core = unsafe { view.controller().CoreWebView2() };
+            let Ok(core) = core else {
+                let _ = send.send(false);
+                return;
+            };
+            let Ok(memory) = core.cast::<ICoreWebView2_19>() else {
+                let _ = send.send(false);
+                return;
+            };
+            // The low target is asynchronous and stays until the frame reports activity.
+            let level = if idle {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+            } else {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+            };
+            if unsafe { memory.SetMemoryUsageTargetLevel(level) }.is_err() {
+                let _ = send.send(false);
+                return;
+            }
+            if !idle {
+                let _ = send.send(true);
+                return;
+            }
+            let mut send = Some(send);
+            let done =
+                CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |status, _| {
+                    if let Some(send) = send.take() {
+                        let _ = send.send(status.is_ok());
+                    }
+                    Ok(())
+                }));
+            if unsafe {
+                core.CallDevToolsProtocolMethod(w!("HeapProfiler.collectGarbage"), w!("{}"), &done)
+            }
+            .is_err()
+            {
+                let _ = unsafe {
+                    memory.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL)
+                };
+            }
+        })
+        .is_err()
+    {
+        return false;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(3), receive).await {
+        Ok(Ok(true)) => true,
+        _ => {
+            let _ = window.with_webview(|view| unsafe {
+                if let Ok(core) = view.controller().CoreWebView2() {
+                    if let Ok(memory) = core.cast::<ICoreWebView2_19>() {
+                        let _ = memory.SetMemoryUsageTargetLevel(
+                            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+                        );
+                    }
+                }
+            });
+            false
+        }
+    }
 }

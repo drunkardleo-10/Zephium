@@ -89,7 +89,11 @@ fn tokenize(line: &str) -> Result<Vec<Token>, ()> {
 }
 
 fn resolve(cwd: &Path, value: &str) -> Option<PathBuf> {
-    if value.contains('~') {
+    if value.contains('~')
+        || Path::new(value)
+            .components()
+            .any(|part| part == Component::ParentDir)
+    {
         return None;
     }
     let path = if Path::new(value).is_absolute() {
@@ -130,6 +134,150 @@ fn path_argument(arg: &str) -> Option<&str> {
 }
 
 pub fn classify(line: &str, cwd: &Path, roots: &[PathBuf]) -> (Class, Reason) {
+    #[cfg(target_os = "windows")]
+    {
+        classify_windows(line, cwd, roots)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        classify_posix(line, cwd, roots)
+    }
+}
+
+// Only a single literal invocation can inherit a folder approval on Windows.
+// PowerShell expansion, pipelines, expressions and unknown commands ask for
+// approval of the exact command; the POSIX allowlist cannot interpret them.
+#[cfg(any(target_os = "windows", test))]
+fn classify_windows(line: &str, cwd: &Path, roots: &[PathBuf]) -> (Class, Reason) {
+    let ask = (Class::Ask, Reason::ShellSyntax);
+    if line.contains([
+        '$', '`', '\n', '\r', '(', ')', '{', '}', '[', ']', '*', '?', '@', '%', '^', '#', ';', '|',
+        '&', '<', '>', ',',
+    ]) {
+        return ask;
+    }
+    let mut args = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    for c in line.chars() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == '\'' || c == '"' {
+                return ask;
+            } else {
+                word.push(c);
+            }
+        } else {
+            match c {
+                '\'' | '"' => {
+                    if started {
+                        return ask;
+                    }
+                    quote = Some(c);
+                    started = true;
+                }
+                ' ' | '\t' => {
+                    if started {
+                        args.push(std::mem::take(&mut word));
+                        started = false;
+                    }
+                }
+                _ => {
+                    word.push(c);
+                    started = true;
+                }
+            }
+        }
+    }
+    if quote.is_some() {
+        return ask;
+    }
+    if started {
+        args.push(word);
+    }
+    let Some(program) = args.first() else {
+        return ask;
+    };
+    let program = program.to_ascii_lowercase();
+    let program = program.strip_suffix(".exe").unwrap_or(&program);
+    let parameters: Option<&[&str]> = match program {
+        "get-location" | "pwd" => Some(&[]),
+        "get-childitem" | "ls" | "dir" | "gci" => Some(&[
+            "-path",
+            "-literalpath",
+            "-name",
+            "-file",
+            "-directory",
+            "-force",
+        ]),
+        "get-content" | "cat" | "gc" => Some(&[
+            "-path",
+            "-literalpath",
+            "-totalcount",
+            "-tail",
+            "-raw",
+            "-encoding",
+        ]),
+        "write-output" | "echo" => Some(&["-inputobject", "-noenumerate"]),
+        "set-content" | "sc" | "add-content" | "ac" => {
+            Some(&["-path", "-literalpath", "-value", "-nonewline", "-encoding"])
+        }
+        "new-item" | "ni" => Some(&["-path", "-name", "-itemtype", "-value"]),
+        "copy-item" | "cp" | "copy" | "cpi" | "move-item" | "mv" | "move" | "mi" => {
+            Some(&["-path", "-literalpath", "-destination"])
+        }
+        _ => None,
+    };
+    if parameters.is_some_and(|allowed| {
+        args.iter().skip(1).any(|arg| {
+            arg.starts_with('-')
+                && !allowed
+                    .iter()
+                    .any(|parameter| arg.eq_ignore_ascii_case(parameter))
+        })
+    }) {
+        return ask;
+    }
+    let translated = match program {
+        "get-location" | "pwd" => "pwd",
+        "get-childitem" | "ls" | "dir" | "gci" => "ls",
+        "get-content" | "cat" | "gc" => "cat",
+        "write-output" | "echo" => "echo",
+        "set-content" | "sc" | "add-content" | "ac" | "new-item" | "ni" | "copy-item" | "cp"
+        | "copy" | "cpi" | "move-item" | "mv" | "move" | "mi" => "cp",
+        "remove-item" | "rm" | "del" | "erase" | "rmdir" | "rd" | "ri" => {
+            return (Class::Ask, Reason::Destructive)
+        }
+        "invoke-webrequest" | "iwr" | "wget" | "curl" | "invoke-restmethod" | "irm" => {
+            return (Class::Ask, Reason::Network)
+        }
+        "git" | "gh" | "rg" | "cargo" | "rustc" | "node" | "pnpm" | "npm" | "yarn" | "bun"
+        | "python" | "python3" | "go" | "pytest" => program,
+        _ => return (Class::Ask, Reason::UnknownProgram),
+    };
+    // Provider paths and alternate streams must never masquerade as descendants.
+    if args.iter().skip(1).any(|arg| {
+        arg.split(['/', '\\']).any(|part| part == "..")
+            || arg.contains(':')
+                && !(arg.as_bytes().get(1) == Some(&b':')
+                    && arg.as_bytes()[0].is_ascii_alphabetic()
+                    && matches!(arg.as_bytes().get(2), Some(b'\\' | b'/'))
+                    && !arg[2..].contains(':'))
+    }) {
+        return (Class::Ask, Reason::OutsideRoots);
+    }
+    args[0] = translated.to_owned();
+    let literal = args
+        .iter()
+        .map(|arg| format!("'{arg}'"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    classify_posix(&literal, cwd, roots)
+}
+
+fn classify_posix(line: &str, cwd: &Path, roots: &[PathBuf]) -> (Class, Reason) {
     let Ok(tokens) = tokenize(line) else {
         return (Class::Ask, Reason::ShellSyntax);
     };
@@ -429,6 +577,42 @@ fn simple(args: &[String]) -> (Class, Reason) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_shell_expansion_and_aliases_require_exact_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let roots = std::slice::from_ref(&root);
+        for line in [
+            "git status --short",
+            "Get-Content 'a b.txt'",
+            "LS src",
+            "Get-Location",
+        ] {
+            assert_eq!(
+                classify_windows(line, &root, roots).0,
+                Class::Read,
+                "{line}"
+            );
+        }
+        for line in [
+            "rm a",
+            "Remove-Item a",
+            "ls; Remove-Item a",
+            "echo $env:TOKEN",
+            "git --% status",
+            "cat HKLM:\\Software",
+            "cat a.txt:secret",
+            "& git status",
+            "g`it status",
+            "echo 'a''b'",
+            "cmd /c dir",
+            "powershell -Command ls",
+        ] {
+            assert_eq!(classify_windows(line, &root, roots).0, Class::Ask, "{line}");
+        }
+        assert_eq!(classify_windows("cargo test", &root, roots).0, Class::Write);
+    }
     #[test]
     fn work_policy_table() {
         let dir = tempfile::tempdir().unwrap();
@@ -632,9 +816,63 @@ mod tests {
         ] {
             for line in lines {
                 assert_eq!(
-                    classify(line, &root, std::slice::from_ref(&root)).0,
+                    classify_posix(line, &root, std::slice::from_ref(&root)).0,
                     class,
                     "{line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn windows_literal_commands_keep_native_approval_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for (class, commands) in [
+            (
+                Class::Read,
+                vec![
+                    "Get-Location",
+                    "Get-ChildItem -LiteralPath . -File",
+                    "Get-Content -LiteralPath file.txt -Raw",
+                    "git.exe status --short",
+                    "cargo --version",
+                ],
+            ),
+            (
+                Class::Write,
+                vec![
+                    "Set-Content -LiteralPath result.txt -Value first -NoNewline -Encoding ascii",
+                    "Add-Content -LiteralPath result.txt -Value second -NoNewline -Encoding ascii",
+                    "cargo test",
+                    "Copy-Item -LiteralPath file.txt -Destination copy.txt",
+                ],
+            ),
+            (
+                Class::Ask,
+                vec![
+                    "Get-ChildItem -Recurse",
+                    "Get-Content -LiteralPath file.txt -Stream secret",
+                    "Get-Location -PSProvider Registry",
+                    "Get-Content Registry:foo",
+                    "Get-Content file.txt:secret",
+                    "Remove-Item result.txt",
+                    "Invoke-WebRequest example.com",
+                    "echo $HOME",
+                    "ls; Remove-Item file.txt",
+                    "echo (Get-Date)",
+                    "echo @args",
+                    "cmd /c echo foo",
+                    "git -c core.pager=x status",
+                    "Get-Content ..\\outside.txt",
+                ],
+            ),
+        ] {
+            for command in commands {
+                assert_eq!(
+                    classify_windows(command, &root, std::slice::from_ref(&root)).0,
+                    class,
+                    "{command}"
                 );
             }
         }
@@ -650,13 +888,13 @@ mod tests {
                 Token::Word("e f".into())
             ]
         );
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
         #[cfg(unix)]
         {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
             std::os::unix::fs::symlink("/etc", root.join("escape")).unwrap();
             assert_eq!(
-                classify("cat escape/passwd", &root, std::slice::from_ref(&root)).0,
+                classify_posix("cat escape/passwd", &root, std::slice::from_ref(&root)).0,
                 Class::Ask
             );
         }

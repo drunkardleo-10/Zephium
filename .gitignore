@@ -2,6 +2,7 @@ node_modules
 .pnpm-store/
 dist
 /target
+/crates/zephium-engine/target/
 /vendor/adblock/target/
 /crates/zephium-blocker/fuzz/artifacts/
 /crates/zephium-blocker/fuzz/target/

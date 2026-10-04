@@ -3,7 +3,7 @@
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import "$styles/panel.css";
-  import { onMount, flushSync } from "svelte";
+  import { onMount, flushSync, tick } from "svelte";
   import type { PanelState, PanelIntent, ToolKind } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
@@ -18,6 +18,16 @@
   let presentation = $state<PanelState | null>(null);
   let Launcher = $state<Awaited<ReturnType<typeof loadLauncherPanel>>["default"] | null>(null);
   let failed = $state(false);
+  let captures = $state(0);
+  $effect(() => {
+    const state = presentation;
+    if (!state || state.visible || captures !== 0) return;
+    const timer = setTimeout(
+      () => void commands.panelIntent({ type: "idle", revision: state.revision }).catch(() => {}),
+      1000,
+    );
+    return () => clearTimeout(timer);
+  });
   function apply(next: PanelState) {
     if (acceptPanelState(presentation, next))
       flushSync(() => {
@@ -76,6 +86,8 @@
         if (disposed) return;
         if (!liveMotion) theme.setReducedMotion(motion === "true");
         if (!liveLanguage) applyLanguage(language);
+        await tick();
+        if (disposed) return;
         void document.documentElement.getBoundingClientRect();
         const initial = await commands.panelReady();
         if (!disposed) {
@@ -102,10 +114,20 @@
   async function capture(text: string): Promise<string | null> {
     const profile = presentation?.profile_id;
     if (!profile) return null;
-    const { captureTask } = await loadCapture();
-    const title = await captureTask(profile, text);
-    if (title) setTimeout(() => void intent({ type: "dismiss" }), CAPTURED_MS);
-    return title;
+    const session = presentation?.session_id;
+    captures += 1;
+    try {
+      const { captureTask } = await loadCapture();
+      const title = await captureTask(profile, text);
+      if (title)
+        setTimeout(() => {
+          if (presentation?.visible && presentation.session_id === session)
+            void intent({ type: "dismiss" });
+        }, CAPTURED_MS);
+      return title;
+    } finally {
+      captures -= 1;
+    }
   }
 </script>
 

@@ -11,6 +11,8 @@ mod pane;
 mod windows_file_identity;
 
 pub use actor::SqliteStore;
+#[cfg(all(windows, feature = "work-execution"))]
+pub use hub::WindowsWorkStorage;
 
 mod work_frames;
 mod work_migration_v2;

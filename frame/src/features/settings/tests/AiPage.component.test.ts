@@ -16,6 +16,14 @@ vi.mock("$shared/ipc/bindings", async () => {
     workSetProviderKey: native.set,
     workTestProviderKey: native.test,
     workChooseModel: native.choose,
+    workDecisionPreference: async () => ({
+      version: 1,
+      profile: PROFILE,
+      choice: "recommended",
+      effective: "standard",
+      typesafe_key_present: false,
+      error: null,
+    }),
   });
 });
 
@@ -85,4 +93,14 @@ test("billing trouble preserves acceptance and dormant Cloud stays hidden", asyn
     )
     .toBeVisible();
   await expect.element(screen.getByText("Zephium Cloud", { exact: true })).not.toBeInTheDocument();
+});
+
+test("Settings AI exposes Jev setup beside the regular model controls with honest fallback", async () => {
+  await page.viewport(1100, 1200);
+  native.read.mockResolvedValue(models({ keys: { open_ai: "set" }, lead: "openai/gpt-6-sol" }));
+  const screen = await render(AiPage);
+  await expect.element(screen.getByRole("button", { name: "Add Jev key" })).toBeVisible();
+  await expect.element(screen.getByRole("radio", { name: "Recommended" })).toBeChecked();
+  await expect.element(screen.getByText("Active: Standard")).toBeVisible();
+  await expect.element(screen.getByRole("heading", { name: "Work", exact: true })).toBeVisible();
 });

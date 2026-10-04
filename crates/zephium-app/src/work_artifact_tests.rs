@@ -238,8 +238,18 @@ fn archived_read_failure_and_late_callback_do_not_consume_future_admission_or_ov
 #[test]
 fn actual_shell_sqlite_artifact_survives_process_exit_without_restoring_execution() {
     let directory = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    let session_label = format!("app-artifact-{}", zephium_core::ids::ProfileId::generate());
+    #[cfg(windows)]
+    let session = zephium_private_fs::NativeWorkStorageTestSession::create(
+        &zephium_private_fs::NativeSession::new(&session_label).unwrap(),
+    )
+    .unwrap();
     for phase in ["publish", "read"] {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        #[cfg(windows)]
+        command.env("ZEPHIUM_ARTIFACT_TEST_WORK_SESSION", &session_label);
+        let child = command
             .args([
                 "--exact",
                 "work::tests::artifact_tests::durable_result_process",
@@ -247,11 +257,15 @@ fn actual_shell_sqlite_artifact_survives_process_exit_without_restoring_executio
             ])
             .env("ZEPHIUM_ARTIFACT_TEST_DIRECTORY", directory.path())
             .env("ZEPHIUM_ARTIFACT_TEST_PHASE", phase)
-            .stdout(std::process::Stdio::null())
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success(), "bounded artifact subprocess {phase}");
+        assert!(
+            child.status.success(),
+            "bounded artifact subprocess {phase}: {child:?}"
+        );
     }
+    #[cfg(windows)]
+    session.retire().unwrap();
 }
 
 #[test]
@@ -265,6 +279,19 @@ fn durable_result_process() {
     let directory = std::env::var_os("ZEPHIUM_ARTIFACT_TEST_DIRECTORY").unwrap();
     let phase = std::env::var("ZEPHIUM_ARTIFACT_TEST_PHASE").unwrap();
     assert!(matches!(phase.as_str(), "publish" | "read"));
+    #[cfg(windows)]
+    let store = Arc::new(
+        zephium_store::SqliteStore::open_with_windows_work_storage(
+            std::path::Path::new(&directory),
+            zephium_store::WindowsWorkStorage::for_application(
+                "app.zephium.webext-qa",
+                Some(&std::env::var("ZEPHIUM_ARTIFACT_TEST_WORK_SESSION").unwrap()),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    #[cfg(not(windows))]
     let store =
         Arc::new(zephium_store::SqliteStore::open(std::path::Path::new(&directory)).unwrap());
     if phase == "publish" {

@@ -8,6 +8,12 @@ pub const WIDTH: f64 = 680.0;
 pub const SHAPE_INSET: f64 = 40.0;
 /// The field alone.
 pub const RESTING_HEIGHT: f64 = 56.0;
+// The ordinary three-row home fits at first reveal; subsequent layouts use content height.
+pub const INITIAL_HEIGHT: f64 = if cfg!(target_os = "windows") {
+    250.0
+} else {
+    RESTING_HEIGHT
+};
 pub const MAX_HEIGHT: f64 = 600.0;
 const MARGIN: f64 = 24.0;
 /// Where the top edge sits, as a share of the work area's height. High

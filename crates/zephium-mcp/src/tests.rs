@@ -99,15 +99,24 @@ async fn an_endless_line_fails_the_stream() {
 
 #[test]
 fn programs_resolve_on_the_given_path() {
+    let executable = std::env::current_exe().unwrap();
+    let directory = executable.parent().unwrap();
+    let path = std::env::join_paths([directory]).unwrap();
+    let name = executable.file_name().unwrap().to_str().unwrap();
     assert_eq!(
-        program_path("sh", "/usr/bin:/bin"),
-        Some(PathBuf::from("/bin/sh"))
+        program_path(name, path.to_str().unwrap()),
+        Some(executable.clone())
     );
-    assert_eq!(program_path("/bin/sh", ""), Some(PathBuf::from("/bin/sh")));
-    assert_eq!(program_path("./sh", "/bin"), None);
-    assert_eq!(program_path("no-such-program-zephium", "/bin"), None);
+    assert_eq!(
+        program_path(executable.to_str().unwrap(), ""),
+        Some(executable)
+    );
+    assert_eq!(program_path("./program", path.to_str().unwrap()), None);
+    assert_eq!(
+        program_path("no-such-program-zephium", path.to_str().unwrap()),
+        None
+    );
 }
-
 #[tokio::test]
 async fn a_missing_program_is_a_closed_failure() {
     let endpoint = Endpoint::Stdio(StdioServer {

@@ -10,6 +10,13 @@ const PIXEL =
 const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
 test("pictures are let go of, and the webview asked to empty its cache, once the last canvas that drew one leaves", async () => {
+  let settled: (value: boolean) => void = () => {};
+  release.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        settled = resolve;
+      }),
+  );
   const canvas = document.createElement("canvas");
   document.body.append(canvas);
   const action = thumbnail(canvas, { url: PIXEL, width: 4 });
@@ -20,4 +27,10 @@ test("pictures are let go of, and the webview asked to empty its cache, once the
   canvas.remove();
   await wait(4300);
   expect(release).toHaveBeenCalledTimes(1);
+  expect(release).toHaveBeenLastCalledWith(true);
+  document.dispatchEvent(new Event("pointerdown"));
+  expect(release).toHaveBeenLastCalledWith(false);
+  settled(true);
+  await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(3));
+  expect(release).toHaveBeenLastCalledWith(false);
 }, 15_000);

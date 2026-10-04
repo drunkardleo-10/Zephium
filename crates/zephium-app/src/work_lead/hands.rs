@@ -76,6 +76,8 @@ struct Desk {
     /// Services waiting for a question: (site, name).
     waiting: Vec<(String, String)>,
     asking: bool,
+    /// Siblings whose native presence/policy admission is still outstanding.
+    preparing: usize,
     answers: Vec<(String, crate::work_sites::EntryAnswer)>,
     stopped: bool,
 }
@@ -85,7 +87,63 @@ enum EntryTurn {
     Decided(Vec<(String, crate::work_sites::EntryAnswer)>),
     Stopped,
 }
+/// Owns one presence admission until its candidates are published or canceled.
+struct EntryPreparation<'a> {
+    desk: &'a EntryDesk,
+    active: bool,
+}
+impl EntryPreparation<'_> {
+    fn finish(mut self, mine: &[(String, String)]) {
+        if self.active {
+            self.desk.finish_preparation(mine);
+            self.active = false;
+        }
+    }
+}
+impl Drop for EntryPreparation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.desk.finish_preparation(&[]);
+        }
+    }
+}
 impl EntryDesk {
+    fn prepare(&self) -> EntryPreparation<'_> {
+        let mut desk = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let active = match desk.preparing.checked_add(1) {
+            Some(count) if !desk.stopped => {
+                desk.preparing = count;
+                true
+            }
+            _ => {
+                desk.stopped = true;
+                false
+            }
+        };
+        EntryPreparation { desk: self, active }
+    }
+    fn finish_preparation(&self, mine: &[(String, String)]) {
+        let mut desk = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match desk.preparing.checked_sub(1) {
+            Some(count) => desk.preparing = count,
+            None => desk.stopped = true,
+        }
+        for (site, name) in mine {
+            if !desk.answers.iter().any(|(known, _)| known == site)
+                && !desk.waiting.iter().any(|(known, _)| known == site)
+            {
+                desk.waiting.push((site.clone(), name.clone()));
+            }
+        }
+        drop(desk);
+        self.changed.notify_waiters();
+    }
     async fn next(&self, mine: &[(String, String)]) -> EntryTurn {
         loop {
             let changed = self.changed.notified();
@@ -96,11 +154,28 @@ impl EntryDesk {
             }
             if self.lead() {
                 tokio::time::sleep(ENTRY_GATHER).await;
-                let mut desk = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                return EntryTurn::Ask(std::mem::take(&mut desk.waiting));
+                loop {
+                    // Register the wake before checking under the lock. A
+                    // finishing native query cannot be lost between the check
+                    // and this wait, or split one admitted sibling wave.
+                    let changed = self.changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    let wave = {
+                        let mut desk = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if desk.stopped {
+                            return EntryTurn::Stopped;
+                        }
+                        (desk.preparing == 0).then(|| std::mem::take(&mut desk.waiting))
+                    };
+                    if let Some(wave) = wave {
+                        return EntryTurn::Ask(wave);
+                    }
+                    changed.await;
+                }
             }
             changed.await;
         }
@@ -455,6 +530,8 @@ where
         if hosts.is_empty() {
             return None;
         }
+        let desk = &self.browser.entries;
+        let preparing = desk.prepare();
         let undecided = driver
             .undecided_entries(hosts.iter().map(|(site, _)| site.clone()).collect())
             .await;
@@ -463,10 +540,10 @@ where
             .filter(|(site, _)| undecided.contains(site))
             .map(|(site, host)| (site, crate::work_sites::service_name(&host)))
             .collect();
+        preparing.finish(&mine);
         if mine.is_empty() {
             return None;
         }
-        let desk = &self.browser.entries;
         loop {
             match desk.next(&mine).await {
                 EntryTurn::Ask(wave) => {
@@ -1033,6 +1110,78 @@ mod tests {
         assert_eq!(*asked.lock().unwrap(), [3, 1]);
     }
 
+    #[test]
+    fn entry_wave_waits_for_sibling_presence_beyond_the_gather_window() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let desk = EntryDesk::default();
+                let first = vec![("slack.com".into(), "Slack".into())];
+                let second = vec![("linear.app".into(), "Linear".into())];
+                let third = vec![("notion.so".into(), "Notion".into())];
+                let first_query = desk.prepare();
+                let second_query = desk.prepare();
+                let slow_query = desk.prepare();
+                first_query.finish(&first);
+                second_query.finish(&second);
+                let question = desk.next(&first);
+                tokio::pin!(question);
+                assert!(tokio::time::timeout(
+                    ENTRY_GATHER + std::time::Duration::from_millis(20),
+                    &mut question,
+                )
+                .await
+                .is_err());
+                slow_query.finish(&third);
+                let EntryTurn::Ask(wave) = question.await else {
+                    panic!("combined question missing")
+                };
+                assert_eq!(
+                    wave,
+                    [first[0].clone(), second[0].clone(), third[0].clone()]
+                );
+                desk.publish(&wave, Some(crate::work_sites::EntryAnswer::Allow));
+                for mine in [&first, &second, &third] {
+                    let EntryTurn::Decided(answer) = desk.next(mine).await else {
+                        panic!("answer missing")
+                    };
+                    assert_eq!(answer.len(), 1);
+                }
+            });
+    }
+
+    #[test]
+    fn empty_and_canceled_presence_release_the_wave_without_inventing_sites() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let desk = EntryDesk::default();
+                let mine = vec![("slack.com".into(), "Slack".into())];
+                let admitted = desk.prepare();
+                let empty = desk.prepare();
+                let canceled = desk.prepare();
+                admitted.finish(&mine);
+                empty.finish(&[]);
+                let question = desk.next(&mine);
+                tokio::pin!(question);
+                assert!(tokio::time::timeout(
+                    ENTRY_GATHER + std::time::Duration::from_millis(20),
+                    &mut question,
+                )
+                .await
+                .is_err());
+                drop(canceled);
+                let EntryTurn::Ask(wave) = question.await else {
+                    panic!("question stranded")
+                };
+                assert_eq!(wave, mine);
+                assert_eq!(desk.state.lock().unwrap().preparing, 0);
+            });
+    }
     #[test]
     fn a_catalog_items_picture_comes_from_the_page_facts() {
         let facts = "product: London | price: 39.99 USD | image: https://www.lego.com/cdn/a/21034.jpg?width=800 | url: https://www.lego.com/en-us/product/london-21034 ;; product: Paris | url: https://www.lego.com/en-us/product/paris-21064";

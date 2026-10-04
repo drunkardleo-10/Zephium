@@ -7,7 +7,7 @@ use zephium_agent_controller::{
     AgentWorkTask, TerraControllerIds,
 };
 use zephium_agent_provider_transport::{
-    load_macos_probe_openai_credential, AgentProviderTransportConfig,
+    load_probe_openai_credential, AgentProviderTransportConfig,
 };
 use zephium_agent_runtime::AgentRuntimeConfig;
 use zephium_agentic::*;
@@ -74,7 +74,7 @@ pub(super) fn load_parts(
         operations,
         max_model_calls,
     )?;
-    let credential = load_macos_probe_openai_credential().map_err(|_| "credential")?;
+    let credential = load_probe_openai_credential().map_err(|_| "credential")?;
     if std::time::Instant::now() >= deadline {
         return Err("deadline");
     }

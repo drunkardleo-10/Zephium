@@ -167,6 +167,10 @@ impl WorkObservation {
 }
 impl WorkNativeResource {
     pub(super) fn presentation_in_flight(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.frame_in_flight.load(Ordering::Acquire) {
+            return true;
+        }
         self.construction_presentation.is_some()
             || self.human_presentation.is_some()
             || self

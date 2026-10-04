@@ -2009,7 +2009,8 @@ impl Driver {
             .await
             .first()
             .copied()
-            .unwrap_or(false);
+            .flatten()
+            .unwrap_or(true);
         let entry = self.sites.entry(site, present);
         Ok(Ok(match entry {
             Entry::Ask => None,
@@ -2289,7 +2290,7 @@ impl WorkPartDriver {
             .into_iter()
             .zip(present)
             .filter(|(site, present)| {
-                self.0.sites.entry(site, *present) == crate::work_sites::Entry::Ask
+                self.0.sites.entry(site, present.unwrap_or(true)) == crate::work_sites::Entry::Ask
             })
             .map(|(site, _)| site)
             .collect()

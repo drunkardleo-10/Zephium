@@ -69,7 +69,7 @@
   function handleKeydown(event: KeyboardEvent) {
     // The native content stage is suppressed while this browser-owned modal
     // is active. Keep chrome shortcuts from mutating tabs behind it as well.
-    if (consentActive || event.defaultPrevented) return;
+    if (consentActive || event.defaultPrevented || event.isComposing) return;
     const pressed = acceleratorFrom(event, IS_MAC);
     if (pressed === null) return;
     const command = keymap.commandFor(event, IS_MAC, pressed);

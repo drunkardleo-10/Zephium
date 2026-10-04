@@ -9,6 +9,20 @@ use std::time::Instant;
 use zephium_agent_controller::*;
 use zephium_agent_provider_transport::AgentProviderCredential;
 
+fn retain_latest_frame(
+    current: &mut Option<Arc<zephium_agentic::WorkBrowserFrame>>,
+    latest: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
+) {
+    if let Some(latest) = latest {
+        if current
+            .as_ref()
+            .is_none_or(|frame| latest.generation > frame.generation)
+        {
+            *current = Some(latest);
+        }
+    }
+}
+
 /// Fresh trusted successor; contains no retained native owner or old model session.
 pub struct PreparedRetainedContinuation {
     generation: u32,
@@ -970,6 +984,12 @@ impl ProductWork {
                 }
             }
         }
+        // A settled frame can arrive with the revocation acknowledgement.
+        // Save it before polling shutdown can destroy the native page and
+        // clear its engine frame; the handle retains only bounded PNG data.
+        if let Ok(mut projection) = self.signal.projection.lock() {
+            retain_latest_frame(&mut projection.frame, work.latest_frame());
+        }
         let closed = if self.signal.close.load(Ordering::Acquire) {
             work.begin_shutdown();
             match work.poll_shutdown(now) {
@@ -1023,7 +1043,7 @@ impl ProductWork {
         work.start_human_wait(self.deadline, now);
         projection.human = work.human_snapshot();
         projection.human_resume = work.human_resume();
-        projection.frame = work.latest_frame();
+        retain_latest_frame(&mut projection.frame, work.latest_frame());
         #[cfg(feature = "work-execution-probe")]
         if work.phase() == AdmissionPhase::Terminal
             && projection.snapshot.phase != RetainedWorkPhase::Terminal
@@ -1122,5 +1142,29 @@ impl Drop for ProductWork {
         if self.prepared.is_some() {
             self.refuse(RetainedRefusal::Discarded, RetainedLaneFacts::default());
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn frame(generation: u64) -> Arc<zephium_agentic::WorkBrowserFrame> {
+        Arc::new(zephium_agentic::WorkBrowserFrame {
+            generation,
+            width: 1,
+            height: 1,
+            png: Arc::new(vec![generation as u8]),
+        })
+    }
+
+    #[test]
+    fn final_native_frame_survives_engine_resource_destruction() {
+        let mut projected = Some(frame(1));
+        retain_latest_frame(&mut projected, Some(frame(2)));
+        retain_latest_frame(&mut projected, None);
+        assert_eq!(projected.as_ref().unwrap().generation, 2);
+        retain_latest_frame(&mut projected, Some(frame(1)));
+        assert_eq!(projected.as_ref().unwrap().generation, 2);
     }
 }

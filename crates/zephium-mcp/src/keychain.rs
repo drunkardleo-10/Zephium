@@ -49,7 +49,30 @@ impl SecretVault for SystemVault {
 }
 
 fn service(profile: &str, server: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let encode =
+            |value: &str| -> String { value.bytes().map(|byte| format!("{byte:02x}")).collect() };
+        format!(
+            "app.zephium.connection.{}.{}",
+            encode(profile),
+            encode(server)
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
     format!("app.zephium.connection.{profile}.{server}")
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_targets {
+    use super::service;
+
+    #[test]
+    fn profile_server_identity_is_unambiguous_and_case_preserving() {
+        assert_ne!(service("a.b", "c"), service("a", "b.c"));
+        assert_ne!(service("Profile", "server"), service("profile", "server"));
+        assert_ne!(service("profile", "Server"), service("profile", "server"));
+    }
 }
 
 /// Reads one secret. Blocking.
@@ -182,7 +205,11 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+#[path = "keychain_windows.rs"]
+mod platform;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
     use super::KeychainError;
     pub(super) fn read(_: &str, _: &str) -> Result<String, KeychainError> {

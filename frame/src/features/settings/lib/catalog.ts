@@ -431,10 +431,22 @@ export const fields = {
     initial: "",
   },
   "work.decisions": {
-    section: "work",
+    section: "ai",
     label: m.settings_decisions,
     description: m.settings_decisions_desc,
     initial: "recommended",
+  },
+  "work.decisions.key": {
+    section: "ai",
+    label: m.ai_jev_key_title,
+    description: m.ai_jev_key_desc,
+    initial: "",
+  },
+  "about.diagnostics": {
+    section: "about",
+    label: m.pref_about_diagnostics,
+    description: m.pref_about_diagnostics_help,
+    initial: "",
   },
   "about.reset": {
     section: "about",

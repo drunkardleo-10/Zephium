@@ -286,7 +286,6 @@ impl EngineHost {
         // URL drift closes authority, but cannot erase a recipe already handed
         // to the page. Only its exact runtime receiver may opt into this drain;
         // ordinary health loss, document replacement and controls still stop it.
-        #[cfg(target_os = "macos")]
         let drain = work_browser_monotonic_now()
             .is_some_and(|now| guard.action_drain_current(&action.lease, action.attempt, now))
             && !self.erasure_tombstones.contains(&resource.profile())
@@ -304,8 +303,6 @@ impl EngineHost {
                         semantic.revoked_settling_action(action.attempt),
                     )
                 });
-        #[cfg(not(target_os = "macos"))]
-        let drain = false;
         let expired = Instant::now() >= action.deadline;
         let present = current
             && !expired
@@ -319,7 +316,6 @@ impl EngineHost {
         let Some(action) = resource.action.as_ref() else {
             return;
         };
-        #[cfg(target_os = "macos")]
         if expired && action.dispatched && action.terminal.is_none() {
             if let Some(semantic) = resource.view.as_ref().and_then(|view| view.semantic()) {
                 semantic.timeout_action(action.attempt);
@@ -386,7 +382,17 @@ impl EngineHost {
                 }
             }
         }
-        if !action.cancelled && !action.authority_revoked && !action.dispatched {
+        let frame_drained = {
+            #[cfg(target_os = "windows")]
+            {
+                !resource.frame_in_flight.load(Ordering::Acquire)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                true
+            }
+        };
+        if !action.cancelled && !action.authority_revoked && !action.dispatched && frame_drained {
             if action.awaiting_presentation && present {
                 if let Some(presentation) = &mut action.presentation {
                     presentation.present();
@@ -610,15 +616,12 @@ impl EngineHost {
             guard.fail();
             return;
         }
-        #[cfg(target_os = "macos")]
         let completed_at = Instant::now();
-        #[cfg(target_os = "macos")]
         let settlement_eligible = resource
             .view
             .as_ref()
             .and_then(|view| view.semantic())
             .is_some_and(|semantic| semantic.settling_action(action.attempt));
-        #[cfg(target_os = "macos")]
         if !action.cancelled && settlement_eligible {
             action.settlement_until =
                 WorkAction::settlement_deadline(completed_at, action.deadline);

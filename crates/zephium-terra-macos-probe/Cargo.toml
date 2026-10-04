@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-build = false
+build = "build.rs"
 
 [features]
 default = []
 decision-eval = ["live-probe", "dep:zephium-agent-model-catalog", "dep:zephium-decision", "zephium-decision/evals"]
-durable-runtime = ["live-probe", "zephium-agentic/probe-harness", "zephium-work-composition/durable-runtime", "zephium-work-composition/retained-lifetime-diagnostic", "dep:zephium-agent-model-catalog"]
+durable-runtime = ["live-probe", "zephium-agentic/probe-harness", "zephium-work-composition/durable-runtime", "zephium-work-composition/retained-lifetime-diagnostic", "dep:zephium-agent-model-catalog", "dep:zephium-private-fs"]
 live-probe = [
     "dep:zephium-app",
     "zephium-agent-controller/probe-harness",
@@ -25,6 +25,11 @@ name = "macos-terra-agentic-probe"
 path = "src/main.rs"
 required-features = ["live-probe"]
 
+[[bin]]
+name = "windows-work-probe"
+path = "src/windows_main.rs"
+required-features = ["durable-runtime"]
+
 [dependencies]
 zephium-agent-model-catalog = { workspace = true, optional = true }
 serde_json.workspace = true
@@ -39,7 +44,15 @@ zephium-store.workspace = true
 zephium-core.workspace = true
 zephium-app = { workspace = true, optional = true }
 zephium-work-composition.workspace = true
-zephium-blocker = { workspace = true, features = ["webkit"] }
+zephium-blocker.workspace = true
 zephium-blocker-service.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+zephium-blocker = { workspace = true, features = ["webkit"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+zephium-blocker = { workspace = true, features = ["runtime"] }
+zephium-private-fs = { workspace = true, optional = true, features = ["windows-work-test-fixtures"] }

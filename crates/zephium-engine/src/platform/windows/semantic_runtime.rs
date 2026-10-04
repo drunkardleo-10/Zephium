@@ -28,16 +28,18 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use windows_core::{IUnknown, Interface as _, HRESULT, HSTRING, PCWSTR, PWSTR};
 use zephium_agentic::{
-    SemanticInvocationId, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
-    SemanticRuntimeResultError, SemanticSnapshot, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
+    SemanticActionAttemptId, SemanticActionRuntimeEvidence, SemanticActionRuntimeFault,
+    SemanticActionRuntimeInvocation, SemanticActionRuntimeResultError, SemanticInvocationId,
+    SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeResultError,
+    SemanticSnapshot, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
 };
 
 use crate::platform::agent_semantic_cdp_protocol::{
-    decode_empty_success, decode_invocation_response, decode_root_frame,
+    decode_action_response, decode_empty_success, decode_invocation_response, decode_root_frame,
     decode_runtime_install_response, get_frame_tree_command, install_runtime_in_context_command,
-    invoke_runtime_command, runtime_disable_command, runtime_enable_command,
-    FixedSemanticCdpCommand, SemanticCdpInvocationError, SemanticContextDiscovery,
-    SemanticExecutionContext, SemanticWorldName, MAX_CONTEXT_EVENT_BYTES,
+    invoke_runtime_command, next_action_command, prepare_action_command, runtime_disable_command,
+    runtime_enable_command, ActionCdpReply, FixedSemanticCdpCommand, SemanticCdpInvocationError,
+    SemanticContextDiscovery, SemanticExecutionContext, SemanticWorldName, MAX_CONTEXT_EVENT_BYTES,
 };
 
 const MAX_CLEANUP_DISABLE_ATTEMPTS: u8 = 1;
@@ -55,6 +57,55 @@ fn next_world_name() -> Result<SemanticWorldName, ()> {
 
 type SemanticCompletion = Box<dyn FnOnce(Result<SemanticSnapshot, SemanticRuntimePortFailure>)>;
 type NativeCompletion = Box<dyn FnOnce(Result<String, NativeCdpFailure>)>;
+type ActionCompletion =
+    Box<dyn FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentSemanticRuntimeDispatchError {
+    NotReady,
+    Busy,
+    Exhausted,
+    Retired,
+}
+
+#[derive(Debug)]
+pub(crate) enum AgentSemanticActionRuntimeFailure {
+    Dispatch(AgentSemanticRuntimeDispatchError),
+    Cancelled,
+    DocumentReplaced,
+    RendererLost,
+    TimedOut,
+    Retired,
+    Transport,
+    Result(SemanticActionRuntimeResultError),
+}
+
+fn requires_passive_action_settlement(
+    failure: Option<&AgentSemanticActionRuntimeFailure>,
+    revoked: bool,
+) -> bool {
+    // This is lifetime debt for an uncertain dispatched effect, not a delay
+    // before independent verification of a successful native terminal.
+    revoked
+        || matches!(
+            failure,
+            Some(AgentSemanticActionRuntimeFailure::Result(
+                SemanticActionRuntimeResultError::Runtime(fault)
+            )) if super::semantic_action::map_runtime_fault(*fault)
+                == zephium_agentic::SemanticActionNativeFailure::AppliedUnverified
+        )
+}
+
+struct PendingAction {
+    invocation: SemanticActionRuntimeInvocation,
+    document_generation: u64,
+    context: SemanticExecutionContext,
+    completion: ActionCompletion,
+    authority: Option<Rc<dyn Fn() -> bool>>,
+    index: u32,
+    handed_off: bool,
+    revoked: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeCdpFailure {
@@ -80,6 +131,9 @@ enum CommandStage {
     InstallRuntime,
     Invoke,
     CleanupRuntimeDisable,
+    ActionPrepare,
+    ActionNext,
+    ActionInput,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,6 +154,9 @@ struct RuntimeState {
     world: SemanticWorldName,
     completed_invocations: u16,
     pending: Option<PendingInvocation>,
+    pending_action: Option<PendingAction>,
+    settling_action: Option<SemanticActionAttemptId>,
+    settling_revoked: bool,
     in_flight: Option<InFlightCommand>,
     discovery: Option<SemanticContextDiscovery>,
     installed_context: Option<SemanticExecutionContext>,
@@ -117,6 +174,9 @@ impl RuntimeState {
             world,
             completed_invocations: 0,
             pending: None,
+            pending_action: None,
+            settling_action: None,
+            settling_revoked: false,
             in_flight: None,
             discovery: None,
             installed_context: None,
@@ -140,6 +200,21 @@ pub(crate) struct AgentSemanticRuntimePlan {
 }
 
 impl AgentSemanticRuntimePlan {
+    pub(crate) fn revoke_document_authority(&self) {
+        if let Some(native) = self.native() {
+            native.invalidate(
+                DocumentPhase::Failed,
+                SemanticRuntimePortFailure::DocumentReplaced,
+            );
+        } else if let Ok(mut state) = self.shared.state.try_borrow_mut() {
+            if state.phase != DocumentPhase::Retired {
+                state.phase = DocumentPhase::Failed;
+            }
+        }
+    }
+    pub(crate) fn begin_document_load(&self) -> Result<(), ()> {
+        self.native().ok_or(())?.begin_document_load()
+    }
     pub(crate) fn prepare() -> Result<Self, ()> {
         let world = next_world_name()?;
         Ok(Self {
@@ -247,6 +322,56 @@ pub(crate) struct AgentSemanticRuntimeController {
 }
 
 impl AgentSemanticRuntimeController {
+    pub(crate) fn revoke_document_authority(&self) {
+        self.native.invalidate(
+            DocumentPhase::Failed,
+            SemanticRuntimePortFailure::DocumentReplaced,
+        );
+    }
+    pub(crate) fn dispatch_action_guarded(
+        &self,
+        invocation: SemanticActionRuntimeInvocation,
+        authority: Option<Box<dyn Fn() -> bool>>,
+        completion: impl FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)
+            + 'static,
+    ) -> Result<(), AgentSemanticRuntimeDispatchError> {
+        self.native
+            .dispatch_action(invocation, authority, Box::new(completion))
+    }
+
+    pub(crate) fn draining_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.native.shared.state.try_borrow().is_ok_and(|state| {
+            state.pending_action.as_ref().is_some_and(|pending| {
+                pending.invocation.attempt() == attempt && pending.handed_off && pending.revoked
+            })
+        })
+    }
+    pub(crate) fn settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.native.shared.state.try_borrow().is_ok_and(|state| {
+            state.pending_action.is_none() && state.settling_action == Some(attempt)
+        })
+    }
+    pub(crate) fn revoked_settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        self.settling_action(attempt)
+            && self
+                .native
+                .shared
+                .state
+                .try_borrow()
+                .is_ok_and(|state| state.settling_revoked)
+    }
+    pub(crate) fn timeout_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        let matches = self.native.shared.state.try_borrow().is_ok_and(|state| {
+            state
+                .pending_action
+                .as_ref()
+                .is_some_and(|pending| pending.invocation.attempt() == attempt)
+        });
+        if matches {
+            self.native.revoke_action();
+        }
+        matches
+    }
     pub(crate) fn dispatch(
         &self,
         invocation: SemanticRuntimeInvocation,
@@ -338,6 +463,304 @@ struct NativeRuntime {
 }
 
 impl NativeRuntime {
+    fn dispatch_action(
+        self: &Rc<Self>,
+        invocation: SemanticActionRuntimeInvocation,
+        authority: Option<Box<dyn Fn() -> bool>>,
+        completion: ActionCompletion,
+    ) -> Result<(), AgentSemanticRuntimeDispatchError> {
+        let refusal = self.shared.state.try_borrow().map_or(
+            Some(AgentSemanticRuntimeDispatchError::Busy),
+            |state| {
+                if state.phase == DocumentPhase::Retired {
+                    Some(AgentSemanticRuntimeDispatchError::Retired)
+                } else if !state.bound
+                    || state.phase != DocumentPhase::Ready
+                    || state.installed_context.is_none()
+                {
+                    Some(AgentSemanticRuntimeDispatchError::NotReady)
+                } else if state.pending.is_some()
+                    || state.pending_action.is_some()
+                    || state.in_flight.is_some()
+                {
+                    Some(AgentSemanticRuntimeDispatchError::Busy)
+                } else if state.completed_invocations >= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS {
+                    Some(AgentSemanticRuntimeDispatchError::Exhausted)
+                } else {
+                    None
+                }
+            },
+        );
+        if let Some(error) = refusal {
+            self.invoke_action_completion(
+                completion,
+                Err(AgentSemanticActionRuntimeFailure::Dispatch(error)),
+            );
+            return Err(error);
+        }
+        if authority
+            .as_ref()
+            .is_some_and(|guard| !self.guard_permitted(guard.as_ref()))
+        {
+            self.invoke_action_completion(
+                completion,
+                Err(AgentSemanticActionRuntimeFailure::Cancelled),
+            );
+            return Ok(());
+        }
+        let installed = self
+            .shared
+            .state
+            .try_borrow()
+            .ok()
+            .and_then(|state| state.installed_context.clone());
+        let Some(context) = installed else {
+            self.invoke_action_completion(
+                completion,
+                Err(AgentSemanticActionRuntimeFailure::Transport),
+            );
+            return Err(AgentSemanticRuntimeDispatchError::NotReady);
+        };
+        let command = prepare_action_command(&context, &invocation);
+        let Ok(command) = command else {
+            self.invoke_action_completion(
+                completion,
+                Err(AgentSemanticActionRuntimeFailure::Transport),
+            );
+            return Ok(());
+        };
+        let generation = {
+            let Ok(mut state) = self.shared.state.try_borrow_mut() else {
+                self.invoke_action_completion(
+                    completion,
+                    Err(AgentSemanticActionRuntimeFailure::Transport),
+                );
+                return Err(AgentSemanticRuntimeDispatchError::Busy);
+            };
+            state.settling_action = None;
+            state.settling_revoked = false;
+            let document_generation = state.document_generation;
+            state.pending_action = Some(PendingAction {
+                invocation,
+                document_generation,
+                context,
+                completion,
+                authority: authority.map(Rc::from),
+                index: 0,
+                handed_off: false,
+                revoked: false,
+            });
+            state.document_generation
+        };
+        if self
+            .dispatch_action_native(generation, CommandStage::ActionPrepare, command)
+            .is_err()
+        {
+            self.finish_action(Err(AgentSemanticActionRuntimeFailure::Transport));
+        }
+        Ok(())
+    }
+
+    fn dispatch_action_native(
+        self: &Rc<Self>,
+        generation: u64,
+        stage: CommandStage,
+        command: FixedSemanticCdpCommand,
+    ) -> Result<(), ()> {
+        let permitted = self.action_permitted();
+        if stage == CommandStage::ActionInput && !permitted {
+            self.revoke_action();
+            return self.dispatch_action_next();
+        }
+        if stage == CommandStage::ActionPrepare && !permitted {
+            self.finish_action(Err(AgentSemanticActionRuntimeFailure::Cancelled));
+            return Ok(());
+        }
+        if let Ok(mut state) = self.shared.state.try_borrow_mut() {
+            if let Some(pending) = state.pending_action.as_mut() {
+                pending.handed_off = true;
+            }
+        }
+        self.dispatch_command(generation, stage, command)
+    }
+
+    fn guard_permitted(&self, guard: &dyn Fn() -> bool) -> bool {
+        match std::panic::catch_unwind(AssertUnwindSafe(guard)) {
+            Ok(permitted) => permitted,
+            Err(_) => {
+                self.callback_panicked();
+                false
+            }
+        }
+    }
+
+    fn action_permitted(&self) -> bool {
+        let Some((attempt, authority)) = self.shared.state.try_borrow().ok().and_then(|state| {
+            let pending = state.pending_action.as_ref()?;
+            (!pending.revoked && state.phase == DocumentPhase::Ready)
+                .then(|| (pending.invocation.attempt(), pending.authority.clone()))
+        }) else {
+            return false;
+        };
+        // External authority can re-enter the native host. Never hold its state
+        // borrow while invoking it, and rejoin the same attempt after it returns.
+        if authority
+            .as_ref()
+            .is_some_and(|guard| !self.guard_permitted(guard.as_ref()))
+        {
+            return false;
+        }
+        self.shared.state.try_borrow().is_ok_and(|state| {
+            state.phase == DocumentPhase::Ready
+                && state.pending_action.as_ref().is_some_and(|pending| {
+                    !pending.revoked && pending.invocation.attempt() == attempt
+                })
+        })
+    }
+
+    fn revoke_action(&self) {
+        if let Ok(mut state) = self.shared.state.try_borrow_mut() {
+            if let Some(pending) = state.pending_action.as_mut() {
+                pending.revoked = true;
+            }
+            if state.settling_action.is_some() {
+                state.settling_revoked = true;
+            }
+        }
+    }
+
+    fn dispatch_action_next(self: &Rc<Self>) -> Result<(), ()> {
+        if !self.action_permitted() {
+            self.revoke_action();
+        }
+        let command = self.shared.state.try_borrow().ok().and_then(|state| {
+            let pending = state.pending_action.as_ref()?;
+            let abort = pending.revoked;
+            next_action_command(&pending.context, &pending.invocation, pending.index, abort)
+                .ok()
+                .map(|command| (state.document_generation, command))
+        });
+        let Some((generation, command)) = command else {
+            return Err(());
+        };
+        self.dispatch_action_native(generation, CommandStage::ActionNext, command)
+    }
+
+    fn handle_action_stage(
+        self: &Rc<Self>,
+        stage: CommandStage,
+        outcome: Result<String, NativeCdpFailure>,
+    ) {
+        let response = match outcome {
+            Ok(response) => response,
+            Err(_) => {
+                self.finish_action(Err(AgentSemanticActionRuntimeFailure::Result(
+                    SemanticActionRuntimeResultError::Runtime(
+                        SemanticActionRuntimeFault::AppliedUnverified,
+                    ),
+                )));
+                return;
+            }
+        };
+        if stage == CommandStage::ActionInput {
+            if decode_empty_success(&response).is_err() || self.dispatch_action_next().is_err() {
+                self.finish_action(Err(AgentSemanticActionRuntimeFailure::Result(
+                    SemanticActionRuntimeResultError::Runtime(
+                        SemanticActionRuntimeFault::AppliedUnverified,
+                    ),
+                )));
+            }
+            return;
+        }
+        let decoded = self.shared.state.try_borrow().ok().and_then(|state| {
+            state.pending_action.as_ref().map(|pending| {
+                decode_action_response(&pending.invocation, pending.index, &response)
+            })
+        });
+        match decoded {
+            Some(Ok(ActionCdpReply::Terminal(outcome))) => {
+                self.finish_action(outcome.map_err(AgentSemanticActionRuntimeFailure::Result))
+            }
+            Some(Ok(ActionCdpReply::Input(command))) => {
+                let generation = {
+                    let Ok(mut state) = self.shared.state.try_borrow_mut() else {
+                        self.invariant_failed();
+                        return;
+                    };
+                    if let Some(pending) = state.pending_action.as_mut() {
+                        pending.index = pending.index.saturating_add(1);
+                    }
+                    state.document_generation
+                };
+                if self
+                    .dispatch_action_native(generation, CommandStage::ActionInput, command)
+                    .is_err()
+                {
+                    self.finish_action(Err(AgentSemanticActionRuntimeFailure::Result(
+                        SemanticActionRuntimeResultError::Runtime(
+                            SemanticActionRuntimeFault::AppliedUnverified,
+                        ),
+                    )));
+                }
+            }
+            _ => self.finish_action(Err(AgentSemanticActionRuntimeFailure::Result(
+                SemanticActionRuntimeResultError::Runtime(
+                    SemanticActionRuntimeFault::AppliedUnverified,
+                ),
+            ))),
+        }
+    }
+
+    fn finish_action(
+        &self,
+        mut outcome: Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>,
+    ) {
+        let pending = {
+            let Ok(mut state) = self.shared.state.try_borrow_mut() else {
+                self.invariant_failed();
+                return;
+            };
+            let pending = state.pending_action.take();
+            if let Some(pending) = pending.as_ref() {
+                if state.document_generation == pending.document_generation {
+                    state.completed_invocations = state.completed_invocations.saturating_add(1);
+                }
+                if pending.revoked {
+                    if state.phase == DocumentPhase::Ready
+                        && state.document_generation == pending.document_generation
+                    {
+                        state.phase = DocumentPhase::Failed;
+                    }
+                    // A late successful reply cannot restore revoked action authority.
+                    // Native input already handed off is indeterminate and cannot retry.
+                    outcome = Err(AgentSemanticActionRuntimeFailure::Result(
+                        SemanticActionRuntimeResultError::Runtime(
+                            SemanticActionRuntimeFault::AppliedUnverified,
+                        ),
+                    ));
+                }
+                state.settling_action =
+                    requires_passive_action_settlement(outcome.as_ref().err(), pending.revoked)
+                        .then_some(pending.invocation.attempt());
+                state.settling_revoked = pending.revoked && state.settling_action.is_some();
+            }
+            pending
+        };
+        if let Some(pending) = pending {
+            self.invoke_action_completion(pending.completion, outcome);
+        }
+    }
+
+    fn invoke_action_completion(
+        &self,
+        completion: ActionCompletion,
+        outcome: Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>,
+    ) {
+        if std::panic::catch_unwind(AssertUnwindSafe(|| completion(outcome))).is_err() {
+            self.callback_panicked();
+        }
+    }
+
     fn dispatch(
         self: &Rc<Self>,
         invocation: SemanticRuntimeInvocation,
@@ -360,7 +783,10 @@ impl NativeRuntime {
                 Some(SemanticRuntimePortFailure::Retired)
             } else if state.phase == DocumentPhase::Failed {
                 Some(SemanticRuntimePortFailure::Transport)
-            } else if state.pending.is_some() || state.in_flight.is_some() {
+            } else if state.pending.is_some()
+                || state.pending_action.is_some()
+                || state.in_flight.is_some()
+            {
                 Some(SemanticRuntimePortFailure::ResourceExhausted)
             } else if state.completed_invocations >= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS {
                 Some(SemanticRuntimePortFailure::InvocationLimit)
@@ -383,6 +809,8 @@ impl NativeRuntime {
                 }
             };
             let generation = state.document_generation;
+            state.settling_action = None;
+            state.settling_revoked = false;
             state.pending = Some(PendingInvocation {
                 invocation,
                 completion,
@@ -426,6 +854,7 @@ impl NativeRuntime {
     }
 
     fn begin_document_load(self: &Rc<Self>) -> Result<(), ()> {
+        self.revoke_action();
         {
             let state = self.shared.state.try_borrow().map_err(|_| ())?;
             if !state.bound || state.phase == DocumentPhase::Retired {
@@ -511,10 +940,19 @@ impl NativeRuntime {
             state.context_events_enabled = false;
             state.cleanup_disable_pending = false;
             state.cleanup_disable_attempts = 0;
+            state.settling_action = None;
+            state.settling_revoked = false;
             let completion = state.pending.take().map(|pending| pending.completion);
             let contradictory_retirement = already_retired && completion.is_some();
             (completion, contradictory_retirement)
         };
+        // Publish retirement before invoking external action completion. A
+        // reentrant callback cannot admit a replacement action during close.
+        self.finish_action(Err(AgentSemanticActionRuntimeFailure::Retired));
+        if let Ok(mut state) = self.shared.state.try_borrow_mut() {
+            state.settling_action = None;
+            state.settling_revoked = false;
+        }
         if let Some(completion) = completion {
             self.invoke_completion(completion, Err(SemanticRuntimePortFailure::Retired));
         }
@@ -526,7 +964,7 @@ impl NativeRuntime {
 
     fn pending_for_audit(&self) -> Option<bool> {
         let state = self.shared.state.try_borrow().ok()?;
-        let pending = state.pending.is_some();
+        let pending = state.pending.is_some() || state.pending_action.is_some();
         let active_command = state.in_flight.is_some();
         let waiting_for_context =
             pending && !active_command && state.context_events_enabled && state.discovery.is_some();
@@ -545,13 +983,15 @@ impl NativeRuntime {
             && (!matches!(
                 state.phase,
                 DocumentPhase::RendererLost | DocumentPhase::Failed | DocumentPhase::Retired
-            ) || (!pending && state.discovery.is_none()));
+            ) || ((state.pending.is_none() || state.pending_action.is_some())
+                && state.discovery.is_none()));
         valid.then_some(pending)
     }
 
     fn work_drained_for_audit(&self) -> Option<bool> {
         let state = self.shared.state.try_borrow().ok()?;
         let drained = state.pending.is_none()
+            && state.pending_action.is_none()
             && state.in_flight.is_none()
             && state.discovery.is_none()
             && !state.context_events_enabled
@@ -576,6 +1016,7 @@ impl NativeRuntime {
     }
 
     fn invalidate(self: &Rc<Self>, phase: DocumentPhase, failure: SemanticRuntimePortFailure) {
+        self.revoke_action();
         let completion = {
             let Ok(mut state) = self.shared.state.try_borrow_mut() else {
                 self.invariant_failed();
@@ -668,11 +1109,19 @@ impl NativeRuntime {
             state.in_flight = None;
             state.document_generation == document_generation
                 && state.phase == DocumentPhase::Ready
-                && state.pending.is_some()
+                && (state.pending.is_some() || state.pending_action.is_some())
         };
 
         if stage == CommandStage::CleanupRuntimeDisable {
             self.handle_disable_completion(outcome, true);
+            return;
+        }
+
+        if matches!(
+            stage,
+            CommandStage::ActionPrepare | CommandStage::ActionNext | CommandStage::ActionInput
+        ) {
+            self.handle_action_stage(stage, outcome);
             return;
         }
 
@@ -827,6 +1276,9 @@ impl NativeRuntime {
             CommandStage::CleanupRuntimeDisable => {
                 self.invariant_failed();
             }
+            CommandStage::ActionPrepare | CommandStage::ActionNext | CommandStage::ActionInput => {
+                self.invariant_failed()
+            }
         }
     }
 
@@ -860,6 +1312,7 @@ impl NativeRuntime {
             | CommandStage::CreateIsolatedWorld
             | CommandStage::InstallRuntime
             | CommandStage::Invoke => {}
+            CommandStage::ActionPrepare | CommandStage::ActionNext | CommandStage::ActionInput => {}
         }
         self.maybe_dispatch_cleanup_disable();
     }
@@ -1246,4 +1699,44 @@ fn borrowed_pcwstr_bounded(
         length += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod action_settlement_tests {
+    use super::*;
+
+    #[test]
+    fn successful_native_action_delivers_without_uncertain_effect_hold() {
+        assert!(!requires_passive_action_settlement(None, false));
+        for failure in [
+            AgentSemanticActionRuntimeFailure::Transport,
+            AgentSemanticActionRuntimeFailure::TimedOut,
+            AgentSemanticActionRuntimeFailure::Result(SemanticActionRuntimeResultError::Runtime(
+                SemanticActionRuntimeFault::TargetChanged,
+            )),
+        ] {
+            assert!(!requires_passive_action_settlement(Some(&failure), false));
+        }
+    }
+
+    #[test]
+    fn uncertain_or_revoked_effect_preserves_passive_lifetime_without_authority() {
+        for fault in [
+            SemanticActionRuntimeFault::AppliedUnverified,
+            SemanticActionRuntimeFault::AppliedUnverifiedBeforeInputRevalidation,
+            SemanticActionRuntimeFault::AppliedUnverifiedRelayDeadline,
+            SemanticActionRuntimeFault::AppliedUnverifiedPostcondition,
+            SemanticActionRuntimeFault::AppliedUnverifiedLogicalEditor,
+        ] {
+            let failure = AgentSemanticActionRuntimeFailure::Result(
+                SemanticActionRuntimeResultError::Runtime(fault),
+            );
+            assert!(requires_passive_action_settlement(Some(&failure), false));
+        }
+        assert!(requires_passive_action_settlement(None, true));
+        assert!(requires_passive_action_settlement(
+            Some(&AgentSemanticActionRuntimeFailure::Transport),
+            true,
+        ));
+    }
 }

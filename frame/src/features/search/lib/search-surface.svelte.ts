@@ -295,7 +295,13 @@ export function createSearchSurface(options: {
 
   function changed(value: string) {
     captured = null;
-    deleting = value.length < displayed.length && displayed.startsWith(value);
+    // Replacing the selected suffix with another typed character shortens
+    // the displayed value too. Only a value that did not extend the typed
+    // prefix is a deletion; otherwise completion would disappear every other key.
+    deleting =
+      value.length <= query.length &&
+      value.length < displayed.length &&
+      displayed.startsWith(value);
     displayed = value;
     query = value;
     applied = null;
@@ -387,6 +393,7 @@ export function createSearchSurface(options: {
    *  next presentation starts fresh rather than resuming. */
   let fulfilled = false;
   let expiry: ReturnType<typeof setTimeout> | undefined;
+  let expiresAt = 0;
   /** The last answer to an empty field, shown again when the launcher resets
    *  so its home list is complete on the frame it appears. */
   let home: SearchResult[] = [];
@@ -394,6 +401,8 @@ export function createSearchSurface(options: {
   /** Binds the launcher to one presentation, resuming whatever it was left
    *  showing unless that has since expired. */
   function begin(next: PanelState) {
+    if (expiresAt && Date.now() >= expiresAt) toHome();
+    expiresAt = 0;
     clearTimeout(expiry);
     context = next;
     if (listening) void initialize();
@@ -415,7 +424,10 @@ export function createSearchSurface(options: {
     notice = null;
     clearTimeout(expiry);
     if (fulfilled || !query) toHome();
-    else expiry = setTimeout(toHome, RESUME_MS);
+    else {
+      expiresAt = Date.now() + RESUME_MS;
+      expiry = setTimeout(toHome, RESUME_MS);
+    }
   }
 
   function toHome() {

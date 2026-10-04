@@ -43,7 +43,7 @@ native-agentic-public-resource-probe = ["native-agentic-work-resource-probe"]
 native-agentic-work-lifetime-diagnostic = ["agentic-browser"]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
-agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]
+agentic-browser = ["dep:zephium-agentic", "dep:zeroize", "dep:image"]
 agentic-browser-qa = ["agentic-browser", "objc2-web-kit/WKHTTPCookieStore"]
 
 [[bin]]
@@ -81,6 +81,11 @@ name = "windows-agentic-semantic-probe"
 path = "src/bin/windows_agentic_semantic_probe.rs"
 required-features = ["native-agentic-semantic-probe"]
 
+[[bin]]
+name = "windows-cookie-persistence-control"
+path = "src/bin/windows_cookie_persistence_control.rs"
+required-features = ["native-agentic-semantic-probe"]
+
 [dependencies]
 zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
@@ -98,11 +103,14 @@ tempfile.workspace = true
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 wry = { workspace = true, features = ["windows-cleanup-qualification"] }
+windows = { version = "0.61", features = ["Win32_Graphics_DirectComposition", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Dxgi_Common"] }
 base64 = "0.22"
 zephium-blocker = { workspace = true, features = ["runtime"] }
 flate2 = "=1.1.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
+base64 = "0.22"
 zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 raw-window-handle.workspace = true
 webview2-com = "0.38"

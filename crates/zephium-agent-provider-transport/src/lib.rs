@@ -35,6 +35,14 @@ pub use zephium_agentic::{
     MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES, MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
 };
 
+#[cfg(feature = "probe-harness")]
+pub use zephium_agentic::load_probe_openai_credential;
+#[cfg(feature = "provider-transport")]
+pub use zephium_agentic::{
+    load_development_openai_credential, load_development_typesafe_credential,
+    AgentProviderVaultError,
+};
+
 /// Diagnostic endpoint validation and construction contracts.
 ///
 /// These exports exist only for the release-forbidden probe harness and are

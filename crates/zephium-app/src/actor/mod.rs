@@ -547,6 +547,9 @@ impl ShutdownRequest {
         if self.workers.join_until(deadline) {
             outcome
         } else {
+            crate::diagnostic!(
+                "shutdown: shell, timer and storage-reader worker joins were not proven before the shared deadline"
+            );
             // A clean native/store acknowledgement is insufficient when the
             // owning shell or timer thread did not terminate under the same
             // process-boundary budget.

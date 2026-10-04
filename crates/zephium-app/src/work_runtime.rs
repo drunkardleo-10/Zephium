@@ -57,6 +57,7 @@ pub struct WorkNodeAttempt {
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
     pages: Pages,
+    page_wake: Arc<PageProjectionWake>,
     handle: crate::Handle,
     profile: ProfileId,
     work: WorkId,
@@ -115,8 +116,11 @@ impl WorkNodeAttempt {
         WorkAttemptObserver {
             attempt: self.attempt,
             execution: self.execution,
+            profile: self.profile,
+            work: self.work,
             progress: Arc::downgrade(&self.progress),
             pages: Arc::downgrade(&self.pages),
+            page_wake: self.page_wake.clone(),
         }
     }
     pub fn record_activity(&self, activity: zephium_ipc::work::WorkActivityV1) {
@@ -132,6 +136,7 @@ impl WorkNodeAttempt {
             owner: self.owner,
             progress: self.progress.clone(),
             pages: self.pages.clone(),
+            page_wake: self.page_wake.clone(),
             handle: self.handle.clone(),
             profile: self.profile,
             work: self.work,
@@ -383,14 +388,106 @@ pub struct WorkPageFrame {
     pub frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
 }
 type Pages = Arc<Mutex<BTreeMap<WorkStepId, WorkPageFrame>>>;
+
+fn publish_page_frame(
+    pages: &Pages,
+    wake: &PageProjectionWake,
+    step: WorkStepId,
+    url: &str,
+    frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
+) {
+    let url: String = url.chars().take(2048).collect();
+    let changed = if let Ok(mut pages) = pages.lock() {
+        if pages.len() >= 16 && !pages.contains_key(&step) {
+            let Some(settled) = pages.values().find(|page| !page.live).map(|page| page.step) else {
+                return;
+            };
+            pages.remove(&settled);
+        }
+        // Existing one-second activity sampling handles ordinary replacements.
+        // Full application invalidation is bounded to the first usable picture
+        // and settlement, independent of how many native frames arrive.
+        let changed = frame.is_some() && pages.get(&step).is_none_or(|prior| prior.frame.is_none());
+        pages.insert(
+            step,
+            WorkPageFrame {
+                step,
+                url,
+                live: true,
+                frame,
+            },
+        );
+        changed
+    } else {
+        false
+    };
+    // Never notify while holding the page data lock: consumers can snapshot now.
+    if changed {
+        wake.notify();
+    }
+}
+
+fn settle_page_frame(pages: &Pages, wake: &PageProjectionWake, step: WorkStepId) {
+    let changed = if let Ok(mut pages) = pages.lock() {
+        if let Some(page) = pages.get_mut(&step) {
+            let changed = page.live;
+            page.live = false;
+            changed
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if changed {
+        wake.notify();
+    }
+}
+
+#[derive(Default)]
+struct PageProjectionWake {
+    pending: std::sync::atomic::AtomicBool,
+    waker: Mutex<Option<std::task::Waker>>,
+}
+impl PageProjectionWake {
+    fn notify(&self) {
+        use std::sync::atomic::Ordering;
+        if self.pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let wake = self.waker.lock().ok().and_then(|slot| slot.clone());
+        if let Some(wake) = wake {
+            // Projection notifications do not alter native or execution state.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake.wake()));
+        }
+    }
+    fn consume(&self) {
+        self.pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+    }
+}
 #[derive(Clone)]
 pub struct WorkAttemptObserver {
     attempt: WorkAttemptId,
     execution: WorkExecutionId,
+    profile: ProfileId,
+    work: WorkId,
     progress: std::sync::Weak<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
     pages: std::sync::Weak<Mutex<BTreeMap<WorkStepId, WorkPageFrame>>>,
+    page_wake: Arc<PageProjectionWake>,
 }
 impl WorkAttemptObserver {
+    /// Retains only this attempt's bounded page pictures. The consumer must
+    /// bound the number of retained attempts; this owns no execution or browser.
+    pub fn retain_pages(&self) -> Option<WorkPageFrames> {
+        Some(WorkPageFrames {
+            pages: self.pages.upgrade()?,
+            page_wake: self.page_wake.clone(),
+            progress: self.progress.clone(),
+            profile: self.profile,
+            work: self.work,
+        })
+    }
     pub fn attempt(&self) -> WorkAttemptId {
         self.attempt
     }
@@ -414,6 +511,169 @@ impl WorkAttemptObserver {
                     .ok()
                     .map(|pages| pages.values().cloned().collect())
             })
+            .unwrap_or_default()
+    }
+}
+/// A bounded page-data mailbox that survives the producer's final update and
+/// destruction, so a slower UI poll can still consume its last picture.
+pub struct WorkPageFrames {
+    pages: Pages,
+    page_wake: Arc<PageProjectionWake>,
+    progress: std::sync::Weak<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
+    profile: ProfileId,
+    work: WorkId,
+}
+
+#[cfg(test)]
+mod page_mailbox_tests {
+    use super::*;
+
+    struct CountingWake {
+        calls: std::sync::atomic::AtomicUsize,
+        pages: Pages,
+    }
+    impl std::task::Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            assert!(
+                self.pages.try_lock().is_ok(),
+                "notifications must release the producer lock"
+            );
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+    #[test]
+    fn first_picture_and_final_state_wake_without_invalidating_each_frame() {
+        use std::sync::atomic::Ordering;
+        let pages = Arc::new(Mutex::new(BTreeMap::new()));
+        let wake = Arc::new(PageProjectionWake::default());
+        let mailbox = WorkPageFrames {
+            pages: pages.clone(),
+            page_wake: wake.clone(),
+            progress: std::sync::Weak::new(),
+            profile: ProfileId::generate(),
+            work: WorkId::generate(),
+        };
+        let counter = Arc::new(CountingWake {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            pages: pages.clone(),
+        });
+        let step = WorkStepId::generate();
+        let frame = |generation| {
+            Some(Arc::new(zephium_agentic::WorkBrowserFrame {
+                generation,
+                width: 1,
+                height: 1,
+                png: Arc::new(vec![generation as u8]),
+            }))
+        };
+        publish_page_frame(&pages, &wake, step, "https://fixture.invalid/", None);
+        assert!(mailbox.register_projection_waker(counter.clone().into()));
+        assert!(!mailbox.register_projection_waker(counter.clone().into()));
+        assert_eq!(counter.calls.load(Ordering::Acquire), 0);
+        publish_page_frame(&pages, &wake, step, "https://fixture.invalid/", frame(1));
+        for generation in 2..5 {
+            publish_page_frame(
+                &pages,
+                &wake,
+                step,
+                "https://fixture.invalid/",
+                frame(generation),
+            );
+        }
+        assert_eq!(counter.calls.load(Ordering::Acquire), 1);
+        assert_eq!(mailbox.pages()[0].frame.as_ref().unwrap().generation, 4);
+        publish_page_frame(&pages, &wake, step, "https://fixture.invalid/", frame(4));
+        assert_eq!(counter.calls.load(Ordering::Acquire), 1);
+        publish_page_frame(&pages, &wake, step, "https://fixture.invalid/", frame(5));
+        assert_eq!(counter.calls.load(Ordering::Acquire), 1);
+        settle_page_frame(&pages, &wake, step);
+        assert_eq!(counter.calls.load(Ordering::Acquire), 2);
+        settle_page_frame(&pages, &wake, step);
+        assert_eq!(counter.calls.load(Ordering::Acquire), 2);
+        assert_eq!(mailbox.pages()[0].frame.as_ref().unwrap().generation, 5);
+    }
+
+    #[test]
+    fn final_page_picture_survives_producer_exit_without_retaining_execution() {
+        let step = WorkStepId::generate();
+        let progress = Arc::new(Mutex::new(None));
+        let pages = Arc::new(Mutex::new(BTreeMap::from([(
+            step,
+            WorkPageFrame {
+                step,
+                url: "https://fixture.invalid/consent".into(),
+                live: true,
+                frame: None,
+            },
+        )])));
+        let weak_pages = Arc::downgrade(&pages);
+        let observer = WorkAttemptObserver {
+            attempt: WorkAttemptId::generate(),
+            execution: WorkExecutionId::generate(),
+            profile: ProfileId::generate(),
+            work: WorkId::generate(),
+            progress: Arc::downgrade(&progress),
+            pages: weak_pages.clone(),
+            page_wake: Arc::new(PageProjectionWake::default()),
+        };
+        let mailbox = observer.retain_pages().unwrap();
+        assert!(mailbox.is_alive());
+        assert!(mailbox.pages()[0].frame.is_none());
+        // The result arrives and the producer exits entirely between UI polls.
+        {
+            let mut pages = pages.lock().unwrap();
+            let page = pages.get_mut(&step).unwrap();
+            page.frame = Some(Arc::new(zephium_agentic::WorkBrowserFrame {
+                generation: 2,
+                width: 1,
+                height: 1,
+                png: Arc::new(vec![2]),
+            }));
+            page.live = false;
+        }
+        drop(pages);
+        drop(progress);
+        drop(observer);
+        assert!(!mailbox.is_alive());
+        let final_pages = mailbox.pages();
+        assert!(!final_pages[0].live);
+        assert_eq!(final_pages[0].frame.as_ref().unwrap().generation, 2);
+        drop(mailbox);
+        assert!(weak_pages.upgrade().is_none());
+    }
+}
+impl WorkPageFrames {
+    /// Installs one data-only application invalidation receiver. This receiver
+    /// retains no producer, execution lease, resource, native page, or timer.
+    pub fn register_projection_waker(&self, waker: std::task::Waker) -> bool {
+        let pending = {
+            let Ok(mut slot) = self.page_wake.waker.lock() else {
+                return false;
+            };
+            if slot.is_some() {
+                return false;
+            }
+            *slot = Some(waker.clone());
+            self.page_wake
+                .pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        };
+        if pending {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()));
+        }
+        true
+    }
+    pub fn scope(&self) -> (ProfileId, WorkId) {
+        (self.profile, self.work)
+    }
+    pub fn is_alive(&self) -> bool {
+        self.progress.strong_count() > 0
+    }
+    pub fn pages(&self) -> Vec<WorkPageFrame> {
+        self.page_wake.consume();
+        self.pages
+            .lock()
+            .map(|pages| pages.values().cloned().collect())
             .unwrap_or_default()
     }
 }
@@ -529,6 +789,7 @@ pub struct WorkAttemptProbe {
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
     pages: Pages,
+    page_wake: Arc<PageProjectionWake>,
     handle: crate::Handle,
     profile: ProfileId,
     work: WorkId,
@@ -629,34 +890,11 @@ impl WorkAttemptProbe {
         url: &str,
         frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
     ) {
-        if let Ok(mut pages) = self.pages.lock() {
-            // A long run keeps every live page: the oldest settled one
-            // makes room, its last frame already kept by the host.
-            if pages.len() >= 16 && !pages.contains_key(&step) {
-                let Some(settled) = pages.values().find(|page| !page.live).map(|page| page.step)
-                else {
-                    return;
-                };
-                pages.remove(&settled);
-            }
-            pages.insert(
-                step,
-                WorkPageFrame {
-                    step,
-                    url: url.chars().take(2048).collect(),
-                    live: true,
-                    frame,
-                },
-            );
-        }
+        publish_page_frame(&self.pages, &self.page_wake, step, url, frame);
     }
     /// The page's step settled: keep its last frame, drop its live mark.
     pub fn settle_page(&self, step: WorkStepId) {
-        if let Ok(mut pages) = self.pages.lock() {
-            if let Some(page) = pages.get_mut(&step) {
-                page.live = false;
-            }
-        }
+        settle_page_frame(&self.pages, &self.page_wake, step);
     }
     pub fn record_activity(&self, activity: zephium_ipc::work::WorkActivityV1) {
         if let Ok(mut signal) = self.progress.lock() {
@@ -1060,6 +1298,7 @@ impl WorkRuntimeService {
                 .owner,
             progress: Arc::new(Mutex::new(None)),
             pages: Arc::new(Mutex::new(BTreeMap::new())),
+            page_wake: Arc::new(PageProjectionWake::default()),
             handle: self.handle.clone(),
             profile,
             work,

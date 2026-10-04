@@ -7,6 +7,18 @@
 
 //! Release-excluded physical qualification of the production WebView2 semantic adapter.
 
+#[cfg(debug_assertions)]
+#[path = "cookie_persistence_control.rs"]
+mod cookie_persistence_control;
+#[cfg(test)]
+#[path = "work_blur_control.rs"]
+mod work_blur_control;
+#[cfg(test)]
+#[path = "work_network_control.rs"]
+mod work_network_control;
+#[cfg(debug_assertions)]
+pub(crate) use cookie_persistence_control::run as run_cookie_persistence_control;
+
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroIsize;
 use std::rc::Rc;
@@ -79,6 +91,9 @@ const LOCATION_SETTLE: Duration = Duration::from_millis(100);
 const NATIVE_CLEANUP_TIMEOUT: Duration = Duration::from_millis(750);
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const PUMP_SLICE: Duration = Duration::from_millis(5);
+const RESOURCE_STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
+const RESOURCE_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_RESOURCE_STARTUP_SAMPLES: u8 = 64;
 const MAX_DOCUMENT_LOADING_RETRIES: u16 = 512;
 const MAX_NAVIGATION_OPERATIONS: u64 = 4;
 const PROBE_WIDTH: i32 = 1_280;
@@ -386,6 +401,31 @@ pub(crate) fn run(
     request_id: u64,
     mode: WindowsSemanticProbeMode,
 ) -> Result<WindowsSemanticProbeEvidence, WindowsSemanticProbeFailure> {
+    run_internal(request_id, mode, false)
+}
+
+/// Separate provider-free action qualification; ordinary M1 evidence is unchanged.
+pub(crate) fn run_semantic_action_guard_probe(
+    request_id: u64,
+) -> Result<[bool; 5], WindowsSemanticProbeFailure> {
+    let evidence = run_internal(
+        request_id,
+        WindowsSemanticProbeMode::HiddenFixedDocuments,
+        true,
+    )?;
+    if !evidence.semantic_work_drained || !evidence.teardown.work_drained {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify).0);
+    }
+    // run_internal can succeed only after the exact refusal/witness assertions
+    // and its complete native retirement, process exit and profile cleanup.
+    Ok([true; 5])
+}
+
+fn run_internal(
+    request_id: u64,
+    mode: WindowsSemanticProbeMode,
+    action_guard: bool,
+) -> Result<WindowsSemanticProbeEvidence, WindowsSemanticProbeFailure> {
     if request_id == 0 {
         return Err(ProbeError::new(
             WindowsSemanticProbeFailureCode::InvalidRequest,
@@ -561,6 +601,7 @@ pub(crate) fn run(
         )
         .map_err(|_| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
         if proof != ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory {
+            construction_failure_checkpoint("owned_profile_proof");
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Construct));
         }
         view = Some(owned);
@@ -593,9 +634,17 @@ pub(crate) fn run(
         }
         native_guard.sample(&host, Some(owned.view()));
         if native_guard.failed() || callbacks.fatal(CallbackAllowance::NONE) {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr().lock(),
+                "windows-semantic-construction: checkpoint=native_or_callback_guard debugger_drift={} focus_theft={} callback_panicked={} suspend_failed={} browser_lost={} renderer_lost={} invariant_failures={}; content=redacted",
+                native_guard.debugger_drift.get(), native_guard.focus_theft.get(),
+                callbacks.callback_panicked.get(), callbacks.suspend_callback_failed.get(),
+                callbacks.browser_lost.get(), callbacks.renderer_lost.get(), callbacks.invariant_failures.get());
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Construct));
         }
-        facts.runtime = Some(runtime_fingerprint()?);
+        facts.runtime = Some(runtime_fingerprint().inspect_err(|_| {
+            construction_failure_checkpoint("runtime_fingerprint");
+        })?);
         facts.resources_before = Some(sample_resources(
             environment
                 .as_ref()
@@ -603,12 +652,13 @@ pub(crate) fn run(
             &host,
             owned.view(),
             &native_guard,
-            run_deadline,
+            construction_deadline,
             WindowsSemanticProbeStage::Construct,
         )?);
 
         execute_mode(
             mode,
+            action_guard,
             identity.id(),
             view.as_mut()
                 .ok_or_else(|| ProbeError::harness(WindowsSemanticProbeStage::Construct))?,
@@ -626,9 +676,12 @@ pub(crate) fn run(
             .as_ref()
             .ok_or_else(|| ProbeError::harness(WindowsSemanticProbeStage::Verify))?;
         facts.semantic_work_drained = owned.semantic_work_drained_for_audit() == Some(true);
-        owned
-            .attest()
-            .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+        owned.attest().map_err(|_| {
+            if action_guard {
+                action_guard_checkpoint("post_action_native_attestation");
+            }
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?;
         native_guard.sample(&host, Some(owned.view()));
         facts.resources_after = Some(sample_resources(
             environment
@@ -656,6 +709,10 @@ pub(crate) fn run(
             || !owned.navigation().location_stable_for_result()
             || !server.is_healthy()
         {
+            if action_guard {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr().lock(), "windows-action-guard-checkpoint: phase=final_guards callback_fatal={} native_guard_failed={} semantic_drained={} location_check_pending={} location_stable={} fixture_healthy={}; content=redacted", callbacks.fatal(allowance), native_guard.failed(), facts.semantic_work_drained, callbacks.location_check_pending.get(), owned.navigation().location_stable_for_result(), server.is_healthy());
+            }
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
         }
         Ok(())
@@ -765,6 +822,7 @@ pub(crate) fn run(
 #[allow(clippy::too_many_arguments)]
 fn execute_mode(
     mode: WindowsSemanticProbeMode,
+    action_guard: bool,
     context_id: ContextId,
     view: &mut AgentOwnedView,
     registry: &mut ContextRegistry,
@@ -777,7 +835,10 @@ fn execute_mode(
 ) -> ProbeResult<()> {
     let mut next_operation = 2_u64;
     let mut next_invocation = 1_u64;
-    let first_url = server.url(FixtureRoute::SemanticRuntime);
+    let mut first_url = server.url(FixtureRoute::SemanticRuntime);
+    if action_guard {
+        first_url.push_str("#windows-rich-guard");
+    }
     let first = navigate(
         view,
         registry,
@@ -804,18 +865,58 @@ fn execute_mode(
         run_deadline,
         &mut facts.peak_pending_invocations,
     )?;
-    verify_first_snapshot(&first_snapshot)?;
+    verify_first_snapshot(&first_snapshot).inspect_err(|_| {
+        if action_guard {
+            action_guard_checkpoint("initial_snapshot_verification");
+        }
+    })?;
     let next_first_snapshot_generation = first_snapshot
         .generation()
         .next()
         .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
     registry
         .acknowledge_observation(context_id, first)
-        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+        .map_err(|_| {
+            if action_guard {
+                action_guard_checkpoint("initial_snapshot_registry_acknowledgement");
+            }
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?;
     facts.snapshots = 1;
     facts.first_snapshot_verified = true;
     facts.page_world_bridge_absent = true;
     facts.secrets_redacted = true;
+
+    if action_guard {
+        let after = qualify_rich_action(
+            view,
+            first,
+            &first_url,
+            first_snapshot,
+            &mut next_invocation,
+            callbacks,
+            host,
+            native_guard,
+            run_deadline,
+            &mut facts.peak_pending_invocations,
+            false,
+        )?;
+        qualify_rich_action(
+            view,
+            first,
+            &first_url,
+            after,
+            &mut next_invocation,
+            callbacks,
+            host,
+            native_guard,
+            run_deadline,
+            &mut facts.peak_pending_invocations,
+            true,
+        )?;
+        facts.snapshots = 3;
+        return Ok(());
+    }
 
     match mode {
         WindowsSemanticProbeMode::HiddenFixedDocuments
@@ -1171,6 +1272,239 @@ fn execute_mode(
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qualify_rich_action(
+    view: &AgentOwnedView,
+    context: ContextJoin,
+    url: &str,
+    snapshot: SemanticSnapshot,
+    next_invocation: &mut u64,
+    callbacks: &CallbackState,
+    host: &ProbeHostWindow,
+    native_guard: &NativeStateGuard,
+    run_deadline: Instant,
+    peak_pending: &mut u8,
+    positive: bool,
+) -> ProbeResult<SemanticSnapshot> {
+    use std::io::Write as _;
+    use zephium_agentic::{
+        SemanticActionExecutionInstant, SemanticActionNativeFailure, SemanticActionText,
+        SemanticFillQualificationExecution, SemanticFrameUnsupported, SemanticObservationAssembler,
+    };
+    action_guard_checkpoint("action_preparation_started");
+    let target_name = if positive {
+        "Windows controlled rich editor"
+    } else {
+        "Windows guarded rich editor"
+    };
+    let target_count = snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node.name().is_some_and(|name| name.as_str() == target_name))
+        .count();
+    let _ = writeln!(std::io::stderr().lock(),
+        "windows-action-guard-checkpoint: phase=initial_target target_count={target_count} node_count={}; content=redacted", snapshot.nodes().len());
+    let generation = snapshot.generation().next().ok_or_else(|| {
+        action_guard_checkpoint("snapshot_generation_exhausted");
+        ProbeError::verify(WindowsSemanticProbeStage::Verify)
+    })?;
+    let target = snapshot
+        .nodes()
+        .iter()
+        .find(|node| node.name().is_some_and(|name| name.as_str() == target_name))
+        .map(|node| node.reference())
+        .ok_or_else(|| {
+            action_guard_checkpoint("admitted_target_missing");
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?;
+    let boundaries = snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node.role() == SemanticRole::FrameBoundary)
+        .map(|node| node.reference())
+        .collect::<Vec<_>>();
+    let request = SemanticObservationRequest::initial(
+        SemanticObservationId::new(snapshot.invocation().get()).ok_or_else(|| {
+            action_guard_checkpoint("observation_identity_invalid");
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?,
+        context,
+        SemanticObservationBudget::INITIAL_FILTERED,
+    );
+    let mut assembler = SemanticObservationAssembler::new(request, snapshot)
+        .map_err(|error| {
+            let _ = writeln!(std::io::stderr().lock(), "windows-action-guard-checkpoint: phase=observation_begin failure={error:?}; content=redacted");
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?;
+    for boundary in boundaries {
+        assembler
+            .mark_frame_unsupported(
+                FrameId::MAIN,
+                boundary,
+                SemanticFrameUnsupported::PlatformIsolationUnavailable,
+            )
+            .map_err(|error| {
+                let _ = writeln!(std::io::stderr().lock(), "windows-action-guard-checkpoint: phase=frame_disposition failure={error:?}; content=redacted");
+                ProbeError::verify(WindowsSemanticProbeStage::Verify)
+            })?;
+    }
+    let observation = assembler
+        .finish()
+        .map_err(|error| {
+            let _ = writeln!(std::io::stderr().lock(), "windows-action-guard-checkpoint: phase=observation_finish failure={error:?}; content=redacted");
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?;
+    let value = SemanticActionText::try_new(if positive {
+        "On my way, ten minutes out".to_owned()
+    } else {
+        "guard replacement".to_owned()
+    })
+    .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+    let mut execution = SemanticFillQualificationExecution::prepare(
+        &observation,
+        target,
+        value,
+        if positive { 2 } else { 1 },
+        if positive { 2 } else { 1 },
+        SemanticActionExecutionInstant::from_millis(10_000),
+    )
+    .map_err(|error| {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "windows-action-guard-checkpoint: phase=fill_preparation failure={}; content=redacted",
+            error.diagnostic_code()
+        );
+        ProbeError::verify(WindowsSemanticProbeStage::Verify)
+    })?;
+    let native = execution.take_native_request().map_err(|error| {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "windows-action-guard-checkpoint: phase=native_request failure={}; content=redacted",
+            error.diagnostic_code()
+        );
+        ProbeError::verify(WindowsSemanticProbeStage::Verify)
+    })?;
+    action_guard_checkpoint("native_dispatch_started");
+    let deadline = earlier_deadline(run_deadline, SNAPSHOT_TIMEOUT)?;
+    let result = Rc::new(RefCell::new(None));
+    let completion = result.clone();
+    let duplicate = Rc::new(Cell::new(false));
+    let completion_duplicate = duplicate.clone();
+    view.dispatch_retained_semantic_action(
+        native,
+        Instant::now(),
+        Box::new(move || Instant::now() < deadline),
+        move |settlement| {
+            if let Ok(mut slot) = completion.try_borrow_mut() {
+                if slot.is_some() {
+                    completion_duplicate.set(true);
+                } else {
+                    *slot = Some(settlement);
+                }
+            } else {
+                completion_duplicate.set(true);
+            }
+        },
+    );
+    while result.borrow().is_none()
+        && !callbacks.fatal(CallbackAllowance::NONE)
+        && !native_guard.failed()
+        && Instant::now() < deadline
+    {
+        pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+    }
+    if duplicate.get() || callbacks.fatal(CallbackAllowance::NONE) || native_guard.failed() {
+        let _ = writeln!(std::io::stderr().lock(), "windows-action-guard-checkpoint: phase=callback_guard duplicate={} callback_fatal={} native_guard_failed={}; content=redacted", duplicate.get(), callbacks.fatal(CallbackAllowance::NONE), native_guard.failed());
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+    }
+    let settlement = result
+        .try_borrow_mut()
+        .map_err(|_| {
+            action_guard_checkpoint("terminal_borrow_conflict");
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?
+        .take()
+        .ok_or_else(|| ProbeError::timeout(WindowsSemanticProbeStage::Verify))?;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "windows-action-guard-checkpoint: phase=native_terminal failure={:?}; content=redacted",
+        settlement.qualification_failure()
+    );
+    let expected_failure = if positive {
+        None
+    } else {
+        Some(SemanticActionNativeFailure::AppliedUnverified)
+    };
+    if settlement.qualification_failure() != expected_failure {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+    }
+    if positive
+        && view.semantic().is_none_or(|semantic| {
+            zephium_agentic::SemanticActionAttemptId::new(2)
+                .is_none_or(|attempt| semantic.settling_action(attempt))
+        })
+    {
+        action_guard_checkpoint("successful_action_retained_uncertain_hold");
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+    }
+    // Let the fixture's one queued closed witness sample the completed event.
+    let witness_deadline = earlier_deadline(run_deadline, Duration::from_millis(50))?;
+    while Instant::now() < witness_deadline {
+        pump_and_sample(witness_deadline, host, Some(view.view()), native_guard)?;
+    }
+    let after = capture_snapshot(
+        view,
+        context,
+        url,
+        generation,
+        next_invocation,
+        callbacks,
+        CallbackAllowance::NONE,
+        host,
+        native_guard,
+        run_deadline,
+        peak_pending,
+    )?;
+    if positive {
+        if !snapshot_contains(&after, "Windows controlled rich model exact paragraphs retained trusted yes before one input one")
+            || !after.nodes().iter().any(|node| node.name().is_some_and(|name| name.as_str() == target_name)
+                && matches!(node.value(), Some(SemanticValueSummary::Text(text)) if text.preview().text() == "On my way, ten minutes out"))
+            || duplicate.get()
+        {
+            action_guard_checkpoint("controlled_positive_fill_failed");
+            return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+        }
+        action_guard_checkpoint("controlled_positive_fill_exact");
+    } else {
+        let _ = writeln!(std::io::stderr().lock(),
+        "windows-action-guard-checkpoint: phase=post_action witness_exact={} witness_pending={} trusted_yes={} before_one={} input_zero={} changed_target_count={} decoy_count={} admitted_intact={} decoy_intact={} duplicate={}; content=redacted",
+        snapshot_contains(&after, "Windows rich guard before one input zero target intact decoy intact trusted yes"),
+        snapshot_contains(&after, "Windows rich guard pending"), snapshot_contains(&after, "trusted yes"), snapshot_contains(&after, "Windows rich guard before one"), snapshot_contains(&after, "input zero target"),
+        after.nodes().iter().filter(|node| node.name().is_some_and(|name| name.as_str() == "Windows changed rich editor")).count(),
+        after.nodes().iter().filter(|node| node.name().is_some_and(|name| name.as_str() == "Windows unapproved rich editor")).count(),
+        after.nodes().iter().any(|node| node.name().is_some_and(|name| name.as_str() == "Windows changed rich editor") && matches!(node.value(), Some(SemanticValueSummary::Text(text)) if text.preview().text() == "guard original")),
+        after.nodes().iter().any(|node| node.name().is_some_and(|name| name.as_str() == "Windows unapproved rich editor") && matches!(node.value(), Some(SemanticValueSummary::Text(text)) if text.preview().text() == "decoy original")), duplicate.get());
+        if !snapshot_contains(&after, "Windows rich guard before one input zero target intact decoy intact trusted yes")
+        || !after.nodes().iter().any(|node| node.name().is_some_and(|name| name.as_str() == "Windows changed rich editor")
+            && matches!(node.value(), Some(SemanticValueSummary::Text(text)) if text.preview().text() == "guard original"))
+        || !after.nodes().iter().any(|node| node.name().is_some_and(|name| name.as_str() == "Windows unapproved rich editor")
+            && matches!(node.value(), Some(SemanticValueSummary::Text(text)) if text.preview().text() == "decoy original"))
+        || duplicate.get() {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+    }
+    }
+    wait_for_semantic_drain(
+        view,
+        url,
+        callbacks,
+        CallbackAllowance::NONE,
+        host,
+        native_guard,
+        run_deadline,
+    )?;
+    Ok(after)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1960,6 +2294,7 @@ fn request_fixed_renderer_crash(view: &AgentOwnedView) -> ProbeResult<()> {
 }
 
 fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> ProbeResult<()> {
+    use std::io::Write as _;
     if snapshot.completeness() != SemanticCompleteness::Complete
         || !snapshot_contains(snapshot, "First semantic epoch")
         || !snapshot_contains(snapshot, "Page bridge absent")
@@ -1979,27 +2314,34 @@ fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> ProbeResult<()> {
             .iter()
             .any(|node| node.role() == SemanticRole::FrameBoundary)
     {
+        let _ = writeln!(std::io::stderr().lock(), "windows-semantic-snapshot: phase=baseline completeness={:?} first_epoch={} bridge_absent={} primary_action={} closed_internal_absent={} bridge_present_absent={} forgery_absent={} password_absent={} bearer_absent={} shadow_action={} clickable_button={} frame_boundary={}; content=redacted",
+            snapshot.completeness(), snapshot_contains(snapshot, "First semantic epoch"), snapshot_contains(snapshot, "Page bridge absent"), snapshot_contains(snapshot, "Primary semantic action"), !snapshot_contains(snapshot, "Closed internal must remain absent"), !snapshot_contains(snapshot, "Page bridge present"), !snapshot_contains(snapshot, "page-world-forgery"), !snapshot_contains(snapshot, "fixture-password-value"), !snapshot_contains(snapshot, "Bearer abcdefghijklmnop"), snapshot_contains(snapshot, "Open shadow semantic action"), snapshot.nodes().iter().any(|node| node.role()==SemanticRole::Button && node.operations().contains(SemanticOperationClass::Click)), snapshot.nodes().iter().any(|node| node.role()==SemanticRole::FrameBoundary));
         return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
     }
     let password = snapshot
         .nodes()
         .iter()
         .find(|node| node.role() == SemanticRole::Password)
-        .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+        .ok_or_else(|| {
+            action_guard_checkpoint("baseline_password_reference_missing");
+            ProbeError::verify(WindowsSemanticProbeStage::Verify)
+        })?;
     let mut token_candidates = snapshot.nodes().iter().filter(|node| {
         node.role() == SemanticRole::Textbox
             && node.value() == Some(&SemanticValueSummary::Redacted)
             && node.sensitivity() == SemanticSensitivity::Secret
     });
-    let token = token_candidates
-        .next()
-        .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+    let token = token_candidates.next().ok_or_else(|| {
+        action_guard_checkpoint("baseline_redacted_token_missing");
+        ProbeError::verify(WindowsSemanticProbeStage::Verify)
+    })?;
     if token_candidates.next().is_some()
         || password.value() != Some(&SemanticValueSummary::Redacted)
         || password.sensitivity() != SemanticSensitivity::Secret
         || token.value() != Some(&SemanticValueSummary::Redacted)
         || token.sensitivity() != SemanticSensitivity::Secret
     {
+        action_guard_checkpoint("baseline_secret_redaction_or_uniqueness");
         return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
     }
     Ok(())
@@ -2228,6 +2570,9 @@ fn sample_resources(
     }
     native_guard.sample(host, Some(view));
     if native_guard.failed() {
+        if stage == WindowsSemanticProbeStage::Construct {
+            construction_failure_checkpoint("resource_sample_initial_native_guard");
+        }
         return Err(ProbeError::verify(stage));
     }
     let mut check_control = || {
@@ -2237,11 +2582,52 @@ fn sample_resources(
             Ok(())
         }
     };
-    let sample =
-        super::agentic_probe_resources::sample_webview2_resources(environment, &mut check_control)?
-            .ok_or_else(|| ProbeError::verify(stage))?;
+    let startup_deadline = earlier_deadline(deadline, RESOURCE_STARTUP_TIMEOUT)?;
+    let mut samples = 0_u8;
+    let sample = loop {
+        samples += 1;
+        let (sample, unavailable) =
+            super::agentic_probe_resources::sample_webview2_resources_diagnostic(
+                environment,
+                &mut check_control,
+            )?;
+        if let Some(sample) = sample {
+            break sample;
+        }
+        let retry = stage == WindowsSemanticProbeStage::Construct
+            && samples < MAX_RESOURCE_STARTUP_SAMPLES
+            && Instant::now() < startup_deadline
+            && matches!(unavailable,
+                Some(super::agentic_probe_resources::ResourceSampleFailure::HelperProcessesEmpty
+                    | super::agentic_probe_resources::ResourceSampleFailure::ProcessCohortChanged));
+        if !retry || samples == 1 {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr().lock(),
+                "windows-semantic-resources: stage={stage:?} failure={unavailable:?} samples={samples} startup_retry={retry}; content=redacted");
+        }
+        if !retry {
+            if stage == WindowsSemanticProbeStage::Construct {
+                construction_failure_checkpoint("resource_sample_unavailable");
+            }
+            return Err(ProbeError::verify(stage));
+        }
+        // The fresh environment's process inventory arrives asynchronously.
+        // Only constructor churn may wait, while the same STA/control deadline
+        // remains authoritative. Every retry still proves the complete cohort.
+        let retry_deadline = earlier_deadline(startup_deadline, RESOURCE_STARTUP_RETRY_INTERVAL)?;
+        while Instant::now() < retry_deadline {
+            pump_and_sample(retry_deadline, host, Some(view), native_guard)?;
+        }
+        if native_guard.failed() {
+            construction_failure_checkpoint("resource_startup_retry_native_guard");
+            return Err(ProbeError::verify(stage));
+        }
+    };
     native_guard.sample(host, Some(view));
     if native_guard.failed() {
+        if stage == WindowsSemanticProbeStage::Construct {
+            construction_failure_checkpoint("resource_sample_final_native_guard");
+        }
         return Err(ProbeError::verify(stage));
     }
     if Instant::now() >= deadline {
@@ -2274,6 +2660,22 @@ fn pump_once(deadline: Instant) -> ProbeResult<()> {
         }
     }
     Ok(())
+}
+
+fn action_guard_checkpoint(checkpoint: &'static str) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "windows-action-guard-checkpoint: phase={checkpoint}; content=redacted"
+    );
+}
+
+fn construction_failure_checkpoint(checkpoint: &'static str) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "windows-semantic-construction: checkpoint={checkpoint}; content=redacted"
+    );
 }
 
 fn runtime_fingerprint() -> ProbeResult<RuntimeFingerprint> {
@@ -2321,4 +2723,268 @@ fn duration_ms_u32(duration: Duration) -> u32 {
 
 fn duration_ms_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Drives the production retained Work host and its ordinary Shell event sink.
+pub(crate) fn run_work_application_probe(
+    _profile: ProfileId,
+    input: crate::MacosWorkProbeInput,
+    timeout: Duration,
+    events: impl Fn(crate::EngineEvent) + Send + Sync + 'static,
+    start: impl FnOnce(
+        Arc<crate::WebviewEngine>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, GetParent, GetWindow, GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
+        SetWindowPos, GW_CHILD, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WINDOW_STYLE,
+        WS_CHILD, WS_VISIBLE,
+    };
+    use zephium_core::ports::engine::Engine as _;
+    struct Cover {
+        hwnd: HWND,
+        parent: HWND,
+    }
+    impl Cover {
+        fn attest(&self) -> Result<(), &'static str> {
+            let mut client = RECT::default();
+            let mut bounds = RECT::default();
+            let mut origin = POINT::default();
+            // SAFETY: these exact parent/cover HWNDs are owned by this STA host;
+            // writable rectangles/point remain live through the read-only calls.
+            let valid = unsafe {
+                IsWindow(Some(self.hwnd)).as_bool()
+                    && IsWindow(Some(self.parent)).as_bool()
+                    && IsWindowVisible(self.hwnd).as_bool()
+                    && IsWindowVisible(self.parent).as_bool()
+                    && !IsIconic(self.parent).as_bool()
+                    && GetParent(self.hwnd).ok() == Some(self.parent)
+                    && GetClientRect(self.parent, &mut client).is_ok()
+                    && GetWindowRect(self.hwnd, &mut bounds).is_ok()
+                    && ClientToScreen(self.parent, &mut origin).as_bool()
+            };
+            if !valid
+                || client.left != 0
+                || client.top != 0
+                || client.right <= 0
+                || client.bottom <= 0
+                || client.right > PROBE_WIDTH
+                || client.bottom > PROBE_HEIGHT
+                || bounds.left != origin.x
+                || bounds.top != origin.y
+                || bounds.right - bounds.left != client.right
+                || bounds.bottom - bounds.top != client.bottom
+            {
+                return Err("actor_cover_identity_bounds");
+            }
+            // SAFETY: native sibling queries/mutations refer only to our own child;
+            // NOACTIVATE preserves focus. Already-top covers cause no mutation.
+            unsafe {
+                if GetWindow(self.parent, GW_CHILD).ok() != Some(self.hwnd) {
+                    SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOP),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                    )
+                    .map_err(|_| "actor_cover_order")?;
+                }
+                if GetWindow(self.parent, GW_CHILD).ok() != Some(self.hwnd) {
+                    return Err("actor_cover_order");
+                }
+            }
+            Ok(())
+        }
+        fn close(mut self) -> Result<(), &'static str> {
+            // SAFETY: this object exclusively owns the child, and successful
+            // destruction is checked before disarming its unconditional Drop.
+            unsafe {
+                DestroyWindow(self.hwnd).map_err(|_| "actor_cover_close")?;
+                if IsWindow(Some(self.hwnd)).as_bool() {
+                    return Err("actor_cover_close");
+                }
+            }
+            self.hwnd = HWND::default();
+            Ok(())
+        }
+    }
+    impl Drop for Cover {
+        fn drop(&mut self) {
+            if !self.hwnd.0.is_null() {
+                // SAFETY: this exact child is owned here and drops before its parent.
+                let _ = unsafe { DestroyWindow(self.hwnd) };
+            }
+        }
+    }
+    if timeout.is_zero() || timeout > Duration::from_secs(900) {
+        return Err("actor_host_timeout");
+    }
+    let host = ProbeHostWindow::new().map_err(|_| "actor_host_window")?;
+    // SAFETY: the qualifier owns this top-level HWND for the entire child-controller lifetime.
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+            host.hwnd,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE,
+        );
+    }
+    let mut cover = if matches!(input, crate::MacosWorkProbeInput::LifecycleOnly) {
+        let mut client = RECT::default();
+        // SAFETY: the live owned parent and initialized output are STA-local.
+        unsafe { GetClientRect(host.hwnd, &mut client) }.map_err(|_| "actor_cover_client")?;
+        let class = HSTRING::from("STATIC");
+        // SS_BLACKRECT (0x0004) is the documented opaque STATIC rectangle style.
+        // SAFETY: system class name lives through creation; exact parent is owned
+        // by this host. Cover retains the child and closes before the parent.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                &class,
+                PCWSTR::null(),
+                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x0004),
+                0,
+                0,
+                client.right,
+                client.bottom,
+                Some(host.hwnd),
+                None,
+                None,
+                None,
+            )
+        }
+        .map_err(|_| "actor_cover_construct")?;
+        let cover = Cover {
+            hwnd,
+            parent: host.hwnd,
+        };
+        cover.attest()?;
+        use std::io::Write as _;
+        let _=writeln!(std::io::stdout().lock(),"windows-work-host: opaque_client_cover=true native_parent_bounds_visibility_order_verified=true minimized=false; content=redacted");
+        Some(cover)
+    } else {
+        None
+    };
+    let parent = host
+        .window_handle()
+        .map_err(|_| "actor_host_handle")?
+        .as_raw();
+    // Explicit nonshipping comparison only: native UDF access requirements
+    // differ from the private journal fixture. This never selects a user profile
+    // or changes the product's configured data root or an existing ACL.
+    #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
+    let ambient_udf = std::env::var_os("ZEPHIUM_WINDOWS_WORK_DIAGNOSTIC_UDF_LOCAL_TEMP").as_deref()
+        == Some(std::ffi::OsStr::new("1"));
+    #[cfg(not(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic")))]
+    let ambient_udf = false;
+    let data = if ambient_udf {
+        let root = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .ok_or("actor_local_udf_root")?
+            .join("Temp");
+        tempfile::tempdir_in(root).map_err(|_| "actor_local_temp_profile")?
+    } else {
+        tempfile::tempdir().map_err(|_| "actor_temp_profile")?
+    };
+    #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
+    {
+        std::fs::write(
+            "target/windows-work-cookie-udf-location.txt",
+            data.path().as_os_str().to_string_lossy().as_bytes(),
+        )
+        .map_err(|_| "actor_udf_evidence")?;
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "windows-work-host: diagnostic_udf_local_temp={ambient_udf} journal_root_unchanged=true evidence_path=target/windows-work-cookie-udf-location.txt; content=redacted");
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(256);
+    let dispatch: crate::MainThreadDispatch =
+        Arc::new(move |operation| sender.try_send(operation).is_ok());
+    let fatal = Arc::new(std::sync::Mutex::new(None));
+    let fatal_sink = fatal.clone();
+    let engine = Arc::new(
+        crate::install(
+            parent,
+            dispatch,
+            data.path().to_owned(),
+            zephium_core::runtime_security::RuntimeSecurityAdvisories::new(),
+            crate::InitialUserContent::new(
+                zephium_core::ports::engine::UserContentGeneration::new(1)
+                    .ok_or("actor_generation")?,
+                Default::default(),
+            ),
+            events,
+            move |reason| {
+                *fatal_sink
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+            },
+        )
+        .map_err(|_| "actor_engine_install")?,
+    );
+    let run_operation = |operation: Box<dyn FnOnce() + Send>| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+            .map_err(|_| "actor_operation_panic")
+    };
+    let result = (|| {
+        let mut poll = start(engine.clone())?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            for _ in 0..256 {
+                let Ok(operation) = receiver.try_recv() else {
+                    break;
+                };
+                run_operation(operation)?;
+            }
+            if let Some(cover) = cover.as_ref() {
+                cover.attest()?;
+            }
+            let failure = *fatal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(result) = poll(failure.is_some()) {
+                return failure.map_or(result, Err);
+            }
+            if Instant::now() >= deadline {
+                return Err("actor_host_deadline");
+            }
+            pump_once(deadline).map_err(|_| "actor_native_pump")?;
+        }
+    })();
+    if result.is_ok() {
+        if let Some(cover) = cover.take() {
+            cover.close()?;
+        }
+        return result;
+    } // Success requires the application's own exact shutdown barrier.
+    let shutdown = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let callback = shutdown.clone();
+    engine.shutdown(Box::new(move |clean| {
+        callback.store(if clean { 1 } else { 2 }, Ordering::Release);
+    }));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while shutdown.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+        for _ in 0..256 {
+            let Ok(operation) = receiver.try_recv() else {
+                break;
+            };
+            let _ = run_operation(operation);
+        }
+        let _ = pump_once(deadline);
+    }
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    if result.is_err() {
+        // This diagnostic helper owns the fresh, synthetic UDF. Preserve only
+        // failed qualification evidence; no user profile is selected or copied.
+        let retained = data.keep();
+        let _ = std::fs::write(
+            "target/windows-work-retained-cookie-udf-path.txt",
+            retained.as_os_str().to_string_lossy().as_bytes(),
+        );
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), "windows-work-host: failed_owned_udf_retained=true evidence_path=target/windows-work-retained-cookie-udf-path.txt; content=redacted");
+    }
+    result
 }

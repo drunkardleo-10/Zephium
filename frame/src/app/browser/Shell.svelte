@@ -475,6 +475,11 @@
 </div>
 
 <style>
+  /* One continuous tint over the native acrylic, including the outer gutter. */
+  :global(html[data-material="acrylic"] body) {
+    background: color-mix(in srgb, var(--color-chrome) 28%, transparent);
+  }
+
   .sidebar-mode-body {
     display: flex;
     flex: 1;
@@ -483,7 +488,8 @@
   }
 
   .sidebar-mode-body[data-arriving="true"] {
-    animation: mode-body-in var(--motion-slow) var(--ease-emphasized) both;
+    /* Release the opacity backdrop root after entry so descendant menus can blur. */
+    animation: mode-body-in var(--motion-slow) var(--ease-emphasized) backwards;
   }
 
   @keyframes mode-body-in {

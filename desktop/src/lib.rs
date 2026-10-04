@@ -578,7 +578,25 @@ fn on_main_window_mapped(window: &WebviewWindow) {
     linux_global_shortcuts::main_window_mapped(window);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn on_main_window_mapped(window: &WebviewWindow) {
+    // DWM can discard the backdrop installed while the window was hidden.
+    // Restore it at the first reveal, not at some later focus event, and use
+    // the person's saved appearance rather than the operating-system default.
+    let appearance = APP_STORE
+        .get()
+        .and_then(|store| store.app_setting("appearance"))
+        .unwrap_or_else(|| "system".to_owned());
+    let dark = matches!(
+        resolved_native_theme(window, &appearance),
+        tauri::Theme::Dark
+    );
+    if !platform::imp::apply_material(window, dark) {
+        diagnostic!("material: main-window backdrop could not be restored after initial reveal");
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn on_main_window_mapped(_window: &WebviewWindow) {}
 
 fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
@@ -1500,6 +1518,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::human::work_human_release,
             work_decision::work_decision_preference,
             work_decision::work_set_decision_preference,
+            work_decision::work_set_decision_key,
+            work_decision::work_clear_decision_key,
             work_models::work_models,
             work_models::work_models_ready,
             work_models::work_choose_model,
@@ -3180,11 +3200,11 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             });
     }
     if id == "launcher.toggle" {
-        if let Some(overlay) = app.try_state::<overlay::Overlay>() {
-            overlay.toggle();
-            return accepted_ui_operation();
-        }
-        return rejected_operation();
+        return if overlay::request(app, |panel| panel.toggle()) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
     }
     if id == "split.choose" {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
@@ -3310,20 +3330,14 @@ fn newtab_search_context(
     {
         return None;
     }
-    let state = app.try_state::<overlay::Overlay>()?.snapshot();
     static NEXT_SEARCH_SESSION: AtomicU64 = AtomicU64::new(1);
     let session = NEXT_SEARCH_SESSION
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .ok()?;
-    Some(zephium_ipc::SearchContext {
-        window_id: state.window_id?,
-        profile_id: state.profile_id?,
-        space_id: state.space_id?,
-        session_id: format!("newtab:{tab_id}:{session}"),
-        request_id: String::new(),
-    })
+    app.try_state::<overlay::ContextCache>()?
+        .newtab_context(&tab_id, session)
 }
 
 #[tauri::command]
@@ -3637,7 +3651,9 @@ async fn resource_call(
     if !call.validate() || serde_json::to_vec(&call).map_or(true, |bytes| bytes.len() > 524288) {
         return failed(ResourceError::Invalid);
     }
-    resource_close::touch(caller.label());
+    if !resource_close::touch(&app, caller.label()) {
+        return failed(ResourceError::Unavailable);
+    }
     let Some(expected_profile) =
         ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
     else {
@@ -4284,14 +4300,13 @@ fn panel_ready(
 #[specta::specta]
 fn panel_intent(
     caller: WebviewWindow,
-    overlay: State<'_, overlay::Overlay>,
+    app: tauri::AppHandle,
     intent: zephium_ipc::PanelIntent,
 ) -> bool {
     if !authorize(&caller, CallerPolicy::Both, "panel_intent") {
         return false;
     }
-    overlay.intent(intent);
-    true
+    overlay::request(&app, move |panel| panel.intent(intent))
 }
 /// Onboarding's own page, which a first run opens in the main window
 /// instead of the browser.
@@ -5257,7 +5272,9 @@ pub fn run() {
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
-                let data_dir = webext_qa::data_dir(data_dir)?;
+                let qa_session = webext_qa::session_label()?;
+                #[cfg(all(target_os = "windows", feature = "webext-qa"))]
+                let data_dir = webext_qa::data_dir(data_dir, qa_session.as_deref())?;
                 #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
                 foreground_rendering_probe::validate_data_root(&data_dir)?;
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
@@ -5286,6 +5303,19 @@ pub fn run() {
                 // private data root is secured. A corrupt/newer database must
                 // fail before either privileged chrome or raw content creates
                 // native renderer state.
+                #[cfg(all(target_os = "windows", feature = "work-product"))]
+                let store = {
+                    #[cfg(feature = "webext-qa")]
+                    let session = qa_session.as_deref();
+                    #[cfg(not(feature = "webext-qa"))]
+                    let session = None;
+                    let work_storage = zephium_store::WindowsWorkStorage::for_application(
+                        &app.config().identifier,
+                        session,
+                    )?;
+                    Arc::new(SqliteStore::open_with_windows_work_storage(&data_dir, work_storage)?)
+                };
+                #[cfg(not(all(target_os = "windows", feature = "work-product")))]
                 let store = Arc::new(SqliteStore::open(&data_dir)?);
                 app.manage(media::MediaBlobs(zephium_store::MediaStore::new(
                     data_dir.join("media"),
@@ -5355,6 +5385,11 @@ pub fn run() {
             let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
             #[cfg(target_os = "windows")]
             let main_builder = main_builder
+                .decorations(false)
+                // Seed the native parent's first erase, not just WebView2's
+                // transparent renderer. Otherwise a hidden decorated window
+                // can reveal an unpainted white client surface until redraw.
+                .background_color(tauri::utils::config::Color(0, 0, 0, 0))
                 .data_directory(privileged_runtime.main.clone())
                 // Supplying any explicit value replaces Wry's default, which
                 // also disables msSmartScreenProtection. Keep only the two
@@ -6029,16 +6064,6 @@ pub fn run() {
                         // interacted with.
                         resize_shell.dispatch(Command::SetWindowVisible(true));
                         presence::report_app_active(resize_window.app_handle());
-                        // DWM occasionally drops the backdrop applied before
-                        // first show; one re-apply on first focus heals it.
-                        #[cfg(target_os = "windows")]
-                        {
-                            static HEALED: AtomicBool = AtomicBool::new(false);
-                            if !HEALED.swap(true, Ordering::SeqCst) {
-                                let dark = matches!(resize_window.theme(), Ok(tauri::Theme::Dark));
-                                platform::imp::apply_material(&resize_window, dark);
-                            }
-                        }
                     }
                     // Losing focus alone does not make a browser tab
                     // background work: audio and timers must continue. Only
@@ -6053,6 +6078,18 @@ pub fn run() {
                 }
             });
 
+            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
+            let panel_handle = handle.clone();
+            #[cfg(target_os = "linux")]
+            let panel_registration = global_registration.clone();
+            let create_panel = move || -> SetupResult {
+                let app = &panel_handle;
+                #[cfg(target_os = "linux")]
+                let handle = app.clone();
+                let window = app.get_webview_window(MAIN_LABEL).ok_or_else(|| std::io::Error::other("launcher owner is unavailable"))?;
+                let shutdown = app.state::<ShutdownCoordinator>();
+                #[cfg(target_os = "linux")]
+                let global_registration = panel_registration;
             if shutdown.terminal_started() {
                 return Err(std::io::Error::other(
                     "terminal shutdown started before privileged panel construction",
@@ -6082,6 +6119,7 @@ pub fn run() {
             setup_privileged_environments
                 .fetch_or(PRIVILEGED_PANEL_ENVIRONMENT, Ordering::Release);
             let panel_window = panel_builder
+                .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Suspend)
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .on_web_resource_request(|_, response| {
                     harden_privileged_headers(response.headers_mut())
@@ -6152,10 +6190,9 @@ pub fn run() {
                 );
             }
 
-            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
             let overlay = overlay::Overlay::new(
                 panel_window.clone(),
-                cfg!(target_os = "windows").then(|| panel_url.clone()),
+                cfg!(not(target_os = "linux")).then(|| panel_url.clone()),
             );
             let main_focus_overlay = overlay.clone();
             window.on_window_event(move |event| { if matches!(event, tauri::WindowEvent::Focused(_)) { main_focus_overlay.focus_changed(); } });
@@ -6178,11 +6215,22 @@ pub fn run() {
                 _ => {}
             }});
             app.manage(overlay);
-            presence::install(app.handle(), &window);
-            memory_pressure::install(app.handle());
-            presence::report_app_active(app.handle());
             #[cfg(all(debug_assertions, target_os = "macos"))]
             log_webview_processes(&window, &panel_window);
+
+
+                apply_native_theme(app, &APP_STORE.get().and_then(|store| store.app_setting("appearance")).unwrap_or_else(|| "system".into()));
+                if shutdown.terminal_started() {
+                    return Err(std::io::Error::other("terminal shutdown started before trusted panel navigation").into());
+                }
+                #[cfg(target_os = "linux")]
+                panel_window.navigate(panel_url)?;
+                Ok(())
+            };
+            #[cfg(not(target_os = "linux"))]
+            app.manage(overlay::Factory::new(create_panel));
+            #[cfg(target_os = "linux")]
+            create_panel()?;
 
             #[cfg(not(target_os = "linux"))]
             {
@@ -6224,6 +6272,10 @@ pub fn run() {
                 }
             }
 
+            presence::install(&handle, &window);
+            memory_pressure::install(&handle);
+            presence::report_app_active(&handle);
+
             let appearance = APP_STORE
                 .get()
                 .and_then(|store| store.app_setting("appearance"))
@@ -6241,8 +6293,6 @@ pub fn run() {
                 )
                 .into());
             }
-            #[cfg(not(target_os = "windows"))]
-            panel_window.navigate(panel_url)?;
             if shutdown.terminal_started() {
                 return Err(std::io::Error::other(
                     "terminal shutdown overtook privileged panel navigation",
@@ -7312,6 +7362,11 @@ mod tests {
             .expect("main privileged WebView construction");
         assert!(watchdog < storage);
         assert!(storage < main_webview);
+        let windows_storage = setup
+            .find("SqliteStore::open_with_windows_work_storage")
+            .expect("Windows protected Work storage selection");
+        assert!(watchdog < windows_storage);
+        assert!(windows_storage < main_webview);
 
         let parent_handle = setup
             .find("let parent = window.window_handle()?.as_raw()")
@@ -7409,7 +7464,7 @@ mod tests {
         assert!(actor_admission < panel_webview);
         assert!(shell_owner < panel_webview);
         assert!(panel_webview < pre_navigation_terminal_gate);
-        assert!(pre_navigation_terminal_gate < panel_navigation);
+        assert!(panel_navigation < pre_navigation_terminal_gate);
         assert!(panel_webview < panel_navigation);
         assert!(panel_navigation < post_panel_navigation_terminal_gate);
         assert!(post_panel_navigation_terminal_gate < main_navigation);

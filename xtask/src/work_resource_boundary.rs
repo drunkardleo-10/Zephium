@@ -289,7 +289,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         "crates/zephium-work-composition/src/retained_qualification.rs",
         &[
             "owner:RetainedWorkProbeOwner", "admission:ForegroundRenderingAdmission",
-            "load_macos_probe_openai_credential()", "native.take_agent_browser_port(move|event|sink(event))",
+            "load_probe_openai_credential()", "native.take_agent_browser_port(move|event|sink(event))",
             "task::capture(retire)",
             "self.owner.construct_with_policy(self.target.clone(),task::document_policy(),now()?,)",
             "self.owner.document(now()?)?",
@@ -848,7 +848,13 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "self.retire_construction();self.cancel_observation(SemanticRuntimePortFailure::Shutdown);self.cancel_action();",
             "screenshot.cancelled.store(true,Ordering::Release);",
             "ifletSome(navigation)=self.navigation.take(){navigation.refuse(ContextPortFailure::Shutdown);}ifletSome(history)=self.history_back.take(){history.refuse(ContextPortFailure::Shutdown);}ifletSome(task)=self.revocation.take(){task.complete(Outcome::Refused);}self.retire_page();self.destruction_drained()",
-            "self.retirement_clean&&self.view.is_none()&&self.guard.callbacks_drained()&&self.observation.is_none()",
+            // Shared retirement still owes every physical callback. Windows
+            // additionally retains native storage, frame and controller-close debt.
+            "self.retirement_clean&&self.view.is_none()&&self.guard.callbacks_drained()&&!self.frame_in_flight.load(Ordering::Acquire)&&self.observation.is_none()&&self.action.is_none()&&self.navigation.is_none()&&!self.history_back_pending()",
+            "#[cfg(target_os=\"macos\")]{self.screenshot.is_none()}",
+            "#[cfg(target_os=\"windows\")]if!view.cancel_work_storage()||!view.work_native_activity_drained()||self.frame_in_flight.load(Ordering::Acquire){returnfalse;}",
+            "letnative_profile=view.work_native_profile().unwrap_or(self.guard.resource().identity().profile());",
+            "ifletErr(debt)=view.close(){letdebt=super::OwnedWindowsCleanupDebt::new(debt,self.native_resource.take());super::queue_windows_cleanup_debt(native_profile,debt);self.retirement_clean=false;self.guard.fail();}",
             "!self.erasure_tombstones.contains(&resource.profile())",
             "native_resource.reclassify(NativeResourceClass::AgentContext)",
             "retirement_clean:false",
@@ -887,7 +893,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "expected.as_url().as_str()==target",
             "state.native_id==Some(event.id)",
             "Some(target.as_url().as_str())==current",
-            "ifletOk(mutstate)=self.0.lock(){state.phase=Phase::Refused;}",
+            "ifletOk(mutstate)=self.0.lock(){state.clear_write_navigation();state.phase=Phase::Refused;}",
             "state.phase=Phase::Retired",
             "state.phase=Phase::Sampling",
             "state.location_revision!=revision",
@@ -1078,6 +1084,26 @@ mod tests {
     use super::*;
     const SOURCE: &str = include_str!("../../crates/zephium-agentic/src/work_browser_resource.rs");
     const PORT: &str = include_str!("../../crates/zephium-agentic/src/context_port.rs");
+    #[test]
+    fn document_refusal_clears_one_shot_write_authority_before_sealing() {
+        let source =
+            include_str!("../../crates/zephium-engine/src/platform/work_document_navigation.rs");
+        let (_, required, forbidden) = ADAPTER_RULES
+            .iter()
+            .find(|(path, _, _)| path.ends_with("platform/work_document_navigation.rs"))
+            .unwrap();
+        validate_adapter(source, required, forbidden).unwrap();
+        let source = compact(production(source));
+        let guarded = "ifletOk(mutstate)=self.0.lock(){state.clear_write_navigation();state.phase=Phase::Refused;}";
+        for replacement in [
+            "ifletOk(mutstate)=self.0.lock(){state.phase=Phase::Refused;}",
+            "ifletOk(mutstate)=self.0.lock(){state.clear_write_navigation();}",
+            "ifletOk(mutstate)=self.0.lock(){state.phase=Phase::Refused;state.clear_write_navigation();}",
+        ] {
+            assert!(source.contains(guarded));
+            assert!(validate_adapter(&source.replace(guarded, replacement), required, forbidden).is_err());
+        }
+    }
     #[test]
     fn url_revocation_cannot_be_moved_after_host_failure_notification() {
         let source =

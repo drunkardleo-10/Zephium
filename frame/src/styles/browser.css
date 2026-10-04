@@ -1223,7 +1223,7 @@
   overflow: hidden;
   border-radius: var(--radius-control);
   background: var(--color-fill);
-  animation: tool-host-in var(--motion-page) var(--ease-emphasized) both;
+  animation: tool-host-in var(--motion-page) var(--ease-emphasized) backwards;
 }
 /* A tool grows out of the rail it was opened from. */
 @keyframes tool-host-in {

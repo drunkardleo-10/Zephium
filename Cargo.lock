@@ -7209,6 +7209,7 @@ dependencies = [
  "ulid",
  "url",
  "zephium-core",
+ "zephium-credentials",
  "zephium-decision",
  "zeroize",
 ]
@@ -7234,6 +7235,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "windows",
  "zephium-agent-controller",
  "zephium-agent-model-catalog",
  "zephium-agent-provider-transport",
@@ -7242,6 +7244,7 @@ dependencies = [
  "zephium-core",
  "zephium-ipc",
  "zephium-mcp",
+ "zephium-private-fs",
  "zephium-store",
 ]
 
@@ -7316,6 +7319,14 @@ dependencies = [
  "ulid",
  "url",
  "winreg",
+]
+
+[[package]]
+name = "zephium-credentials"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -7398,6 +7409,7 @@ dependencies = [
  "dispatch2",
  "flate2",
  "gtk",
+ "image",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -7463,8 +7475,13 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
+ "ulid",
  "url",
+ "windows",
+ "zephium-credentials",
+ "zeroize",
 ]
 
 [[package]]
@@ -7516,6 +7533,7 @@ dependencies = [
 name = "zephium-terra-macos-probe"
 version = "0.1.0"
 dependencies = [
+ "image",
  "serde_json",
  "tempfile",
  "tokio",
@@ -7531,6 +7549,7 @@ dependencies = [
  "zephium-decision",
  "zephium-engine",
  "zephium-ipc",
+ "zephium-private-fs",
  "zephium-store",
  "zephium-work-composition",
 ]

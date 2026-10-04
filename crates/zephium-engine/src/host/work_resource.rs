@@ -3,11 +3,12 @@
 
 #[cfg(target_os = "macos")]
 use super::agent_context::AgentPendingScreenshot;
+#[cfg(target_os = "macos")]
+use super::profiles::{
+    profile_scoped_value, profile_value_is_isolated, MAX_PROFILE_PERSISTENCE_BINDINGS,
+};
 use super::{
-    profiles::{
-        bind_profile_persistence_class, profile_scoped_value, profile_value_is_isolated,
-        MAX_PROFILE_PERSISTENCE_BINDINGS,
-    },
+    profiles::bind_profile_persistence_class,
     resources::{NativeResourceClass, NativeResourceLease},
     EngineHost,
 };
@@ -17,15 +18,16 @@ use crate::agent_context_port::{
 };
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 use crate::WorkResourceFailureCause as ResourceFailureCause;
-#[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use zephium_agentic::ContextOwnedViewport;
 use zephium_agentic::{
-    ContextId, ContextOwnedViewport, ContextPortFailure, ContextProfileStorageClass,
-    SemanticRuntimeCorrelation, SemanticRuntimePortFailure, SemanticSnapshot,
-    WorkBrowserLeaseNativeDebt, WorkBrowserResourceNativeOutcome as Outcome,
-    WorkBrowserResourceOperation as Operation, MAX_EXECUTING_CONTEXTS, MAX_LIVE_CONTEXTS,
+    ContextId, ContextPortFailure, ContextProfileStorageClass, SemanticRuntimeCorrelation,
+    SemanticRuntimePortFailure, SemanticSnapshot, WorkBrowserLeaseNativeDebt,
+    WorkBrowserResourceNativeOutcome as Outcome, WorkBrowserResourceOperation as Operation,
+    MAX_EXECUTING_CONTEXTS, MAX_LIVE_CONTEXTS,
 };
 use zephium_core::{ids::ProfileId, ports::engine::Partition};
 
@@ -56,6 +58,8 @@ mod witness;
 
 #[path = "work_resource_action.rs"]
 mod action;
+#[path = "work_frame_schedule.rs"]
+mod frame_schedule;
 #[path = "work_resource_human.rs"]
 mod human;
 #[path = "work_resource_navigation.rs"]
@@ -142,7 +146,11 @@ pub(super) struct WorkNativeResource {
     presentation_wake: Option<observation::ObservationWake>,
     frame_generation: u64,
     frame_in_flight: Arc<std::sync::atomic::AtomicBool>,
-    frame_captured_at: Option<Instant>,
+    frame_rendering_pending: Arc<std::sync::atomic::AtomicBool>,
+    frame_schedule: frame_schedule::WorkFrameSchedule,
+    #[cfg(target_os = "windows")]
+    frame_initial_requested: bool,
+    frame_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
     navigation: Option<navigation::WorkNavigation>,
     history_back: Option<navigation::WorkHistoryBack>,
     #[cfg(target_os = "macos")]
@@ -234,7 +242,11 @@ impl WorkNativeResource {
             presentation_wake: None,
             frame_generation: 0,
             frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            frame_captured_at: None,
+            frame_rendering_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frame_schedule: frame_schedule::WorkFrameSchedule::default(),
+            #[cfg(target_os = "windows")]
+            frame_initial_requested: false,
+            frame_wake: None,
             navigation: None,
             history_back: None,
             #[cfg(target_os = "macos")]
@@ -276,6 +288,9 @@ impl WorkNativeResource {
     ) -> Option<crate::platform::imp::ContentPolicyRegistration> {
         self.content_policy.replace(registration)
     }
+    fn history_back_pending(&self) -> bool {
+        self.history_back.is_some()
+    }
     pub(super) fn pending(&self) -> bool {
         self.construction.is_some()
             || self.revocation.is_some()
@@ -283,7 +298,7 @@ impl WorkNativeResource {
             || self.observation.is_some()
             || self.action.is_some()
             || self.navigation.is_some()
-            || self.history_back.is_some()
+            || self.history_back_pending()
             || {
                 #[cfg(target_os = "macos")]
                 {
@@ -362,7 +377,7 @@ impl WorkNativeResource {
     /// is taken as loaded after a short wait, then the quiet period and the
     /// location sample make it ready.
     fn progress_hand_on(&mut self) {
-        if self.construction.is_some() || self.navigation.is_some() || self.history_back.is_some() {
+        if self.construction.is_some() || self.navigation.is_some() || self.history_back_pending() {
             return;
         }
         let Some(gate) = self
@@ -410,10 +425,11 @@ impl WorkNativeResource {
         self.retirement_clean
             && self.view.is_none()
             && self.guard.callbacks_drained()
+            && !self.frame_in_flight.load(Ordering::Acquire)
             && self.observation.is_none()
             && self.action.is_none()
             && self.navigation.is_none()
-            && self.history_back.is_none()
+            && !self.history_back_pending()
             && {
                 #[cfg(target_os = "macos")]
                 {
@@ -482,6 +498,19 @@ impl WorkNativeResource {
         if retired {
             self.construction_presentation = None;
         } else {
+            #[cfg(target_os = "windows")]
+            if self.frame_rendering_pending.load(Ordering::Acquire)
+                && self
+                    .construction_presentation
+                    .as_mut()
+                    .is_some_and(|presentation| {
+                        presentation.poll() == crate::platform::imp::PresentationState::Retiring
+                    })
+            {
+                // Original CapturePreview rendering debt is pending, not a
+                // failed native retirement. Its callback wakes this same owner.
+                return false;
+            }
             self.retirement_clean = false;
             self.guard.fail();
         }
@@ -563,46 +592,227 @@ impl WorkNativeResource {
     /// One bounded frame for the canvas after a settled observation or action.
     /// Never more than one capture in flight, never faster than four a second.
     pub(super) fn capture_frame(&mut self) {
-        use std::sync::atomic::Ordering;
+        self.frame_schedule.request();
+        self.frame_rendering_pending.store(true, Ordering::Release);
+        #[cfg(target_os = "windows")]
+        if let Some(presentation) = self
+            .reading_presentation
+            .as_mut()
+            .or(self.construction_presentation.as_mut())
+        {
+            presentation.retain_frame_capture(self.frame_rendering_pending.clone());
+        }
+        self.progress_frame_capture();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn request_initial_frame(&mut self) {
+        if self.frame_initial_requested
+            || self.construction.is_none()
+            || !self.guard.construction_current()
+        {
+            return;
+        }
+        let committed = self
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .and_then(|gate| gate.preview_document_stamp())
+            .is_some();
+        let visible = self
+            .construction_presentation
+            .as_ref()
+            .is_some_and(crate::platform::imp::WorkObservationPresentation::visible_for_audit);
+        if !committed || !visible {
+            return;
+        }
+        self.frame_initial_requested = true;
+        // One finite native paint opportunity, independent of semantic readiness.
+        self.frame_schedule
+            .request_after(Instant::now() + Duration::from_millis(100));
+        self.frame_rendering_pending.store(true, Ordering::Release);
+        #[cfg(target_os = "windows")]
+        if let Some(presentation) = &mut self.construction_presentation {
+            presentation.retain_frame_capture(self.frame_rendering_pending.clone());
+        }
+    }
+
+    fn progress_frame_capture(&mut self) {
+        use frame_schedule::FrameOpportunity;
+        let in_flight = self.frame_in_flight.load(Ordering::Acquire);
+        if !self.guard.is_healthy() || self.destruction.is_some() {
+            self.frame_schedule.discard();
+            self.frame_wake = None;
+        }
+        #[cfg(target_os = "windows")]
+        if self.construction.is_some()
+            && !in_flight
+            && self.ready()
+            && self
+                .view
+                .as_ref()
+                .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
+        {
+            // A fast document owes no new visual work. If semantic readiness
+            // wins before dispatch, preserve construction's existing fast path;
+            // its first read will request the ordinary settled picture.
+            self.frame_schedule.discard();
+            self.frame_wake = None;
+        }
+        if !self.frame_schedule.requested() {
+            self.frame_rendering_pending
+                .store(in_flight, Ordering::Release);
+            return;
+        }
+        // An admitted operation owns its own completion wake. Capture the
+        // newest settled state when it returns, rather than an intermediate
+        // document or action whose native callback is still outstanding.
+        if self.observation.is_some()
+            || self.action.is_some()
+            || self.navigation.is_some()
+            || self.history_back_pending()
+        {
+            return;
+        }
         let visible = self
             .reading_presentation
             .as_ref()
+            .or(self.construction_presentation.as_ref())
             .is_some_and(crate::platform::imp::WorkObservationPresentation::visible_for_audit);
-        let recent = self
-            .frame_captured_at
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(250));
-        if !visible || recent || self.frame_in_flight.load(Ordering::Acquire) {
+        if !visible || self.view.is_none() {
+            self.frame_schedule.discard();
+            self.frame_wake = None;
+            self.frame_rendering_pending
+                .store(in_flight, Ordering::Release);
             return;
         }
+        let now = Instant::now();
+        match self.frame_schedule.opportunity(now, in_flight) {
+            FrameOpportunity::Idle | FrameOpportunity::Busy => return,
+            FrameOpportunity::Wait(delay) => {
+                if self.frame_wake.is_none() {
+                    let guard = self.guard.clone();
+                    self.frame_wake =
+                        crate::platform::imp::schedule_content_policy_timeout(delay, move || {
+                            let id = guard.resource().identity().context();
+                            let _ = crate::host::try_with_agent_context_terminal(move |host| {
+                                if let Some(resource) = host
+                                    .work_resources
+                                    .get_mut(&id)
+                                    .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
+                                {
+                                    resource.frame_wake = None;
+                                }
+                                host.progress_work_resource(&guard);
+                            });
+                        });
+                    if self.frame_wake.is_none() {
+                        self.frame_schedule.discard();
+                        self.frame_rendering_pending.store(false, Ordering::Release);
+                    }
+                }
+                return;
+            }
+            FrameOpportunity::Capture => {}
+        }
+        self.frame_wake = None;
+        self.frame_schedule.discard();
         let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let Some(gate) = view.work_navigation().cloned() else {
+            self.frame_rendering_pending
+                .store(in_flight, Ordering::Release);
+            return;
+        };
+        #[cfg(target_os = "windows")]
+        let stamp = gate.preview_document_stamp();
+        #[cfg(not(target_os = "windows"))]
+        let stamp = gate.document_stamp();
+        let Some(stamp) = stamp else {
+            self.frame_rendering_pending
+                .store(in_flight, Ordering::Release);
             return;
         };
         let id = self.guard.resource().identity().context();
         let generation = self.frame_generation.saturating_add(1);
         let in_flight = self.frame_in_flight.clone();
+        let guard = self.guard.clone();
+        #[cfg(all(
+            target_os = "windows",
+            feature = "native-agentic-work-lifetime-diagnostic"
+        ))]
+        guard.bind_frame_capture_diagnostic(&in_flight);
         in_flight.store(true, Ordering::Release);
+        #[cfg(target_os = "windows")]
+        let frame_rendering_guard = self
+            .reading_presentation
+            .as_mut()
+            .or(self.construction_presentation.as_mut())
+            .map(|presentation| {
+                presentation.retain_frame_capture(self.frame_rendering_pending.clone())
+            });
+        #[cfg(all(
+            target_os = "windows",
+            feature = "native-agentic-work-lifetime-diagnostic"
+        ))]
+        if generation == 1 {
+            view.diagnose_work_cookie_disk();
+        }
         let dispatched = crate::platform::imp::capture_work_frame(view.view(), move |encoded| {
-            if let Some((width, height, png)) = encoded {
-                super::work_frames::store(
-                    id,
-                    zephium_agentic::WorkBrowserFrame {
-                        generation,
-                        width,
-                        height,
-                        png: Arc::new(png),
-                    },
-                );
+            #[cfg(target_os = "windows")]
+            let document_current = gate.preview_document_stamp() == Some(stamp);
+            #[cfg(not(target_os = "windows"))]
+            let document_current = gate.document_stamp() == Some(stamp);
+            #[cfg(target_os = "windows")]
+            let projection_current = guard.frame_projection_current();
+            #[cfg(not(target_os = "windows"))]
+            let projection_current = guard.is_healthy();
+            if projection_current && document_current {
+                if let Some((width, height, png)) = encoded {
+                    super::work_frames::store(
+                        id,
+                        zephium_agentic::WorkBrowserFrame {
+                            generation,
+                            width,
+                            height,
+                            png: Arc::new(png),
+                        },
+                    );
+                    // Windows finishes byte encoding after the observation's
+                    // normal application wake. Publish this replacement through
+                    // the original resource receiver as soon as it is ready.
+                    guard.notify_frame_projection();
+                }
             }
+            #[cfg(target_os = "windows")]
+            drop(frame_rendering_guard);
             in_flight.store(false, Ordering::Release);
+            notify_work_resource(guard);
         });
         if dispatched {
             self.frame_generation = generation;
-            self.frame_captured_at = Some(Instant::now());
+            self.frame_schedule.started(now);
+            #[cfg(all(
+                target_os = "windows",
+                feature = "native-agentic-work-lifetime-diagnostic"
+            ))]
+            self.guard.notify_frame_capture_dispatched_diagnostic();
         } else {
             self.frame_in_flight.store(false, Ordering::Release);
+            self.frame_rendering_pending.store(false, Ordering::Release);
         }
     }
     fn retire_page(&mut self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.frame_in_flight.load(Ordering::Acquire) {
+            // Revoke the transferred reading/action fences, but preserve the
+            // original capture's rendering opportunity and native debt.
+            self.retire_reading_presentation();
+            self.retire_observation_presentation();
+            self.retire_action_presentation();
+            return false;
+        }
         self.watchdog = None;
         super::work_frames::clear(self.guard.resource().identity().context());
         if !self.retire_human_presentation()
@@ -622,6 +832,13 @@ impl WorkNativeResource {
         let Some(view) = self.view.as_mut() else {
             return self.retirement_clean;
         };
+        #[cfg(target_os = "windows")]
+        if !view.cancel_work_storage()
+            || !view.work_native_activity_drained()
+            || self.frame_in_flight.load(Ordering::Acquire)
+        {
+            return false;
+        }
         // Destruction only. Lease retirement never enters this method.
         crate::platform::imp::stop_loading(view.view());
         self.retirement_clean &= view.work_navigation().is_some_and(|gate| gate.retire());
@@ -630,6 +847,22 @@ impl WorkNativeResource {
             .content_policy
             .take()
             .is_some_and(|registration| registration.retire().is_ok());
+        #[cfg(target_os = "windows")]
+        if self.retirement_clean {
+            let native_profile = view
+                .work_native_profile()
+                .unwrap_or(self.guard.resource().identity().profile());
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            if let Some(target) = self.guard.document() {
+                super::work_windows::diagnose_work_cookie_before_close(view, target);
+            }
+            if let Err(debt) = view.close() {
+                let debt = super::OwnedWindowsCleanupDebt::new(debt, self.native_resource.take());
+                super::queue_windows_cleanup_debt(native_profile, debt);
+                self.retirement_clean = false;
+                self.guard.fail();
+            }
+        }
         if self.retirement_clean {
             self.view = None;
         } else {
@@ -639,6 +872,7 @@ impl WorkNativeResource {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn resource_callback(guard: Arc<WorkResourceGuard>) {
     notify_work_resource(guard);
 }
@@ -703,6 +937,7 @@ fn timeout(
 }
 
 impl EngineHost {
+    #[cfg(target_os = "macos")]
     pub(super) fn work_execution_reservations(&self) -> usize {
         self.work_resources
             .values()
@@ -827,6 +1062,43 @@ impl EngineHost {
                         })
                         .is_some_and(|(view, target)| view.begin_history_lease(target).is_ok());
                 }
+                #[cfg(target_os = "windows")]
+                if accepted {
+                    accepted = resource
+                        .view
+                        .as_ref()
+                        .is_some_and(|view| view.set_work_leased(true));
+                }
+                #[cfg(target_os = "windows")]
+                if accepted {
+                    let target = resource
+                        .view
+                        .as_ref()
+                        .and_then(|view| view.work_navigation())
+                        .and_then(|gate| gate.ready_target());
+                    if let Some((view, target)) = resource.view.as_mut().zip(target) {
+                        let current = guard.clone();
+                        view.enroll_work_history_with_completion(target, true, move |healthy| {
+                            let accepted = healthy
+                                && current.is_healthy()
+                                && task
+                                    .request()
+                                    .and_then(|request| request.lease())
+                                    .is_some_and(|lease| {
+                                        work_browser_monotonic_now().is_some_and(|now| {
+                                            current.acquisition_current(lease, now)
+                                        })
+                                    });
+                            task.complete(if accepted {
+                                Outcome::Acquired
+                            } else {
+                                Outcome::Refused
+                            });
+                        });
+                        return;
+                    }
+                    accepted = false;
+                }
                 task.complete(if accepted {
                     Outcome::Acquired
                 } else {
@@ -875,6 +1147,8 @@ impl EngineHost {
     }
 
     fn construct_work_resource(&mut self, task: WorkLifecycleTask) {
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        eprintln!("windows-work-construction: stage=shared_construct; content=redacted");
         let guard = task.guard();
         let original_deadline = guard.construction_deadline(Instant::now());
         if original_deadline.is_none_or(|deadline| deadline <= Instant::now()) {
@@ -882,6 +1156,10 @@ impl EngineHost {
             return;
         }
         let result = self.build_work_resource(guard.clone());
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        if let Err(failure) = &result {
+            eprintln!("windows-work-construction: stage=shared_admission port_failure={failure:?}; content=redacted");
+        }
         let Ok(mut resource) = result else {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             if let Err(failure) = &result {
@@ -968,6 +1246,7 @@ impl EngineHost {
             .try_acquire(NativeResourceClass::TransientConstruction)
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
         // Anonymous sessions never borrow the user's profile cookie store.
+        #[cfg(target_os = "macos")]
         let store = if guard.isolated_public() {
             Some(match guard.anonymous_session() {
                 Some(session) if session.admits(profile, guard.resource().identity().work()) => {
@@ -1006,10 +1285,15 @@ impl EngineHost {
                 }
             }
         };
+        #[cfg(target_os = "macos")]
         let legacy = guard.clone();
+        #[cfg(target_os = "macos")]
         let location = guard.clone();
+        #[cfg(target_os = "macos")]
         let renderer = guard.clone();
+        #[cfg(target_os = "macos")]
         let invariant = guard.clone();
+        #[cfg(target_os = "macos")]
         let panic = guard.clone();
         // Publish/retain this exact native reservation before a fallible
         // constructor can allocate a partial view/delegate graph. An error
@@ -1035,7 +1319,11 @@ impl EngineHost {
             presentation_wake: None,
             frame_generation: 0,
             frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            frame_captured_at: None,
+            frame_rendering_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            frame_schedule: frame_schedule::WorkFrameSchedule::default(),
+            #[cfg(target_os = "windows")]
+            frame_initial_requested: false,
+            frame_wake: None,
             navigation: None,
             history_back: None,
             #[cfg(target_os = "macos")]
@@ -1061,6 +1349,7 @@ impl EngineHost {
             #[cfg(feature = "native-agentic-work-resource-probe")]
             presentation_observations: 0,
         };
+        #[cfg(target_os = "macos")]
         let callbacks = crate::platform::imp::AgentOwnedViewCallbacks::new(
             move |_| {
                 legacy.fail();
@@ -1086,12 +1375,16 @@ impl EngineHost {
                 resource_callback(panic.clone());
             },
         );
-        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        #[cfg(all(
+            target_os = "macos",
+            feature = "native-agentic-work-lifetime-diagnostic"
+        ))]
         let callbacks = {
             let diagnostic = guard.clone();
             callbacks
                 .with_failure_diagnostic(move |failure| diagnostic.record_failure_cause(failure))
         };
+        #[cfg(target_os = "macos")]
         let view = crate::platform::imp::build_owned_work_view(
             &self.parent,
             ContextOwnedViewport::STANDARD,
@@ -1104,6 +1397,8 @@ impl EngineHost {
             store.as_ref(),
             callbacks,
         );
+        #[cfg(target_os = "windows")]
+        let view = self.build_windows_work_view(&guard, &mut resource.native_resource);
         let Ok(view) = view else {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(ResourceFailureCause::NativeAdmission(
@@ -1118,6 +1413,8 @@ impl EngineHost {
             crate::platform::imp::install_content_policy_on_view(view.view(), &policy);
         resource.view = Some(view);
         let Ok(registration) = registration else {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            eprintln!("windows-work-construction: stage=content_policy_install refused=true; content=redacted");
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(ResourceFailureCause::NativeAdmission(
                 ContextPortFailure::NativeRefused,
@@ -1160,6 +1457,14 @@ impl EngineHost {
             guard.fail();
         }
         if resource.destruction.is_some() {
+            // Cancellation/destruction discards undispatched preview demand.
+            // Already dispatched native capture debt still owns its renderer.
+            resource.frame_schedule.discard();
+            resource.frame_wake = None;
+            resource.frame_rendering_pending.store(
+                resource.frame_in_flight.load(Ordering::Acquire),
+                Ordering::Release,
+            );
             if resource.prepare_destruction() {
                 let Some(mut resource) = self.work_resources.remove(&id) else {
                     guard.fail();
@@ -1169,6 +1474,8 @@ impl EngineHost {
                 resource.lifecycle_deadline = None;
                 let task = resource.destruction.take();
                 drop(resource);
+                #[cfg(target_os = "windows")]
+                self.retire_windows_anonymous_work_sessions();
                 if let Some(task) = task {
                     task.complete(Outcome::Destroyed);
                 }
@@ -1183,6 +1490,9 @@ impl EngineHost {
         resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_human(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_hand_on();
+        #[cfg(target_os = "windows")]
+        resource.request_initial_frame();
+        resource.progress_frame_capture();
         if resource
             .construction_presentation
             .as_mut()
@@ -1203,7 +1513,17 @@ impl EngineHost {
             .is_none_or(|gate| gate.failed())
         {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-            guard.record_failure_cause(ResourceFailureCause::UnattributedResourceFailure);
+            guard.record_failure_cause(
+                resource
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .and_then(|gate| gate.url_observation_failure())
+                    .map_or(
+                        ResourceFailureCause::UnattributedResourceFailure,
+                        ResourceFailureCause::UrlObservationRefused,
+                    ),
+            );
             #[cfg(feature = "native-agentic-work-resource-probe")]
             if resource.construction.is_some() {
                 resource.record_construction_failure("navigation_gate");
@@ -1247,15 +1567,21 @@ impl EngineHost {
                 return;
             }
             if !resource.document_started {
-                let Some(view) = resource.view.as_ref() else {
+                let Some(view) = resource.view.as_mut() else {
                     guard.fail();
                     return;
                 };
+                #[cfg(target_os = "windows")]
+                view.progress_work_storage();
                 let Some(gate) = view.work_navigation().cloned() else {
                     guard.fail();
                     return;
                 };
                 if !gate.bootstrap_ready() {
+                    return;
+                }
+                #[cfg(target_os = "windows")]
+                if !view.work_storage_ready() {
                     return;
                 }
                 if let Some(document) = guard.document() {
@@ -1269,6 +1595,10 @@ impl EngineHost {
                         resource.retire_construction();
                         return;
                     };
+                    #[cfg(target_os = "windows")]
+                    if !view.admit_work_store_page() {
+                        return;
+                    }
                     resource.document_started = true;
                     if view.prepare_semantic_document_load().is_err()
                         || gate
@@ -1299,6 +1629,31 @@ impl EngineHost {
                     .and_then(|view| view.work_navigation())
                     .filter(|gate| gate.finalization_pending())
                     .cloned();
+                // Drain the original finite visual request before retiring its
+                // native owner. Keep the original construction watchdog and
+                // deadline; no frame can renew construction or input authority.
+                if resource.frame_rendering_pending.load(Ordering::Acquire) {
+                    // Start the existing native quiet interval concurrently;
+                    // never consume its ready ticket or sample a URL until the
+                    // original visual capture has returned.
+                    if let Some(gate) = &finalizing {
+                        if resource.document_finalization_wake.is_none()
+                            && resource.document_finalization_ready.is_none()
+                            && !matches!(
+                                resource.progress_document_finalization(gate),
+                                DocumentFinalizationProgress::Pending
+                            )
+                        {
+                            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                            guard.record_failure_cause(
+                                ResourceFailureCause::DocumentFinalizationRefused,
+                            );
+                            guard.fail();
+                            resource.retire_construction();
+                        }
+                    }
+                    return;
+                }
                 if let Some(gate) = finalizing {
                     // No lease/read exists here. Require one native quiet
                     // period, then freeze one revision-fenced location sample
@@ -1309,6 +1664,12 @@ impl EngineHost {
                             if guard.construction_current() =>
                         {
                             let retired = resource.retire_construction_presentation();
+                            #[cfg(target_os = "windows")]
+                            let retired = retired
+                                && resource
+                                    .view
+                                    .as_ref()
+                                    .is_some_and(|view| view.set_work_leased(false));
                             resource.watchdog = None;
                             resource.lifecycle_deadline = None;
                             if let Some(task) = resource.construction.take() {
@@ -1367,6 +1728,12 @@ impl EngineHost {
                     .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
             {
                 let retired = resource.retire_construction_presentation();
+                #[cfg(target_os = "windows")]
+                let retired = retired
+                    && resource
+                        .view
+                        .as_ref()
+                        .is_some_and(|view| view.set_work_leased(false));
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
                 if let Some(task) = resource.construction.take() {
@@ -1379,13 +1746,28 @@ impl EngineHost {
             }
             return;
         }
+        let frame_drained = {
+            #[cfg(target_os = "windows")]
+            {
+                !resource.frame_rendering_pending.load(Ordering::Acquire)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                true
+            }
+        };
+        // CapturePreview still owns a rendering opportunity after snapshot
+        // delivery. Hiding its child or suspending its controller can strand
+        // that native callback. The presenter revokes input immediately while
+        // deferring its native hide until the exact capture flag drains.
         let presentation_retired = if resource.revocation.is_some() {
             resource.retire_reading_presentation()
         } else {
             true
         };
         if let Some(task) = resource.revocation.as_ref() {
-            let drained = presentation_retired
+            let drained = frame_drained
+                && presentation_retired
                 && task
                     .request()
                     .and_then(|request| request.lease())
@@ -1393,7 +1775,7 @@ impl EngineHost {
                 && resource.observation.is_none()
                 && resource.action.is_none()
                 && resource.navigation.is_none()
-                && resource.history_back.is_none()
+                && !resource.history_back_pending()
                 && {
                     #[cfg(target_os = "macos")]
                     {
@@ -1410,6 +1792,24 @@ impl EngineHost {
                     .as_ref()
                     .is_some_and(|view| view.semantic_pending_for_audit() == Some(false));
             if drained {
+                #[cfg(target_os = "windows")]
+                if resource
+                    .view
+                    .as_ref()
+                    .is_none_or(|view| !view.set_work_leased(false))
+                {
+                    guard.fail();
+                    return;
+                }
+                #[cfg(target_os = "windows")]
+                if resource
+                    .view
+                    .as_ref()
+                    .is_none_or(|view| !view.work_native_activity_drained())
+                    || resource.frame_in_flight.load(Ordering::Acquire)
+                {
+                    return;
+                }
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
                 if let Some(task) = resource.revocation.take() {
@@ -1451,6 +1851,19 @@ impl EngineHost {
                 guard.construction_timed_out();
             }
             resource.deadline_expired = true;
+            #[cfg(all(
+                target_os = "windows",
+                feature = "native-agentic-work-lifetime-diagnostic"
+            ))]
+            if deadline.operation == Operation::Revoke {
+                eprintln!("windows-work-revocation: guard_facts={:?} presentation_absent={} observation_absent={} action_absent={} navigation_absent={} history_absent={} document_ready={} semantic_pending={:?} native_activity_drained={} native_suspended={:?} frame_pending={}; content=redacted",
+                    deadline.lease.as_ref().and_then(|lease| guard.revocation_drain_facts(lease)),
+                    resource.reading_presentation.is_none(), resource.observation.is_none(), resource.action.is_none(), resource.navigation.is_none(), !resource.history_back_pending(), resource.ready(),
+                    resource.view.as_ref().and_then(|view| view.semantic_pending_for_audit()),
+                    resource.view.as_ref().is_some_and(|view| view.work_native_activity_drained()),
+                    resource.view.as_ref().map(|view| view.is_suspended().ok()),
+                    resource.frame_in_flight.load(Ordering::Acquire));
+            }
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(resource.deadline_failure_cause(deadline.operation));
             #[cfg(feature = "native-agentic-work-resource-probe")]

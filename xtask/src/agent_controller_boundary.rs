@@ -37,10 +37,12 @@ const ALLOWED_DEPENDENCIES: [&str; 7] = [
     "zephium-agent-runtime",
     "zephium-decision",
 ];
-const FORBIDDEN_TERRA_TOKENS: [&str; 14] = [
+const FORBIDDEN_TERRA_TOKENS: [&str; 16] = [
     "reqwest",
     "keychain",
     "load_macos_development",
+    "load_development",
+    "load_probe",
     "zephium_engine",
     "zephium_store",
     "zephium_app",

@@ -1,6 +1,9 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(feature = "agentic-browser")]
 pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES};
@@ -14,6 +17,9 @@ mod motion_curve;
 mod navigation_epoch;
 mod pane_geometry;
 mod platform;
+
+#[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+pub use platform::windows::{install_work_rendering_backing, remove_work_rendering_backing};
 
 #[cfg(all(feature = "agentic-browser-qa", not(debug_assertions)))]
 compile_error!("agent browser QA is forbidden in optimized builds");
@@ -40,7 +46,7 @@ pub use platform::macos::agentic_liveness_probe::{
 compile_error!("native Work lifetime diagnostics are forbidden in optimized builds");
 
 #[cfg(all(
-    target_os = "macos",
+    any(target_os = "macos", target_os = "windows"),
     feature = "native-agentic-work-lifetime-diagnostic"
 ))]
 #[doc(hidden)]
@@ -50,7 +56,7 @@ pub use agent_context_port::work_resource_failure_diagnostic::{
 };
 
 #[cfg(all(
-    target_os = "macos",
+    any(target_os = "macos", target_os = "windows"),
     feature = "native-agentic-work-lifetime-diagnostic"
 ))]
 impl WebviewEngine {
@@ -63,6 +69,29 @@ impl WebviewEngine {
     ) -> Option<WorkResourceFailureCause> {
         self.agent_context_port
             .work_resource_failure_cause(resource)
+    }
+    /// Content-free sample of the original capture flag; no native authority.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn work_resource_frame_capture_pending(
+        &self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+    ) -> Option<bool> {
+        self.agent_context_port
+            .work_resource_frame_capture_pending(resource)
+    }
+    /// One diagnostic notification after the original native capture accepts
+    /// dispatch, while its original debt flag is still set. The callback must
+    /// not wait on the native UI thread; no new cancellation authority is given.
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn work_resource_on_frame_capture_dispatched(
+        &self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+        callback: Box<dyn FnOnce() + Send>,
+    ) -> bool {
+        self.agent_context_port
+            .work_resource_on_frame_capture_dispatched(resource, callback)
     }
 }
 
@@ -298,7 +327,10 @@ pub use platform::macos::MacosAgenticSemanticProbeAuthority;
 pub use platform::macos::MacosAgenticSemanticTwoActionScenario;
 
 /// Release-excluded main-thread observer of a real product runtime actor.
-#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    feature = "native-agentic-semantic-probe"
+))]
 #[doc(hidden)]
 pub type MacosAgentWorkProbePoll = Box<dyn FnMut(bool) -> Option<Result<(), &'static str>>>;
 
@@ -360,7 +392,10 @@ pub fn run_macos_agentic_work_application_probe(
     platform::macos::run_agentic_work_application_probe(profile, start)
 }
 
-#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    feature = "native-agentic-semantic-probe"
+))]
 #[derive(Clone, Copy)]
 #[doc(hidden)]
 pub enum MacosWorkProbeInput {
@@ -1680,7 +1715,7 @@ impl WebviewEngine {
     /// For each host, whether the profile's own website data holds cookies
     /// for its site: closed facts, never a cookie or an account. The receiver
     /// yields all false, or disconnects, when the answer is not available.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn work_sessions_present(
         &self,
         profile: zephium_core::ids::ProfileId,
@@ -1695,7 +1730,7 @@ impl WebviewEngine {
 
     /// Finished page loads in the profile's ordinary tabs on a site: a count
     /// that grows when the person loads a page there, such as after signing in.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn work_site_loads(
         &self,
         profile: zephium_core::ids::ProfileId,
@@ -2918,6 +2953,39 @@ impl Engine for WebviewEngine {
 #[doc(hidden)]
 pub fn run_macos_anonymous_work_session_probe() -> Result<(), &'static str> {
     host::anonymous_session_probe::run()
+}
+
+/// Windows STA host for the release-excluded full Work application qualifier.
+#[cfg(all(target_os = "windows", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_windows_work_application_with_input_probe(
+    profile: zephium_core::ids::ProfileId,
+    input: MacosWorkProbeInput,
+    timeout: std::time::Duration,
+    events: impl Fn(EngineEvent) + Send + Sync + 'static,
+    start: impl FnOnce(std::sync::Arc<WebviewEngine>) -> Result<MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    platform::windows::run_work_application_probe(profile, input, timeout, events, start)
+}
+
+/// Provider-free Windows SDK cookie persistence control; no Work policy or user profile.
+#[cfg(all(
+    debug_assertions,
+    target_os = "windows",
+    feature = "native-agentic-semantic-probe"
+))]
+#[doc(hidden)]
+pub fn run_windows_cookie_persistence_control() -> Result<(), &'static str> {
+    platform::windows::run_cookie_persistence_control()
+}
+
+/// Release-excluded Windows native rich-editor guard qualifier.
+#[cfg(all(target_os = "windows", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_windows_semantic_action_guard_probe(
+    request_id: u64,
+) -> Result<[bool; 5], zephium_agentic::WindowsSemanticProbeFailure> {
+    platform::windows::run_semantic_action_guard_probe(request_id)
 }
 
 #[cfg(test)]

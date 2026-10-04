@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import type { Snippet } from "svelte";
+  import { IS_WINDOWS } from "$shared/platform";
   import * as motion from "$session/motion.svelte";
   import { surface as browserPage } from "$domain/surface";
   import * as tools from "$session/tools.svelte";
@@ -152,6 +153,7 @@
   aria-label={m.ui_browser_sidebar()}
   style:width={`${width}px`}
   style:--sidebar-width={`${width}px`}
+  data-menu-material={IS_WINDOWS && !settings ? "opaque" : undefined}
   data-reshaping={reshaping}
   data-sidebar-resize-settling={resizeSettling}
   data-header-fresh={headerFresh}
@@ -161,13 +163,13 @@
       {width}
       disabled={reshaping}
     />{/if}
-  <SidebarHeader
-    compact={headerCompact}
-    launcher={!navigating && tools.activeTool() !== null}
-    ontoggle={toggleShape}
-    navigation={!navigating}
-    pageControls={!inWork}
-  />
+  {#if !settings || !IS_WINDOWS}<SidebarHeader
+      compact={headerCompact}
+      launcher={!navigating && tools.activeTool() !== null}
+      ontoggle={toggleShape}
+      navigation={!navigating}
+      pageControls={!inWork}
+    />{/if}
   {#if settings}
     {@render settingsNavigation()}
   {:else}

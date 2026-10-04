@@ -101,11 +101,6 @@ impl AgentNavigationObservation {
     }
 
     #[cfg(test)]
-    pub(crate) fn is_some(&self) -> bool {
-        self.terminal.is_some()
-    }
-
-    #[cfg(test)]
     pub(crate) fn expect(self, message: &str) -> AgentNavigationTerminal {
         self.terminal.expect(message)
     }

@@ -281,3 +281,144 @@ emitted-style checks pass. Native live qualification is still outstanding.
 Public-discovery approval, transient activity ownership, browser promotion/takeover,
 durable draft checkpoints, artifact editing and account workflows remain unfinished;
 this checkpoint does not claim the complete Work product or end-to-end success.
+
+## Windows chrome follow-up (2026-10-04)
+
+This is focused UI qualification on `windows/work`, not a release sign-off.
+The native caption in `desktop/src/platform/windows_caption.rs` now keeps
+resize hit testing separate from caption reveal. Its owned edge forwards top
+and corner sizing commands to the main HWND because the child WebView otherwise
+consumes the frameless client border. Caption popups hide during move/resize;
+the right gutter remains a sizing target. Hover repaints happen on state changes,
+pressed controls have feedback, Escape restores the previous native focus, and
+theme changes repaint the caption background as well as its buttons.
+
+The isolated QA executable passed live top-edge and top-right diagonal resizing,
+caption reveal above page content, maximize, and Alt+Space -> Restore. Alt+F10
+was not delivered to the caption while page content had focus; use the standard
+Windows system menu for verified keyboard window operations. Snap Layouts,
+mixed-DPI monitors, Windows 10 and accessibility/theme combinations still need
+native acceptance. Static screenshots do not certify animation smoothness.
+
+The custom menu blur problem is still open. On WebView2 154.0.4258.53, the live
+Utilities menu has computed `backdrop-filter: blur(24px)` but sharp sidebar text
+remains visible through it. The same CSS blurs correctly in standalone Chromium,
+and the user reports working blur over the opaque Settings page. This matches
+[WebView2 issue 4945](https://github.com/MicrosoftEdge/WebView2Feedback/issues/4945):
+transparent native/WebView backgrounds blend the backdrop incorrectly. No opaque
+fallback, extra renderer, global GPU flag, or security-policy change was shipped.
+The temporary inspector-opening diagnostic was removed.
+
+Validation: desktop QA library 155 passed / 2 existing ignored; strict all-target
+QA Clippy passed; QA executable build passed; emitted CSS checks passed (105
+files); whitespace checks passed. Logs use `target/windows-ui-round6-*`. The
+preceding launcher/frontend checks are recorded separately; this caption-only
+follow-up does not claim a new full frontend or macOS qualification.
+
+Release gates were checked directly: `check-engine-floors` fails on the macOS/
+WebKit review expired September 18; `check-advisory-exceptions` fails on the
+security-owned exception expired September 30. The Windows WebView2 review is
+valid through October 9. No deadline or gate was weakened. The earlier round4
+privileged-WebView exit-proof/quarantine warning remains an endurance concern;
+round5 and the diagnostic round6 close did not log that warning. Pending Work,
+extension, signed-package and resource qualification in the Windows handoffs
+and `.github/RELEASE.md` still applies.
+
+## Windows sidebar material and caption refinement (2026-10-04)
+
+The user accepted an opaque fallback specifically for Windows sidebar menus.
+The sidebar marks its surface policy outside Settings; Menu, Select, Disclosure
+and the Tasks date popover carry that policy from their trigger to their panel,
+including across DOM portals. The existing solid float token replaces the
+translucent menu background and disables backdrop filtering for those panels.
+Settings and macOS receive no marker and keep their previous appearance. Notes
+editor popups were already opaque. No dependency, renderer, polling loop or native
+window was added. This supersedes the presentation decision above; it does not
+claim to fix the underlying WebView2 compositor issue.
+
+The caption now limits top/right resize hit testing to a narrow DPI-aware outer
+rim, separately from the corner reach and top reveal strip. Moving within the
+reveal strip does not dismiss the controls. Both caption popups and their fade
+are hidden before minimize focus changes and the native animation.
+
+Validation: full frame check passed (646 unit tests); 19 focused browser-component
+tests passed, including scoped menu materials and the Tasks calendar. Desktop QA
+library: 155 passed / 2 existing ignored; strict all-target QA Clippy passed.
+Frontend production build and emitted CSS checks passed (105 files). Four bundle
+ceilings were reviewed with measurements and reasons in bundle-budgets.json:
+100-byte CSS steps for Downloads/History, 500-byte CSS step for the shared Select
+graph in Skills, and 300-byte JS step for Tasks menu/calendar portal propagation.
+The implementation adds no package dependencies; these are graph-size changes,
+not measured RAM costs. Logs use target/windows-ui-round7-*.
+
+Native resize, hover, minimize and visual acceptance of this revision are left
+to the user at their request. Earlier live checks do not qualify this revision.
+The release gate findings and pending platform qualification above remain open.
+
+## Caption maximize/restore flash follow-up (2026-10-04)
+
+The user accepted the preceding sidebar/menu and caption refinement, then reported
+an intermittent white caption flash on maximize/restore. The minimize suppression
+now covers all three window-state commands. The caption is hidden before focus
+repaint, stays suppressed through synchronous native size/focus processing, and
+returns to collapsed hover behavior after command handling. Fade origin is reset
+and reveal requests during the transition are ignored. No frontend change.
+
+Strict all-target QA Clippy passed; desktop QA library 155 passed / 2 existing
+ignored. Logs use target/windows-ui-round8-*. The user subsequently confirmed
+that maximize/restore works; no agent interaction test was performed.
+
+## Windows UI commit and PR handoff (2026-10-04)
+
+The UI work starts at 527a8b94 on windows/work. Reviewable implementation commits:
+
+- aab488a4: lazy launcher creation, native hidden-state suspension, search ownership,
+  dynamic Windows geometry, autocomplete and scrollbar refinements, with tests.
+- 99a92b9d: native Windows caption and application-menu rendering, acrylic tuning,
+  Windows sidebar/window integration and keyboard handling.
+- 75ed3221: Windows-sidebar-only opaque CSS menu surfaces, portal propagation,
+  component regressions and measured bundle-budget updates.
+- The documentation commit containing this section records the evidence and limits.
+
+These commits preserve the user's tested combined working tree. Validation above
+qualifies that combined state, not each intermediate split in isolation. The
+user confirmed the final maximize/restore correction. Full workspace Rust format
+check passed again before committing. No QA logs, profiles, executables or local
+credentials are included. No push or pull request has been performed in this
+commit-preparation step.
+
+The branch already contained eight unpublished Work commits before this UI work.
+A PR from windows/work to main therefore includes the broader Windows Work port,
+not only the three implementation commits above. Suggested PR title:
+"Integrate Windows Work mode and polish native browser chrome".
+
+Suggested PR summary: Windows gains the committed Work integration together with
+native caption/menu polish and a launcher created only on demand. Hidden launcher
+work is settled before native suspension, New Tab search no longer depends on
+launcher existence, and Windows sidebar menus use an opaque material while
+Settings and macOS menus retain their current appearance. Include the earlier
+Work qualification from windows-work-implementation.md and the focused UI checks
+above; do not describe the branch as fully release-qualified.
+
+Remote inspection fetched origin/main at afd3d0cb. At that point main had 48
+commits absent from this branch. A merge-tree preview after 75ed3221 found content
+conflicts in these eight paths, without modifying the index or working tree:
+
+- crates/zephium-engine/src/platform/windows/mod.rs
+- desktop/Cargo.toml
+- desktop/src/lib.rs
+- frame/bundle-budgets.json
+- frame/src/app/browser/BrowserApp.svelte
+- frame/src/app/panel/PanelApp.svelte
+- frame/src/features/settings/lib/catalog.ts
+- frame/src/features/settings/tests/settings-model.test.ts
+
+Next: push windows/work and open a review PR to main. Resolve current-main
+integration in a separate, reviewable commit while preserving both Work and UI
+behavior; regenerate IPC bindings from Rust after resolving contracts, and
+re-measure bundle graphs instead of blindly selecting the larger budgets.
+Rerun the full frame gate, affected component tests, frontend build/style checks,
+strict native checks and the relevant Work/runtime gates on the merged result.
+Only merge after review and CI are complete. The recorded expired security
+reviews, resource/endurance measurements, macOS lifecycle, Windows compatibility
+and signed-package qualification remain separate release requirements.

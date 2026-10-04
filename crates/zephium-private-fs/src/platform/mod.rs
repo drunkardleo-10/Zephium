@@ -19,6 +19,13 @@ pub(crate) enum RegularMode {
 
 #[cfg(unix)]
 pub(crate) use unix::*;
+#[cfg(all(target_os = "windows", feature = "windows-work-test-fixtures"))]
+pub use windows::native_storage::NativeWorkStorageTestSession;
+#[cfg(target_os = "windows")]
+pub use windows::native_storage::{
+    NativeApplication, NativeSession, NativeStorageAnchor, NativeStorageFile,
+    NativeWorkStorageAnchor, NativeWorkStorageFile,
+};
 #[cfg(target_os = "windows")]
 pub(crate) use windows::*;
 

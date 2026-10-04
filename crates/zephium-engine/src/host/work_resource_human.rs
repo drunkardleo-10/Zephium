@@ -3,6 +3,7 @@ use super::*;
 const HUMAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[cfg(all(
+    target_os = "macos",
     feature = "agentic-browser-qa",
     feature = "native-agentic-semantic-probe"
 ))]
@@ -89,6 +90,10 @@ impl WorkNativeResource {
                         deadline,
                     )
                     .ok_or(())?;
+                    #[cfg(target_os = "windows")]
+                    if !view.activate_work_human() {
+                        return Err(());
+                    }
                     view.work_navigation().ok_or(())?.begin_human(
                         request.human_source().ok_or(())?,
                         deadline,
@@ -140,9 +145,28 @@ impl WorkNativeResource {
         });
         match result {
             Ok(None) => task.complete(Outcome::HumanPresented),
-            Ok(Some(document)) => task.complete_human_document(document),
+            Ok(Some(document)) => {
+                #[cfg(target_os = "windows")]
+                if let Some(view) = self.view.as_ref() {
+                    let guard = self.guard.clone();
+                    view.finish_work_human_activity(move |clean| {
+                        if clean {
+                            task.complete_human_document(document);
+                        } else {
+                            guard.fail();
+                            task.complete(Outcome::Refused);
+                        }
+                    });
+                    return;
+                }
+                task.complete_human_document(document);
+            }
             Err(()) => {
                 self.retire_human_presentation();
+                #[cfg(target_os = "windows")]
+                if let Some(view) = self.view.as_ref() {
+                    view.finish_work_human_activity(|_| {});
+                }
                 self.guard.fail();
                 task.complete(Outcome::Refused);
             }
@@ -210,6 +234,10 @@ impl WorkNativeResource {
             || !self.schedule_human_wake()
         {
             self.retire_human_presentation();
+            #[cfg(target_os = "windows")]
+            if let Some(view) = self.view.as_ref() {
+                view.finish_work_human_activity(|_| {});
+            }
             self.guard.fail();
         }
     }

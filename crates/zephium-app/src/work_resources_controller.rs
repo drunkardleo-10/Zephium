@@ -143,7 +143,7 @@ impl RetainedBrowser {
 }
 impl AgentWorkRetainedBrowser for RetainedBrowser {
     fn supports_screenshots(&self) -> bool {
-        cfg!(target_os = "macos")
+        cfg!(any(target_os = "macos", target_os = "windows"))
     }
     fn dispatch_screenshot(
         &mut self,

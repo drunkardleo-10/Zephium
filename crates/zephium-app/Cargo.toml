@@ -49,8 +49,14 @@ lopdf = { version = "=0.45.0", default-features = false, optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = { version = "=0.2.186", optional = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Pipes", "Win32_System_IO", "Win32_Security"] }
+
 [dev-dependencies]
 zephium-agent-model-catalog.workspace = true
 serde_json.workspace = true
 zephium-store = { workspace = true, features = ["work-execution"] }
 tempfile.workspace = true
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+zephium-private-fs = { workspace = true, features = ["windows-work-test-fixtures"] }

@@ -1609,6 +1609,11 @@ impl Shell {
             && reads_stopped
             && native_clean
             && blocker_clean;
+        if !clean {
+            crate::diagnostic!(
+                "shutdown: clean proof incomplete terminal={terminal_clean} agent_lifecycle={agent_lifecycle_clean} storage={storage_clean} coordination={coordination_clean} readers={reads_stopped} native={native_clean} blocker={blocker_clean}"
+            );
+        }
         let outcome = if clean {
             ShutdownOutcome::Clean
         } else {

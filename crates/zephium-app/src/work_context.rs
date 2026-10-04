@@ -10,13 +10,14 @@ use zephium_core::{
 
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
 /// A session check never holds a request up for longer than this.
-const PRESENCE_TIMEOUT: Duration = Duration::from_secs(2);
+const PRESENCE_TIMEOUT: Duration = Duration::from_millis(5500);
+const SITE_LOADS_TIMEOUT: Duration = Duration::from_secs(2);
 #[path = "work_context_media.rs"]
 mod media;
 
 /// Answers, per host, whether the profile's own website data holds cookies
 /// for that host's site. Closed facts only; the composition root installs the
-/// engine's check, and without one every answer is false.
+/// engine's check. Unavailable checks remain unknown.
 pub type WorkSessionPresence =
     dyn Fn(ProfileId, Vec<String>) -> std::sync::mpsc::Receiver<Vec<bool>> + Send + Sync;
 static PRESENCE: std::sync::RwLock<Option<std::sync::Arc<WorkSessionPresence>>> =
@@ -26,20 +27,79 @@ pub fn install_session_presence(presence: std::sync::Arc<WorkSessionPresence>) {
         *slot = Some(presence);
     }
 }
-/// One answer per host, in order; false wherever the check is unavailable.
-pub(crate) async fn sessions_present(profile: ProfileId, hosts: Vec<String>) -> Vec<bool> {
+/// One answer per host, in order; unavailable or incomplete checks stay unknown.
+pub(crate) async fn sessions_present(profile: ProfileId, hosts: Vec<String>) -> Vec<Option<bool>> {
     let count = hosts.len();
     let presence = PRESENCE.read().ok().and_then(|slot| slot.clone());
     let (Some(presence), false) = (presence, hosts.is_empty()) else {
-        return vec![false; count];
+        return vec![None; count];
     };
     let receiver = presence(profile, hosts);
-    tokio::task::spawn_blocking(move || receiver.recv_timeout(PRESENCE_TIMEOUT))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .filter(|answers| answers.len() == count)
-        .unwrap_or_else(|| vec![false; count])
+    presence_answers(
+        count,
+        tokio::task::spawn_blocking(move || receiver.recv_timeout(PRESENCE_TIMEOUT))
+            .await
+            .ok()
+            .and_then(Result::ok),
+    )
+}
+
+fn presence_answers(count: usize, answers: Option<Vec<bool>>) -> Vec<Option<bool>> {
+    match answers.filter(|answers| answers.len() == count) {
+        Some(answers) => answers.into_iter().map(Some).collect(),
+        None => vec![None; count],
+    }
+}
+
+fn confirmed_session(present: Option<bool>) -> bool {
+    present == Some(true)
+}
+
+#[cfg(all(test, feature = "work-runtime"))]
+mod presence_tests {
+    use super::{confirmed_session, presence_answers};
+    use crate::work_sites::{Entry, PrivateBecause, RunSites};
+    use zephium_core::work::sites::{WorkSiteAccessV1, WorkSiteEntryV1};
+    #[test]
+    fn unavailable_and_partial_presence_never_enter_yours_or_claim_a_badge() {
+        for answers in [None, Some(vec![false])] {
+            let facts = presence_answers(2, answers);
+            assert_eq!(facts, vec![None, None]);
+            let mut sites = RunSites::new(false, vec![]);
+            for fact in facts {
+                assert_eq!(sites.entry("example.com", fact.unwrap_or(true)), Entry::Ask);
+                assert!(!confirmed_session(fact));
+            }
+        }
+        assert_eq!(
+            presence_answers(2, Some(vec![false, true])),
+            vec![Some(false), Some(true)]
+        );
+        let mut always = RunSites::new(
+            false,
+            vec![WorkSiteEntryV1 {
+                site: "example.com".into(),
+                access: WorkSiteAccessV1::Always,
+            }],
+        );
+        assert!(matches!(
+            always.entry("example.com", true),
+            Entry::Session(_)
+        ));
+        let mut never = RunSites::new(
+            false,
+            vec![WorkSiteEntryV1 {
+                site: "example.com".into(),
+                access: WorkSiteAccessV1::Never,
+            }],
+        );
+        assert_eq!(
+            never.entry("example.com", true),
+            Entry::Private(PrivateBecause::Never)
+        );
+        assert!(!confirmed_session(Some(false)));
+        assert!(confirmed_session(Some(true)));
+    }
 }
 
 /// Finished page loads in the profile's ordinary tabs on one site: a count
@@ -56,7 +116,7 @@ pub fn install_site_loads(loads: std::sync::Arc<WorkSiteLoads>) {
 pub async fn site_loads(profile: ProfileId, site: String) -> Option<u64> {
     let loads = SITE_LOADS.read().ok().and_then(|slot| slot.clone())?;
     let receiver = loads(profile, site);
-    tokio::task::spawn_blocking(move || receiver.recv_timeout(PRESENCE_TIMEOUT))
+    tokio::task::spawn_blocking(move || receiver.recv_timeout(SITE_LOADS_TIMEOUT))
         .await
         .ok()
         .and_then(Result::ok)
@@ -173,7 +233,7 @@ impl WorkContextAdmission {
         let present =
             sessions_present(profile, tabs.iter().map(|tab| tab.host.clone()).collect()).await;
         for (tab, present) in tabs.iter_mut().zip(present) {
-            tab.signed_in = present;
+            tab.signed_in = confirmed_session(present);
         }
         Ok(tabs)
     }

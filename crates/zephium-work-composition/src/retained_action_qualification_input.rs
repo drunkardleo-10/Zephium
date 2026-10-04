@@ -3,7 +3,7 @@ use super::*;
 use crate::native_work_clock::{authority_window, NativeWorkClock};
 use std::{sync::Arc, time::Duration};
 use zephium_agent_provider_transport::{
-    load_macos_probe_openai_credential, AgentProviderTransportConfig,
+    load_probe_openai_credential, AgentProviderTransportConfig,
 };
 use zephium_agent_runtime::AgentRuntimeConfig;
 const TOTAL: Duration = Duration::from_secs(150);
@@ -35,7 +35,7 @@ pub fn load_request(
         origin.clone(),
     )?;
     let task = LocalTask::new(identity, origin, fixture).map_err(|_| "task")?;
-    let credential = load_macos_probe_openai_credential().map_err(|_| "credential")?;
+    let credential = load_probe_openai_credential().map_err(|_| "credential")?;
     if Instant::now() >= deadline {
         return Err("deadline");
     }

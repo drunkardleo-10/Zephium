@@ -22,19 +22,57 @@ use zephium_private_fs::LockedPrivateNamespace;
 
 use super::Hub;
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[path = "agent_work_artifact_tests.rs"]
 mod artifact_tests;
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[path = "agent_work_tests.rs"]
 mod tests;
+#[cfg(all(
+    test,
+    windows,
+    debug_assertions,
+    feature = "windows-namespace-validation"
+))]
+#[path = "agent_work_windows_tests.rs"]
+mod windows_tests;
 
 const _: [(); 96] = [(); AGENT_WORK_RECORD_BYTES];
 const _: [(); 1024] = [(); MAX_DURABLE_AGENT_WORK_RUNS];
 
 pub(super) struct WorkOwnership {
-    namespace: LockedPrivateNamespace,
+    lease: WorkLease,
     incarnation: AgentWorkIncarnation,
+}
+
+enum WorkLease {
+    Legacy(LockedPrivateNamespace),
+    #[cfg(windows)]
+    Native(Arc<zephium_private_fs::NativeWorkStorageAnchor>),
+}
+
+impl WorkOwnership {
+    fn verified<T>(&self, operation: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+        match &self.lease {
+            WorkLease::Legacy(namespace) => namespace
+                .directory()
+                .with_verified_path(|_| operation())
+                .map_err(|_| Error::Uncertain)?,
+            #[cfg(windows)]
+            WorkLease::Native(anchor) => {
+                anchor.verify().map_err(|_| Error::Uncertain)?;
+                let result = operation();
+                anchor.verify().map_err(|_| Error::Uncertain)?;
+                result
+            }
+        }
+    }
 }
 
 // Engine teardown follows Store, and unacknowledged native work may survive
@@ -42,10 +80,66 @@ pub(super) struct WorkOwnership {
 // the Hub/Store actor has gone. Store replacement cannot reopen admission.
 static PROCESS_WORK_FENCE: Mutex<Option<Arc<WorkOwnership>>> = Mutex::new(None);
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 pub(crate) use tests::work_test_guard;
+#[cfg(all(test, windows))]
+pub(crate) use tests::work_test_storage;
 
 impl Hub {
+    fn with_work_connection<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        #[cfg(windows)]
+        if self.windows_work_storage.is_some() {
+            return self
+                .windows_work_database()
+                .map_err(|_| Error::Unavailable)?
+                .with_connection(|connection| Ok(operation(connection)))
+                .map_err(|_| Error::Uncertain)?;
+        }
+        operation(&mut self.meta)
+    }
+
+    fn work_profile_retired(&mut self, profile: ProfileId) -> Result<bool, Error> {
+        #[cfg(windows)]
+        if self.windows_work_storage.is_some() {
+            return self.with_work_connection(|connection| {
+                super::windows_work_storage::profile_retired(connection, profile)
+                    .map_err(|_| Error::Uncertain)
+            });
+        }
+        let _ = profile;
+        Ok(false)
+    }
+
+    pub(super) fn read_agent_work_evidence(
+        &mut self,
+        profile: ProfileId,
+        link: zephium_core::work::artifact::WorkEvidenceLink,
+    ) -> Result<zephium_core::work::artifact::WorkEvidencePreviewV1, zephium_core::work::WorkError>
+    {
+        use zephium_core::work::WorkError;
+        if self
+            .work_profile_retired(profile)
+            .map_err(|_| WorkError::Unavailable)?
+        {
+            return Err(WorkError::NotFound);
+        }
+        #[cfg(windows)]
+        if self.windows_work_storage.is_some() {
+            return self
+                .windows_work_database()
+                .map_err(|_| WorkError::Unavailable)?
+                .with_connection(|connection| Ok(read_work_evidence(connection, profile, link)))
+                .map_err(|_| WorkError::Unavailable)?;
+        }
+        read_work_evidence(&self.meta, profile, link)
+    }
+
     pub(crate) fn agent_work(&mut self, request: Request) -> Result<Reply, Error> {
         if self.recovery_required.is_some() {
             return Err(Error::Unavailable);
@@ -53,7 +147,7 @@ impl Hub {
         if let Request::Claim = request {
             return self.claim_work();
         }
-        let ownership = self.work.as_ref().ok_or(Error::Fenced)?;
+        let ownership = self.work.as_ref().cloned().ok_or(Error::Fenced)?;
         if let Request::CompareAndSet(mutation) = request {
             if mutation
                 .result_profile()
@@ -61,9 +155,16 @@ impl Hub {
             {
                 return Err(Error::Fenced);
             }
+            if let Some(profile) = mutation.result_profile() {
+                if self.work_profile_retired(profile)? {
+                    return Err(Error::Fenced);
+                }
+            }
             if mutation.next().disposition() == AgentWorkDisposition::Running {
-                if let Some(profile) = result_profile(&self.meta, mutation.next().key())? {
-                    if !self.registry.contains(&profile) {
+                if let Some(profile) = self.with_work_connection(|connection| {
+                    result_profile(connection, mutation.next().key())
+                })? {
+                    if !self.registry.contains(&profile) || self.work_profile_retired(profile)? {
                         return Err(Error::Fenced);
                     }
                 }
@@ -79,21 +180,17 @@ impl Hub {
         }
         // Retain the original namespace lock and revalidate its exact identity
         // before and after every SQLite operation, including reconciliation.
-        ownership
-            .namespace
-            .directory()
-            .with_verified_path(|_| {
-                verify_owner(&self.meta, owner)?;
+        ownership.verified(|| {
+            self.with_work_connection(|connection| {
+                verify_owner(connection, owner)?;
                 match request {
-                    Request::Read { key, .. } => read(&self.meta, key).map(Reply::Record),
-                    Request::CompareAndSet(mutation) => {
-                        compare_and_set(&mut self.meta, mutation, None)
-                            .map(|()| Reply::Record(Some(mutation.next())))
-                    }
+                    Request::Read { key, .. } => read(connection, key).map(Reply::Record),
+                    Request::CompareAndSet(mutation) => compare_and_set(connection, mutation, None)
+                        .map(|()| Reply::Record(Some(mutation.next()))),
                     Request::Claim => Err(Error::Fenced),
                 }
             })
-            .map_err(|_| Error::Uncertain)?
+        })
     }
 
     pub(crate) fn agent_work_artifact(
@@ -103,7 +200,7 @@ impl Hub {
         if self.recovery_required.is_some() {
             return Err(Error::Unavailable);
         }
-        let ownership = self.work.as_ref().ok_or(Error::Fenced)?;
+        let ownership = self.work.as_ref().cloned().ok_or(Error::Fenced)?;
         let (owner, profile) = match &request {
             AgentWorkArtifactRequest::Publish(publication) => (
                 publication.mutation().next().incarnation(),
@@ -111,14 +208,15 @@ impl Hub {
             ),
             AgentWorkArtifactRequest::Read { owner, profile, .. } => (*owner, *profile),
         };
-        if ownership.incarnation != owner || !self.registry.contains(&profile) {
+        if ownership.incarnation != owner
+            || !self.registry.contains(&profile)
+            || self.work_profile_retired(profile)?
+        {
             return Err(Error::Fenced);
         }
-        ownership
-            .namespace
-            .directory()
-            .with_verified_path(|_| {
-                verify_owner(&self.meta, owner)?;
+        ownership.verified(|| {
+            self.with_work_connection(|connection| {
+                verify_owner(connection, owner)?;
                 match request {
                     AgentWorkArtifactRequest::Publish(publication) => {
                         // Data parsing cannot mint a terminal mutation: that owner
@@ -127,11 +225,7 @@ impl Hub {
                             publication.descriptor(),
                             publication.body(),
                         )?;
-                        compare_and_set(
-                            &mut self.meta,
-                            publication.mutation(),
-                            Some(&publication),
-                        )?;
+                        compare_and_set(connection, publication.mutation(), Some(&publication))?;
                         Ok(AgentWorkArtifactReply::Published {
                             record: publication.mutation().next(),
                             descriptor: publication.descriptor(),
@@ -140,16 +234,16 @@ impl Hub {
                     AgentWorkArtifactRequest::Read {
                         record, profile, ..
                     } => {
-                        if read(&self.meta, record.key())? != Some(record)
+                        if read(connection, record.key())? != Some(record)
                             || record.disposition() != AgentWorkDisposition::Succeeded
                         {
                             return Err(Error::Conflict);
                         }
-                        let expected = result_profile(&self.meta, record.key())?;
+                        let expected = result_profile(connection, record.key())?;
                         if expected.is_some_and(|expected| expected != profile) {
                             return Err(Error::Fenced);
                         }
-                        let body = read_artifact(&self.meta, record.key(), profile)?;
+                        let body = read_artifact(connection, record.key(), profile)?;
                         if expected.is_some() && body.is_none() {
                             return Err(Error::Uncertain);
                         }
@@ -157,7 +251,7 @@ impl Hub {
                     }
                 }
             })
-            .map_err(|_| Error::Uncertain)?
+        })
     }
 
     fn claim_work(&mut self) -> Result<Reply, Error> {
@@ -169,22 +263,49 @@ impl Hub {
                 return Err(Error::Fenced);
             }
             // In-memory/transient stores cannot claim durable product admission.
-            let dir = self.dir.as_ref().ok_or(Error::Unavailable)?;
-            let namespace = LockedPrivateNamespace::open_or_create(dir.join("work-execution"))
-                .map_err(|_| Error::Unavailable)?;
+            let _ = self.dir.as_ref().ok_or(Error::Unavailable)?;
+            #[cfg(windows)]
+            let lease = if self.windows_work_storage.is_some() {
+                WorkLease::Native(
+                    self.windows_work_database()
+                        .map_err(|_| Error::Unavailable)?
+                        .anchor
+                        .clone(),
+                )
+            } else {
+                WorkLease::Legacy(
+                    LockedPrivateNamespace::open_or_create(
+                        self.dir
+                            .as_ref()
+                            .ok_or(Error::Unavailable)?
+                            .join("work-execution"),
+                    )
+                    .map_err(|_| Error::Unavailable)?,
+                )
+            };
+            #[cfg(not(windows))]
+            let lease = WorkLease::Legacy(
+                LockedPrivateNamespace::open_or_create(
+                    self.dir
+                        .as_ref()
+                        .ok_or(Error::Unavailable)?
+                        .join("work-execution"),
+                )
+                .map_err(|_| Error::Unavailable)?,
+            );
             // Keep the exclusive lock even after an ambiguous transaction. A
             // retry may reconcile this exact owner; another owner cannot race it.
             let ownership = Arc::new(WorkOwnership {
-                namespace,
+                lease,
                 incarnation: AgentWorkIncarnation::generate(),
             });
             *process = Some(ownership.clone());
             self.work = Some(ownership);
         }
-        let held = self.work.as_ref().ok_or(Error::Fenced)?;
+        let held = self.work.as_ref().cloned().ok_or(Error::Fenced)?;
         let owner = held.incarnation;
-        held.namespace.directory().with_verified_path(|_| {
-            let transaction = self.meta.transaction().map_err(|_| Error::Unavailable)?;
+        held.verified(|| self.with_work_connection(|connection| {
+            let transaction = connection.transaction().map_err(|_| Error::Unavailable)?;
             let mut records = inventory(&transaction)?;
             for record in &mut records {
                 let next = record.interrupted(owner)?;
@@ -195,7 +316,7 @@ impl Hub {
                     ).map_err(|_| Error::Uncertain)?;
                     if changed != 1 { return Err(Error::Conflict); }
                     *record = next;
-                    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+                    #[cfg(all(test, any(target_os = "macos", target_os = "linux", target_os = "windows")))]
                     if tests::fault(tests::Fault::RestartPartial) { return Err(Error::Uncertain); }
                 }
             }
@@ -206,7 +327,7 @@ impl Hub {
             ).map_err(|_| Error::Uncertain)?;
             transaction.commit().map_err(|_| Error::Uncertain)?;
             Ok(Reply::Claimed { owner, records })
-        }).map_err(|_| Error::Uncertain)?
+        }))
     }
 }
 
@@ -313,7 +434,10 @@ fn compare_and_set_records(
         return Err(Error::Transition);
     }
     let transaction = connection.transaction().map_err(|_| Error::Unavailable)?;
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     if tests::fault(tests::Fault::BeforeWrite) {
         return Err(Error::Uncertain);
     }
@@ -364,7 +488,10 @@ fn compare_and_set_records(
         }
         transaction.execute("INSERT INTO agent_work_artifacts(run_key, profile_id, artifact_id, digest, body) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![next.key().as_slice(), descriptor.profile().to_string(), descriptor.id().as_slice(), descriptor.digest().as_slice(), publication.body]).map_err(|_| Error::Uncertain)?;
-        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            test,
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        ))]
         if tests::fault(tests::Fault::AfterArtifactWrite) {
             return Err(Error::Uncertain);
         }
@@ -384,12 +511,18 @@ fn compare_and_set_records(
     if changed != 1 {
         return Err(Error::Conflict);
     }
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     if tests::fault(tests::Fault::AfterWrite) {
         return Err(Error::Uncertain);
     }
     transaction.commit().map_err(|_| Error::Uncertain)?;
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        test,
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
     if tests::fault(tests::Fault::AfterCommit) {
         return Err(Error::Uncertain);
     }

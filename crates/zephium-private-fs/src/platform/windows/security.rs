@@ -1,5 +1,7 @@
 //! Protected, explicit owner/system/administrator DACLs for private nodes.
 
+pub(super) mod native_storage;
+
 use std::ffi::c_void;
 use std::fs::File;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -190,6 +192,34 @@ fn entries(acl: *mut ACL) -> Result<Vec<(u8, u8, u32, PSID)>, PrivateFsError> {
         result.push((header.AceType, header.AceFlags, mask, sid));
     }
     Ok(result)
+}
+
+/// Owned, bounded owner/DACL identity for independently opened handles.
+#[derive(Eq, PartialEq)]
+pub(super) struct SecuritySnapshot {
+    owner: String,
+    control: u16,
+    entries: Vec<(u8, u8, u32, String)>,
+}
+
+pub(super) fn snapshot(file: &File) -> Result<SecuritySnapshot, PrivateFsError> {
+    let (sd, owner, acl) = query(file)?;
+    let mut control = 0u16;
+    let mut revision = 0;
+    // SAFETY: the queried descriptor stays owned until all SID/ACE data has
+    // been copied; the outputs are live for this synchronous query.
+    unsafe { GetSecurityDescriptorControl(sd.0, &raw mut control, &raw mut revision) }
+        .map_err(|_| PrivateFsError::Unsafe)?;
+    let owner = sid_string(owner)?;
+    let entries = entries(acl)?
+        .into_iter()
+        .map(|(kind, flags, mask, sid)| sid_string(sid).map(|sid| (kind, flags, mask, sid)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SecuritySnapshot {
+        owner,
+        control,
+        entries,
+    })
 }
 
 pub(super) fn mode(file: &File) -> Result<bool, PrivateFsError> {

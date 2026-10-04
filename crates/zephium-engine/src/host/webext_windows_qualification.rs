@@ -18,7 +18,8 @@ use zephium_core::blocker::{
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ports::engine::{Partition, UserContent, UserContentGeneration};
-thread_local! { static TASKS: RefCell<Option<mpsc::Receiver<Box<dyn FnOnce() + Send>>>> = const { RefCell::new(None) }; }
+type Task = Box<dyn FnOnce() + Send>;
+thread_local! { static TASKS: RefCell<Option<mpsc::Receiver<Task>>> = const { RefCell::new(None) }; }
 thread_local! { static TOKENS: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) }; }
 fn live_token() -> Arc<AtomicBool> {
     let token = Arc::new(AtomicBool::new(true));
@@ -439,7 +440,7 @@ fn native_windows_runtime_recovery() {
                     )
                     .as_u64()
                     .unwrap_or(0)
-                        >= index as u64 + 1
+                        > index as u64
                 })
             },
             10,

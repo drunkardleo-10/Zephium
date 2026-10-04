@@ -137,10 +137,14 @@ fn modified(path: &Path) -> SystemTime {
 }
 
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+    shown_path(path.strip_prefix(root).unwrap_or(path))
+}
+
+pub(super) fn shown_path(path: &Path) -> String {
+    let shown = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let shown = shown.replace('\\', "/");
+    shown
 }
 
 /// Newest first, then by path, so what was just changed leads.

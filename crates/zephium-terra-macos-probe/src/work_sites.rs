@@ -17,15 +17,20 @@ pub(super) enum Site {
     CommerceProduct,
 }
 
+#[derive(Debug)]
+pub(super) enum SiteParseFailure {
+    Authority,
+}
+
 impl Site {
-    pub(super) fn parse(value: &str) -> Result<Self, super::ProbeFailure> {
+    pub(super) fn parse(value: &str) -> Result<Self, SiteParseFailure> {
         match value {
             "react" => Ok(Self::React),
             "react-navigation" => Ok(Self::ReactNavigation),
             "react-route" => Ok(Self::ReactRoute),
             "commerce" => Ok(Self::Commerce),
             "commerce-product" => Ok(Self::CommerceProduct),
-            _ => Err(super::ProbeFailure::Authority),
+            _ => Err(SiteParseFailure::Authority),
         }
     }
 
@@ -46,6 +51,7 @@ impl Site {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) const fn objective(self) -> &'static str {
         match self {
             Self::React => "Read the React Quick Start page. The initial viewport omits later headings, so call extract with trusted schema 1 and subtree scope targeting the current main content landmark's opaque ref. Locate that landmark if necessary. Return inventory as three complete exact heading names from the freshly delivered subtree evidence: Quick Start, Creating and nesting components, and Writing markup with JSX. Cite exactly one heading text source for each. Do not use initial extraction scope, navigation-link citations, paraphrases, navigation, or page modifications.",

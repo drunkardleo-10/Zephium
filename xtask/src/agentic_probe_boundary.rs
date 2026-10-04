@@ -226,6 +226,20 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_WINDOWS_SEMANTIC_EVIDENCE))?,
     )?;
     let agentic_root = read(repository.join(AGENTIC_ROOT))?;
+    let fixed_runtime = compact(&read(
+        repository.join("crates/zephium-agentic/src/semantic_runtime.rs"),
+    )?);
+    for required in [
+        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES:usize=176*1024;",
+        "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES:usize=2*1024;",
+        "MAX_SEMANTIC_ACTION_RUNTIME_RESULT_BYTES:usize=512;",
+        "SEMANTIC_RUNTIME_SOURCE_SHA256:[u8;32]",
+        "#[cfg(target_os=\"windows\")]\"engine_native_input\"=>crate::SemanticActionExecutionBackend::EngineNativeInput",
+    ] {
+        if !fixed_runtime.contains(required) {
+            return Err(format!("fixed semantic runtime lost its reviewed budget/platform contract: {required}"));
+        }
+    }
     validate_root(&agentic_root)?;
     validate_agentic_no_direct_logging_attribute(AGENTIC_ROOT, &agentic_root)?;
     validate_agentic_no_invariant_panic_attribute(AGENTIC_ROOT, &agentic_root)?;
@@ -752,11 +766,24 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         != [
             toml::Value::String("dep:zephium-agentic".to_owned()),
             toml::Value::String("dep:zeroize".to_owned()),
+            toml::Value::String("dep:image".to_owned()),
         ]
     {
         return Err(
             "engine production agentic-browser feature must remain probe-independent".to_owned(),
         );
+    }
+    let image = windows_dependencies
+        .get("image")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "Windows Work thumbnail codec is missing".to_owned())?;
+    if image.get("version").and_then(toml::Value::as_str) != Some("=0.25.10")
+        || image.get("optional").and_then(toml::Value::as_bool) != Some(true)
+        || image.get("default-features").and_then(toml::Value::as_bool) != Some(false)
+        || image.get("features").and_then(toml::Value::as_array)
+            != Some(&vec![toml::Value::String("png".to_owned())])
+    {
+        return Err("Windows Work thumbnail codec must remain optional and PNG-only".to_owned());
     }
     let semantic_probe_feature = manifest
         .get("features")
@@ -854,6 +881,11 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
             "src/bin/windows_agentic_semantic_probe.rs",
             "Windows",
         ),
+        (
+            "windows-cookie-persistence-control",
+            "src/bin/windows_cookie_persistence_control.rs",
+            "Windows cookie persistence",
+        ),
     ] {
         let semantic_binary = binaries
             .iter()
@@ -931,7 +963,9 @@ fn validate_engine_agent_lifetime_boundary(source: &str) -> Result<(), String> {
         "failed.store(true,Ordering::Release)",
     ] {
         if !source.contains(boundary) {
-            return Err(format!("native lifetime factory lost exact ownership boundary: {boundary}"));
+            return Err(format!(
+                "native lifetime factory lost exact ownership boundary: {boundary}"
+            ));
         }
     }
     for forbidden in [
@@ -1533,8 +1567,20 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
         "admitted_at:Instant",
         "map_cookie_transfer_deadline(request.window(),admitted_at,now)",
         "terminal_deadline.checked_sub(AGENT_COOKIE_CLEANUP_RESERVE)",
-        "AgentCookiePreflight::try_new(request.scope().len())",
-        "scope:request.scope().clone()",
+        "Self::start_scoped(source,destination,destination_profile,request.scope().clone(),terminal_deadline,completion,callback_panicked,)",
+        "AgentCookiePreflight::try_new(scope.len())",
+        "pub(crate)fnstart_scoped(",
+        "pub(crate)fnstart_work_scoped(",
+        "fnstart_mode(",
+        "work_seed:retained.then(||WorkSeed{existing:Vec::new(),attempted:Vec::new(),})",
+        "ifretained{check_work_destination(&shared);}else{start_origin(&shared,0);}",
+        "countasusize>MAX_COOKIES_PER_TRANSFER",
+        "bytes>MAX_COOKIE_TRANSFER_BYTES",
+        "Ok(identity)if!seed.existing.contains(&identity)=>{}",
+        "seed.attempted.push(cookie.clone());",
+        "rollback_work_seed(shared,failure,stats);",
+        "destination.DeleteCookie(cookie)",
+        "attempted.iter().all(|cookie|{cookie_identity(cookie).is_ok_and(|identity|!current.contains(&identity))})",
         "GetCookies(PCWSTR::from_raw(origin.as_ptr()),&handler)",
         "count>maximum",
         "state.destination.CopyCookie(&source_cookie)",
@@ -1564,6 +1610,46 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
         }
     }
 
+    // Legacy transfers retain profile-wide rollback. A retained Work seed must
+    // select its separate destination preflight and journal-only rollback.
+    let legacy_scoped = source
+        .split_once("fnstart_scoped(")
+        .and_then(|(_, body)| body.split_once("fnstart_work_scoped("))
+        .map(|(body, _)| body)
+        .ok_or_else(|| "production Windows legacy scoped cookie entry is missing".to_owned())?;
+    let work_scoped = source
+        .split_once("fnstart_work_scoped(")
+        .and_then(|(_, body)| body.split_once("fnstart_mode("))
+        .map(|(body, _)| body)
+        .ok_or_else(|| "production Windows retained scoped cookie entry is missing".to_owned())?;
+    if !legacy_scoped.contains("callback_panicked,false,)")
+        || !work_scoped.contains("callback_panicked,true,)")
+    {
+        return Err(
+            "production Windows cookie entries lost exact legacy/retained mode separation"
+                .to_owned(),
+        );
+    }
+
+    let rollback = source
+        .split_once("fnrollback_work_seed(")
+        .and_then(|(_, body)| body.split_once("fnfinish_work_rollback("))
+        .map(|(body, _)| body)
+        .ok_or_else(|| "production Windows retained cookie rollback owner is missing".to_owned())?;
+    for forbidden in ["DeleteAllCookies", "ClearBrowsingData"] {
+        if rollback.contains(forbidden) {
+            return Err(
+                "production Windows retained cookie rollback may delete only its seed journal"
+                    .to_owned(),
+            );
+        }
+    }
+    let journal = source
+        .find("seed.attempted.push(cookie.clone());")
+        .ok_or_else(|| {
+            "production Windows retained cookie mutation journal is missing".to_owned()
+        })?;
+
     let entered = source
         .find("state.phase=TransferPhase::Applying{in_flight:true};")
         .ok_or_else(|| "production Windows cookie write interlock is missing".to_owned())?;
@@ -1573,7 +1659,7 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
     let accounted = source
         .find("application.record_current_applied(after_apply)")
         .ok_or_else(|| "production Windows cookie write accounting is missing".to_owned())?;
-    if !(entered < write && write < accounted) {
+    if !(journal < entered && entered < write && write < accounted) {
         return Err(
             "production Windows cookie write must be interlocked before mutation and accounted afterward"
                 .to_owned(),
@@ -1692,22 +1778,18 @@ fn validate_engine_windows_semantic_screenshot(
     let agent_context = compact(agent_context);
     let buffer = compact(buffer);
     let adapter = compact(adapter);
-    for required in [
-        "#[cfg(feature=\"agentic-browser\")]#[allow(dead_code)]modsemantic_screenshot;",
-        "pub(crate)fndispatch_screenshot(",
-        "semantic.document_content_available_for_audit()==Some(true)",
-        "attest_hidden_owner(&self.view,self.expected_parent,self.viewport)",
-    ] {
-        let source = if required.starts_with("#[cfg") {
-            &module
-        } else {
-            &agent_context
-        };
-        if !source.contains(required) {
-            return Err(format!(
-                "production Windows semantic screenshot lost gated ownership seam {required}"
-            ));
-        }
+    if !module
+        .contains("#[cfg(feature=\"agentic-browser\")]#[allow(dead_code)]modsemantic_screenshot;")
+    {
+        return Err("production Windows semantic screenshot lost its gated module".into());
+    }
+    let screenshot = agent_context
+        .split_once("pub(crate)fndispatch_screenshot(")
+        .map(|(_, method)| method.split("pub(crate)fn").next().unwrap_or(method))
+        .ok_or("production Windows semantic screenshot lost its dispatch method")?;
+    let guarded_capture = "ifself.semantic().is_none_or(|semantic|semantic.document_content_available_for_audit()!=Some(true))||(self.work_navigation.is_none()&&attest_hidden_owner(&self.view,self.expected_parent,self.viewport).is_err()){returnErr(SemanticScreenshotNativeFailure::NotReady);}super::semantic_screenshot::capture_viewport(";
+    if !screenshot.contains(guarded_capture) {
+        return Err("production Windows semantic screenshot lost its exact early ownership refusal before capture".into());
     }
     for required in [
         "structBoundedScreenshotBuffer",
@@ -2288,6 +2370,20 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
         "Page.createIsolatedWorld",
         "Runtime.disable",
         "Runtime.callFunctionOn",
+        // Windows Work actions use only these closed CDP input methods after
+        // isolated target preparation, with a guard retained through delivery.
+        "Self::DispatchMouseEvent=>\"Input.dispatchMouseEvent\"",
+        "Self::DispatchKeyEvent=>\"Input.dispatchKeyEvent\"",
+        "Self::InsertText=>\"Input.insertText\"",
+        "fnprepare_action_command",
+        "fnnext_action_command",
+        "fndecode_action_response",
+        "plan.len()!=4",
+        "invocation.attempt().get()",
+        "payload.len()==6",
+        "payload.len()==5",
+        "payload.len()==1",
+        "text.len()<=4096",
         "install_runtime_in_context_command",
         // 812c53c4: CDP installs the hash-pinned whitespace-compacted twin.
         "SEMANTIC_RUNTIME_PROGRAM.cdp_source()",
@@ -2335,13 +2431,30 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
                 .to_owned(),
         );
     }
+    for (offset, _) in production.match_indices("\"Input.") {
+        let method = production[offset + 1..]
+            .split('"')
+            .next()
+            .unwrap_or_default();
+        if !matches!(
+            method,
+            "Input.dispatchMouseEvent" | "Input.dispatchKeyEvent" | "Input.insertText"
+        ) {
+            return Err(
+                "production semantic protocol acquired an unreviewed native input method"
+                    .to_owned(),
+            );
+        }
+    }
     for forbidden in [
         "Page.addScriptToEvaluateOnNewDocument",
         "Page.removeScriptToEvaluateOnNewDocument",
         "Runtime.evaluate",
         "Page.bringToFront",
         "Page.captureScreenshot",
-        "Input.dispatch",
+        "Input.dispatchTouchEvent",
+        "Input.dispatchDragEvent",
+        "Input.synthesize",
         "Runtime.addBinding",
         "PostWebMessage",
         "with_ipc_handler",
@@ -2391,7 +2504,14 @@ fn validate_engine_windows_semantic_runtime(module: &str, source: &str) -> Resul
         "state.installed_context=None",
         "state.document_generation=state.document_generation.checked_add(1)",
         "fnwork_drained_for_audit(&self)->Option<bool>",
-        "state.pending.is_none()&&state.in_flight.is_none()&&state.discovery.is_none()&&!state.context_events_enabled&&!state.cleanup_disable_pending",
+        "state.pending.is_none()&&state.pending_action.is_none()&&state.in_flight.is_none()&&state.discovery.is_none()&&!state.context_events_enabled&&!state.cleanup_disable_pending",
+        "fnrevoke_document_authority(&self)",
+        "pending_action:Option<PendingAction>",
+        "state.pending_action.take()",
+        "self.action_permitted()",
+        "pending.document_generation",
+        "self.dispatch_action_next()",
+        "state.settling_revoked=true",
         "SemanticRuntimePortFailure::DocumentReplaced",
         "SemanticRuntimePortFailure::RendererLost",
         "SemanticRuntimePortFailure::TimedOut",
@@ -2537,7 +2657,9 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
             "#[cfg(feature=\"native-agentic-semantic-probe\")]ifletErr(AgentSemanticActionRuntimeFailure::Result(SemanticActionRuntimeResultError::Runtime(fault),))=&outcome{program_probe::record_fault(fault);}",
         ] {
             if !source.contains(required) {
-                return Err(format!("fixed semantic qualification source escaped its exact gate: {required}"));
+                return Err(format!(
+                    "fixed semantic qualification source escaped its exact gate: {required}"
+                ));
             }
         }
         if source.matches("program_probe::source()").count() != 2 {
@@ -2950,6 +3072,41 @@ fn validate_macos_rendering_probe(
         .nth(1)
         .and_then(|source| source.split("const SEMANTIC_RUNTIME_HTML:").next())
         .ok_or("rendering fixture boundary missing")?;
+    let fixture = fixture.replace("\r\n", "\n");
+    // This exact, finite opt-in is the only interval admitted in the shared
+    // fixture. Preserve the default rendering qualifier's interval-free page.
+    const RETAINED_PROGRESS_BRANCH: &str = r#"  if (window.location.hash === '#windows-retained-progress') {
+    const progress = document.createElement('h3');
+    let ticks = 0;
+    progress.textContent = 'Retained native progress 0';
+    document.body.append(progress);
+    const timer = setInterval(() => {
+      ticks += 1;
+      progress.textContent = 'Retained native progress ' + ticks;
+      if (ticks === 4096) clearInterval(timer);
+    }, 500);
+  }
+"#;
+    if fixture.matches(RETAINED_PROGRESS_BRANCH).count() != 1 {
+        return Err("rendering fixture lost its exact bounded retained-progress opt-in".into());
+    }
+    let (before_progress, after_progress) = fixture
+        .split_once(RETAINED_PROGRESS_BRANCH)
+        .ok_or("rendering fixture retained-progress boundary missing")?;
+    let default_rendering = format!("{before_progress}{after_progress}");
+    for forbidden in [
+        "setInterval(",
+        "clearInterval(",
+        "Retained native progress",
+        "windows-retained-progress",
+        "window.location.hash",
+    ] {
+        if default_rendering.contains(forbidden) {
+            return Err(format!(
+                "rendering fixture escaped its bounded progress opt-in {forbidden}"
+            ));
+        }
+    }
     for required in [
         "Promise.resolve().then(",
         "setTimeout(",
@@ -2958,20 +3115,13 @@ fn validate_macos_rendering_probe(
         "document.addEventListener('readystatechange'",
         "id=\"animation\" hidden",
     ] {
-        if !fixture.contains(required) {
+        if !default_rendering.contains(required) {
             return Err(format!(
                 "rendering diagnostic lost independent fixture control {required}"
             ));
         }
     }
-    for forbidden in [
-        "fetch(",
-        "src=",
-        "https://",
-        "messageHandlers",
-        "setInterval(",
-        "focus(",
-    ] {
+    for forbidden in ["fetch(", "src=", "https://", "messageHandlers", "focus("] {
         if fixture.contains(forbidden) {
             return Err(format!(
                 "rendering fixture acquired external work {forbidden}"
@@ -3624,15 +3774,18 @@ fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result
         "pub(crate)structWebView2ResourceSample{pub(crate)processes:u8,pub(crate)resident_bytes:u64,}",
         "typeProcessCohort=[(u32,i32);MAX_RESOURCE_WEBVIEW2_PROCESSESasusize];",
         "pub(crate)fnsample_webview2_resources<E>(environment:&ICoreWebView2Environment,check_control:&mutimplFnMut()->Result<(),E>,)->Result<Option<WebView2ResourceSample>,E>",
+        "sample_resources_inner(environment,check_control,&mutfailure)",
+        "pub(crate)fnsample_webview2_resources_diagnostic<E>(",
+        "Ok((sample,failure))",
         "usezephium_agentic::{MAX_RESOURCE_RESIDENT_BYTES,MAX_RESOURCE_WEBVIEW2_PROCESSES};",
-        "letenvironment=environment.cast::<ICoreWebView2Environment8>();check_control()?;letOk(environment)=environmentelse{returnOk(None);};",
-        "letprocesses=unsafe{environment.GetProcessInfos()};check_control()?;letOk(processes)=processeselse{returnOk(None);};",
+        "letenvironment=environment.cast::<ICoreWebView2Environment8>();check_control()?;letOk(environment)=environmentelse{*failure=Some(ResourceSampleFailure::Environment8Interface);returnOk(None);};",
+        "letprocesses=unsafe{environment.GetProcessInfos()};check_control()?;letOk(processes)=processeselse{*failure=Some(ResourceSampleFailure::ProcessInfosQuery);returnOk(None);};",
         "letcount_result=unsafe{processes.Count(&mutcount)};check_control()?;ifcount_result.is_err()",
         ".filter(|count|(1..=MAX_RESOURCE_WEBVIEW2_PROCESSES).contains(count))",
         "letmutprocess_cohort=[(0_u32,0_i32);MAX_RESOURCE_WEBVIEW2_PROCESSESasusize];",
         "letmutprocess_handles:[Option<ProbeProcessHandle>;MAX_RESOURCE_WEBVIEW2_PROCESSESasusize]",
         "active_process_cohort.windows(2).any(|pair|pair[0].0==pair[1].0)",
-        "letprocess=unsafe{processes.GetValueAtIndex(index)};check_control()?;letOk(process)=processelse{returnOk(None);};",
+        "letprocess=unsafe{processes.GetValueAtIndex(index)};check_control()?;letOk(process)=processelse{*failure=Some(ResourceSampleFailure::ProcessEntryQuery);returnOk(None);};",
         "letkind_result=unsafe{process.Kind(&mutkind)};check_control()?;ifkind_result.is_err()",
         "ifkind==COREWEBVIEW2_PROCESS_KIND_BROWSER",
         "letprocess_id_result=unsafe{process.ProcessId(&mutprocess_id)};check_control()?;ifprocess_id_result.is_err()",
@@ -3645,12 +3798,12 @@ fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result
         "lethandle=std::mem::replace(&mutself.0,std::ptr::null_mut());",
         "unsafe{CloseHandle(handle)!=0}",
         "all_closed&=handle.close()",
-        "letSome((process_cohort,process_count,helper_processes))=webview2_process_cohort(&environment,check_control)?else{returnOk(None);};",
-        "letSome((rejoined_process_cohort,rejoined_count,rejoined_helper_processes))=webview2_process_cohort(&environment,check_control)?else{returnOk(None);};",
+        "letSome((process_cohort,process_count,helper_processes))=webview2_process_cohort(&environment,check_control,failure)?else{returnOk(None);};",
+        "letSome((rejoined_process_cohort,rejoined_count,rejoined_helper_processes))=webview2_process_cohort(&environment,check_control,failure)?else{returnOk(None);};",
         "ifrejoined_count!=process_count||rejoined_helper_processes!=helper_processes||rejoined_process_cohort.get(..process_count_usize)!=Some(active_process_cohort)",
         "ifbrowser_processes!=1",
         "process_count.checked_sub(browser_processes).filter(|count|*count!=0)",
-        "letopened_handle=ProbeProcessHandle::open(process_id);check_control()?;letSome(handle)=opened_handleelse{returnOk(None);};letprocess_resident_bytes=handle.resident_bytes();check_control()?;letSome(process_resident_bytes)=process_resident_byteselse{returnOk(None);};",
+        "letopened_handle=ProbeProcessHandle::open(process_id,failure);check_control()?;letSome(handle)=opened_handleelse{returnOk(None);};letprocess_resident_bytes=handle.resident_bytes(failure);check_control()?;letSome(process_resident_bytes)=process_resident_byteselse{returnOk(None);};",
         "resident_bytes.checked_add(process_resident_bytes)",
         "ifresident_bytes>MAX_RESOURCE_RESIDENT_BYTES",
         "letall_handles_closed=close_process_handles(active_handles);check_control()?;if!all_handles_closed",
@@ -3670,7 +3823,7 @@ fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result
         || code.matches("GetProcessMemoryInfo(").count() != 1
         || code.matches("CloseHandle(").count() != 1
         || code
-            .matches("webview2_process_cohort(&environment,check_control)?")
+            .matches("webview2_process_cohort(&environment,check_control,failure)?")
             .count()
             != 2
     {
@@ -3938,7 +4091,15 @@ fn validate_windows_semantic_probe(
         "\"semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v4\"",
         "facts.resources_before=Some(sample_resources(",
         "facts.resources_after=Some(sample_resources(",
-        "super::agentic_probe_resources::sample_webview2_resources(environment,&mutcheck_control)?",
+        "super::agentic_probe_resources::sample_webview2_resources_diagnostic(environment,&mutcheck_control,)?",
+        "constRESOURCE_STARTUP_TIMEOUT:Duration=Duration::from_secs(2);",
+        "constRESOURCE_STARTUP_RETRY_INTERVAL:Duration=Duration::from_millis(25);",
+        "constMAX_RESOURCE_STARTUP_SAMPLES:u8=64;",
+        "&native_guard,construction_deadline,WindowsSemanticProbeStage::Construct,",
+        "letretry=stage==WindowsSemanticProbeStage::Construct&&samples<MAX_RESOURCE_STARTUP_SAMPLES&&Instant::now()<startup_deadline",
+        "ResourceSampleFailure::HelperProcessesEmpty|super::agentic_probe_resources::ResourceSampleFailure::ProcessCohortChanged",
+        "ifletSome(sample)=sample{breaksample;}",
+        "if!retry{ifstage==WindowsSemanticProbeStage::Construct{construction_failure_checkpoint(\"resource_sample_unavailable\");}returnErr(ProbeError::verify(stage));}",
         "resources_before:WindowsSemanticResourceEvidence{webview2_processes:resources_before.processes,resident_bytes:resources_before.resident_bytes,}",
         "resources_after:WindowsSemanticResourceEvidence{webview2_processes:resources_after.processes,resident_bytes:resources_after.resident_bytes,}",
         "SemanticRuntimePortFailure::Transport",
@@ -3957,7 +4118,7 @@ fn validate_windows_semantic_probe(
         "observer.observed_expected_exit()&&process.has_exited()",
         "profile.close().is_ok()",
         "server.shutdown().is_ok()",
-        "verify_first_snapshot(&first_snapshot)?;",
+        "verify_first_snapshot(&first_snapshot).inspect_err(|_|{ifaction_guard{action_guard_checkpoint(\"initial_snapshot_verification\");}})?;",
         "facts.snapshots=1;facts.first_snapshot_verified=true;facts.page_world_bridge_absent=true;facts.secrets_redacted=true;",
         "verify_replacement_snapshot(&snapshot)?;",
         "facts.snapshots=2;facts.replacement_snapshot_verified=true;facts.replacement_stale_state_absent=true;",
@@ -4187,6 +4348,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "dep:tokio",
         "dep:zeroize",
         "dep:zephium-decision",
+        "dep:zephium-credentials",
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
@@ -4201,6 +4363,23 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         .is_none_or(|version| version != "=2.1.220")
     {
         return Err("zephium-agentic suffix data must remain an exact plain pin".to_owned());
+    }
+    let windows = manifest
+        .get("target")
+        .and_then(|targets| targets.get("cfg(target_os = \"windows\")"))
+        .and_then(|target| target.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "Windows provider vault dependency is missing".to_owned())?;
+    if windows.len() != 1
+        || windows.get("zephium-credentials").is_none_or(|dependency| {
+            dependency.get("workspace").and_then(toml::Value::as_bool) != Some(true)
+                || dependency.get("optional").and_then(toml::Value::as_bool) != Some(true)
+                || dependency.as_table().is_none_or(|table| table.len() != 2)
+        })
+    {
+        return Err(
+            "Windows provider vault must remain the exact optional credential seam".to_owned(),
+        );
     }
     let macos = manifest
         .get("target")
@@ -6079,7 +6258,7 @@ fn validate_provider_transport_http2_ingress_boundary(source: &str) -> Result<()
     Ok(())
 }
 
-// These two synchronous login-Keychain loaders each retry Inaccessible once,
+// These fixed platform vault loaders each retry Inaccessible once,
 // under the existing process-wide lock. No other thread or sleep is exempted.
 const KEYCHAIN_RETRY_SLEEP: &str = "std::thread::sleep(std::time::Duration::from_millis(40));";
 const KEYCHAIN_LOGIN_LOADER: &str = r#"fn load_keychain_login_credential<P: AgentCredentialBinding>(
@@ -6107,12 +6286,57 @@ const LEAD_KEYCHAIN_LOADER: &str = r#"pub(super) fn read(service: &str) -> Resul
         }
     }"#;
 
+const WINDOWS_VAULT_RETRY_SLEEP: &str = "std::thread::sleep(Duration::from_millis(40));";
+const WINDOWS_VAULT_LOADER: &str = r#"fn load_windows_credential<P: AgentCredentialBinding>(
+    provider: P,
+    target: &str,
+) -> Result<AgentProviderCredential<P>, AgentProviderVaultError> {
+    let _turn = keychain_turn();
+    let read = || zephium_credentials::read(target);
+    let loaded = match read() {
+        Err(zephium_credentials::VaultError::Inaccessible) => {
+            std::thread::sleep(Duration::from_millis(40));
+            read()
+        }
+        loaded => loaded,
+    };
+    let secret = loaded.map_err(|error| match error {
+        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
+        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
+        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
+        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
+    })?;
+    AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
+        AgentProviderCredentialError::Content => AgentProviderVaultError::Invalid,
+        AgentProviderCredentialError::Capacity => AgentProviderVaultError::Capacity,
+    })
+}"#;
+const LEAD_WINDOWS_VAULT_LOADER: &str = r#"pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
+        let _turn = crate::provider_transport::keychain_turn();
+        let loaded = match zephium_credentials::read(service) {
+            Err(VaultError::Inaccessible) => {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                zephium_credentials::read(service)
+            }
+            loaded => loaded,
+        };
+        let bytes = loaded.map_err(map)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| LeadKeyError::Invalid)?;
+        LeadSecret::new(text.to_owned()).map_err(|_| LeadKeyError::Invalid)
+    }"#;
+
 fn without_exact_keychain_retry(source: &str, loader: &str) -> Result<String, String> {
     let loader = compact(loader);
     if source.matches(&loader).count() != 1 {
         return Err("Keychain loader changed its exact single 40 ms retry".to_owned());
     }
-    Ok(source.replacen(&loader, &loader.replace(KEYCHAIN_RETRY_SLEEP, ""), 1))
+    Ok(source.replacen(
+        &loader,
+        &loader
+            .replace(KEYCHAIN_RETRY_SLEEP, "")
+            .replace(WINDOWS_VAULT_RETRY_SLEEP, ""),
+        1,
+    ))
 }
 
 fn validate_provider_transport_shutdown_contract(
@@ -6145,6 +6369,7 @@ fn validate_provider_transport_shutdown_contract(
     );
     for required in [
         "pubconstMAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES:usize=32;",
+        "#[cfg(feature=\"probe-harness\")]pubfnload_probe_openai_credential()->Result<AgentProviderCredential,AgentProviderVaultError>{#[cfg(target_os=\"macos\")]{returnload_macos_probe_openai_credential();}#[cfg(not(target_os=\"macos\"))]load_development_openai_credential()}",
         "pubconstfnis_idle(self)->bool{self.active==0}",
         "pubconstfnis_quiescent(self)->bool{self.sealed&&self.active==0}",
         "drained:Notify,",
@@ -6181,7 +6406,9 @@ fn validate_provider_transport_shutdown_contract(
         }
     }
     let source = without_exact_keychain_retry(&source, KEYCHAIN_LOGIN_LOADER)?;
+    let source = without_exact_keychain_retry(&source, WINDOWS_VAULT_LOADER)?;
     let lead_keys = without_exact_keychain_retry(&compact(lead_keys), LEAD_KEYCHAIN_LOADER)?;
+    let lead_keys = without_exact_keychain_retry(&lead_keys, LEAD_WINDOWS_VAULT_LOADER)?;
     for forbidden in ["std::thread", "thread::sleep("] {
         if lead_keys.contains(forbidden) {
             return Err(format!(
@@ -6357,8 +6584,7 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
         .map(|offset| execute_start + offset)
         .ok_or_else(|| "agent provider attempt execution boundary is unclosed".to_owned())?;
     let execute = &source[execute_start..execute_end];
-    let cancellation =
-        "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled(){returnself.finish_terminal(";
+    let cancellation = "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled(){returnself.finish_terminal(";
     let checks = execute
         .match_indices(cancellation)
         .map(|(offset, _)| offset)
@@ -9064,6 +9290,8 @@ fn validate_shipping_sources(repository: &Path) -> Result<(), String> {
         "macos-agentic-semantic-probe",
         "windows-agentic-input-probe",
         "windows-agentic-semantic-probe",
+        "windows-cookie-persistence-control",
+        "windows_cookie_persistence_control",
         "__zephiumNativeInputFixtureV1",
     ];
     let mut files = Vec::new();
@@ -12570,7 +12798,7 @@ mod tests {
             publish = false
             [features]
             default = []
-            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:rig-core", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys", "dep:dirs", "dep:zephium-decision", "dep:httpdate"]
+            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:rig-core", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys", "dep:dirs", "dep:zephium-decision", "dep:httpdate", "dep:zephium-credentials"]
             probe-harness = ["zephium-decision?/evals"]
             [[bin]]
             name = "windows-agentic-input-evidence-review"
@@ -12598,6 +12826,8 @@ mod tests {
             zephium-decision = { workspace = true, optional = true }
             httpdate = { version = "1", optional = true }
             zephium-core = "1"
+            [target.'cfg(target_os = "windows")'.dependencies]
+            zephium-credentials = { workspace = true, optional = true }
             [target.'cfg(target_os = "macos")'.dependencies]
             security-framework = { version = "1", optional = true }
             security-framework-sys = { version = "1", optional = true }
@@ -13151,21 +13381,26 @@ mod tests {
         for (source, loader, is_lead) in [
             (root, KEYCHAIN_LOGIN_LOADER, false),
             (keys, LEAD_KEYCHAIN_LOADER, true),
+            (root, WINDOWS_VAULT_LOADER, false),
+            (keys, LEAD_WINDOWS_VAULT_LOADER, true),
         ] {
+            let sleep = if loader == WINDOWS_VAULT_LOADER {
+                WINDOWS_VAULT_RETRY_SLEEP
+            } else {
+                KEYCHAIN_RETRY_SLEEP
+            };
             for changed in [
                 loader.replace("from_millis(40)", "from_millis(41)"),
-                loader.replace(
-                    KEYCHAIN_RETRY_SLEEP,
-                    &format!("{KEYCHAIN_RETRY_SLEEP}{KEYCHAIN_RETRY_SLEEP}"),
-                ),
-                loader.replace(
-                    KEYCHAIN_RETRY_SLEEP,
-                    &format!("loop {{ {KEYCHAIN_RETRY_SLEEP} }}"),
-                ),
+                loader.replace(sleep, &format!("{sleep}{sleep}")),
+                loader.replace(sleep, &format!("loop {{ {sleep} }}")),
                 loader.replace("::Inaccessible)", "::Missing)"),
                 loader
                     .replace("let _turn = keychain_turn();", "")
-                    .replace("let _turn = turn();", ""),
+                    .replace("let _turn = turn();", "")
+                    .replace(
+                        "let _turn = crate::provider_transport::keychain_turn();",
+                        "",
+                    ),
             ] {
                 assert_ne!(changed, loader);
                 let invalid = source.replacen(loader, &changed, 1);
@@ -13332,7 +13567,7 @@ mod tests {
               "dep:zephium-agentic",
               "zephium-agentic/probe-harness",
             ]
-            agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]
+            agentic-browser = ["dep:zephium-agentic", "dep:zeroize", "dep:image"]
             native-agentic-semantic-probe = [
               "agentic-browser",
               "dep:tempfile",
@@ -13355,10 +13590,15 @@ mod tests {
             name = "windows-agentic-semantic-probe"
             path = "src/bin/windows_agentic_semantic_probe.rs"
             required-features = ["native-agentic-semantic-probe"]
+            [[bin]]
+            name = "windows-cookie-persistence-control"
+            path = "src/bin/windows_cookie_persistence_control.rs"
+            required-features = ["native-agentic-semantic-probe"]
             [dependencies]
             zephium-agentic = { optional = true }
             zeroize = { version = "=1.9.0", optional = true }
             [target.'cfg(target_os = "windows")'.dependencies]
+            image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
             windows = { version = "0.61", features = ["Win32_System_Threading"] }
             windows-probe-sys = { package = "windows-sys", version = "=0.61.2", optional = true, features = [
               "Win32_Foundation",
@@ -13376,11 +13616,20 @@ mod tests {
         )
         .is_err());
         assert!(validate_engine_manifest(&valid.replace(
-            "agentic-browser = [\"dep:zephium-agentic\", \"dep:zeroize\"]",
+            "agentic-browser = [\"dep:zephium-agentic\", \"dep:zeroize\", \"dep:image\"]",
             "agentic-browser = [\"zephium-agentic/probe-harness\"]",
         ))
         .is_err());
         assert!(validate_engine_manifest(&valid.replace("=1.9.0", "=1.9.1")).is_err());
+        assert!(validate_engine_manifest(&valid.replace("=0.25.10", "=0.25.11")).is_err());
+        assert!(validate_engine_manifest(
+            &valid.replace("default-features = false", "default-features = true")
+        )
+        .is_err());
+        assert!(validate_engine_manifest(
+            &valid.replace("features = [\"png\"]", "features = [\"png\", \"jpeg\"]")
+        )
+        .is_err());
         assert!(validate_engine_manifest(&valid.replace(
             "\"Win32_System_ProcessStatus\"",
             "\"Win32_System_Threading\""
@@ -13561,6 +13810,31 @@ mod tests {
             include_str!("../../crates/zephium-engine/src/bin/macos_agentic_semantic_probe.rs");
         let fixture = include_str!("../../crates/zephium-agentic/src/fixture_server.rs");
         validate_macos_rendering_probe(source, parent, binary, fixture).unwrap();
+        for (required, replacement) in [
+            (
+                "if (window.location.hash === '#windows-retained-progress')",
+                "if (true)",
+            ),
+            ("let ticks = 0;", "let ticks = -1;"),
+            ("ticks += 1;", "ticks += 0;"),
+            ("if (ticks === 4096) clearInterval(timer);", ""),
+            ("}, 500);", "}, 1);"),
+            (
+                "  window.addEventListener('load',",
+                "  setInterval(() => {}, 500);\n  window.addEventListener('load',",
+            ),
+            (
+                "progress.textContent = 'Retained native progress 0';",
+                "fetch('https://example.test');",
+            ),
+        ] {
+            assert!(
+                fixture.contains(required),
+                "mutation must alter the real fixture"
+            );
+            let invalid = fixture.replacen(required, replacement, 1);
+            assert!(validate_macos_rendering_probe(source, parent, binary, &invalid).is_err());
+        }
         for required in [
             "Duration::from_secs(5)",
             "document_finished_for_audit(operation)",
@@ -13895,11 +14169,36 @@ mod tests {
             include_str!("../../crates/zephium-engine/src/platform/windows/cookie_transfer.rs");
         validate_engine_windows_cookie_transfer(module, transfer)
             .expect("bounded dormant Windows cookie adapter");
-        let invalid_modules = [module.replacen("#[cfg(feature = \"agentic-browser\")]", "", 2)];
+        // Target this module's gate: adding another preceding Windows module
+        // must not turn the negative fixture into an unrelated mutation.
+        let cookie_module_at = module.find("mod cookie_transfer;").expect("cookie module");
+        let cookie_gate_at = module[..cookie_module_at]
+            .rfind("#[cfg")
+            .expect("cookie gate");
+        let cookie_gate_end =
+            cookie_gate_at + module[cookie_gate_at..].find(']').expect("cookie gate end") + 1;
+        let mut ungated_cookie_module = module.to_owned();
+        ungated_cookie_module.replace_range(cookie_gate_at..cookie_gate_end, "");
+        let invalid_modules = [ungated_cookie_module];
         for invalid in invalid_modules {
             assert!(validate_engine_windows_cookie_transfer(&invalid, transfer).is_err());
         }
         for invalid in [
+            transfer.replace(
+                "AgentCookiePreflight::try_new(scope.len())",
+                "AgentCookiePreflight::try_new(1)",
+            ),
+            transfer.replace("request.scope().clone()", "ContextCookieScope::default()"),
+            compact(transfer).replace("callback_panicked,true,)", "callback_panicked,false,)"),
+            transfer.replace("count as usize > MAX_COOKIES_PER_TRANSFER", "false"),
+            transfer.replace("bytes > MAX_COOKIE_TRANSFER_BYTES", "false"),
+            transfer.replace("!seed.existing.contains(&identity)", "true"),
+            transfer.replace("seed.attempted.push(cookie.clone());", ""),
+            transfer.replace(
+                "destination.DeleteCookie(cookie)",
+                "destination.DeleteAllCookies()",
+            ),
+            transfer.replace("!current.contains(&identity)", "true"),
             transfer.replace(
                 "state.destination.CopyCookie(&source_cookie)",
                 "source_cookie.clone()",
@@ -14026,7 +14325,10 @@ mod tests {
             "#[cfg(feature = \"native-agentic-semantic-probe\")]\n                let bytes = program_probe::normalize_diagnostic(bytes);",
         ] {
             assert!(runtime.contains(call), "gate witness drifted");
-            let unguarded = runtime.replace(call, &call.replace("#[cfg(feature = \"native-agentic-semantic-probe\")]", ""));
+            let unguarded = runtime.replace(
+                call,
+                &call.replace("#[cfg(feature = \"native-agentic-semantic-probe\")]", ""),
+            );
             assert!(validate_engine_semantic_runtime_boundary(&unguarded).is_err());
         }
     }
@@ -14104,8 +14406,12 @@ mod tests {
         "#;
         let context = r#"
             pub(crate) fn dispatch_screenshot() {
-                semantic.document_content_available_for_audit() == Some(true);
-                attest_hidden_owner(&self.view, self.expected_parent, self.viewport);
+                if self.semantic().is_none_or(|semantic| semantic.document_content_available_for_audit() != Some(true))
+                    || (self.work_navigation.is_none()
+                        && attest_hidden_owner(&self.view, self.expected_parent, self.viewport).is_err()) {
+                    return Err(SemanticScreenshotNativeFailure::NotReady);
+                }
+                super::semantic_screenshot::capture_viewport(&self.view);
             }
         "#;
         let buffer = r#"
@@ -14133,6 +14439,37 @@ mod tests {
         "#;
         validate_engine_windows_semantic_screenshot(module, context, buffer, adapter)
             .expect("bounded Windows semantic screenshot");
+        for (required, replacement) in [
+            ("!= Some(true)", "== Some(true)"),
+            (
+                "self.work_navigation.is_none()",
+                "self.work_navigation.is_some()",
+            ),
+            (".is_err()", ".is_ok()"),
+            ("return Err(SemanticScreenshotNativeFailure::NotReady);", ""),
+            (
+                "pub(crate) fn dispatch_screenshot()",
+                "pub(crate) fn semantic_runtime_ready_for_history()",
+            ),
+        ] {
+            assert!(context.contains(required));
+            assert!(validate_engine_windows_semantic_screenshot(
+                module,
+                &context.replace(required, replacement),
+                buffer,
+                adapter
+            )
+            .is_err());
+        }
+        // A correct check in a different method cannot authorize an unchecked
+        // screenshot method, even when both methods appear in the same source.
+        let history_only =
+            context.replace("dispatch_screenshot", "semantic_runtime_ready_for_history");
+        let unchecked = format!("pub(crate) fn dispatch_screenshot() {{ super::semantic_screenshot::capture_viewport(&self.view); }}\n{history_only}");
+        assert!(
+            validate_engine_windows_semantic_screenshot(module, &unchecked, buffer, adapter)
+                .is_err()
+        );
         assert!(validate_engine_windows_semantic_screenshot(
             module,
             context,
@@ -14564,6 +14901,11 @@ mod tests {
             include_str!("../../crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs");
         validate_engine_windows_semantic_protocol(module, source)
             .expect("closed Windows semantic protocol");
+        assert!(validate_engine_windows_semantic_protocol(
+            module,
+            &format!("const ESCAPE: &str = \"Input.dispatchArbitraryEvent\";\n{source}")
+        )
+        .is_err());
         assert!(validate_engine_windows_semantic_protocol(
             module,
             &format!("{source}\nRuntime.evaluate();"),
@@ -15032,7 +15374,9 @@ mod tests {
         let module = include_str!("../../crates/zephium-engine/src/platform/windows/mod.rs");
         let valid = include_str!(
             "../../crates/zephium-engine/src/platform/windows/agentic_probe_resources.rs"
-        );
+        )
+        .replace("\r\n", "\n");
+        let valid = valid.as_str();
         validate_windows_probe_resource_sampler(module, valid).expect("bounded shared sampler");
         assert!(validate_windows_probe_resource_sampler(
             &module.replace(
@@ -15074,17 +15418,16 @@ mod tests {
         .is_err());
         assert!(validate_windows_probe_resource_sampler(
             module,
-            &valid.replacen(
-                "        let Some(total_resident_bytes) = resident_bytes.checked_add(process_resident_bytes) else {\n            return Ok(None);\n        };\n        resident_bytes = total_resident_bytes;",
-                "        resident_bytes = process_resident_bytes;",
-                1,
+            &valid.replace(
+                "resident_bytes.checked_add(process_resident_bytes)",
+                "Some(process_resident_bytes)"
             ),
         )
         .is_err());
         assert!(validate_windows_probe_resource_sampler(
             module,
             &valid.replacen(
-                "    let Some((rejoined_process_cohort, rejoined_count, rejoined_helper_processes)) =\n        webview2_process_cohort(&environment, check_control)?\n    else {\n        return Ok(None);\n    };",
+                "    let Some((rejoined_process_cohort, rejoined_count, rejoined_helper_processes)) =\n        webview2_process_cohort(&environment, check_control, failure)?\n    else {\n        return Ok(None);\n    };",
                 "    let (rejoined_process_cohort, rejoined_count, rejoined_helper_processes) = (process_cohort, process_count, helper_processes);",
                 1,
             ),
@@ -15093,8 +15436,8 @@ mod tests {
         assert!(validate_windows_probe_resource_sampler(
             module,
             &valid.replacen(
-                "        let opened_handle = ProbeProcessHandle::open(process_id);\n        check_control()?;\n        let Some(handle) = opened_handle else {",
-                "        let opened_handle = ProbeProcessHandle::open(process_id);\n        let Some(handle) = opened_handle else {",
+                "        let opened_handle = ProbeProcessHandle::open(process_id, failure);\n        check_control()?;\n        let Some(handle) = opened_handle else {",
+                "        let opened_handle = ProbeProcessHandle::open(process_id, failure);\n        let Some(handle) = opened_handle else {",
                 1,
             ),
         )

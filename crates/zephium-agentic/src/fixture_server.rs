@@ -1089,6 +1089,17 @@ const SEMANTIC_RENDERING_HTML: &str = r###"<!doctype html>
   const update = () => { state.textContent = 'Document ' + document.readyState; };
   document.addEventListener('readystatechange', update);
   update();
+  if (window.location.hash === '#windows-retained-progress') {
+    const progress = document.createElement('h3');
+    let ticks = 0;
+    progress.textContent = 'Retained native progress 0';
+    document.body.append(progress);
+    const timer = setInterval(() => {
+      ticks += 1;
+      progress.textContent = 'Retained native progress ' + ticks;
+      if (ticks === 4096) clearInterval(timer);
+    }, 500);
+  }
   window.addEventListener('load', () => { document.getElementById('load').textContent = 'Load ready'; }, { once: true });
   Promise.resolve().then(() => { document.getElementById('microtask').hidden = false; });
   setTimeout(() => { document.getElementById('timer').hidden = false; }, 0);
@@ -1237,6 +1248,77 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
     'semantic-hostile-recovery-status',
     'Zephium hostile recovery'
   );
+  // Provider-free Windows native-input guard fixture. The beforeinput handler
+  // changes the admitted identity and editing selection before browser mutation.
+  if (window.location.hash === '#windows-rich-guard') {
+    const target = document.createElement('div');
+    target.contentEditable = 'true'; target.setAttribute('role', 'textbox');
+    target.setAttribute('aria-label', 'Windows guarded rich editor');
+    target.innerHTML = '<p>guard original</p>';
+    const decoy = document.createElement('div');
+    decoy.contentEditable = 'true'; decoy.setAttribute('role', 'textbox');
+    decoy.setAttribute('aria-label', 'Windows unapproved rich editor');
+    decoy.innerHTML = '<p>decoy original</p>';
+    const quarantine = document.createElement('section');
+    const witness = document.createElement('h3');
+    witness.textContent = 'Windows rich guard pending';
+    const panel = document.createElement('section');
+    panel.style.cssText = 'position:absolute;right:240px;top:0;width:220px;font-size:10px;line-height:12px;z-index:1;background:white';
+    panel.append(target, decoy, quarantine, witness);
+    document.body.append(panel);
+    let before = 0, inputs = 0;
+    const publish = trusted => {
+      witness.textContent = `Windows rich guard before ${before === 1 ? 'one' : 'other'} input ${inputs === 0 ? 'zero' : 'other'} target ${target.textContent === 'guard original' ? 'intact' : 'changed'} decoy ${decoy.textContent === 'decoy original' ? 'intact' : 'changed'} trusted ${trusted ? 'yes' : 'no'}`;
+    };
+    for (const editor of [target, decoy]) editor.addEventListener('input', event => { inputs += 1; publish(event.isTrusted); });
+    target.addEventListener('beforeinput', event => {
+      before += 1;
+      target.setAttribute('aria-label', 'Windows changed rich editor');
+      quarantine.append(target);
+      decoy.focus({preventScroll: true});
+      const range = document.createRange(); range.selectNodeContents(decoy);
+      const selection = document.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      setTimeout(() => publish(event.isTrusted), 0);
+    }, {once: true});
+    // Positive counterpart uses the same paragraph/model contract as the
+    // controlled Slack/Linear/Notion replicas, including their empty editor.
+    const controlled = document.createElement('div');
+    controlled.contentEditable = 'true'; controlled.setAttribute('role', 'textbox');
+    controlled.setAttribute('aria-label', 'Windows controlled rich editor');
+    controlled.innerHTML = '<p><br></p>';
+    const controlledWitness = document.createElement('h3');
+    controlledWitness.textContent = 'Windows controlled rich pending';
+    panel.append(controlled, controlledWitness);
+    let controlledModel = '', controlledBefore = 0, controlledInputs = 0;
+    let controlledTrusted = false;
+    const paragraphs = () => {
+      const lines = [];
+      for (const node of controlled.childNodes) {
+        if (node.nodeType !== 1 || node.tagName !== 'P') return null;
+        lines.push(node.textContent.replace(/\u00a0/g, ' '));
+      }
+      return lines.length ? lines.join('\n') : '';
+    };
+    const renderControlled = () => {
+      controlled.innerHTML = '';
+      const paragraph = document.createElement('p');
+      if (controlledModel) paragraph.textContent = controlledModel;
+      else paragraph.appendChild(document.createElement('br'));
+      controlled.appendChild(paragraph);
+    };
+    controlled.addEventListener('beforeinput', event => {
+      controlledBefore += 1; controlledTrusted = event.isTrusted;
+    });
+    controlled.addEventListener('input', event => {
+      controlledInputs += 1; controlledTrusted = controlledTrusted && event.isTrusted;
+      const model = paragraphs();
+      if (model === null) renderControlled();
+      else controlledModel = model;
+      controlledWitness.textContent = `Windows controlled rich model ${controlledModel === 'On my way, ten minutes out' ? 'exact' : 'mismatch'} paragraphs ${paragraphs() !== null ? 'retained' : 'lost'} trusted ${controlledTrusted ? 'yes' : 'no'} before ${controlledBefore === 1 ? 'one' : 'other'} input ${controlledInputs === 1 ? 'one' : 'other'}`;
+    });
+    new MutationObserver(() => { if (paragraphs() === null) renderControlled(); })
+      .observe(controlled, {childList: true, subtree: true, characterData: true});
+  }
   // Local fixture application: delegated editor handler owns a tiny model and
   // rerenders only the admitted leaf. The recipe must never edit this parent,
   // its noneditable formatted sibling, or a newly selected editing context.
@@ -1918,6 +2000,44 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("connect-src 'none'"));
         assert!(response.contains("script-src 'unsafe-inline'"));
+        // Pin the entire opt-in branch, including its enclosing exact hash
+        // guard and finite counter. The ordinary rendering fixture must keep
+        // its independent one-shot readiness controls and no interval.
+        const RETAINED_PROGRESS_BRANCH: &str = r#"  if (window.location.hash === '#windows-retained-progress') {
+    const progress = document.createElement('h3');
+    let ticks = 0;
+    progress.textContent = 'Retained native progress 0';
+    document.body.append(progress);
+    const timer = setInterval(() => {
+      ticks += 1;
+      progress.textContent = 'Retained native progress ' + ticks;
+      if (ticks === 4096) clearInterval(timer);
+    }, 500);
+  }
+"#;
+        assert_eq!(
+            SEMANTIC_RENDERING_HTML
+                .matches(RETAINED_PROGRESS_BRANCH)
+                .count(),
+            1,
+            "retained progress must remain one exact opt-in, bounded branch"
+        );
+        let (before_progress, after_progress) = SEMANTIC_RENDERING_HTML
+            .split_once(RETAINED_PROGRESS_BRANCH)
+            .expect("exact retained progress branch");
+        let default_rendering = format!("{before_progress}{after_progress}");
+        for forbidden in [
+            "setInterval(",
+            "clearInterval(",
+            "Retained native progress",
+            "windows-retained-progress",
+            "window.location.hash",
+        ] {
+            assert!(
+                !default_rendering.contains(forbidden),
+                "retained progress escaped its exact opt-in branch: {forbidden}"
+            );
+        }
         for expected in [
             "Promise.resolve().then(",
             "setTimeout(",
@@ -1928,7 +2048,7 @@ mod tests {
             "id=\"timer\" hidden",
             "id=\"animation\" hidden",
         ] {
-            assert!(SEMANTIC_RENDERING_HTML.contains(expected));
+            assert!(default_rendering.contains(expected));
         }
         for forbidden in [
             "fetch(",
@@ -1936,7 +2056,6 @@ mod tests {
             "https://",
             "messageHandlers",
             "visibilityState=",
-            "setInterval(",
             "requestAnimationFrame=",
             "focus(",
         ] {

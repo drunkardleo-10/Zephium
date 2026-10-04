@@ -70,8 +70,11 @@ modifier in between starts over, so ⌘C then ⌘V never counts.
 
 ## Loading and presentation
 
-The panel loads the launcher while hidden, before `panel_ready`, and keeps it
-mounted. Each presentation binds a new search session; putting it away disposes
+The panel is created on first use on Windows and macOS. It loads the launcher
+while hidden, before `panel_ready`, and keeps it mounted for fast reopening.
+After hiding and draining pending captures, Windows asks WebView2 to suspend;
+macOS detaches the hidden WKWebView from its parent and allows background
+suspension. Reopening resumes the renderer before publishing the new session. Each presentation binds a new search session; putting it away disposes
 the controller and native work. What was typed is kept for 30 seconds so a
 launcher reopened a moment later resumes, and the reset to the home list happens
 while hidden, so the window is never resized on the frame it appears. A
@@ -101,8 +104,17 @@ system's 4-point list radius inside it. Two separate glass objects would need
 two windows, and so two WebView2 instances, for a look; they are not worth
 that memory.
 
+On Windows, the WebView retains a bounded maximum-height viewport while the
+native window clips to the measured content height. A single CSS wash covers
+that viewport; DWM owns the visible rounded edge. Reports coalesce until the
+content has painted, then commit one native size change. There is no independent
+native height animation or resize timer to drift behind the content. Hidden
+layout reports do not depend on animation frames, which suspension may pause.
+This avoids repeated WebView surface resizing while keeping short lists compact.
+Long lists scroll within the maximum height without visible scrollbars.
+
 The window keeps a fixed width and a height that follows the content, between
-the field alone and 560 points, bounded by the display. It grows at once and
+the field alone and 600 points, bounded by the display. With macOS shapes it grows at once and
 shrinks only after the shapes have settled, so nothing is cut off mid-motion;
 the shapes sit on a canvas pinned to the window's top edge, so a resize never
 moves them. It opens on the display under the pointer with its top edge at a

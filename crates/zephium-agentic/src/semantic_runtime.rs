@@ -55,12 +55,12 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 144 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 176 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
 /// windows, keyword discovery, independent page-dialog samples, bounded fill
 /// diagnostics, covered-target centring and the page's structured-data facts,
 /// with an explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 160 * 1024;
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 176 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -88,8 +88,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x32, 0xb9, 0xab, 0x28, 0x65, 0x86, 0x78, 0xb9, 0x9d, 0xa1, 0x5b, 0xd6, 0x0d, 0x8d, 0x7b, 0x6c,
-    0x17, 0x4e, 0xbe, 0x2e, 0x04, 0xb6, 0x09, 0x9f, 0xa5, 0x06, 0xe3, 0x37, 0xab, 0x50, 0xdd, 0x4d,
+    0xc9, 0x8d, 0x00, 0x4a, 0xc3, 0x92, 0x15, 0xe0, 0x5a, 0xeb, 0x29, 0x26, 0x98, 0xc2, 0xeb, 0x43,
+    0x5c, 0xdf, 0x24, 0xcb, 0xfd, 0xba, 0x8e, 0x04, 0x83, 0xaa, 0x4f, 0xdf, 0x17, 0xec, 0xd2, 0xef,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -351,6 +351,8 @@ impl SemanticActionRuntimeInvocation {
             return Err(SemanticActionRuntimeResultError::Correlation);
         }
         let backend = match wire.backend.as_str() {
+            #[cfg(target_os = "windows")]
+            "engine_native_input" => crate::SemanticActionExecutionBackend::EngineNativeInput,
             "fixed_semantic_recipe" => crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
             "page_world_compatibility_fill" => {
                 crate::SemanticActionExecutionBackend::PageWorldCompatibilityFill
@@ -665,7 +667,7 @@ pub fn encode_semantic_action_runtime_invocation(
     let option = match (request.kind(), request.option()) {
         (SemanticActionKind::Select, Some(option)) => option.get(),
         (SemanticActionKind::Select, None) => {
-            return Err(SemanticActionRuntimeInvocationError::Recipe)
+            return Err(SemanticActionRuntimeInvocationError::Recipe);
         }
         (_, None) => 0,
         (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
@@ -673,7 +675,7 @@ pub fn encode_semantic_action_runtime_invocation(
     let option_descriptor = match (request.kind(), request.option_runtime_descriptor()) {
         (SemanticActionKind::Select, Some(descriptor)) => Some(descriptor),
         (SemanticActionKind::Select, None) => {
-            return Err(SemanticActionRuntimeInvocationError::Recipe)
+            return Err(SemanticActionRuntimeInvocationError::Recipe);
         }
         (_, None) => None,
         (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
@@ -681,7 +683,7 @@ pub fn encode_semantic_action_runtime_invocation(
     let fill_text = match (request.kind(), request.fill_text()) {
         (SemanticActionKind::Fill, Some(value)) => Some(value.as_str()),
         (SemanticActionKind::Fill, None) => {
-            return Err(SemanticActionRuntimeInvocationError::Recipe)
+            return Err(SemanticActionRuntimeInvocationError::Recipe);
         }
         (_, None) => None,
         (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
@@ -2053,11 +2055,23 @@ mod tests {
             SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
         );
 
+        let native = br#"{"v":1,"a":31,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":80,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"engine_native_input"}"#;
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            invocation
+                .decode_result(native)
+                .expect("Windows native evidence")
+                .backend(),
+            crate::SemanticActionExecutionBackend::EngineNativeInput
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert!(invocation.decode_result(native).is_err());
+
         for invalid in [
             br#"{"v":1,"a":32,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":80,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"fixed_semantic_recipe"}"#.as_slice(),
             br#"{"v":1,"a":31,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":0,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"fixed_semantic_recipe"}"#.as_slice(),
             br#"{"v":1,"a":31,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":80,"h":30,"vw":800,"vh":600,"px":800,"py":35,"d":0,"b":"fixed_semantic_recipe"}"#.as_slice(),
-            br#"{"v":1,"a":31,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":80,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"engine_native_input"}"#.as_slice(),
+            br#"{"v":1,"a":31,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":0,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"engine_native_input"}"#.as_slice(),
         ] {
             assert!(invocation.decode_result(invalid).is_err());
         }

@@ -9,6 +9,7 @@ use zephium_core::work::model::{WorkModelError, WorkModelProvider};
 use super::{LeadCredential, LeadSecret, LeadSecretFuture};
 
 /// Shared with the development OpenAI credential and every older loader.
+#[cfg(target_os = "macos")]
 const ACCOUNT: &str = "development";
 
 /// The Keychain service holding `provider`'s key, if it takes one.
@@ -118,6 +119,22 @@ pub fn present(provider: WorkModelProvider) -> Result<bool, LeadKeyError> {
     }
     let service = service(provider).ok_or(LeadKeyError::Missing)?;
     platform::present(service)
+}
+
+/// Stores the separate TypeSafe/Jev decision credential at its existing fixed
+/// native target. This never adds TypeSafe to the general model-provider list.
+/// Blocking; the validated secret is zeroized when ownership ends.
+pub fn store_typesafe(secret: LeadSecret) -> Result<(), LeadKeyError> {
+    if secret.expose().len() > crate::MAX_AGENT_PROVIDER_CREDENTIAL_BYTES {
+        return Err(LeadKeyError::Invalid);
+    }
+    platform::write("app.zephium.agent-provider.typesafe", &secret)
+}
+
+/// Removes only the fixed TypeSafe/Jev decision credential. Missing succeeds.
+/// Blocking; no secret is read back to perform removal.
+pub fn clear_typesafe() -> Result<(), LeadKeyError> {
+    platform::delete("app.zephium.agent-provider.typesafe")
 }
 
 /// Reads the provider's Keychain key once per process, again after a refusal.
@@ -246,7 +263,50 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::{LeadKeyError, LeadSecret};
+    use zephium_credentials::VaultError;
+
+    fn map(error: VaultError) -> LeadKeyError {
+        match error {
+            VaultError::Missing => LeadKeyError::Missing,
+            VaultError::Invalid => LeadKeyError::Invalid,
+            VaultError::Inaccessible | VaultError::Capacity => LeadKeyError::Inaccessible,
+        }
+    }
+
+    pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
+        let _turn = crate::provider_transport::keychain_turn();
+        let loaded = match zephium_credentials::read(service) {
+            Err(VaultError::Inaccessible) => {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                zephium_credentials::read(service)
+            }
+            loaded => loaded,
+        };
+        let bytes = loaded.map_err(map)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| LeadKeyError::Invalid)?;
+        LeadSecret::new(text.to_owned()).map_err(|_| LeadKeyError::Invalid)
+    }
+
+    pub(super) fn write(service: &str, secret: &LeadSecret) -> Result<(), LeadKeyError> {
+        let _turn = crate::provider_transport::keychain_turn();
+        zephium_credentials::write(service, secret.expose().as_bytes()).map_err(map)
+    }
+
+    pub(super) fn delete(service: &str) -> Result<(), LeadKeyError> {
+        let _turn = crate::provider_transport::keychain_turn();
+        zephium_credentials::delete(service).map_err(map)
+    }
+
+    pub(super) fn present(service: &str) -> Result<bool, LeadKeyError> {
+        let _turn = crate::provider_transport::keychain_turn();
+        zephium_credentials::present(service).map_err(map)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
     use super::{LeadKeyError, LeadSecret};
 
@@ -261,5 +321,23 @@ mod platform {
     }
     pub(super) fn present(_: &str) -> Result<bool, LeadKeyError> {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typesafe_setup_refuses_beyond_its_loader_bound_before_any_native_write() {
+        let secret = LeadSecret::new("x".repeat(crate::MAX_AGENT_PROVIDER_CREDENTIAL_BYTES + 1))
+            .expect("fits the general provider secret owner");
+        assert_eq!(store_typesafe(secret), Err(LeadKeyError::Invalid));
+        // This separate target does not alter the closed LLM provider mapping.
+        assert_eq!(
+            service(WorkModelProvider::OpenAi),
+            Some("app.zephium.agent-provider.openai")
+        );
+        assert_eq!(service(WorkModelProvider::Cloud), None);
     }
 }

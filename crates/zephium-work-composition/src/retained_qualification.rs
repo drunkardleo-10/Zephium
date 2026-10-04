@@ -533,7 +533,7 @@ pub fn start_retained_controller_witness(
     .ok_or("native_owner")?;
     let credential_job = std::thread::Builder::new()
         .name("work-probe-credential".into())
-        .spawn(|| load_macos_probe_openai_credential().map_err(|_| "credential_unavailable"))
+        .spawn(|| load_probe_openai_credential().map_err(|_| "credential_unavailable"))
         .map_err(|_| "credential_worker")?;
     *POLICY.lock().map_err(|_| "policy_owner")? = Some(signal.clone());
     DRIVER.with(|slot| {

@@ -300,7 +300,8 @@ impl Hub {
                 }));
             }
             #[cfg(feature = "work-execution")]
-            return super::agent_work::read_work_evidence(&self.meta, profile, link.clone())
+            return self
+                .read_agent_work_evidence(profile, link.clone())
                 .map(WorkReply::Evidence);
             #[cfg(not(feature = "work-execution"))]
             return Err(WorkError::Unavailable);
