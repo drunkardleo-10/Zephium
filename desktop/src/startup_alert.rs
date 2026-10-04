@@ -1,7 +1,7 @@
 //! A native explanation for a startup that cannot continue. Without it a
 //! Finder or Start-menu launch has no visible stderr and simply disappears.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const TITLE: &str = "Zephium couldn't start";
 const ISSUES_URL: &str = "https://github.com/zephium-browser/Zephium/issues";
@@ -61,7 +61,8 @@ pub(crate) fn show_blocking(problem: StartupProblem, detail: &str) {
 
 /// Inside the running event loop a nested modal can re-enter it, so the alert
 /// is asynchronous and `then` runs once it is dismissed. Only the first
-/// failure is explained; any later one proceeds directly.
+/// failure is explained: later ones that arrive while it is open (dependent
+/// components timing out) wait for it, and any after it proceed directly.
 pub(crate) fn show_then(
     app: &tauri::AppHandle,
     problem: StartupProblem,
@@ -70,10 +71,17 @@ pub(crate) fn show_then(
 ) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
-    static SHOWN: AtomicBool = AtomicBool::new(false);
-    if SHOWN.swap(true, Ordering::AcqRel) {
-        then(app);
-        return;
+    const NONE: u8 = 0;
+    const OPEN: u8 = 1;
+    const DISMISSED: u8 = 2;
+    static ALERT: AtomicU8 = AtomicU8::new(NONE);
+    match ALERT.compare_exchange(NONE, OPEN, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {}
+        Err(OPEN) => return,
+        Err(_) => {
+            then(app);
+            return;
+        }
     }
     let handle = app.clone();
     app.dialog()
@@ -81,6 +89,7 @@ pub(crate) fn show_then(
         .title(TITLE)
         .kind(MessageDialogKind::Error)
         .show(move |_| {
+            ALERT.store(DISMISSED, Ordering::Release);
             let main = handle.clone();
             if handle.run_on_main_thread(move || then(&main)).is_err() {
                 crate::write_diagnostic(format_args!(
