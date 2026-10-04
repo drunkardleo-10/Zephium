@@ -38,7 +38,6 @@ mod semantic_runtime;
 #[allow(dead_code)]
 mod semantic_screenshot;
 mod stage;
-#[cfg(feature = "agentic-browser")]
 mod timeout;
 
 #[cfg(feature = "agentic-browser")]
@@ -50,7 +49,8 @@ pub(crate) use content_filter::{
 };
 pub use stage::Stage;
 #[cfg(feature = "agentic-browser")]
-pub(crate) use timeout::{schedule_content_policy_timeout, ContentPolicyTimeout};
+pub(crate) use timeout::schedule_content_policy_timeout;
+pub(crate) use timeout::{schedule_browser_timeout, ContentPolicyTimeout};
 
 #[cfg(feature = "agentic-browser")]
 pub(crate) use crate::platform::agent_cookie_preflight::map_cookie_transfer_deadline;

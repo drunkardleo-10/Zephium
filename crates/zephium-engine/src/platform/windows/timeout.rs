@@ -6,29 +6,44 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
-//! Bounded UI-thread one-shot timers for native agent lifecycle deadlines.
+//! UI-thread one-shot deadlines with separate agent and browser quotas.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer, USER_TIMER_MINIMUM};
 
+#[cfg(feature = "agentic-browser")]
 const MAX_AGENT_UI_TIMERS: usize = zephium_agentic::MAX_PENDING_NATIVE_CONTEXT_TASKS;
+#[cfg(not(feature = "agentic-browser"))]
+const MAX_AGENT_UI_TIMERS: usize = 16;
+const MAX_BROWSER_UI_TIMERS: usize = 128;
+const MAX_UI_TIMERS: usize = MAX_AGENT_UI_TIMERS + MAX_BROWSER_UI_TIMERS;
+const TIMER_TICK_SLACK: Duration = Duration::from_millis(32);
 
 type TimerCallback = Box<dyn FnOnce() + 'static>;
+
+struct TimerEntry {
+    timer: usize,
+    generation: u64,
+    deadline: Instant,
+    callback: TimerCallback,
+}
 
 thread_local! {
     // Allocates no map, worker, channel, or heap storage until a caller
     // supplies the one callback box. The fixed slots match native ingress.
-    static TIMERS: RefCell<[Option<(usize, TimerCallback)>; MAX_AGENT_UI_TIMERS]> =
-        RefCell::new([const { None }; MAX_AGENT_UI_TIMERS]);
+    static TIMERS: RefCell<[Option<TimerEntry>; MAX_UI_TIMERS]> =
+        RefCell::new([const { None }; MAX_UI_TIMERS]);
+    static NEXT_GENERATION: Cell<u64> = const { Cell::new(1) };
 }
 
 pub(crate) struct ContentPolicyTimeout {
     timer: usize,
+    generation: u64,
     // A window-less timer may only be killed by the thread that created it.
     // Keep both the handle and its TLS callback mechanically UI-thread-bound.
     _thread_bound: PhantomData<Rc<()>>,
@@ -43,20 +58,30 @@ impl ContentPolicyTimeout {
 
 impl Drop for ContentPolicyTimeout {
     fn drop(&mut self) {
-        // SAFETY: this !Send handle can only drop on the creating thread and
-        // `timer` is the exact window-less identifier returned by SetTimer.
-        let _ = unsafe { KillTimer(None, self.timer) };
-        let _ = TIMERS.try_with(|timers| {
-            let Ok(mut timers) = timers.try_borrow_mut() else {
-                return;
-            };
-            if let Some(slot) = timers
-                .iter_mut()
-                .find(|slot| slot.as_ref().is_some_and(|(timer, _)| *timer == self.timer))
-            {
-                *slot = None;
-            }
-        });
+        let removed = TIMERS
+            .try_with(|timers| {
+                let Ok(mut timers) = timers.try_borrow_mut() else {
+                    return None;
+                };
+                timers
+                    .iter_mut()
+                    .find(|slot| {
+                        slot.as_ref().is_some_and(|entry| {
+                            entry.timer == self.timer && entry.generation == self.generation
+                        })
+                    })
+                    .and_then(Option::take)
+            })
+            .ok()
+            .flatten();
+        if removed.is_some() {
+            // SAFETY: only the exact live slot's guard can kill this UI-thread
+            // timer. A previously fired guard cannot kill a reused identifier.
+            let _ = unsafe { KillTimer(None, self.timer) };
+        }
+        // Callback captures may deregister other native owners. Drop them
+        // only after releasing the TLS borrow and killing the exact timer.
+        drop(removed);
     }
 }
 
@@ -72,16 +97,25 @@ unsafe extern "system" fn timer_proc(_: HWND, _: u32, timer: usize, _: u32) {
             let Ok(mut timers) = timers.try_borrow_mut() else {
                 return TimerPoll::Busy;
             };
-            let Some(slot) = timers.iter_mut().find(|slot| {
-                slot.as_ref()
-                    .is_some_and(|(candidate, _)| *candidate == timer)
-            }) else {
+            let Some(slot) = timers
+                .iter_mut()
+                .find(|slot| slot.as_ref().is_some_and(|entry| entry.timer == timer))
+            else {
                 return TimerPoll::Missing;
             };
-            let Some((_, callback)) = slot.take() else {
+            // WM_TIMER fires on the system tick, up to ~15.6 ms before an
+            // Instant deadline. Treating that as early would wait a full
+            // extra period; only a stale message for a reused id is early.
+            if slot
+                .as_ref()
+                .is_some_and(|entry| Instant::now() + TIMER_TICK_SLACK < entry.deadline)
+            {
+                return TimerPoll::Busy;
+            }
+            let Some(entry) = slot.take() else {
                 return TimerPoll::Missing;
             };
-            TimerPoll::Ready(callback)
+            TimerPoll::Ready(entry.callback)
         })
         .unwrap_or(TimerPoll::Missing);
     match poll {
@@ -102,9 +136,25 @@ unsafe extern "system" fn timer_proc(_: HWND, _: u32, timer: usize, _: u32) {
     }
 }
 
+#[cfg(feature = "agentic-browser")]
 pub(crate) fn schedule_content_policy_timeout(
     duration: Duration,
     callback: impl FnOnce() + 'static,
+) -> Option<ContentPolicyTimeout> {
+    schedule_timeout(duration, callback, 0..MAX_AGENT_UI_TIMERS)
+}
+
+pub(crate) fn schedule_browser_timeout(
+    duration: Duration,
+    callback: impl FnOnce() + 'static,
+) -> Option<ContentPolicyTimeout> {
+    schedule_timeout(duration, callback, MAX_AGENT_UI_TIMERS..MAX_UI_TIMERS)
+}
+
+fn schedule_timeout(
+    duration: Duration,
+    callback: impl FnOnce() + 'static,
+    slots: std::ops::Range<usize>,
 ) -> Option<ContentPolicyTimeout> {
     if duration.is_zero() {
         return None;
@@ -119,12 +169,21 @@ pub(crate) fn schedule_content_policy_timeout(
         .try_with(|timers| {
             timers
                 .try_borrow()
-                .is_ok_and(|timers| timers.iter().any(Option::is_none))
+                .is_ok_and(|timers| timers[slots.clone()].iter().any(Option::is_none))
         })
         .unwrap_or(false);
     if !has_capacity {
         return None;
     }
+    let generation = NEXT_GENERATION
+        .try_with(|next| {
+            let current = next.get();
+            next.set(current.checked_add(1)?);
+            Some(current)
+        })
+        .ok()
+        .flatten()?;
+    let deadline = Instant::now().checked_add(duration)?;
     // SAFETY: `timer_proc` has the exact TIMERPROC system ABI and contains all
     // panics. A null HWND creates a timer owned by this current UI thread; the
     // returned !Send guard ensures cancellation occurs on that same thread.
@@ -138,17 +197,18 @@ pub(crate) fn schedule_content_policy_timeout(
             let Ok(mut timers) = timers.try_borrow_mut() else {
                 return None;
             };
-            if timers
-                .iter()
-                .flatten()
-                .any(|(candidate, _)| *candidate == timer)
-            {
+            if timers.iter().flatten().any(|entry| entry.timer == timer) {
                 return Some(false);
             }
-            let Some(slot) = timers.iter_mut().find(|slot| slot.is_none()) else {
+            let Some(slot) = timers[slots].iter_mut().find(|slot| slot.is_none()) else {
                 return Some(false);
             };
-            *slot = Some((timer, callback.take()?));
+            *slot = Some(TimerEntry {
+                timer,
+                generation,
+                deadline,
+                callback: callback.take()?,
+            });
             Some(true)
         })
         .ok()
@@ -162,6 +222,7 @@ pub(crate) fn schedule_content_policy_timeout(
     }
     Some(ContentPolicyTimeout {
         timer,
+        generation,
         _thread_bound: PhantomData,
     })
 }
@@ -172,7 +233,8 @@ mod tests {
     fn source_has_fixed_slots_and_no_worker_or_sleep() {
         let source = include_str!("timeout.rs");
         assert!(source.contains("MAX_PENDING_NATIVE_CONTEXT_TASKS"));
-        assert!(source.contains("[Option<(usize, TimerCallback)>; MAX_AGENT_UI_TIMERS]"));
+        assert!(source.contains("[Option<TimerEntry>; MAX_UI_TIMERS]"));
+        assert!(source.contains("MAX_AGENT_UI_TIMERS..MAX_UI_TIMERS"));
         for forbidden in [
             concat!("Hash", "Map"),
             concat!("thread::", "spawn"),
