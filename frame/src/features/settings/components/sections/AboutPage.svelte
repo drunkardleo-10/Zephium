@@ -41,9 +41,7 @@
       case "unavailable":
         return m.update_status_unavailable();
       case "idle":
-        return preferences.value("updates.auto-check") === "false"
-          ? m.pref_about_updates_help()
-          : m.update_status_idle();
+        return m.pref_about_updates_help();
       case "checking":
         return m.update_status_checking();
       case "upToDate":
@@ -53,7 +51,7 @@
       case "ready":
         return m.update_status_ready({ version: update.version });
       case "installing":
-        return m.update_status_installing();
+        return m.update_installing();
       case "failed":
         return m.update_status_failed();
     }

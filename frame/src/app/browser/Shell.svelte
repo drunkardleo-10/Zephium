@@ -10,7 +10,7 @@
   import { AddressField, findInPage } from "$features/address";
   import { Dock } from "$features/dock";
   import { DownloadPulse, DownloadStatus } from "$features/downloads";
-  import { UpdateCards, UpdateGlyph } from "$features/updates";
+  import { UpdateNotice } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionActions, ManageExtensions } from "$features/extensions";
   import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
@@ -271,12 +271,12 @@
                 profile={tabs.profile()!.id}
                 onopen={() => toolHost.open("downloads")}
               />{/if}
-            <UpdateCards />
+            <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
     {/snippet}{#snippet dock(compact)}{#if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
             profile={tabs.profile()?.id ?? ""}
-          />{/if}<UpdateGlyph onabout={openAbout} /><Dock compact tools={!inWork}>
+          />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock compact tools={!inWork}>
           {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
               variant="stack"
             />{/snippet}

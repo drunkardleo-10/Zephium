@@ -60,7 +60,7 @@ test("updates are checked, downloaded and relaunched from About", async () => {
   native.status = { state: "installing" };
   await screen.getByRole("button", { name: "Relaunch to update" }).click();
   expect(native.relaunch).toHaveBeenCalledOnce();
-  await expect.element(screen.getByText("Installing update…")).toBeVisible();
+  await expect.element(screen.getByText("Updating…")).toBeVisible();
 
   await screen.getByRole("switch", { name: "Check for updates automatically" }).click();
   expect(preferences.set).toHaveBeenCalledWith("updates.auto-check", "false");

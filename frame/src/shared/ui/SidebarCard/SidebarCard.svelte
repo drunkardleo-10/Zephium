@@ -21,7 +21,6 @@
     title,
     detail,
     icon,
-    hint,
     pending = false,
     onclick,
     dismissLabel = "",
@@ -35,8 +34,6 @@
     detail?: string;
     /** The pill's glyph, before its label. */
     icon?: IconSvgElement;
-    /** The pill's tooltip, for what its label leaves out. */
-    hint?: string;
     pending?: boolean;
     onclick?: () => void;
     dismissLabel?: string;
@@ -65,7 +62,6 @@
     type="button"
     class="sidebar-card"
     data-variant="pill"
-    title={hint}
     disabled={pending}
     aria-busy={pending || undefined}
     {onclick}

@@ -2,7 +2,7 @@
   import "$styles/global.css";
   import { DownloadStatus } from "$features/downloads";
   import { Dock } from "$features/dock";
-  import { UpdateCards, UpdateGlyph } from "$features/updates";
+  import { UpdateNotice } from "$features/updates";
 
   let { compact = false, download = false }: { compact?: boolean; download?: boolean } = $props();
   const noop = () => {};
@@ -13,11 +13,11 @@
     <div class="sidebar-browser-column">
       <div class="rest"></div>
       {#if compact}
-        <UpdateGlyph onabout={noop} />
+        <UpdateNotice view="glyph" onabout={noop} />
         <Dock compact />
       {:else}
         {#if download}<DownloadStatus profile="look" onopen={noop} />{/if}
-        <UpdateCards />
+        <UpdateNotice view="cards" />
         <Dock />
       {/if}
     </div>

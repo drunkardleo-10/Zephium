@@ -30,7 +30,6 @@
         variant="pill"
         title={pillLabel(pill)}
         icon={PILL_ICON}
-        hint={pill.kind === "ready" ? m.update_relaunch_hint({ version: pill.version }) : undefined}
         pending={pill.kind === "installing"}
         onclick={() => void updates.relaunch()}
       />

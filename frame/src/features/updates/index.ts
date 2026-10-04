@@ -1,3 +1,2 @@
-export { default as UpdateCards } from "./components/UpdateCards.svelte";
-export { default as UpdateGlyph } from "./components/UpdateGlyph.svelte";
+export { default as UpdateNotice } from "./components/UpdateNotice.svelte";
 export * as updateNotices from "./lib/notices.svelte";
