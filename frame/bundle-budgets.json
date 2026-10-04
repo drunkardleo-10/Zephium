@@ -29,9 +29,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
-    "js": 362000,
+    "js": 365500,
     "css": 108000,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365430 measured over the prior 362000 limit, 4 Oct)."
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
     "js": 1262430,
@@ -44,9 +44,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 466800,
+    "js": 470200,
     "css": 111800,
-    "description": "History's header keeps one control: a menu, shared with Tasks, that opens the full page or closes the panel."
+    "description": "History's header keeps one control: a menu, shared with Tasks, that opens the full page or closes the panel. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (470174 measured over the prior 466800 limit, 4 Oct)."
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
     "js": 1267323,
@@ -104,9 +104,9 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
-    "js": 467100,
+    "js": 470500,
     "css": 111800,
-    "description": "Time's header keeps one control: a menu, shared with Tasks, for the page, its settings and closing."
+    "description": "Time's header keeps one control: a menu, shared with Tasks, for the page, its settings and closing. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (470407 measured over the prior 467100 limit, 4 Oct)."
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
     "js": 283200,
@@ -157,9 +157,9 @@
     "css": 12600
   },
   "lazy:features/library/components/LibraryPage.svelte": {
-    "js": 354900,
+    "js": 358400,
     "css": 104900,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (358338 measured over the prior 354900 limit, 4 Oct)."
   },
   "lazy:features/tasks/components/TasksPage.svelte": {
     "js": 399600,
@@ -182,9 +182,9 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (177236 measured over 174933 at 714054aa). The object renderers' message keys in the shared message chunk add under 0.1 KB JS (177441 measured). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 179552 JS and 3963 CSS."
   },
   "lazy:features/downloads/components/DownloadsList.svelte": {
-    "js": 365500,
+    "js": 369000,
     "css": 109400,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368938 measured over the prior 365500 limit, 4 Oct)."
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
     "js": 588700,
@@ -212,9 +212,9 @@
     "description": "Measured 512177 JS and 16027 CSS bytes: Work's board loads the kit through loadChart, so this entry carries LayerChart and is bounded by WorkChart's measured graph. The shadcn-svelte chart designs (radial rings with their track, the radar web, line points, area washes, stacked areas, the headline and the overview and tile levels) add 12.5 KB JS and 2.7 KB CSS (524686 and 18703 measured)."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 871000,
+    "js": 874500,
     "css": 149800,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (874447 measured over the prior 871000 limit, 4 Oct)."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 275400,
@@ -227,14 +227,14 @@
     "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog. The request lift's header and its run as a timeline of steps add 10.1 KB JS and 2.4 KB CSS (168962 and 24212 measured). Merged with main: 235567 JS and 23448 CSS measured. Site marks in the lift header and evidence chips (favicon cache and FavIcon) add 3.3 KB JS (238836 measured). Diagram and table projection in the result renderer, the whole table with its sticky header and first column, and the knowledge caption add 3.4 KB JS and 1.2 KB CSS (243278 and 24974 measured). A source glyph asking native once for an icon the cache lacks adds 0.9 KB JS (244203 measured). The code kind's projection and its lazy block loader in the result renderer add 0.4 KB JS (245780 measured). The origin grant approval in the request lift adds 3.7 KB JS and 1.2 KB CSS (249506 and 26379 measured). The answer view in the result renderer adds 5.4 KB JS and 2.7 KB CSS (253708 and 29001 measured on bf0d0f03). The diagram lift's headings in the shared message catalog add under 0.1 KB JS (253801 measured over 253708 at 64a197e4). The sticky lift header and the sortable table with its best marks and CSV footer in the shared result renderer add 3.5 KB JS and 2.9 KB CSS (201146 and 31887 measured over 197656 and 29001 at a33931f7). The signed-in offer's run reply and the run facts in the shared Work graph add 1.2 KB JS (260775 measured over 259607 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (259607 measured over 257289 at 714054aa). Three concurrent rounds (lift and chrome, charts on LayerChart, sources and signed-in) each raised by its own delta from a base without the others; reconciled to the combined measurement (260775 measured on d9a65235). The shared DataTable's sortable headers and its plain variant with a held heading column (Work's sheet) add 1.6 KB CSS (33588 measured). The object renderers' message keys and the code block's first line number in the shared Work graph add 0.3 KB JS (262806 measured)."
   },
   "lazy:features/work/components/local/CommandInspector.svelte": {
-    "js": 93600,
+    "js": 93900,
     "css": 6000,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (93857 measured over the prior 93600 limit, 4 Oct)."
   },
   "lazy:features/work/components/local/CommandRecord.svelte": {
-    "js": 88800,
+    "js": 89100,
     "css": 4800,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (89054 measured over the prior 88800 limit, 4 Oct)."
   },
   "lazy:features/work/components/WorkFileInspector.svelte": {
     "js": 167500,
@@ -262,9 +262,9 @@
     "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them. The lift header and the sources rail add 7.2 KB JS and 1.1 KB CSS (117296 and 9141 measured). Sentence-case fact labels and compare best values add 1.1 KB JS (118845 measured). Merged with main: 198659 JS and 9616 CSS measured. Site marks in the lift header and source rows add 3.1 KB JS and 0.4 KB CSS (201792 and 9994 measured). A source glyph asking native once for an icon the cache lacks adds under 1 KB JS (204278 measured). The answer projection in the shared result graph adds 1.7 KB JS (205732 measured on bf0d0f03). The signed-in offer's run reply and the run facts in the shared Work graph add 1.3 KB JS (210865 measured over 209602 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (209602 measured over 207296 at 714054aa). Three concurrent rounds (lift and chrome, charts on LayerChart, sources and signed-in) each raised by its own delta from a base without the others; reconciled to the combined measurement (210865 measured on d9a65235). CSS reconciled the same way (10792 measured on d9a65235). Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 213528 JS measured. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 213925 JS measured. Release merge 2026-10-01: Merged shared graph measures 214,007 bytes of JS, 7 bytes over the previous ceiling; rounded to the next 100 bytes."
   },
   "lazy:features/work/components/pane/TakeoverPane.svelte": {
-    "js": 95200,
+    "js": 95500,
     "css": 11000,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (95457 measured over the prior 95200 limit, 4 Oct)."
   },
   "lazy:features/settings/components/sections/WorkPage.svelte": {
     "js": 303400,
@@ -287,9 +287,9 @@
     "description": "Measured 4911 JS bytes: d3-quadtree, which LayerChart's tooltip loads only for its quadtree modes; the app's charts never ask for it."
   },
   "lazy:shared/ui/data/Code/CodeBlock.svelte": {
-    "js": 98400,
+    "js": 98700,
     "css": 6000,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.2 KB JS (98631 measured over the prior 98400 limit, 4 Oct)."
   },
   "lazy:features/work/index.ts": {
     "js": 149500,
@@ -297,9 +297,9 @@
     "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149380 measured; the board adds a few bytes to the shared runtime)."
   },
   "lazy:features/work/components/parts/ComputerPart.svelte": {
-    "js": 125700,
+    "js": 126000,
     "css": 8400,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.2 KB JS (125945 measured over the prior 125700 limit, 4 Oct)."
   },
   "lazy:features/work/components/parts/ConnectionPart.svelte": {
     "js": 125800,
@@ -347,9 +347,9 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: the code object over the shared code block. Measured 161526 JS and 8196 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The shared code scanner (calls, types, properties, tags; one pass over the whole text, shared with notes) adds about 5 KB JS at 37e62d31: measured 167298."
   },
   "lazy:features/work/components/objects/Diff.svelte": {
-    "js": 99700,
+    "js": 100000,
     "css": 7600,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (99968 measured over the prior 99700 limit, 4 Oct)."
   },
   "lazy:features/work/components/objects/Document.svelte": {
     "js": 201400,
@@ -377,14 +377,14 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: a note as text on the canvas that edits in place. Measured 86520 JS and 4572 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 168611 JS and 10171 CSS. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 174271 JS measured. Its CSS: 11008 measured."
   },
   "lazy:features/work/components/objects/File.svelte": {
-    "js": 103500,
+    "js": 103900,
     "css": 8300,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (103813 measured over the prior 103500 limit, 4 Oct)."
   },
   "lazy:features/work/components/objects/Folder.svelte": {
-    "js": 88400,
+    "js": 88700,
     "css": 5700,
-    "description": "Time and focus strings join the shared message catalog."
+    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.2 KB JS (88650 measured over the prior 88400 limit, 4 Oct)."
   },
   "lazy:features/work/components/objects/Project.svelte": {
     "js": 167800,
@@ -404,12 +404,12 @@
   "lazy:features/settings/components/sections/AiPage.svelte": {
     "js": 508200,
     "css": 109400,
-    "description": "Measured 502078 JS and 100139 CSS bytes. Settings \u2192 AI: provider keys, the model catalogue and role defaults over the shared settings graph. The soft palette in the global tokens adds 3.3 KB CSS: 108454 measured."
+    "description": "Measured 502078 JS and 100139 CSS bytes. Settings → AI: provider keys, the model catalogue and role defaults over the shared settings graph. The soft palette in the global tokens adds 3.3 KB CSS: 108454 measured."
   },
   "lazy:features/settings/components/sections/ConnectionsPage.svelte": {
     "js": 312400,
     "css": 20700,
-    "description": "Measured 306623 JS and 19667 CSS bytes. Settings \u2192 Connections: detected command-line tools and MCP servers with their editor. BYOK/connections release: measured 312205 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 312332 JS measured."
+    "description": "Measured 306623 JS and 19667 CSS bytes. Settings → Connections: detected command-line tools and MCP servers with their editor. BYOK/connections release: measured 312205 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 312332 JS measured."
   },
   "lazy:features/settings/components/sections/MemoryPage.svelte": {
     "js": 199200,
@@ -419,12 +419,12 @@
   "lazy:features/settings/components/sections/SitesPage.svelte": {
     "js": 172800,
     "css": 10300,
-    "description": "Measured 170671 JS and 9760 CSS bytes. Settings \u2192 Sites: the sites the agent may work in as the person."
+    "description": "Measured 170671 JS and 9760 CSS bytes. Settings → Sites: the sites the agent may work in as the person."
   },
   "lazy:features/settings/components/sections/SkillsPage.svelte": {
     "js": 306500,
     "css": 19200,
-    "description": "Measured 302801 JS and 17064 CSS bytes. Settings \u2192 Skills: built-in and personal skills with the Markdown editor. Launcher, onboarding and new tab merge 2026-10-01: 19,163 bytes of CSS measured; ceiling rounded to the next 100 bytes."
+    "description": "Measured 302801 JS and 17064 CSS bytes. Settings → Skills: built-in and personal skills with the Markdown editor. Launcher, onboarding and new tab merge 2026-10-01: 19,163 bytes of CSS measured; ceiling rounded to the next 100 bytes."
   },
   "lazy:features/work/components/start/WorkStart.svelte": {
     "js": 193100,
@@ -432,29 +432,29 @@
     "description": "A new work's first screen (workflows by what the person does), fetched only when a work is empty so the Workspace chunk does not carry it. Measured 116550 JS and 12231 CSS, most of it the shared Work graph. Round 5 memory: pictures asked for at the width shown: 116726 JS measured. BYOK/connections release: measured 116856 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5b: the tiles wear the real marks of the apps a workflow reads, through the canvas's site glyph and favicon cache, which the Work screen has already loaded: 192547 JS measured in this static graph. Its CSS with the glyph: 13406 measured."
   },
   "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 482600,
+    "js": 486100,
     "css": 117800,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (486047 measured over the prior 482600 limit, 4 Oct)."
   },
   "lazy:features/blocker/components/ProtectionMenu.svelte": {
-    "js": 365000,
+    "js": 368400,
     "css": 109700,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368371 measured over the prior 365000 limit, 4 Oct)."
   },
   "onboarding": {
-    "js": 199800,
+    "js": 200100,
     "css": 104800,
-    "description": "Onboarding reads the preference defaults, which gain the time and focus settings."
+    "description": "Onboarding reads the preference defaults, which gain the time and focus settings. Shared numeric sidebar revision and guide commands add 60 measured JS bytes above the prior limit. Onboarding remains isolated from the browser graph; CSS is unchanged."
   },
   "lazy:features/bookmarks/components/BookmarksPanel.svelte": {
-    "js": 372300,
+    "js": 375800,
     "css": 110800,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (375710 measured over the prior 372300 limit, 4 Oct)."
   },
   "lazy:features/tools/components/previews/BookmarksView.svelte": {
-    "js": 362500,
+    "js": 366000,
     "css": 108000,
-    "description": "Notice, download and tool-menu strings join the shared message catalog."
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365949 measured over the prior 362500 limit, 4 Oct)."
   },
   "lazy:features/time/components/ShutSites.svelte": {
     "js": 356200,
@@ -462,18 +462,23 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/time/components/TimePage.svelte": {
-    "js": 491300,
+    "js": 494800,
     "css": 125500,
-    "description": "The focus dial chooses its length from the menu shared with Tasks."
+    "description": "The focus dial chooses its length from the menu shared with Tasks. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.5 KB JS (494754 measured over the prior 491300 limit, 4 Oct)."
   },
   "lazy:features/time/components/TimePanel.svelte": {
-    "js": 484000,
+    "js": 487400,
     "css": 123600,
-    "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place."
+    "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (487373 measured over the prior 484000 limit, 4 Oct)."
   },
   "lazy:features/time/components/FocusCover.svelte": {
-    "js": 357400,
+    "js": 360800,
     "css": 107000,
-    "description": "Stands where a page focus shuts would be: the round's ring, the site, and allow or end."
+    "description": "Stands where a page focus shuts would be: the round's ring, the site, and allow or end. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (360716 measured over the prior 357400 limit, 4 Oct)."
+  },
+  "lazy:features/tabs/components/TabCapacityState.svelte": {
+    "js": 118100,
+    "css": 6500,
+    "description": "Measured 118060 JS and 6402 CSS bytes: the capacity notice shown while a page waits for a live-view slot, loaded only when needed."
   }
 }
