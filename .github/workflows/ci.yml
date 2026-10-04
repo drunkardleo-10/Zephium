@@ -154,9 +154,12 @@ jobs:
       # The desktop test binary needs the WebView2 loader at run time, which
       # hosted runners lack; the log-policy crate covers its Windows-only code.
       # The native Work storage tests exercise real NTFS handles and process
-      # ownership; hosted runners' antivirus makes them flaky, so they run on
+      # ownership; hosted runners' antivirus makes them flaky. The Work journal
+      # tests need a private namespace, which must be owned by the user, and the
+      # elevated runner creates directories owned by Administrators. Both run on
       # the Windows QA machine instead.
       - run: >-
           cargo nextest run --workspace --exclude zephium-desktop --locked --retries 2 --no-fail-fast
-          -E 'not test(/^platform::windows::native_storage::work::tests::/)'
+          -E 'not (test(/^platform::windows::native_storage::work::tests::/)
+          or (package(zephium-store) and test(/^(hub::agent_work|actor::tests::work_journal_|hub::work_document::runtime_store::tests::approved_deadline_)/)))'
       - run: cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml
