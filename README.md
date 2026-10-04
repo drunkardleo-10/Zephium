@@ -28,9 +28,8 @@ canvas where you and your agents browse, compare and plan in the open, and keep
 the results.
 
 > [!NOTE]
-> Zephium is in **beta**. `1.0.0-beta.1` is the first public release. It is
-> ready to try and to give feedback on, and rough edges are expected. Please
-> report what you find.
+> Zephium is in **beta**. It is ready to try and to give feedback on, and rough
+> edges are expected. Please report what you find.
 
 ## Screenshots
 
