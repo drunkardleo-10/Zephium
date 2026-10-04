@@ -22,6 +22,7 @@ mod extension_browser_surface;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod focus;
+mod generic_styles;
 mod lifecycle;
 mod navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]

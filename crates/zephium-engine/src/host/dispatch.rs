@@ -237,6 +237,7 @@ enum HostTaskKey {
     // view merely because they share an ItemId.
     Source(ItemId),
     DocumentStyle(ItemId),
+    GenericStyle(ItemId),
     Title(ItemId),
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
@@ -931,6 +932,17 @@ where
     with_priority(
         HostTaskPriority::Observation,
         Some(HostTaskKey::DocumentStyle(id)),
+        f,
+    )
+}
+
+pub(super) fn with_generic_style<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Observation,
+        Some(HostTaskKey::GenericStyle(id)),
         f,
     )
 }

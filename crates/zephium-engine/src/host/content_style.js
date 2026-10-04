@@ -35,14 +35,25 @@
       else clearTimeout(generic.idle);
     }
     generic.idle = null;
-    generic.roots.clear(); generic.walker = null;
+    generic.roots.clear(); generic.walker = null; generic.cursor = null;
+    if (generic.waiter) { const done = generic.waiter; generic.waiter = null; done(null); }
   }
   function addGenericToken(state, key) {
+    if (state.remote) {
+      // The immutable host index has ASCII class/id keys. Escaped and Unicode
+      // selectors already belong to the unconditional native-supplied CSS.
+      if (!/^[.#][A-Za-z0-9_-]{1,4096}$/.test(key) || state.tokens.has(key) ||
+          state.pending.has(key) || state.batch?.tokens.includes(key)) return true;
+      if (state.pending.size >= 256 || state.pendingBytes + key.length > 65536) {
+        state.blocked = true; return false;
+      }
+      state.pending.add(key); state.pendingBytes += key.length; return true;
+    }
     const selectors = state.index.get(key);
-    if (!selectors) return;
+    if (!selectors) return true;
     for (const selector of selectors) {
       if (state.seen.has(selector) || state.exceptions.has(selector)) continue;
-      if (state.seen.size >= 2048) return;
+      if (state.seen.size >= 2048) return true;
       state.seen.add(selector);
       try { state.sheet.insertRule(`${selector}{display:none!important}`, state.sheet.cssRules.length); } catch (_) {}
       if (state.seen.size === 2048) {
@@ -50,13 +61,70 @@
         // observing rather than scanning every later mutation forever,
         // and release the now-unused per-document lookup payload.
         stopGeneric(); state.index.clear(); state.exceptions.clear();
-        return;
+        return true;
       }
     }
+    return true;
+  }
+  function settleGeneric(state) {
+    if (!state.remote || document.hidden || !state.waiter || (!state.batch && !state.pending.size)) return;
+    const done = state.waiter; state.waiter = null;
+    if (!state.batch) {
+      if (state.serial >= Number.MAX_SAFE_INTEGER) { done(null); stopGeneric(); return; }
+      state.batch = { serial: ++state.serial, tokens: [...state.pending] };
+      state.pending.clear(); state.pendingBytes = 0;
+    }
+    state.blocked = false;
+    done(state.batch);
+  }
+  function pullGeneric(expectedToken, expectedUrl, fingerprint) {
+    const state = generic;
+    if (!matches(expectedToken, expectedUrl) || !state?.remote ||
+        state.fingerprint !== fingerprint || state.seen.size >= 2048 || state.waiter) return null;
+    return new Promise(resolve => {
+      state.waiter = batch => {
+        if (!batch || generic !== state || document.hidden || !matches(expectedToken, expectedUrl)) {
+          resolve(null); return;
+        }
+        const reply = create(null);
+        reply.token = token; reply.url = expectedUrl; reply.subscription = fingerprint;
+        reply.serial = batch.serial; reply.tokens = batch.tokens;
+        resolve(stringify(reply));
+      };
+      settleGeneric(state); scheduleGeneric();
+    });
+  }
+  function applyGeneric(expectedToken, expectedUrl, fingerprint, serial, selectors) {
+    const state = generic;
+    if (!matches(expectedToken, expectedUrl) || !state?.remote || document.hidden ||
+        state.fingerprint !== fingerprint || state.batch?.serial !== serial ||
+        !Array.isArray(selectors) || selectors.length > 2048 ||
+        selectors.some(s => typeof s !== "string" || s.length > 8192) ||
+        selectors.reduce((n,s) => n+s.length, 0) > 1048576) return false;
+    if (!getSheets().includes(state.sheet)) return false;
+    for (const selector of selectors) {
+      if (state.seen.has(selector)) continue;
+      if (state.seen.size >= 2048) break;
+      state.seen.add(selector);
+      try { state.sheet.insertRule(`${selector}{display:none!important}`, state.sheet.cssRules.length); } catch (_) {}
+    }
+    for (const key of state.batch.tokens) {
+      if (state.tokens.has(key)) continue;
+      while (state.tokens.size >= 4096 || state.tokenBytes + key.length > 131072) {
+        const oldest = state.tokens.values().next().value;
+        if (oldest === undefined) break;
+        state.tokens.delete(oldest); state.tokenBytes -= oldest.length;
+      }
+      state.tokens.add(key); state.tokenBytes += key.length;
+    }
+    state.batch = null; state.blocked = false;
+    if (state.seen.size >= 2048) stopGeneric();
+    else scheduleGeneric();
+    return true;
   }
   function scheduleGeneric() {
     const state = generic;
-    if (!state || state.seen.size >= 2048 || document.hidden || state.idle !== null || (!state.walker && !state.roots.size)) return;
+    if (!state || state.seen.size >= 2048 || document.hidden || state.blocked || state.idle !== null || (!state.walker && !state.roots.size)) return;
     const callback = deadline => {
       state.idle = null;
       if (generic !== state || document.hidden) return;
@@ -78,18 +146,34 @@
           state.walker = subtree ? document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT) : { root, currentNode: root, nextNode: () => null };
           state.first = true;
         }
-        const node = state.first ? state.walker.currentNode : state.walker.nextNode();
-        state.first = false;
-        if (!node || !state.walker.root.isConnected) { state.walker = null; continue; }
-        visited++;
-        if (node.id && node.id.length <= 4096) addGenericToken(state, `#${node.id}`);
-        let count = 0;
-        for (const name of node.classList) {
-          if (++count > 128) break;
-          if (name.length <= 4096) addGenericToken(state, `.${name}`);
+        if (!state.cursor) {
+          const node = state.first ? state.walker.currentNode : state.walker.nextNode();
+          state.first = false;
+          if (!node || !state.walker.root.isConnected) { state.walker = null; continue; }
+          state.cursor = { node, id: false, index: 0 };
         }
+        const cursor = state.cursor, node = cursor.node;
+        if (!node.isConnected) {
+          // A held token batch can pause the walker while the page removes
+          // its current node. TreeWalker cannot advance out of that detached
+          // subtree, so resume with a bounded rescan of the live document.
+          state.cursor = null; state.walker = null;
+          if (document.documentElement) state.roots.set(document.documentElement, true);
+          continue;
+        }
+        if (!cursor.id) {
+          if (node.id && node.id.length <= 4096 && !addGenericToken(state, `#${node.id}`)) break;
+          cursor.id = true;
+        }
+        while (cursor.index < Math.min(node.classList.length, 128)) {
+          const name = node.classList[cursor.index];
+          if (name.length <= 4096 && !addGenericToken(state, `.${name}`)) break;
+          cursor.index++;
+        }
+        if (state.blocked) break;
+        state.cursor = null; visited++;
       }
-      scheduleGeneric();
+      settleGeneric(state); scheduleGeneric();
     };
     state.idle = globalThis.requestIdleCallback
       ? requestIdleCallback(callback, { timeout: 200 })
@@ -112,10 +196,12 @@
     const old = slots.get("subscription");
     if (generation < old.generation) return false;
     old.generation = generation;
+    if (generic?.remote && generic.waiter) { const done = generic.waiter; generic.waiter = null; done(null); }
     return true;
   }
   function setSubscription(expectedToken, expectedUrl, generation, fingerprint, css, indexJson, exceptionJson) {
-    if (!matches(expectedToken, expectedUrl) || typeof indexJson !== "string" || indexJson.length > 1048576 ||
+    const remote = typeof indexJson === "boolean";
+    if (!matches(expectedToken, expectedUrl) || (!remote && (typeof indexJson !== "string" || indexJson.length > 1048576)) ||
         typeof exceptionJson !== "string" || exceptionJson.length > 1048576) return false;
     const old = slots.get("subscription");
     if (old && generation < old.generation) return false;
@@ -124,14 +210,15 @@
       old.generation = generation; return true;
     }
     try {
-      const entries = JSON.parse(indexJson), exceptions = JSON.parse(exceptionJson);
+      const entries = remote ? [] : JSON.parse(indexJson), exceptions = remote ? [] : JSON.parse(exceptionJson);
       if (!Array.isArray(entries) || entries.length > 50000 || !Array.isArray(exceptions) || exceptions.length > 50000) return false;
       stopGeneric(); generic = null;
       if (!setStyle("subscription", expectedToken, expectedUrl, generation, fingerprint, css)) return false;
-      if (!entries.length) return true;
+      if (remote ? !indexJson : !entries.length) return true;
       const sheet = slots.get("subscription").sheet;
       if (!getSheets().includes(sheet)) setSheets([...getSheets(), sheet]);
-      const state = { fingerprint, sheet, index: new Map(entries), exceptions: new Set(exceptions), seen: new Set(), roots: new Map(), walker: null, first: false, idle: null, observer: null };
+      const state = { fingerprint, sheet, remote, index: remote ? null : new Map(entries), exceptions: new Set(exceptions), seen: new Set(), roots: new Map(), walker: null, cursor: null, first: false, idle: null, observer: null,
+        tokens: new Set(), tokenBytes: 0, pending: new Set(), pendingBytes: 0, batch: null, serial: 0, waiter: null, blocked: false };
       state.observer = new MutationObserver(records => {
         if (generic !== state || document.hidden) return;
         const whole = document.documentElement;
@@ -480,6 +567,8 @@
     },
     subscription: setSubscription,
     reuseSubscription,
+    pullGeneric,
+    applyGeneric,
     apply: setStyle,
     startPicker,
     beginEncoded: session => {

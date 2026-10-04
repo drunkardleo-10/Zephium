@@ -55,11 +55,27 @@ const INSPECT: &str = "(()=>{const a=globalThis.__zephium_content_style_v1__;ret
 const MAX_DELIVERY_BYTES: usize = 64 * 1024 * 1024;
 static DELIVERY_BYTES: AtomicUsize = AtomicUsize::new(0);
 
+// Both initial sheets and incremental replies share one retained-script budget.
+pub(super) fn charge_script(bytes: usize) -> Option<usize> {
+    let charge = bytes.checked_mul(3)?;
+    DELIVERY_BYTES
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current
+                .checked_add(charge)
+                .filter(|total| *total <= MAX_DELIVERY_BYTES)
+        })
+        .ok()?;
+    Some(charge)
+}
+pub(super) fn release_script(charge: usize) {
+    DELIVERY_BYTES.fetch_sub(charge, Ordering::Relaxed);
+}
+
 #[derive(Clone, PartialEq, Eq)]
-struct StyleKey {
-    epoch: NavigationEpoch,
-    url: String,
-    subscription: Option<ContentRuleDigest>,
+pub(super) struct StyleKey {
+    pub(super) epoch: NavigationEpoch,
+    pub(super) url: String,
+    pub(super) subscription: Option<ContentRuleDigest>,
     personal: Option<ContentRuleDigest>,
     paused: bool,
 }
@@ -68,6 +84,7 @@ struct StyleKey {
 pub(super) struct DocumentStyleState(Mutex<StyleState>);
 
 #[derive(Default)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 struct StyleState {
     sequence: u64,
     active: Option<u64>,
@@ -76,11 +93,53 @@ struct StyleState {
     dirty: bool,
     force_full: bool,
     in_flight: usize,
+    generic_active: bool,
+    generic_visible: bool,
+    generic_visibility_revision: u64,
+    generic_enabled: bool,
+    generic_fingerprint: String,
+    document_token: String,
 }
 
 impl DocumentStyleState {
     fn lock(&self) -> MutexGuard<'_, StyleState> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(super) fn begin_generic(&self) -> Option<(StyleKey, String, String, u64)> {
+        let mut state = self.lock();
+        let key = state.applied_key.clone()?;
+        if state.generic_active || !state.generic_enabled || key.paused {
+            return None;
+        }
+        state.generic_active = true;
+        Some((
+            key,
+            state.generic_fingerprint.clone(),
+            state.document_token.clone(),
+            state.generic_visibility_revision,
+        ))
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(super) fn generic_visibility(&self, visible: bool) -> u64 {
+        let mut state = self.lock();
+        if state.generic_visible != visible {
+            state.generic_visible = visible;
+            state.generic_visibility_revision = state.generic_visibility_revision.saturating_add(1);
+        }
+        state.generic_visibility_revision
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(super) fn end_generic(&self) {
+        self.lock().generic_active = false;
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(super) fn generic_current(&self, key: &StyleKey, fingerprint: &str) -> bool {
+        let state = self.lock();
+        state.generic_enabled
+            && state.applied_key.as_ref() == Some(key)
+            && state.generic_fingerprint == fingerprint
     }
 
     /// Ends one delivery; true when a newer change waited on it (a URL change
@@ -105,6 +164,9 @@ struct Delivery {
     charged_bytes: usize,
     reuse: bool,
     force_full: bool,
+    generic_enabled: bool,
+    generic_fingerprint: String,
+    document_token: String,
     key: StyleKey,
     navigation: NavigationEpochTracker,
     permit: EventPermit,
@@ -114,7 +176,7 @@ struct Delivery {
 
 impl Drop for Delivery {
     fn drop(&mut self) {
-        DELIVERY_BYTES.fetch_sub(self.charged_bytes, Ordering::Relaxed);
+        release_script(self.charged_bytes);
         // The dispatch runs inline on the main thread, where the refresh takes
         // this lock again: `settle` returns with it released.
         if self.state.settle(self.sequence) {
@@ -241,6 +303,8 @@ impl EngineHost {
         {
             let mut status = state.lock();
             if status.applied_key.as_ref() == Some(&key) {
+                drop(status);
+                self.refresh_generic_styles(id);
                 return;
             }
             if status.active.is_some() {
@@ -293,6 +357,9 @@ impl EngineHost {
             state,
             reuse: false,
             force_full,
+            generic_enabled: false,
+            generic_fingerprint: String::new(),
+            document_token: String::new(),
             sequence,
             charged_bytes: 0,
             key,
@@ -373,6 +440,9 @@ impl EngineHost {
             // exact URL-dependent plan, including generichide exceptions. A
             // same-document navigation or personal edit can then reuse the
             // installed subscription without encoding/copying its whole index.
+            delivery.generic_enabled = plan.generic_index.as_ref() != "[]";
+            delivery.generic_fingerprint = fingerprint.clone();
+            delivery.document_token = identity.token.clone();
             delivery.reuse =
                 !delivery.force_full && identity.subscription.as_ref() == Some(&fingerprint);
             let script = document_style_script(
@@ -386,16 +456,7 @@ impl EngineHost {
             if script.len() > 4 * 1024 * 1024 {
                 return None;
             }
-            let charge = script.len().saturating_mul(3);
-            if DELIVERY_BYTES
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    v.checked_add(charge).filter(|v| *v <= MAX_DELIVERY_BYTES)
-                })
-                .is_err()
-            {
-                return None;
-            }
-            delivery.charged_bytes = charge;
+            delivery.charged_bytes = charge_script(script.len())?;
             Some(Box::new(move || {
                 let _ = with_document_style(id, move |host| {
                     host.deliver_document_styles(id, delivery, script)
@@ -448,6 +509,9 @@ impl EngineHost {
                         .matches_committed_snapshot(delivery.key.epoch, &delivery.key.url)
                 {
                     state.applied_key = Some(delivery.key.clone());
+                    state.generic_enabled = delivery.generic_enabled;
+                    state.generic_fingerprint = delivery.generic_fingerprint.clone();
+                    state.document_token = delivery.document_token.clone();
                     state.force_full = false;
                 }
                 if result != "true" && delivery.reuse {
@@ -462,6 +526,10 @@ impl EngineHost {
             drop(delivery);
             if dirty {
                 let _ = with_document_style(id, move |host| host.refresh_document_styles(id));
+            } else if result == "true" {
+                let _ = super::dispatch::with_generic_style(id, move |host| {
+                    host.refresh_generic_styles(id)
+                });
             }
         });
     }
@@ -475,18 +543,26 @@ fn document_style_script(
     personal: &str,
     reuse: bool,
 ) -> String {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let index = serde_json::json!(!reuse && plan.generic_index.as_ref() != "[]");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let index = serde_json::json!(if reuse {
+        ""
+    } else {
+        plan.generic_index.as_ref()
+    });
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let exceptions = "";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let exceptions = if reuse { "" } else { plan.exceptions.as_ref() };
     let arguments = serde_json::json!([
         identity.token,
         identity.url,
         format!("{sequence:016x}"),
         fingerprint,
         if reuse { "" } else { plan.css.as_ref() },
-        if reuse {
-            ""
-        } else {
-            plan.generic_index.as_ref()
-        },
-        if reuse { "" } else { plan.exceptions.as_ref() },
+        index,
+        exceptions,
         css_digest(personal),
         personal,
     ]);
@@ -558,6 +634,9 @@ mod tests {
             ".personal{display:none!important}",
             true,
         );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(full.len() < 1024);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert!(full.len() > 487_107);
         assert!(reuse.len() < 1024);
         assert!(!reuse.contains(".site-ad"));
@@ -587,5 +666,45 @@ mod tests {
         assert!(
             decode_identity(r#"{"token":"x","url":"y","subscription":null,"extra":1}"#).is_none()
         );
+    }
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn one_generic_pull_survives_visibility_changes_without_overlapping_requests() {
+        let tracker = NavigationEpochTracker::new();
+        let key = StyleKey {
+            epoch: tracker.begin("https://example.com/").unwrap(),
+            url: "https://example.com/".into(),
+            subscription: None,
+            personal: None,
+            paused: false,
+        };
+        let state = DocumentStyleState::default();
+        {
+            let mut inner = state.lock();
+            inner.applied_key = Some(key.clone());
+            inner.generic_enabled = true;
+            inner.generic_fingerprint = "a".repeat(64);
+            inner.document_token = "b".repeat(32);
+        }
+        let visible = state.generic_visibility(true);
+        let first = state.begin_generic().unwrap();
+        assert_eq!(first.3, visible);
+        state.generic_visibility(false);
+        let shown_again = state.generic_visibility(true);
+        assert_ne!(shown_again, first.3);
+        assert!(
+            state.begin_generic().is_none(),
+            "the prior native completion still owns its slot"
+        );
+        state.end_generic();
+        assert_eq!(state.begin_generic().unwrap().3, shown_again);
+        let mut replaced = key.clone();
+        replaced.url = "https://example.com/next".into();
+        state.lock().applied_key = Some(replaced);
+        assert!(
+            !state.generic_current(&key, &"a".repeat(64)),
+            "a changed document cannot accept old tokens"
+        );
+        state.end_generic();
     }
 }

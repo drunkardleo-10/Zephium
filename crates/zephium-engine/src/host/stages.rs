@@ -243,7 +243,11 @@ impl EngineHost {
             return !stage.has_terminal_failure();
         }
         let Some(r) = region else {
-            return stage.finish_content_update(update_epoch);
+            let applied = stage.finish_content_update(update_epoch);
+            if applied {
+                self.refresh_visible_generic_styles();
+            }
+            return applied;
         };
         if !stage_set_frame(&stage, &self.parent, r, motion) {
             stage.abort_content_update(update_epoch);
@@ -320,7 +324,11 @@ impl EngineHost {
         if !stage.content_update_is_current(update_epoch) {
             return !stage.has_terminal_failure();
         }
-        stage.finish_content_update(update_epoch)
+        let applied = stage.finish_content_update(update_epoch);
+        if applied {
+            self.refresh_visible_generic_styles();
+        }
+        applied
     }
 
     #[cfg(target_os = "macos")]
@@ -432,6 +440,7 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
             }
         }
+        self.refresh_visible_generic_styles();
         true
     }
 

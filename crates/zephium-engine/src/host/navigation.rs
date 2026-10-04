@@ -554,6 +554,7 @@ impl EngineHost {
             // behind the chrome acknowledgement barrier. Resample now rather
             // than trusting or replaying an earlier callback payload.
             self.emit_title_observation(id, source_permit, source_navigation, epoch);
+            self.refresh_generic_styles(id);
         }
     }
 
