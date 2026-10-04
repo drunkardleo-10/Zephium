@@ -213,7 +213,7 @@ order: native menu > overlay panel > DOM.
 - Packaged Linux identity is one exact value: Tauri's Linux-only product name,
   installed desktop basename, GTK application id, and host Registry id are
   `app.zephium`; a custom desktop template keeps the visible `Name=Zephium`.
-  The release workflow verifies the extracted RPM entry before signing. A raw
+  No Linux package is built, so the release workflow does not verify it. A raw
   development binary has no installed desktop-entry proof, so its attempted
   Registry identity may be rejected and cannot be treated as proven. Zephium
   never falls through to automatic cgroup identity after such a rejection; the
@@ -506,12 +506,13 @@ navigation, close/profile retirement, and a 30-second watchdog use an
 independent fixed terminal channel; an `Allow` is downgraded to denial after
 any identity or epoch change.
 
-The Shell-side coordinator is also built, but remains a release-gated dormant
-path. Desktop defaults do not enable it; the explicit
-`zephium-desktop/macos-page-permission-prompts` feature only forwards to the
-app feature so a packaged release candidate can exercise the gate without a
-second policy implementation.
-It loads the exact profile catalog only after a supported request from the
+The Shell-side coordinator is on by default in desktop builds (the
+`zephium-desktop/macos-page-permission-prompts` feature is a default feature and
+forwards to the app feature). On Windows, ordinary human tabs defer camera and
+microphone to WebView2's own prompt and Zephium stores nothing; geolocation,
+notifications and screen capture are denied everywhere, and extension pages and
+offscreen documents deny media capture.
+The macOS coordinator loads the exact profile catalog only after a supported request from the
 focused resident tab, retains at most the two relevant rows, and serializes one
 browser-owned process-wide prompt. Navigation, tab/profile loss, window hide,
 shutdown, a 25-second Shell deadline, Store refusal, or identity mismatch all
@@ -519,14 +520,16 @@ deny. One-time choices never write policy. A remembered denial dominates an
 atomic camera-and-microphone request; a remembered Allow reaches WebKit only
 after an atomic CAS mutation and a second exact catalog read observe every
 requested capability as allowed. Conflict and outcome-unknown results are
-reconciled but never blindly retried. The frame receives opaque echo identities,
+reconciled but never blindly retried. These remembered-choice paths exist but
+are unreachable in shipped builds: `PagePermissionPromptState::remember_enabled`
+is false, so every macOS decision is one-time until the browser can list and
+revoke grants. The frame receives opaque echo identities,
 a canonical origin, and a closed camera/microphone vocabulary; it cannot supply
 an origin or permission name. Incognito profiles bypass Store entirely, expose
 only one-time choices, and cannot be coerced into durable policy through IPC.
-Default product builds therefore continue to
-deny every request, including pre-bootstrap and quarantined-profile events.
-Unit, actor, IPC-binding, and frontend projection tests cover this dormant
-path. The feature-only `macos-page-permission-probe` provides a loopback-origin
+Pre-bootstrap and quarantined-profile events still
+deny every request. Unit, actor, IPC-binding, and frontend projection tests
+cover the remembered-choice path. The feature-only `macos-page-permission-probe` provides a loopback-origin
 WKWebView gate that observes one atomic camera-and-microphone request, defers
 it, resolves exact Deny once, rejects a duplicate settlement, and requires
 JavaScript `NotAllowedError`. It is deliberately compiled and linted, but not
@@ -546,11 +549,11 @@ cargo run --locked -p zephium-engine --features native-page-permission-probes --
 
 The macOS bundle carries human-readable `NSCameraUsageDescription` and
 `NSMicrophoneUsageDescription` values, but metadata is not capability. A
-signed packaged build on the supported security floor must still prove camera,
-microphone, and atomic combined Allow/Deny, OS consent ordering, navigation and
-tab-close invalidation, remembered-policy reload, incognito non-persistence,
-and device-track cleanup before the desktop feature becomes a release default
-or Zephium claims user-visible page permission support.
+signed packaged build must still be checked for camera, microphone, and atomic
+combined Allow/Deny, OS consent ordering, navigation and tab-close
+invalidation, and device-track cleanup (`desktop/Entitlements.plist` grants the
+two device entitlements). Remembered-policy reload and incognito
+non-persistence must be proved before `remember_enabled` is switched on.
 
 Session restore state (§7) rides on lifecycle (`opts` carries restore state).
 
@@ -3099,10 +3102,11 @@ UI presentation can evolve without changing the native admission boundary.
 
 ## 13. Platform layer
 
-Development reality: all three OSes are available for real testing, including
-Linux under Wayland (GNOME, Hyprland) and X11 (i3). Native code is written
-against the OS it runs on; no blind ports. CI matrix keeps all targets
-compiling (§14). The current source-level/native checks do not replace the
+Linux is not a supported platform at launch: `run()` in `desktop/src/lib.rs`
+prints that Zephium isn't available on Linux yet and exits 1. The Linux code
+stays in the tree and CI keeps it compiling, but no Linux build ships. Native
+code is written against the OS it runs on; no blind ports. CI keeps all
+targets compiling (§14). The current source-level/native checks do not replace the
 packaged hostile-page and endurance matrix still required on real machines.
 
 Per-OS map for the native seams (each a `cfg`-selected module with the same
@@ -3139,9 +3143,7 @@ a main-thread-retained, generation/attachment-checked WKWebView that is
 unpublished before release. On Windows, every fallible controller build owns a
 typed cleanup plan for the parent subclass, controller `Close`, and child HWND;
 unresolved steps return as retryable profile-attributed debt and consume native
-resource budget. On Linux, context properties fail closed and CI additionally
-spawns a real Fedora WebProcess to inspect namespaces, no-new-privileges,
-seccomp, and host-path denial. Packaged real-OS hostile tests are still a
+resource budget. On Linux (not shipped), context properties fail closed. Packaged real-OS hostile tests are still a
 release gate. Split-divider drag/drop indicators on Windows/Linux and per-view
 rounded corners remain later platform work (rounded corners are intentionally
 skipped on Windows for now).
@@ -3151,12 +3153,13 @@ skipped on Windows for now).
 ## 14. CI
 
 `cargo xtask ci` is the local gate (fmt, clippy, tests, frame check).
-GitHub CI is the full matrix: {windows, macos, linux} native runners so
-`cfg`-gated code cannot rot, plus nextest, bindings-drift, coverage, and
-advisory `cargo machete` / `cargo deny check` (licenses, advisories,
-sources; deny.toml at the root). Frontend gate: `tsc --noEmit` + biome.
-The supported Fedora job explicitly runs the otherwise ignored real-WebProcess
-confinement probe; its result applies to that CI image, not every installation.
+`.github/workflows/ci.yml` is the per-push gate: workflow lint, the frontend
+gate (`tsc --noEmit` + biome + unit tests), and native Rust jobs on {linux,
+macos, windows} runners so `cfg`-gated code cannot rot. `nightly.yml` adds the
+fuzz, extended, component and coverage jobs; `security-review.yml` checks
+review deadlines weekly; `release.yml` builds, signs and drafts a release from a
+`v*` tag (see `.github/RELEASE.md`). `deny.toml` at the root governs licenses,
+advisories and sources.
 Later: sustained fuzzing for new parsers (filter lists, themes), `cargo geiger`,
 packaged hostile tests, and endurance/resource gates.
 
@@ -3195,8 +3198,7 @@ path authority. A profile-scoped native WKDownload coordinator owns transfers,
 Store-backed metadata/preferences and bounded progress snapshots. Private transfers
 remain memory-only. Filesystem workers mediate staging, quarantine, exclusive
 publication and file-identity checks. Trusted UI actions carry download IDs;
-paths and native completions stay in Rust. Windows/Linux download adapters remain
-outstanding. Local-document viewing is outside this delivery's scope.
+paths and native completions stay in Rust. Linux download adapters remain outstanding (Linux does not ship). Local-document viewing is outside this delivery's scope.
 
 ---
 
