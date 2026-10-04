@@ -18,7 +18,15 @@
   "bundle": {
     "windows": {
       "nsis": {
-        "installerHooks": "windows/installer-hooks.nsh"
+        "installerHooks": "windows/installer-hooks.nsh",
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "windows": {
+        "installMode": "passive"
       }
     }
   }
