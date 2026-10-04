@@ -4,6 +4,7 @@ import type {
   PagePermissionPromptEntryView,
   PagePermissionPromptView,
 } from "$shared/ipc/bindings";
+import * as m from "$shared/i18n/messages";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { operations } from "$domain/operations";
@@ -57,16 +58,16 @@ function dispositionMessage(disposition: OperationDisposition): string | null {
   if (disposition.outcome === "applied" || disposition.outcome === "no_op") return null;
   switch (disposition.reason) {
     case "invalid_scope":
-      return "This request is no longer available.";
+      return m.page_permission_unavailable();
     case "store_conflict":
-      return "This site's saved permission changed. Review the request and try again.";
+      return m.page_permission_conflict();
     case "store_outcome_unknown":
     case "store_reconciliation_failed":
-      return "Zephium couldn't safely verify the saved permission.";
+      return m.page_permission_unverified_store();
     case "store_admission_rejected":
-      return "Saved site permissions are temporarily unavailable.";
+      return m.page_permission_store_unavailable();
     default:
-      return "Zephium couldn't apply this permission decision.";
+      return m.page_permission_apply_failed();
   }
 }
 
@@ -137,7 +138,7 @@ async function settle(
       IPC_TIMEOUT_MS,
     );
     if (!admission.accepted || admission.operation_id === null) {
-      notice = "This request is no longer available.";
+      notice = m.page_permission_unavailable();
       responding = false;
       return;
     }
@@ -150,14 +151,14 @@ async function settle(
       notice = dispositionMessage(resolution.disposition);
       if (notice !== null) responding = false;
     } else if (resolution.state === "pending") {
-      notice = "Zephium is still applying the saved permission.";
+      notice = m.page_permission_still_applying();
     } else {
-      notice = "Zephium couldn't verify this permission decision.";
+      notice = m.page_permission_unverified();
       responding = false;
     }
   } catch {
     if (samePrompt(state.prompt, retained)) {
-      notice = "Site permissions are temporarily unavailable.";
+      notice = m.page_permission_service_unavailable();
       responding = false;
     }
   }

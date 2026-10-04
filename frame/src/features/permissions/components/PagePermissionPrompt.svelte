@@ -5,6 +5,7 @@
     PagePermissionPromptDecisionInput,
     PagePermissionPromptEntryView,
   } from "$shared/ipc/bindings";
+  import * as m from "$shared/i18n/messages";
   import { pagePermissions as permissions } from "$domain/permissions";
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
@@ -18,8 +19,19 @@
   let failure = $derived(permissions.failure());
   let camera = $derived(prompt.kinds.includes("camera"));
   let microphone = $derived(prompt.kinds.includes("microphone"));
-  let capability = $derived(
-    camera && microphone ? "camera and microphone" : camera ? "camera" : "microphone",
+  let title = $derived(
+    camera && microphone
+      ? m.page_permission_title_both()
+      : camera
+        ? m.page_permission_title_camera()
+        : m.page_permission_title_microphone(),
+  );
+  let detail = $derived(
+    camera && microphone
+      ? m.page_permission_detail_both()
+      : camera
+        ? m.page_permission_detail_camera()
+        : m.page_permission_detail_microphone(),
   );
 
   onMount(() => queueMicrotask(() => denyButton?.focus()));
@@ -90,7 +102,7 @@
       </span>
       <div class="min-w-0 flex-1">
         <h1 id="page-permission-title" class="text-[14px] leading-5 font-semibold text-text">
-          Use your {capability}?
+          {title}
         </h1>
         <p id="page-permission-origin" class="mt-0.5 text-[11.5px] leading-4 break-all text-muted">
           {prompt.origin}
@@ -99,7 +111,7 @@
     </div>
 
     <p id="page-permission-detail" class="mt-3 text-[11.5px] leading-4 text-text">
-      Granting access lets this site use your {capability}.
+      {detail}
     </p>
 
     {#if prompt.rememberable}
@@ -112,11 +124,11 @@
           aria-busy={busy || undefined}
           class="h-3.5 w-3.5 accent-accent"
         />
-        Remember for this site
+        {m.page_permission_remember()}
       </label>
     {:else}
       <p class="mt-3 rounded-row bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted">
-        Private Browsing won't remember this decision.
+        {m.page_permission_ask_again()}
       </p>
     {/if}
 
@@ -124,7 +136,7 @@
       <p role="alert" class="mt-2.5 text-[10.5px] leading-4 text-danger">{failure}</p>
     {:else if busy}
       <p role="status" class="mt-2.5 text-[10.5px] leading-4 text-muted">
-        Applying the permission securely…
+        {m.page_permission_applying()}
       </p>
     {/if}
 
@@ -136,7 +148,7 @@
         aria-busy={busy || undefined}
         onclick={() => respond(false)}
       >
-        Don't allow
+        {m.page_permission_deny()}
       </Button>
       <Button
         bind:ref={allowButton}
@@ -145,7 +157,7 @@
         aria-busy={busy || undefined}
         onclick={() => respond(true)}
       >
-        Allow
+        {m.page_permission_allow()}
       </Button>
     </div>
   </div>
