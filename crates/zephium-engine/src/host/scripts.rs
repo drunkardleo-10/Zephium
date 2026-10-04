@@ -491,6 +491,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   } catch (_) { uncertain = true; }
 })()"#;
 
+#[cfg(any(not(target_os = "windows"), test))]
 pub(super) const DISCARD_SAFETY_QUERY_JS: &str = r#"(function(){
   'use strict';
   try {

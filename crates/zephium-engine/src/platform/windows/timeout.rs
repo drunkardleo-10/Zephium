@@ -37,7 +37,7 @@ thread_local! {
     // Allocates no map, worker, channel, or heap storage until a caller
     // supplies the one callback box. The fixed slots match native ingress.
     static TIMERS: RefCell<[Option<TimerEntry>; MAX_UI_TIMERS]> =
-        RefCell::new([const { None }; MAX_UI_TIMERS]);
+        const { RefCell::new([const { None }; MAX_UI_TIMERS]) };
     static NEXT_GENERATION: Cell<u64> = const { Cell::new(1) };
 }
 

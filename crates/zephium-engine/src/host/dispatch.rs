@@ -206,8 +206,6 @@ impl ContentPolicyTerminalSlots {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum HostTaskPriority {
     Normal,
-    #[cfg(target_os = "windows")]
-    Maintenance,
     Observation,
     Lifecycle,
     Close,
@@ -1466,10 +1464,6 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
 
     let replace = match queued.priority {
         HostTaskPriority::Normal => None,
-        #[cfg(target_os = "windows")]
-        HostTaskPriority::Maintenance => pending
-            .iter()
-            .position(|task| task.priority < queued.priority),
         HostTaskPriority::Observation | HostTaskPriority::Lifecycle | HostTaskPriority::Close => {
             pending
                 .iter()
@@ -2289,14 +2283,6 @@ mod tests {
             keyed(
                 HostTaskPriority::Observation,
                 HostTaskKey::View(ItemId::from(1))
-            )
-        ));
-        #[cfg(target_os = "windows")]
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(
-                HostTaskPriority::Maintenance,
-                HostTaskKey::Suspend(ItemId::from(1))
             )
         ));
         assert!(enqueue_pending(

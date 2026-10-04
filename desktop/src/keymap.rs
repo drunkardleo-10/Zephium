@@ -105,6 +105,7 @@ impl Keymap {
         if let Some(apply) = self.engine.get() {
             apply(self.engine_table());
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let recording = self.recording.load(Ordering::Acquire);
         #[cfg(target_os = "linux")]
         {
