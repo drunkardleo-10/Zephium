@@ -17,6 +17,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     tabsBootstrap: async () => {},
     sidebarSetWidth: async () => {},
+    sidebarResize: async () => false,
+    sidebarResizeGuide: async () => true,
     settingSet: async () => ({ accepted: true, operation_id: null }),
   });
 });

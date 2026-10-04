@@ -19,6 +19,17 @@ const MODE_SETTING = "sidebar.mode";
 let mode = $state.raw<SidebarMode>("default");
 let desiredMode: SidebarMode = "default";
 let expandedWidth = $state.raw(240);
+let drag: { mode: SidebarMode; desired: SidebarMode; expanded: number; pending: number } | null =
+  null;
+let resizeSettlement = $state(0);
+// One document-local ordering counter, seeded above earlier document owners.
+let resizeRevision = $state(Math.trunc(performance.timeOrigin * 1024));
+export const sidebarResizeRevision = () => resizeRevision;
+export function claimSidebarResizeOwner() {
+  return ++resizeRevision;
+}
+export const sidebarResizeActive = () => drag !== null;
+export const sidebarResizeSettlement = () => resizeSettlement;
 
 export const sidebarMode = () => mode;
 export const isCompact = () => mode === "compact";
@@ -62,19 +73,68 @@ export function resolveDragWidth(value: number): { mode: SidebarMode; expanded: 
  * a drag in progress or a restored preference moves it without ceremony.
  */
 function publish(travel = false) {
-  void commands.sidebarSetWidth(effectiveWidth(), travel);
+  resizeRevision++;
+  if (drag) cancelSidebarResize();
+  const width = effectiveWidth();
+  void commands.sidebarSetWidth(width, travel, resizeRevision);
 }
 
 export function applyDragWidth(value: number) {
+  if (drag) {
+    drag.pending = value;
+    return;
+  }
   const next = resolveDragWidth(value);
   if (next.mode === mode && next.expanded === expandedWidth) return;
-
   const modeChanged = next.mode !== mode;
   mode = next.mode;
   expandedWidth = next.expanded;
-  // Crossing the snap point is a change of shape, not a drag step.
+  desiredMode = mode;
   publish(modeChanged);
   if (modeChanged) save(mode);
+}
+
+/** The non-native capture fallback also keeps the rendered layout unchanged. */
+export function beginSidebarResize() {
+  if (drag) return;
+  drag = { mode, desired: desiredMode, expanded: expandedWidth, pending: effectiveWidth() };
+}
+
+export function finishSidebarResize(value: number) {
+  if (!drag) return;
+  drag = null;
+  adoptResizeWidth(value);
+  void commands.sidebarSetWidth(effectiveWidth(), false, resizeRevision);
+}
+
+export function cancelSidebarResize() {
+  drag = null;
+}
+
+/** Native has admitted one final width; adopt its display shape without another layout command. */
+export function adoptResizeWidth(value: number, revision = resizeRevision) {
+  if (revision !== resizeRevision) return;
+  if (!Number.isFinite(value) || value < COMPACT_WIDTH || value > MAX_EXPANDED_WIDTH) return;
+  const next = resolveDragWidth(value);
+  const changed = next.mode !== mode;
+  mode = next.mode;
+  desiredMode = mode;
+  expandedWidth = next.expanded;
+  resizeSettlement++;
+  if (changed) save(mode);
+}
+
+let resizeListenerInstalled = false;
+function installResizeListener() {
+  if (resizeListenerInstalled) return;
+  resizeListenerInstalled = true;
+  window.addEventListener("zephium:sidebar-width-selected", (event) => {
+    if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
+      return;
+    const { width, revision } = event.detail;
+    if (typeof width === "number" && typeof revision === "number")
+      adoptResizeWidth(width, revision);
+  });
 }
 
 // The shape this column last saved, until the store reports it back. Values
@@ -98,6 +158,7 @@ export function adoptMode(next: SidebarMode) {
     }
     return;
   }
+  cancelSidebarResize();
   if (next === mode) return;
   mode = next;
   desiredMode = next;
@@ -105,6 +166,7 @@ export function adoptMode(next: SidebarMode) {
 }
 
 export function setMode(next: SidebarMode) {
+  cancelSidebarResize();
   if (next === mode) return;
   mode = next;
   desiredMode = next;
@@ -117,17 +179,20 @@ export function setMode(next: SidebarMode) {
  * returned function puts the rail back, unless a shape was chosen meanwhile.
  */
 export function expandBriefly(): () => void {
+  cancelSidebarResize();
   if (mode !== "compact") return () => {};
   mode = "default";
   publish(true);
   return () => {
     if (mode !== "default" || desiredMode !== "compact") return;
+    cancelSidebarResize();
     mode = "compact";
     publish(true);
   };
 }
 
 export function toggleMode() {
+  cancelSidebarResize();
   desiredMode = desiredMode === "compact" ? "default" : "compact";
   setMode(desiredMode);
 }
@@ -138,6 +203,7 @@ export function toggleMode() {
  * first interaction.
  */
 export async function init(): Promise<void> {
+  installResizeListener();
   try {
     const stored = await commands.settingGet(MODE_SETTING);
     if (stored === "compact") {

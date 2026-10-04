@@ -213,7 +213,11 @@ export class ListMotion {
 
   /** Before the DOM changes: where everything is now. */
   capture(container: HTMLElement | undefined) {
-    if (!container || reducedMotion()) {
+    if (
+      !container ||
+      reducedMotion() ||
+      container.closest('[data-sidebar-resize-settling="true"]')
+    ) {
       this.#before = null;
       return;
     }
@@ -236,6 +240,7 @@ export class ListMotion {
     // Stop anything mid-flight first, so every measurement is of the resting
     // layout; the capture above already recorded where each one was drawn.
     for (const element of now) settleRunning(element);
+    if (container.closest('[data-sidebar-resize-settling="true"]')) return;
 
     const present = new Set<string>();
     let shared = 0;

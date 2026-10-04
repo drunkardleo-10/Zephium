@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-const native = vi.hoisted(() => ({ width: vi.fn(async () => undefined) }));
+const native = vi.hoisted(() => ({
+  width: vi.fn(async () => undefined),
+}));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -17,6 +19,11 @@ const {
   MIN_EXPANDED_WIDTH,
   SNAP_THRESHOLD,
   applyDragWidth,
+  adoptResizeWidth,
+  beginSidebarResize,
+  finishSidebarResize,
+  cancelSidebarResize,
+  expanded,
   resolveDragWidth,
   adoptMode,
   setPanelExtent,
@@ -56,7 +63,7 @@ describe("resolveDragWidth", () => {
 });
 
 describe("which width changes the page travels with", () => {
-  const last = () => native.width.mock.calls.at(-1) as unknown as [number, boolean];
+  const last = () => native.width.mock.calls.at(-1)?.slice(0, 2) as unknown as [number, boolean];
 
   it("slides for a deliberate change of shape and follows a drag directly", () => {
     toggleMode();
@@ -82,6 +89,54 @@ describe("which width changes the page travels with", () => {
     setPanelExtent(0);
     expect(last()[1]).toBe(true);
   });
+
+  it("keeps the sidebar and layout fixed while a guide moves, then commits once", () => {
+    const originalWidth = expanded();
+    const originalMode = sidebarMode();
+    const before = native.width.mock.calls.length;
+    beginSidebarResize();
+    applyDragWidth(315);
+    expect(expanded()).toBe(originalWidth);
+    expect(sidebarMode()).toBe(originalMode);
+    expect(native.width.mock.calls.length).toBe(before);
+    finishSidebarResize(315);
+    expect(native.width.mock.calls.length).toBe(before + 1);
+    expect(last()).toEqual([315, false]);
+  });
+
+  it("cancellation leaves the original shape untouched and emits no layout", () => {
+    const originalMode = sidebarMode();
+    const originalWidth = expanded();
+    const before = native.width.mock.calls.length;
+    beginSidebarResize();
+    applyDragWidth(SNAP_THRESHOLD - 1);
+    cancelSidebarResize();
+    finishSidebarResize(300);
+    expect(sidebarMode()).toBe(originalMode);
+    expect(expanded()).toBe(originalWidth);
+    expect(native.width.mock.calls.length).toBe(before);
+  });
+
+  it("adopts a native selection without dispatching a second width change", () => {
+    const before = native.width.mock.calls.length;
+    adoptResizeWidth(320);
+    expect(expanded()).toBe(320);
+    expect(native.width.mock.calls.length).toBe(before);
+  });
+
+  it("a deliberate toggle retires a guide before a stale pointer release", () => {
+    const before = native.width.mock.calls.length;
+    beginSidebarResize();
+    applyDragWidth(SNAP_THRESHOLD - 1);
+    expect(sidebarMode()).toBe("default");
+    toggleMode();
+    cancelSidebarResize();
+    finishSidebarResize(300);
+    expect(native.width.mock.calls.length).toBe(before + 1);
+    expect(sidebarMode()).toBe("compact");
+    expect(last()).toEqual([COMPACT_WIDTH, true]);
+    toggleMode();
+  });
 });
 
 describe("the stored preference catching up with a toggle", () => {
@@ -91,7 +146,9 @@ describe("the stored preference catching up with a toggle", () => {
     native.width.mockClear();
     toggleMode();
     expect(sidebarMode()).toBe("compact");
-    expect(native.width.mock.calls).toEqual([[COMPACT_WIDTH, true]]);
+    expect(native.width.mock.calls.map((call) => call.slice(0, 2))).toEqual([
+      [COMPACT_WIDTH, true],
+    ]);
 
     // The store still holds the old value, then reports the new one: neither
     // is a change of shape, so neither moves anything.
@@ -123,7 +180,9 @@ describe("the stored preference catching up with a toggle", () => {
     const other = shape === "compact" ? "default" : "compact";
     adoptMode(other);
     expect(sidebarMode()).toBe(other);
-    expect((native.width.mock.calls.at(-1) as unknown as [number, boolean])[1]).toBe(false);
+    expect((native.width.mock.calls.at(-1)?.slice(0, 2) as unknown as [number, boolean])[1]).toBe(
+      false,
+    );
     vi.useRealTimers();
   });
 });

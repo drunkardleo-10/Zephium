@@ -9,6 +9,7 @@
     COMPACT_WIDTH,
     effectiveWidth,
     isCompact,
+    sidebarResizeSettlement,
     toggleMode,
   } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
@@ -65,8 +66,10 @@
   let morph: ReturnType<typeof shapeMorph.capture> = null;
   // While the shape changes, the column's width travels with the page
   // instead of jumping, and its contents hold their final width so only the
-  // space beside them moves. A drag never sets this: it follows the pointer.
+  // space beside them moves. A resize guide commits its width immediately on release.
   let reshaping = $state(false);
+  let resizeSettling = $state(false);
+  let observedResizeSettlement = sidebarResizeSettlement();
   // The header only fades in when it is the other header, not merely beside
   // a column that changed (a tool opening keeps the same header).
   let headerCompact = $derived(compact && tools.activeTool() === null);
@@ -77,7 +80,22 @@
   $effect.pre(() => {
     const next = compact;
     const head = headerCompact;
+    const settlement = sidebarResizeSettlement();
     untrack(() => {
+      if (settlement !== observedResizeSettlement) {
+        observedResizeSettlement = settlement;
+        resizeSettling = true;
+        queueMicrotask(() => {
+          if (observedResizeSettlement === settlement) resizeSettling = false;
+        });
+        morph = null;
+        reshaping = false;
+        headerFresh = false;
+        clearTimeout(reshaped);
+        shown = next;
+        shownHeader = head;
+        return;
+      }
       const headChanged = shownHeader !== null && shownHeader !== head;
       shownHeader = head;
       if (shown === null || shown === next) return;
@@ -135,10 +153,14 @@
   style:width={`${width}px`}
   style:--sidebar-width={`${width}px`}
   data-reshaping={reshaping}
+  data-sidebar-resize-settling={resizeSettling}
   data-header-fresh={headerFresh}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
-  {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle {width} />{/if}
+  {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle
+      {width}
+      disabled={reshaping}
+    />{/if}
   <SidebarHeader
     compact={headerCompact}
     launcher={!navigating && tools.activeTool() !== null}

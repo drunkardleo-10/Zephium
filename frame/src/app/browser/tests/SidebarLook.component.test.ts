@@ -8,6 +8,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     runCommand: vi.fn(async () => ({ accepted: true, operation_id: null })),
     sidebarSetWidth: vi.fn(async () => undefined),
+    sidebarResize: async () => false,
+    sidebarResizeGuide: async () => true,
   });
 });
 
