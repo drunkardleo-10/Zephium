@@ -86,10 +86,11 @@ fn compile(worker: &WorkerBlocker, profile: u128) -> Arc<ContentRules> {
         ),
         BlockerDispatch::Scheduled
     );
-    let BlockerCompileOutcome::Compiled(rules) =
-        receive.recv_timeout(Duration::from_secs(60)).unwrap()
-    else {
-        panic!("the release artifact must be recoverable without its source loader");
+    let rules = match receive.recv_timeout(Duration::from_secs(60)).unwrap() {
+        BlockerCompileOutcome::Compiled(rules) => rules,
+        other => {
+            panic!("the release artifact must be recoverable without its source loader: {other:?}")
+        }
     };
     assert!(rules.enabled());
     assert!(rules.coverage().has_blocking_entries());
