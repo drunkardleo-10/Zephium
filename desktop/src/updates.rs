@@ -18,7 +18,9 @@ pub(crate) enum UpdateStatus {
     Checking,
     UpToDate,
     Downloading,
-    Ready { version: String },
+    Ready {
+        version: String,
+    },
     Installing,
     Failed,
 }

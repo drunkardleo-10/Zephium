@@ -424,11 +424,10 @@ mod tests {
 
     #[test]
     fn outdated_os_or_safari_recommends_an_update_instead_of_blocking() {
-        let update = RuntimeSecurityAdvisories::from_advisory(
-            RuntimeSecurityAdvisory::update_recommended(
+        let update =
+            RuntimeSecurityAdvisories::from_advisory(RuntimeSecurityAdvisory::update_recommended(
                 RuntimeSecurityUpdateTarget::OperatingSystem,
-            ),
-        );
+            ));
         for (os, safari) in [
             ("14.0.0", "26.6.1"),
             ("14.8.8", "26.6.1"),

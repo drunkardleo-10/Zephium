@@ -111,10 +111,7 @@ mod tests {
             ),
             StartupProblem::NewerProfile
         );
-        for damaged in [
-            "database disk image is malformed",
-            "file is not a database",
-        ] {
+        for damaged in ["database disk image is malformed", "file is not a database"] {
             assert_eq!(
                 StartupProblem::classify(damaged),
                 StartupProblem::DamagedProfile

@@ -2294,7 +2294,6 @@ fn to_wry(r: Rect) -> wry::Rect {
     }
 }
 
-
 pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::PermissionResponse {
     match kind {
         wry::PermissionKind::Camera | wry::PermissionKind::Microphone if cfg!(windows) => {
