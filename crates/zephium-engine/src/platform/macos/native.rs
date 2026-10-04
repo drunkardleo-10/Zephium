@@ -401,6 +401,32 @@ pub fn query_document_playback(
     true
 }
 
+/// The renderer process footprint, as Activity Monitor reports it. WebKit
+/// exposes the process only through SPI; without it no page counts as heavy.
+pub(crate) fn page_footprint(view: &wry::WebView) -> Option<u64> {
+    let page = webkit(view);
+    // SAFETY: main-thread WebKit access; the SPI is used only when present.
+    let supported: bool =
+        unsafe { objc2::msg_send![&*page, respondsToSelector: objc2::sel!(_webProcessIdentifier)] };
+    if !supported {
+        return None;
+    }
+    let pid: libc::pid_t = unsafe { objc2::msg_send![&*page, _webProcessIdentifier] };
+    if pid <= 0 {
+        return None;
+    }
+    // SAFETY: a correctly sized, zeroed rusage_info_v4 for this flavor.
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let status = unsafe {
+        libc::proc_pid_rusage(
+            pid,
+            libc::RUSAGE_INFO_V4,
+            (&mut info as *mut libc::rusage_info_v4).cast(),
+        )
+    };
+    (status == 0).then_some(info.ri_phys_footprint)
+}
+
 /// Hidden pages are throttled by default and suspended once dormant. WebKit
 /// keeps a page running while it is audible or capturing, whatever this says,
 /// and resumes it as soon as it becomes visible.

@@ -794,6 +794,26 @@ impl EngineHost {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn sample_page_memory(&self, ids: Vec<ItemId>) {
+        for id in ids {
+            let (Some(view), Some(partition)) = (self.views.get(&id), self.partitions.get(&id))
+            else {
+                continue;
+            };
+            if let Some(bytes) = crate::platform::imp::page_footprint(&view.view) {
+                view.event_permit.emit(
+                    &self.sink,
+                    EngineEvent::PageMemory {
+                        id,
+                        profile: partition.profile(),
+                        bytes,
+                    },
+                );
+            }
+        }
+    }
+
     pub(crate) fn set_memory_pressure(
         &mut self,
         pressure: zephium_core::ports::engine::MemoryPressure,

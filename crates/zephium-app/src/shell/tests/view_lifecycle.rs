@@ -1031,6 +1031,42 @@ fn disabled_sleep_is_honored_until_critical_memory_pressure() {
 }
 
 #[test]
+fn heavy_hidden_pages_sleep_early_but_the_last_hidden_page_stays_instant() {
+    let (mut shell, _engine, screen) = setup();
+    shell.residency.discard_idle_min = std::time::Duration::from_secs(60 * 60);
+    shell.residency.heavy_page = (100, std::time::Duration::ZERO);
+    shell.handle(Command::Bootstrap);
+    let heavy = active_id(&screen);
+    navigate_and_commit(&mut shell, heavy, "heavy.example");
+    let mut ids = vec![heavy];
+    for host in ["light.example", "recent-heavy.example", "active.example"] {
+        shell.handle(Command::Open);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, host);
+        ids.push(id);
+    }
+    let (light, recent) = (ids[1], ids[2]);
+    let profile = shell.profile_of_item(heavy).unwrap();
+    for (id, bytes) in [(heavy, 200), (light, 50), (recent, 200)] {
+        shell.handle(Command::Engine(EngineEvent::PageMemory {
+            id,
+            profile,
+            bytes,
+        }));
+    }
+    shell.handle(Command::Tick);
+    assert!(
+        shell.residency.discard_probes.contains_key(&heavy),
+        "a heavy page sleeps early even inside the warm set"
+    );
+    assert!(!shell.residency.discard_probes.contains_key(&light));
+    assert!(
+        !shell.residency.discard_probes.contains_key(&recent),
+        "the most recent hidden page stays for instant switching"
+    );
+}
+
+#[test]
 fn memory_warning_uses_a_short_grace_instead_of_discarding_at_once() {
     use zephium_core::ports::engine::MemoryPressure;
     let (mut shell, _engine, screen) = setup();

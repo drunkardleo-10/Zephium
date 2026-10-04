@@ -22,6 +22,11 @@ const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60
 // A system memory warning can last for hours on small machines; a short
 // grace keeps tabs the user is actively switching between from reloading.
 const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+// A few pages hold most of a session's memory. One whose renderer exceeds the
+// heavy threshold sleeps after a short grace, even inside the warm set; only
+// the most recent hidden page stays for instant back-and-forth.
+const HEAVY_PAGE: (u64, std::time::Duration) = (256 << 20, std::time::Duration::from_secs(3 * 60));
+const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 pub(super) const DISCARD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) const DISCARD_PROTECTED_RETRY: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
@@ -56,6 +61,9 @@ pub(super) struct ResidencyState {
     exceptions: Vec<String>,
     memory_pressure: MemoryPressure,
     preferred_limits: (usize, usize),
+    pub(super) heavy_page: (u64, std::time::Duration),
+    pub(super) page_bytes: std::collections::HashMap<ItemId, u64>,
+    memory_sampled: Option<std::time::Instant>,
     pub(super) capacity_requests: std::collections::VecDeque<CapacityRequest>,
     capacity_blocked: std::collections::HashMap<ItemId, String>,
     pub(super) recent: Vec<ItemId>,
@@ -83,6 +91,9 @@ impl Default for ResidencyState {
             exceptions: Vec::new(),
             memory_pressure: MemoryPressure::Normal,
             preferred_limits: (WARM_VIEW_LIMIT, LIVE_VIEW_PRESSURE_LIMIT),
+            heavy_page: HEAVY_PAGE,
+            page_bytes: std::collections::HashMap::new(),
+            memory_sampled: None,
             capacity_requests: std::collections::VecDeque::new(),
             capacity_blocked: std::collections::HashMap::new(),
             recent: Vec::new(),
@@ -138,6 +149,11 @@ impl ResidencyState {
                     "keep-ready" => (10, 28),
                     _ => (WARM_VIEW_LIMIT, LIVE_VIEW_PRESSURE_LIMIT),
                 };
+                self.heavy_page = match value {
+                    "save-memory" => (160 << 20, std::time::Duration::from_secs(60)),
+                    "keep-ready" => (512 << 20, std::time::Duration::from_secs(10 * 60)),
+                    _ => HEAVY_PAGE,
+                };
                 self.update_limits();
             }
             "performance.exceptions" => {
@@ -156,6 +172,15 @@ impl ResidencyState {
         };
     }
 
+    fn heavy_grace(&self) -> std::time::Duration {
+        match self.memory_pressure {
+            MemoryPressure::Normal => self.heavy_page.1,
+            MemoryPressure::Warning | MemoryPressure::Critical => {
+                self.heavy_page.1.min(WARNING_IDLE_GRACE)
+            }
+        }
+    }
+
     fn idle_grace(&self) -> std::time::Duration {
         match self.memory_pressure {
             MemoryPressure::Normal => self.discard_idle_min,
@@ -164,6 +189,12 @@ impl ResidencyState {
             }
         }
     }
+}
+
+pub(super) struct Warmth {
+    warm: std::collections::HashSet<ItemId>,
+    // The most recent hidden page, kept even when heavy.
+    instant: Option<ItemId>,
 }
 
 #[derive(Default)]
@@ -177,6 +208,14 @@ impl Shell {
         if key.starts_with("performance.") {
             self.residency.apply_setting(key, value);
             self.maintain_views();
+        }
+    }
+
+    pub(super) fn on_page_memory(&mut self, id: ItemId, profile: ProfileId, bytes: u64) {
+        if self.profile_of_item(id) == Some(profile)
+            && self.items.tab(id).is_some_and(TabState::has_view)
+        {
+            self.residency.page_bytes.insert(id, bytes);
         }
     }
 
@@ -389,6 +428,9 @@ impl Shell {
         self.residency
             .inactive_since
             .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
+        self.residency
+            .page_bytes
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
         self.last_visits
             .retain(|id, _| self.items.tab(*id).is_some());
         self.residency.discard_protected_until.retain(|id, until| {
@@ -426,6 +468,7 @@ impl Shell {
         self.record_inactive_leaves(&protected, &shown);
         let live_count = self.items.view_ids().len();
         let warm = self.warm_views(&protected);
+        self.sample_hidden_page_memory(&shown);
         let invalid_probes: Vec<ItemId> = self
             .residency
             .discard_probes
@@ -529,7 +572,18 @@ impl Shell {
                     && self.wants_discard(*id, live_count, &warm)
             })
             .collect();
-        candidates.sort_by_key(|id| (self.last_view_activity(*id).copied(), *id));
+        if urgent {
+            // Memory is needed now: free the most with the fewest reloads.
+            candidates.sort_by_key(|id| {
+                (
+                    std::cmp::Reverse(self.residency.page_bytes.get(id).copied()),
+                    self.last_view_activity(*id).copied(),
+                    *id,
+                )
+            });
+        } else {
+            candidates.sort_by_key(|id| (self.last_view_activity(*id).copied(), *id));
+        }
 
         let available =
             MAX_CONCURRENT_DISCARD_PROBES.saturating_sub(self.residency.discard_probes.len());
@@ -630,28 +684,27 @@ impl Shell {
     /// user's choices are honored: kept-awake sites never sleep, and with
     /// sleeping off only critical OS pressure, where the alternative is the
     /// OS killing renderers outright, may still discard.
-    fn wants_discard(
-        &self,
-        id: ItemId,
-        live_count: usize,
-        warm: &std::collections::HashSet<ItemId>,
-    ) -> bool {
+    fn wants_discard(&self, id: ItemId, live_count: usize, warm: &Warmth) -> bool {
         if self.site_kept_awake(id) {
             return false;
         }
         if self.discard_is_urgent(live_count) {
             return true;
         }
+        let heavy = self
+            .residency
+            .page_bytes
+            .get(&id)
+            .is_some_and(|bytes| *bytes >= self.residency.heavy_page.0);
         self.residency.sleeping
-            && !warm.contains(&id)
-            && self.idle_for(id, self.residency.idle_grace())
+            && ((!warm.warm.contains(&id) && self.idle_for(id, self.residency.idle_grace()))
+                || (heavy
+                    && warm.instant != Some(id)
+                    && self.idle_for(id, self.residency.heavy_grace())))
     }
 
     /// The most recently active hidden pages, kept resident for fast switching.
-    fn warm_views(
-        &self,
-        protected: &std::collections::HashSet<ItemId>,
-    ) -> std::collections::HashSet<ItemId> {
+    fn warm_views(&self, protected: &std::collections::HashSet<ItemId>) -> Warmth {
         let mut hidden: Vec<ItemId> = self
             .items
             .view_ids()
@@ -659,8 +712,39 @@ impl Shell {
             .filter(|id| !protected.contains(id))
             .collect();
         hidden.sort_by_key(|id| std::cmp::Reverse((self.last_view_activity(*id).copied(), *id)));
-        hidden.truncate(self.residency.warm_view_limit);
-        hidden.into_iter().collect()
+        Warmth {
+            instant: hidden.first().copied(),
+            warm: hidden
+                .into_iter()
+                .take(self.residency.warm_view_limit)
+                .collect(),
+        }
+    }
+
+    /// Heavy pages are found by their renderer's footprint; asked for only
+    /// while something can act on the answer, at most every half minute.
+    fn sample_hidden_page_memory(&mut self, shown: &std::collections::HashSet<ItemId>) {
+        if !self.residency.sleeping && self.residency.memory_pressure == MemoryPressure::Normal {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self
+            .residency
+            .memory_sampled
+            .is_some_and(|sampled| now.duration_since(sampled) < MEMORY_SAMPLE_INTERVAL)
+        {
+            return;
+        }
+        let hidden: Vec<ItemId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter(|id| !shown.contains(id))
+            .collect();
+        if !hidden.is_empty() {
+            self.residency.memory_sampled = Some(now);
+            self.engine.sample_page_memory(hidden);
+        }
     }
 
     fn protect_discard_candidate(&mut self, id: ItemId) {

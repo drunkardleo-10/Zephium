@@ -388,6 +388,9 @@ impl Shell {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => {
                 self.on_view_discard_refused(id, profile, probe)
             }
+            EngineEvent::PageMemory { id, profile, bytes } => {
+                self.on_page_memory(id, profile, bytes)
+            }
             EngineEvent::PermissionRequested {
                 id,
                 profile,
@@ -567,6 +570,7 @@ impl Shell {
             EngineEvent::ContentRulesSettled { profile, .. }
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
+            | EngineEvent::PageMemory { profile, .. }
             | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
             EngineEvent::UserContentSettled {
                 scope: ContentScope::Profile(profile),

@@ -1138,6 +1138,9 @@ impl RetirementGate {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::ViewDiscardRefused { id, profile, probe }),
+            EngineEvent::PageMemory { id, profile, bytes } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::PageMemory { id, profile, bytes }),
         }
     }
 }
@@ -1928,6 +1931,15 @@ impl Engine for WebviewEngine {
                 host::best_effort_with(move |h| h.ensure_spare(partition));
             }
         });
+    }
+
+    fn sample_page_memory(&self, ids: Vec<ItemId>) {
+        #[cfg(target_os = "macos")]
+        self.run(move || {
+            host::best_effort_with(move |host| host.sample_page_memory(ids));
+        });
+        #[cfg(not(target_os = "macos"))]
+        let _ = ids;
     }
 
     fn set_memory_pressure(&self, pressure: zephium_core::ports::engine::MemoryPressure) {

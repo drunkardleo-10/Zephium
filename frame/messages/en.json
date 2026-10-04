@@ -477,7 +477,7 @@
   "pref_performance_after_option_2": "30 minutes",
   "pref_performance_after_option_3": "1 hour",
   "pref_performance_memory": "Resource preference",
-  "pref_performance_memory_help": "Choose how many recent tabs stay ready for instant switching.",
+  "pref_performance_memory_help": "Recent tabs stay ready; tabs using lots of memory sleep sooner.",
   "pref_performance_memory_option_0": "Balanced",
   "pref_performance_memory_option_1": "Save memory",
   "pref_performance_memory_option_2": "Keep tabs ready",

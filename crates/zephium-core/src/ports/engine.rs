@@ -776,6 +776,9 @@ pub trait Engine {
     }
     /// Drops speculative resources during OS pressure; never evicts user work.
     fn set_memory_pressure(&self, _pressure: MemoryPressure) {}
+    /// Requests `EngineEvent::PageMemory` for these live pages where the
+    /// platform can attribute a renderer process to a page.
+    fn sample_page_memory(&self, _ids: Vec<ItemId>) {}
     /// Replaces one profile's Shell-owned logical window/tab routing facts.
     ///
     /// This projection is deliberately incapable of creating a native view.
@@ -1225,6 +1228,12 @@ pub enum EngineEvent {
         id: ItemId,
         profile: ProfileId,
         probe: DiscardProbeId,
+    },
+    /// Physical footprint of the renderer process serving one live page.
+    PageMemory {
+        id: ItemId,
+        profile: ProfileId,
+        bytes: u64,
     },
     NavState {
         id: ItemId,

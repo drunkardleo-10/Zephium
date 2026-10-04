@@ -431,7 +431,10 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
   WebKit's suspend scheduling policy, which still runs audible or capturing
   pages; both resume when shown. Older hidden pages beyond a small warm set of
   recent ones (4, or 2 to save memory, 10 to keep tabs ready) are discarded
-  after the chosen idle grace, whatever the tab count, after an exact
+  after the chosen idle grace, whatever the tab count; a hidden page whose
+  renderer exceeds a heavy threshold (256 MB, or 160 MB to save memory)
+  sleeps after three minutes (one) unless it is the most recent hidden page,
+  and urgent pressure takes the heaviest first. Discard follows an exact
   generation/navigation discard-safety probe. Above the pressure watermark of
   24 or under critical OS pressure they are probed without that grace; a
   memory warning shortens it to two minutes. At most four probes run at once,
