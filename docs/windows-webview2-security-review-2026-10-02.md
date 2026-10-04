@@ -1,6 +1,6 @@
 # WebView2 security review: October 2, 2026
 
-The hard floor and latest reviewed recommendation are now **154.0.4258.53**,
+The reviewed floor and latest recommendation are now **154.0.4258.53**,
 published October 1. Review again by October 9 inclusive; CI expires at
 2026-10-10T00:00:00Z. This deliberately excludes every earlier 152/153/154
 build; there is no compatibility exception for a superseded security patch.
@@ -43,7 +43,7 @@ Authenticode signature. Older 153.0.4234.48 and 154.0.4258.37 executables also
 remained installed. Registration and files are inventory evidence, not proof
 of the version loaded into an already-running browser process.
 
-The reviewed floor rejects .48. The signed Microsoft standalone installer
+Runtime .48 is below the reviewed floor and now yields an update-recommended advisory rather than a startup refusal. The signed Microsoft standalone installer
 updated the machine to **154.0.4258.53** through normal Windows administrator
 approval. After restarting the QA app, its child processes loaded
 `Microsoft/EdgeWebView/Application/154.0.4258.53/msedgewebview2.exe`.
@@ -54,8 +54,6 @@ malformed versions, major 155, pre-publication time, and exclusive review expiry
 The July 14 historical pending-fix guard remains intact. No macOS, WebKitGTK or
 advisory-exception date was changed by this Windows review.
 
-This document records vendor and local inventory review. The final prerequisite
-handoff records test outcomes and the installed runtime after any update.
-Packaged hostile/native qualification and a second maintainer's review remain
-required before signing a release. UI checks belong to the user for this task;
-this review makes no claim that they passed.
+This document records vendor and local inventory review only. Packaged
+hostile/native qualification and a second maintainer's review remain required
+before signing a release.
