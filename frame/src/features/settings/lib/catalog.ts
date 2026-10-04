@@ -442,6 +442,18 @@ export const fields = {
     description: m.ai_jev_key_desc,
     initial: "",
   },
+  "about.updates": {
+    section: "about",
+    label: m.pref_about_updates,
+    description: m.pref_about_updates_help,
+    initial: "",
+  },
+  "updates.auto-check": {
+    section: "about",
+    label: m.pref_updates_auto,
+    description: m.pref_updates_auto_help,
+    initial: true,
+  },
   "about.diagnostics": {
     section: "about",
     label: m.pref_about_diagnostics,

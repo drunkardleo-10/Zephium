@@ -3,11 +3,15 @@
   import * as m from "$shared/i18n/messages";
   import { commands, type AboutInfo } from "$shared/ipc/bindings";
   import { preferences } from "$domain/preferences";
+  import { runtime } from "$domain/runtime";
+  import { releaseNotesUrl, systemUpdateTarget, updates } from "$domain/updates";
+  import { IS_MAC } from "$shared/platform";
   import { keymap } from "$domain/keymap";
   import * as notices from "$session/notice.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Button from "$shared/ui/Button";
+  import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let about = $state<AboutInfo | null>(null);
   let confirming = $state(false);
@@ -16,6 +20,7 @@
 
   onMount(() => {
     let live = true;
+    void updates.refresh();
     void commands
       .aboutInfo()
       .then((info) => {
@@ -28,6 +33,34 @@
   });
 
   let platform = $derived(about ? m.about_platform({ os: about.os, arch: about.arch }) : "");
+
+  let update = $derived(updates.status());
+  let updatable = $derived(update.state !== "unavailable");
+  let updateLine = $derived.by(() => {
+    switch (update.state) {
+      case "unavailable":
+        return m.update_status_unavailable();
+      case "idle":
+        return preferences.value("updates.auto-check") === "false"
+          ? m.pref_about_updates_help()
+          : m.update_status_idle();
+      case "checking":
+        return m.update_status_checking();
+      case "upToDate":
+        return m.update_status_current();
+      case "downloading":
+        return m.update_status_downloading();
+      case "ready":
+        return m.update_status_ready({ version: update.version });
+      case "installing":
+        return m.update_status_installing();
+      case "failed":
+        return m.update_status_failed();
+    }
+  });
+  let security = $derived(
+    updatable ? systemUpdateTarget(runtime.status().security_advisories) : null,
+  );
 
   async function copyDetails() {
     if (!about) return;
@@ -57,8 +90,52 @@
 </div>
 <SettingsGroup title={m.settings_about()}>
   <SettingsRow title={m.settings_version()} description={platform}>
-    <span class="settings-value">{about?.version ?? ""}</span>
+    <div class="actions">
+      {#if updatable && about}<Button
+          size="compact"
+          variant="ghost"
+          onclick={() =>
+            void commands.browserOpenUrl(releaseNotesUrl(about!.version), true).catch(() => {})}
+          >{m.update_release_notes()}</Button
+        >{/if}
+      <span class="settings-value">{about?.version ?? ""}</span>
+    </div>
   </SettingsRow>
+  <SettingsRow settingId="about.updates" title={m.pref_about_updates()} description={updateLine}>
+    {#if update.state === "ready" || update.state === "installing"}
+      <Button
+        size="compact"
+        variant="primary"
+        pending={update.state === "installing" || updates.pendingRelaunch()}
+        onclick={() => void updates.relaunch()}>{m.update_relaunch()}</Button
+      >
+    {:else if updatable}
+      <Button
+        size="compact"
+        pending={update.state === "checking" || update.state === "downloading"}
+        onclick={() => void updates.check()}>{m.update_check_now()}</Button
+      >
+    {/if}
+  </SettingsRow>
+  {#if updatable}<PreferenceSwitch id="updates.auto-check" preference="updates.auto-check" />{/if}
+  {#if security}
+    <SettingsRow
+      title={security === "browser_runtime"
+        ? m.update_webview_title()
+        : IS_MAC
+          ? m.update_security_mac_title()
+          : m.update_security_system_title()}
+      description={security === "browser_runtime"
+        ? m.update_webview_detail()
+        : m.update_security_detail()}
+    >
+      {#if security === "operating_system" && IS_MAC}<Button
+          size="compact"
+          onclick={() => void commands.openSoftwareUpdate().catch(() => {})}
+          >{m.update_security_open()}</Button
+        >{/if}
+    </SettingsRow>
+  {/if}
   <SettingsRow title={m.about_copy_details()} description={m.about_copy_details_help()}>
     <Button size="compact" disabled={!about} onclick={() => void copyDetails()}
       >{m.about_copy_details()}</Button
@@ -75,7 +152,7 @@
         ? m.about_reset_failed()
         : m.pref_about_reset_help()}
   >
-    <div class="reset">
+    <div class="actions">
       {#if confirming}
         <Button
           size="compact"
@@ -100,8 +177,9 @@
 </SettingsGroup>
 
 <style>
-  .reset {
+  .actions {
     display: flex;
+    align-items: center;
     gap: 6px;
   }
 </style>
