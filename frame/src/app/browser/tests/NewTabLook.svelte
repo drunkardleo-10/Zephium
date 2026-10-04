@@ -20,7 +20,7 @@
   <div style="flex: 1; min-inline-size: 0; padding-inline-start: 8px">
     <div class="content-pane" data-ground="own" style="block-size: 100%">
       <LazyView loader={loadNewTab} loadingLabel="" failureLabel="failed" retryLabel="retry"
-        >{#snippet children(NewTab)}<NewTab oncustomize={() => {}} onprofile={() => {}} {ontasks}
+        >{#snippet children(NewTab)}<NewTab oncustomize={() => {}} {ontasks}
             >{#snippet search()}<LazyView
                 loader={loadNewTabSearch}
                 loadingLabel=""

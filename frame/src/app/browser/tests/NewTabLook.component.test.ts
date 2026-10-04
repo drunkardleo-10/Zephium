@@ -126,9 +126,9 @@ test("the field hangs from the top, the name and the day are cut into the page",
   expect(Number(cut.getAttribute("x")) + 2).toBeCloseTo(mark.left - pane.left, 0);
   expect(Number(cut.getAttribute("y")) + 2).toBeCloseTo(mark.top - pane.top, 0);
   expect(Number(cut.getAttribute("width")) - 4).toBeCloseTo(mark.width, 0);
-  // And a round pane for each of the page's controls; the figures are cards
+  // And a round pane for the page's control; the figures are cards
   // along the foot.
-  expect(screen.container.querySelectorAll(".ground .pane")).toHaveLength(2);
+  expect(screen.container.querySelectorAll(".ground .pane")).toHaveLength(1);
   const card = screen.container.querySelector(".tile")!.getBoundingClientRect();
   expect(pane.bottom - card.bottom).toBe(28);
 
@@ -142,7 +142,6 @@ test("the field hangs from the top, the name and the day are cut into the page",
   await due.click();
   expect(ontasks).toHaveBeenCalledOnce();
   await expect.element(screen.getByRole("button", { name: "Customize New Tab" })).toBeVisible();
-  await expect.element(screen.getByRole("button", { name: "Profile" })).toBeVisible();
   await capture(screen, "rest");
 
   // Over a material the openings are the window itself: a stand-in

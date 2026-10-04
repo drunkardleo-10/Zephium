@@ -69,7 +69,6 @@
   "ntp_focus_goal": "of {goal} goal",
   "ntp_overdue": "{count} overdue",
   "ntp_nothing_overdue": "Nothing overdue",
-  "ntp_profile": "Profile",
   "ntp_private": "Private window. Site data from this window is discarded when it closes.",
   "settings_title": "Settings",
   "settings_search": "Search settings",

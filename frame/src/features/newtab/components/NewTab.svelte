@@ -5,7 +5,6 @@
     Clock01Icon,
     Settings01Icon,
     Shield01Icon,
-    UserCircleIcon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import { commands } from "$shared/ipc/bindings";
@@ -25,7 +24,6 @@
   let {
     search,
     oncustomize,
-    onprofile,
     ontasks,
     ontime,
   }: {
@@ -33,8 +31,6 @@
     search: Snippet;
     /** Opens this page's settings. */
     oncustomize?: () => void;
-    /** Opens the profile's settings. */
-    onprofile?: () => void;
     /** Opens Tasks. */
     ontasks?: () => void;
     /** Opens Time. */
@@ -127,7 +123,7 @@
       live = false;
     };
   });
-  let controls = $derived((onprofile ? 1 : 0) + (oncustomize ? 1 : 0));
+  let controls = $derived(oncustomize ? 1 : 0);
   let page = $derived(layout(width, height, { controls, clock: showClock, tiles: figures.length }));
 
   // One outline for the ground: the page less the notch, the controls' panes,
@@ -265,18 +261,6 @@
 
   <!-- Each control in its own round pane of the window, level with the
        field. -->
-  {#if onprofile && page.controls[0]}
-    <div class="control" data-glass-text style={at(page.controls[0])}>
-      <IconButton
-        icon={UserCircleIcon}
-        label={m.ntp_profile()}
-        shape="circle"
-        size={16}
-        buttonSize={32}
-        onclick={onprofile}
-      />
-    </div>
-  {/if}
   {#if oncustomize && page.controls.at(-1)}
     <div class="control" data-glass-text style={at(page.controls.at(-1)!)}>
       <IconButton

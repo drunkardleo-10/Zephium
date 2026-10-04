@@ -58,8 +58,8 @@
     await noteSession(profile, page ? "page" : "sidebar")?.create();
   }
   // Settings opened from a page lands on the section that page asked for.
-  function openSettings(section: "newtab" | "profiles") {
-    handleNativeSection(`settings.section.${section}`);
+  function openSettings() {
+    handleNativeSection("settings.section.newtab");
     void browserPage.open("settings");
   }
   // The sidebar's own menu stands where the engine would offer Reload.
@@ -381,8 +381,7 @@
           failureLabel={m.surface_render_failed()}
           retryLabel={m.surface_retry()}
           >{#snippet children(NewTab)}<NewTab
-              oncustomize={() => openSettings("newtab")}
-              onprofile={() => openSettings("profiles")}
+              oncustomize={openSettings}
               ontasks={() => void browserPage.open("tasks")}
               ontime={() => void browserPage.open("time")}
               >{#snippet search()}{#key tabs.activeId()}<LazyView
