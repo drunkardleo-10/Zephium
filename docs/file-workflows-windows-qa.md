@@ -1,14 +1,13 @@
 # Windows file-workflow candidate qualification
 
-This adapter is implemented, but has not run on a Windows machine yet. A macOS
+The Windows adapter is implemented; run these checks on a Windows machine before relying on it. A macOS
 cross-check is compilation evidence only. Do not label this candidate Windows
 production-ready until the checks below pass on the supported Windows/WebView2
 floor and a current stable WebView2 runtime.
 
 ## Build an isolated candidate
 
-Use the committed integration delivery (also available on the UI branch after
-the local fast-forward), with the repository's Rust/MSVC, Node, pnpm and
+From a checkout of this repository, with the Rust/MSVC, Node, pnpm and
 WebView2 prerequisites installed. Install locked frontend/desktop dependencies
 using the normal repository setup, then run in PowerShell:
 
@@ -21,8 +20,7 @@ checks/build/CSS gate, then builds a debug executable without an installer. It
 uses `app.zephium.files-integration-qa` and the explicit Windows QA configuration.
 The default output is `target/debug/zephium-desktop.exe`; respect
 `CARGO_TARGET_DIR` if configured. The script does not launch it. The QA feature
-cannot be used in release builds or combined with another QA identity. Neither
-the Windows build script nor its output has been executed on this Mac.
+cannot be used in release builds or combined with another QA identity. 
 
 Start the generated-only fixture in a separate terminal:
 
@@ -95,3 +93,76 @@ Never weaken security policy or disable Defender to make a check pass.
   closure drains it. Private crash cleanup without persisting browsing/path
   history is still a release-design gap.
 - Linux and local-document navigation remain out of this delivery's scope.
+
+## Implementation notes
+
+Ownership, recovery and platform behavior of the shared download/upload
+lifecycle, as implemented.
+
+### Shared ownership and recovery
+
+- Migration 21 (`0x3483179692c933a6`) adds a bounded `download_cleanup` journal,
+  independent of history. Migrations 1–20 keep their existing fingerprints.
+  Forget/history eviction cannot discard cleanup ownership. Only an exact
+  filesystem receipt acknowledgement can remove an obligation.
+- Startup enumerates registered and deletion-pending durable profiles. It cleans
+  in 50-record pages with one recovery worker, without opening Downloads. Late
+  terminal persistence requests a rescan; the coordinator stops its idle timer.
+- Profile deletion retains internal cleanup/terminal-save access after the normal
+  registry grant is revoked. A failed drain does not mark the profile retired and
+  thereby allow a subsequent deletion attempt to bypass proof.
+- Private cleanup has a separate, bounded, memory-only receipt map. Completion
+  and removal from visible history do not discard that receipt. Orderly private
+  profile/global shutdown drains it without persisting private paths.
+- Explicit Cancelling state; late progress samples cannot change terminal Store
+  acknowledgement revisions. Cancellation wins a race with native completion
+  before publication, while finalization ignores late native failure callbacks.
+- Destination decisions cancel on drop. Detached cleanup/persistence work also
+  counts against admission, preventing repeated fast transfers from creating an
+  unbounded backlog of slow filesystem workers. Existing bounds remain eight
+  active transfers, four UI calls, 64 recent/private receipts, 10,000 durable
+  history/cleanup records; new admission pauses at 32 outstanding work items.
+- Portable filename handling covers reserved Windows device names, alternate
+  streams, separators and bidi controls. Collision suffixes remain within 240
+  UTF-8 bytes, preserving normal extensions and complete Unicode characters.
+
+### Windows
+
+- Human WebViews opt into a narrow Wry DownloadStarting hook. Explicit denial
+  wins for privileged/agent contexts. WebView2 retains transport, cookies, POST
+  bodies and blob/data ownership. No URL replay or second HTTP client is used.
+- Native deferrals remain cancelled until a selected destination and durable
+  staging receipt are acknowledged. Native COM file/folder dialogs, interruption
+  mapping, cancellation, progress, Open and Reveal are implemented.
+- Every Windows download requires native save confirmation. The event has no
+  originating-frame activation/navigation identity; a simultaneous address-bar
+  navigation cannot safely supply that proof. Settings explains the limit and
+  disables automatic saving. A selected folder still seeds the dialog.
+- Canonical ancestor handles, protected user/SYSTEM staging ACLs, reparse rejection,
+  complete 128-bit file IDs, exclusive same-volume publication, Attachment Services
+  and verified Internet-zone metadata protect the file boundary. A protection or
+  unsupported-filesystem failure cannot be shown as Completed.
+- Recovery refuses an open writer and retains uncertain native process ownership
+  by PID plus creation time. Deletion addresses only the fixed payload and exact
+  empty staging directory, never a recursive user-directory walk.
+- Closed source tabs revoke page authority, hide/disable scripts and park at
+  about:blank while a bounded retained controller owns the transfer. Shutdown
+  joins download drain with existing verified process-group teardown.
+- Native stopped/cancelled navigation is distinguished from controller failure,
+  preserving an uncommitted download destination context without inventing a
+  document commit or presentation permission.
+- Origin-less data URLs expose only their page context in history, explicitly
+  labelled as such; large data URL payloads are not copied into UI metadata.
+
+### UI and qualification support
+
+- Downloads shows Cancelling and actionable cleanup failures/retry while keeping
+  history usable. A late history response cannot erase a newer cleanup failure.
+- The status indicator takes one bounded native snapshot on subscribe, including
+  after profile changes, then follows events without history or idle polling.
+- Extended generated-only loopback fixtures cover empty, unknown-length and
+  deliberately truncated responses plus a large data URL.
+- Added an isolated Windows debug QA configuration and
+  `scripts/qualification/build_file_workflows_windows.ps1`. The QA feature still
+  rejects release builds and mixed QA identities. Windows instructions and the
+  native acceptance matrix are in [file-workflows-windows-qa.md](file-workflows-windows-qa.md).

@@ -1,7 +1,6 @@
 # Windows Extensions QA
 
-Use `chore/windows-extension-probe`, ordinary non-administrator PowerShell, and
-the isolated QA profile. Main remains unchanged pending review and acceptance.
+Use ordinary non-administrator PowerShell and the isolated QA profile.
 
 ```powershell
 # Close QA before rebuilding. Rust and Node/pnpm are required.
@@ -106,10 +105,27 @@ Record cold/warm startup and fixed simple/complex public-page loads, then repeat
 install/remove and popup open/close cycles. Allow caches and workers to settle
 before comparing memory. Battery claims need a controlled power test.
 
+## Management view tradeoff
+
+Each installed extension keeps a persistent hidden management view so that
+asynchronous action notifications (badge, title, icon) keep arriving. A shared
+view parked on `about:blank` was measured as an alternative:
+
+| Extensions | Persistent manager per extension | Shared manager parked on about:blank | Processes |
+| --- | ---: | ---: | ---: |
+| 1 | 227.0 MiB | 233.2 MiB | 9 / 9 |
+| 3 | 352.8 MiB | 341.3 MiB | 11 / 11 |
+| 5 | 405.5 MiB | 361.7 MiB | 13 / 12 |
+
+Means cover the final 30 seconds of 120-second minimal-lab trials, not the full
+browser (Intel i3-1115G4, Windows 11, WebView2 154). Sharing saved about 44 MiB at
+five extensions but loses asynchronous action notifications while parked, so
+persistent observers stay until a replacement preserves correctness. The
+extension admission budget is a QA limit, not a WebView2 limit.
+
 ## Limits
 
-The [review handoff](windows-extensions-handoff.md) records evidence, measurements
-and remaining release gates. Eight enabled extensions process-wide remains
+Eight enabled extensions process-wide remains
 provisional. Dark Reader's per-site popup controls are not qualified. On-click
 access, runtime permission UI, native messaging/desktop companions and MV2 are
 unavailable or unqualified. Work remains separate. Fixture passes do not
