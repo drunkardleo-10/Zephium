@@ -16,6 +16,7 @@
   import { operations } from "$domain/operations";
   import { pagePermissions } from "$domain/permissions";
   import { runtime } from "$domain/runtime";
+  import { updates } from "$domain/updates";
   import { focus } from "$domain/time";
   import { tabs } from "$domain/tabs";
   import { theme } from "$domain/appearance";
@@ -100,6 +101,7 @@
     const preferencesReady = preferences.init();
     const runtimeReady = runtime.init();
     void focus.init();
+    void updates.init();
     const extensionsReady = extensions.init();
     void webext.refresh();
     const stopAccess = webext.listenForAccess();
@@ -163,6 +165,7 @@
       operations.dispose();
       blocker.dispose();
       runtime.dispose();
+      updates.dispose();
       focus.dispose();
       extensions.dispose();
       pagePermissions.dispose();

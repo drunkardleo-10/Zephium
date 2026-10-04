@@ -38,6 +38,7 @@ const defaults = {
   "performance.after": "15",
   "performance.memory": "balanced",
   "performance.exceptions": "",
+  "updates.auto-check": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
