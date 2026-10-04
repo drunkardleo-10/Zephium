@@ -1,8 +1,8 @@
 # Initial extension release scope
 
-September 11, 2026. This is the working product scope from the user's latest
-clarification. It supersedes the initial-release marketplace, curated-package
-publication and per-version approval requirements in `plans/extensions.md`.
+September 11, 2026. This is the working product scope from the current product
+scope. It replaces the earlier marketplace, curated-package
+publication and per-version approval plans, which are no longer in scope.
 It describes the implementation target, not completed behavior. Existing
 security guarantees and persisted ownership records must be preserved through
 explicit changes and migrations.
@@ -100,9 +100,7 @@ contract is unchanged.
 The isolated `external-extensions-qa` debug bundle has now exercised real Dark
 Reader 4.9.130 installation from Google, native popup/options presentation,
 dynamic dark styling on example.com and IANA, live site toggling, native keyboard
-commands, restart, disable/re-enable, and removal/reinstallation. See
-[the September 11 runtime check](extension-runtime-check-2026-09-11.md) for the
-exact evidence and limits. The normal desktop build still requires explicit
+commands, restart, disable/re-enable, and removal/reinstallation.  The normal desktop build still requires explicit
 feature selection; this is not a completed release qualification.
 
 The compatibility subset remains narrow. On-demand original-source update
@@ -119,8 +117,7 @@ capability and carries separately authenticated publisher-native bindings.
 1Password has user-observed workflow evidence after desktop trust setup, and
 JSON Formatter has a live Raw/Parsed page workflow alongside the original two.
 The shared runtime limit is twelve, with an independent three-profile limit;
-this is an admission bound, not twelve-extension endurance qualification. See
-[the capability follow-up](extension-capability-check-2026-09-11.md).
+this is an admission bound, not twelve-extension endurance qualification.
 Vimium 2.4.2 now uses the existing WebKit compatibility compiler through the
 local store path; link hints, navigation, history results and default search
 have been tested alongside Dark Reader. Physical Windows validation has not
@@ -182,5 +179,5 @@ terms. A mandatory bespoke Google agreement has not been established either.
 Keep the exact interface/updates/local-adaptation question documented for scoped
 review; do not invent a Google partnership prerequisite or claim legal clearance.
 The engineering plan remains the direct user-requested browser installation flow.
-See `extension-acquisition-review.md` for the source evidence; its alternative
+Alternative
 hosting/build routes are outside this initial product scope.

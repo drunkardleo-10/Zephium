@@ -426,8 +426,8 @@ getters, setters, constructors or event dispatch. Windows native action
 integration and site-specific editing/persistence behavior require separate
 qualification.
 
-A release-excluded [isolated editing-command candidate](../eval/agentic-browsing/isolated-contenteditable-command-qualification.md)
-now runs through this same owned-view document-start channel. It captures the
+A release-excluded isolated editing-command candidate
+runs through this same owned-view document-start channel. It captures the
 fixed native `insertText` command, consumes one document-local opportunity before
 focus preparation, revalidates exact refs/descriptors/range boundaries, and
 checks a fresh bounded logical-editor value after framework reconciliation.
@@ -1685,8 +1685,8 @@ selected the relevant documentation page, and returned the correct functional
 updater solution with current-page evidence. The run used the actual bundled
 application, ordinary Work controller, native WKWebView, provider adapter,
 durable Store, audit path, and normal shutdown. Full identities, metrics,
-retained response IDs, manual judgment, and scoped limits are recorded in the
-[qualification evidence](../eval/agentic-browsing/macos-open-objective.md).
+retained response IDs, manual judgment, and scoped limits are kept with the
+local qualification results.
 
 Subsequent objectives add deterministic loopback tasks with hidden ground truth,
 same-origin SPA transitions, cross-origin scope boundaries, multiple pages,
@@ -2027,8 +2027,7 @@ earlier gate.
 
 The current reusable locate/act controller vertical and its explicit host
 obligations are documented in [Bounded semantic browser session](agent-browser-session.md).
-The [M6 engineering record](../eval/agentic-browsing/m6-production-qualification.md)
-separately reports real-site evidence and remaining shipping integration gaps.
+Real-site evidence and remaining shipping integration gaps are tracked separately.
 
 - complete deterministic, real-site, concurrent-use, endurance, and fault
   suites;

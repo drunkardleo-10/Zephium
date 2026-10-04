@@ -199,6 +199,6 @@ deterministic poll inside the native callback proves terminal arrival cannot
 release action debt before the physical-return publication. These tests use
 isolated native and model fixtures; a bundled native witness and real-site
 qualification remain separate evidence requirements. The release-excluded
-[bundled local action qualification](../eval/agentic-browsing/macos-retained-local-action.md)
-now prepares that native witness through the ordinary retained product entry;
+bundled local action qualifier
+prepares that native witness through the ordinary retained product entry;
 its implementation is not itself evidence of a successful native run.

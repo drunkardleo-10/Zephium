@@ -103,8 +103,7 @@ presentation. It pumps the real macOS dispatcher and requires independently
 verified effects, durable success, clean application teardown and no focus
 theft. Application success owns the one-shot engine shutdown; the wrapper does
 not issue a second shutdown. Host-only qualification and failed application
-runs retain bounded host cleanup. The [M6 evidence](../eval/agentic-browsing/m6-production-qualification.md)
-records exact results and the initial wrapper ownership defect.
+runs retain bounded host cleanup.
 
 No user-facing task/plan authoring or approval authority is invented here. A
 future trusted product layer must supply the typed task/effect/account contract

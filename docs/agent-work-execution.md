@@ -259,14 +259,12 @@ EngineHost context port, runtime mailbox and `SqliteStore` audit implementation.
 The application qualifier additionally uses the [trusted macOS composition](agent-work-composition.md),
 actual shell admission, journal and application shutdown. It requires trusted
 task completion, durable success, focus isolation and clean native/store/worker
-teardown. See the [M6 record](../eval/agentic-browsing/m6-production-qualification.md).
+teardown.
 Only an explicit synthetic qualification can enable retained provider logs;
 production/BYOK remains `store:false`. Local diagnostics contain only closed
 states, correlations, counters and timings; no page/provider data or secrets.
 
-The first exact authenticated read-only workflow is separately recorded in the
-[macOS Notion qualification](../eval/agentic-browsing/macos-authenticated-notion.md).
-It proves one user-attested disposable-workspace task, same-document progressive
+The first exact authenticated read-only workflow proves one user-attested disposable-workspace task, same-document progressive
 inspection, source-bound extraction, durable terminal publication, and clean
 retained-resource reuse. It does not implement or qualify native account
 discovery, writes, arbitrary Notion pages, Windows, or concurrent Browse.

@@ -7,11 +7,9 @@ and personal element hiding on macOS and Windows. The quick menu exposes site
 controls and the picker; Privacy settings owns the live profile toggle, source
 refresh, and retry. Rust owns durable state and exact operation settlement.
 
-The implementation is on `adblock-release`. macOS native fixtures and the
-isolated browser QA build have been exercised. Windows cross-compilation is
-not WebView2 runtime qualification: the separate Windows machine must complete
-[the handoff](adblock-windows-qualification.md). Merge remains gated on user QA.
-Linux is not a release qualification target for this change.
+macOS native fixtures and the isolated browser QA build have been exercised.
+Windows protection has been measured on physical hardware; the Windows engine
+still needs per-release WebView2 qualification. Linux is not supported.
 
 Protection defaults on for new profiles. META migration 23 enables existing
 profiles once, preserving site pauses and personal hides; subsequent explicit
@@ -248,7 +246,7 @@ property/fuzz/fork-contract tests for compiler boundaries; and
 debug-only `app.zephium.protection-qa` application and data directory. This
 feature rejects opt-level 0; use `CARGO_PROFILE_DEV_OPT_LEVEL=2` for QA builds.
 
-Before merge/release: run the [Windows qualification](adblock-windows-qualification.md),
+Before each release: run the Windows protection QA (`scripts/qualification/windows-protection.ps1`),
 complete packaged endurance/process-family CPU/RAM/battery measurements, test
 representative daily-use pages and user QA, and resolve any release-blocking
 findings. These are evidence gates, not claims inferred from cross-compilation.

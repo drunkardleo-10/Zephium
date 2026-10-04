@@ -88,14 +88,13 @@ allocate a legacy context or restart the session. The successor's observation
 owns its bounded native rendering episode and retires presentation before the
 next provider call. See [retained resource ownership](agent-work-resources.md).
 Beyond deterministic two-hop/interruption regressions, one
-[retained macOS public workflow](../eval/agentic-browsing/macos-retained-open-objective.md)
-now completed two Luna-selected Svelte documentation hops with durable success
+retained macOS public workflow
+completed two Luna-selected Svelte documentation hops with durable success
 and clean retained-resource closure. Human review found the route rational but
 answer usefulness partial because a relevant subsection body was absent from
 model-visible evidence. This qualifies the navigation/lifecycle seam, not complete
 semantic content access, cross-page synthesis or general reliability.
-The [progressive inspection evidence](../eval/agentic-browsing/progressive-inspection.md)
-records the first live inspection failure (repeated broad-region/viewport
+The first live inspection failure (repeated broad-region/viewport
 captures) and its generic deterministic correction. The corrected Svelte/Luna
 qualification is still pending; neither earlier result is retroactively
 upgraded by passing fixtures.
@@ -103,7 +102,7 @@ upgraded by passing fixtures.
 Production/BYOK construction remains `store:false`. The development-only
 `discovery-qualification` feature explicitly opts into retained public Responses
 through the same profile-bound application preparation and is compile-refused
-in optimized builds. See the [actual-app evidence protocol](../eval/agentic-browsing/macos-open-objective.md).
+in optimized builds.
 
 The first actual-app qualification passed on macOS at source `e792f6f`. Luna
 chose two previously observed React documentation links, recognized when the

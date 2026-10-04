@@ -12,9 +12,8 @@ they should.
 This is not a claim that every described capability exists in the current
 tree. `architecture.md` remains the source of truth for the implemented browser
 foundation, `security-model.md` for enforced security guarantees, and
-`work-runtime-continuation.md` for implementation status and qualification
-limits. `agentic-browsing.md` describes the browser execution substrate. This
-revision supersedes older product assumptions in handoffs; changing this
+the `agent-work-*.md` documents for Work runtime subsystems. `agentic-browsing.md` describes the browser execution substrate. This
+revision supersedes older product assumptions; changing this
 document does not change implemented permissions or contracts.
 
 ## 0. Program context

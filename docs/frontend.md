@@ -1,7 +1,5 @@
 # Frontend architecture and conventions
 
-Current capabilities and qualification are recorded in [the frontend handoff](frontend-handoff.md).
-
 Read this before touching `frame/`. It is the working contract for UI work;
 `architecture.md` covers the system and `security-model.md` the trust rules.
 
@@ -191,7 +189,7 @@ write is not proof that the write did not happen.
 
 The Browse disposition ledger is not the Work command protocol. Work uses the
 runtime-owned profile/Work scope, decimal revisions and replayable command receipts
-specified in `work-runtime-context.md`; do not route Work command IDs through the
+specified in [agent-work-persistence.md](agent-work-persistence.md); do not route Work command IDs through the
 Browse operation-ID parser.
 
 The session sidebar/tools modules and the string UI-command transport are transitional
@@ -207,7 +205,7 @@ otherwise collapses it inside the native sidebar, and without it a long title or
 preview widens the whole panel. Test both ToolSlot hosts with production sidebar
 CSS, including list/detail navigation and launcher return.
 
-Notes save on their own cadence (see the handoff): a background save is one
+Notes save on their own cadence: a background save is one
 write, explicit navigation and app close drain everything typed, and conflicts,
 retries and read-only notes are shown in place. Hidden hosts stop observation and
 release saved text, retaining the open note's ID for a fresh read on return.
@@ -271,8 +269,6 @@ native surface boundaries and meet the visual/performance guidance above.
 Use `features/work` through its lazy loaders. Shared semantic renderers live in
 `shared/ui/data`; their display types are not Work IPC contracts. XYFlow, SVG
 LayerChart and the constrained Tiptap editor load on demand. Tables remain lightweight.
-See the [Work handoff](frontend-handoff.md) for input limits,
-request states, view/draft lifetimes and exact integration responsibilities.
 
 Open Work using the browser sidebar mode switch. Rust admits the internal surface
 and suppresses native page WebViews; returning to Browse uses the existing verified

@@ -658,8 +658,8 @@ not relax the existing exact Verified manifest authority or promise general
 API parity. Public provider composition and Beta activation remain unfinished
 and disabled.
 
-The public metadata format and backend handoff are defined in
-`extension-metadata-service.md`. Its bounded parser and read-only xtask
+The public metadata format and backend handoff are defined by the
+metadata service contract. Its bounded parser and read-only xtask
 validator produce structural data, not authenticated policy or installation
 authority. Upstream intake can authenticate and preflight an original CRX
 without inventing a reviewed catalog row; complete tree receipts preserve its
@@ -685,7 +685,7 @@ durable known time, and a process-local monotonic deadline. These are signed
 policy receipts, not Beta manifest or native-runtime authority. The filesystem
 adapter supports this cache on macOS/Linux. Windows has implemented handle-relative
 operations and shared recovery behind a debug-only validation gate; default
-activation still fails closed pending [live Windows validation](extension-windows-validation.md).
+activation still fails closed pending live Windows validation.
 
 The response cache is bounded to 2 MiB/32 entries and sends only content-derived
 conditional ETags. A 304 still re-enters full signature and freshness validation.
@@ -722,7 +722,7 @@ manifest key while rejecting a supplied key that differs from the CRX publisher.
 No reviewed catalog row is synthesized. Compiled source rules, exact remote
 target/version opt-in, revocation, and upstream high-water comparison all apply.
 The witness rechecks live policy on use and cannot enter a Verified activation
-path. See `extension-beta-admission.md` for the initial closed subset and limits.
+path.
 
 The opt-in `BetaPreparationWorkspace` now turns admitted source into a private,
 sealed output artifact. It reauthenticates the original CRX, performs the
@@ -3189,7 +3189,7 @@ chrome positioning) carries over as-is.
   reducer chokepoint), SQLCipher/SecretStore.
 
 Website file workflows are implemented for macOS foreground human tabs:
-[file workflow ownership and qualification](file-workflows-progress.md). Native
+(see [file-workflows-windows-qa.md](file-workflows-windows-qa.md) for the shared implementation notes). Native
 selection stays in the engine, with no durable upload manager or frontend file
 path authority. A profile-scoped native WKDownload coordinator owns transfers,
 Store-backed metadata/preferences and bounded progress snapshots. Private transfers

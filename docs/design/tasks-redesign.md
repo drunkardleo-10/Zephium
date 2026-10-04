@@ -21,9 +21,7 @@ References:
 
 - [Product system](../product-system.md): Browse stands alone; agents are actors.
 - [Frontend architecture](../frontend.md): ownership and native surface rules.
-- [Current handoff](../frontend-handoff.md): resource capabilities and limitations.
-- [Runtime handoff](../work-runtime-context.md): integration ownership; historical
-  checkpoints in this document require fresh verification at integration time.
+- [Work persistence](../agent-work-persistence.md): runtime ownership and durable state.
 
 ## Scope and ownership
 

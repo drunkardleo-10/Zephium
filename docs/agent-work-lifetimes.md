@@ -58,8 +58,7 @@ port `admit_successor_trusted_work` requires the exact prior handle and fresh
 trusted input. Invalid preparation leaves the original composition intact;
 mailbox refusal preserves the original prepared owner. Neither port is UI/IPC.
 
-See [M6](../eval/agentic-browsing/m6-production-qualification.md) for the narrow
-public native evidence. Deterministic coverage additionally checks successful
+Deterministic coverage additionally checks successful
 and failed predecessors, pending terminal ACK/result/event/native owners, stale
 handles, wrong engine identity, lost callbacks and audit/retirement/shutdown races.
 

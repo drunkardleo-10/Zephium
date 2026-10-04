@@ -192,7 +192,7 @@ shared SQLite Store. Its trusted task checks ten distinct public Wikipedia
 language-link names against their cited native observation before completion.
 The delivery consumer checks the owned values and provenance again, then
 requires durable success, focus isolation and clean application-owned teardown.
-Only this explicit public mode retains provider logs. See the [M6 evidence](../eval/agentic-browsing/m6-production-qualification.md).
+Only this explicit public mode retains provider logs.
 
 The `--live-public-luna-work-combined-inspectable` qualifier exercises the same
 application path with three independently verified, unsubmitted public form-state

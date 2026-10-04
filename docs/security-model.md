@@ -395,8 +395,7 @@ allowance while its child is hidden; all destination consent and filesystem
 checks still apply. Acceptance or terminal cancellation removes an uncommitted
 transient child, including after a space switch. A child that committed a real
 document is retained. Native script-close notifications only close host-owned
-children; ordinary browser tabs remain host controlled. See
-[native links and download handoff qualification](native-links-implementation.md).
+children; ordinary browser tabs remain host controlled.
 
 macOS native image/link context-menu downloads use the optional private WebKit
 `_webView:contextMenuDidCreateDownload:` callback to receive the original public
@@ -428,8 +427,7 @@ HTML accept filters; this adapter does not invent those filters with page JS.
 Linux upload selection remains disabled; Windows selection retains the engine-owned
 behavior described above. macOS human views opt into native WebKit file drops with
 a 128-item bound, URL bounds, and document/presentation checks at entry and drop.
-Privileged and agent views retain default denial. See
-[file upload implementation and qualification](file-upload-implementation.md).
+Privileged and agent views retain default denial.
 
 **Human downloads on macOS.** Raw human views explicitly opt into a WKDownload
 broker; the native network request retains its WebKit profile, cookies, POST body,
@@ -481,8 +479,7 @@ Closing the logical tab revokes page authority, hides/disables scripts and parks
 the retained controller at about:blank until its transfer ends. Native process
 exit proof joins download drain during shutdown/profile retirement. These Windows
 paths have been cross-checked, not yet qualified on a native Windows runtime.
-See [Windows qualification](file-workflows-windows-qa.md) and
-[the current hardening record](file-workflows-hardening.md).
+See [Windows qualification and implementation notes](file-workflows-windows-qa.md).
 
 **Profiles and storage.** Persistent profiles use distinct native engine data
 partitions: profile paths/contexts on Windows and Linux and named WKWebsiteDataStore
@@ -1652,8 +1649,7 @@ and monotonic publisher history atomically with installation and grants;
 complete expected provenance is rechecked on cohort reads, and native grant
 reads validate its output-manifest and high-water joins. Neither these rows nor
 their constructors authenticate package bytes or mint native ownership.
-Uninstall retains upstream history; profile erasure scrubs it. See `extension-metadata-service.md` for the
-backend contract and its remaining client integration gates.
+Uninstall retains upstream history; profile erasure scrubs it.
 
 The opt-in public-policy client now verifies the complete TUF chain and exact
 shared target, then compares role/policy/time high-water marks and preserved
@@ -1691,7 +1687,7 @@ transformation, output-tree, permission, filesystem, or native execution authori
 those subsequent authorities must bind its exact source identity. In particular,
 copying authenticated input to a sink is sufficient to analyze source but never
 proves durable materialization. No public Beta installation is enabled by this
-new source witness. See `extension-beta-admission.md`.
+new source witness.
 
 The separate prepared-artifact boundary now authenticates exact on-device
 output for the initial key-identity transformation. It rechecks original CRX

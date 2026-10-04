@@ -11,7 +11,7 @@ available, and its all-zero proof also excludes retained Work resources and thei
 outstanding delivery owners.
 
 The actual-app retained WKWebView/common-controller join additionally qualified
-one [frozen public product brief](../eval/agentic-browsing/macos-retained-public-product-brief.md)
+one frozen public product brief
 on 2026-09-07, with two stateless Luna calls and clean independent closure.
 That one-page read-only result is not general task or shipping-product readiness.
 
@@ -19,11 +19,11 @@ The shared controller/application now joins observed-link public discovery to
 execution-lease-bound document transitions on that same retained resource. Its
 deterministic provider/controller regressions cover two selected hops, transcript
 retirement and exact cancellation accounting. The corrected
-[retained public workflow](../eval/agentic-browsing/macos-retained-open-objective.md)
+retained public workflow
 completed two Luna-selected Svelte documentation hops and source-mapped output
 in 28.934 seconds on 2026-09-07. Mechanical completion and partial semantic
 usefulness are recorded separately. Observation-owned native rendering is also
-independently [RAF-qualified](../eval/agentic-browsing/macos-retained-observation-rendering.md).
+independently RAF-qualified.
 
 ## Production selected-profile attachment
 
@@ -69,9 +69,9 @@ unsupported. Default Browse does not enable this optional graph.
 Deterministic actual-Shell/SQLite/loopback tests cover durable result before
 destruction, original global shutdown, foreign Engine/Store and changed profile,
 duplicate/legacy attachment, pre-attachment stop, and stop/expiry during original
-construction with no acquisition/provider work. Separate actual-app evidence
-now exercises this production entry for a
-[one-page result](../eval/agentic-browsing/macos-retained-product-workflow.md) and
+construction with no acquisition/provider work. Separate actual-app runs
+exercised this production entry for a
+one-page result and
 the bounded two-hop public workflow above, retaining the page after terminal
 result and verifying normal original Shell/native shutdown. Those isolated
 witnesses do not establish broad website coverage or production reliability.
@@ -175,7 +175,7 @@ Navigation retires this document-local metadata. Metadata is encoded before the
 original model-input reservation and shares its existing ceilings.
 
 See [discovery semantics](agent-work-discovery.md) and
-[deterministic evidence](../eval/agentic-browsing/progressive-inspection.md).
+the deterministic regressions.
 The reused rendering owner was previously RAF-qualified; the new scoped live
 workflow itself still requires qualification. Windows native composition is not
 claimed by macOS or loopback tests.
@@ -319,9 +319,7 @@ The historical diagnostic holder stays release-excluded. The provider-free
 two-lease RAF qualifier now instead calls the shipping retained-read operation,
 then waits 400 ms after delivery before independently checking the hidden page
 and completed presentation count. Its native view/document/world stamps and
-normal application/profile/native weak cleanup remain required. See
-[retained observation rendering qualification](../eval/agentic-browsing/macos-retained-observation-rendering.md)
-for the actual measured status; deterministic tests alone do not qualify a live
+normal application/profile/native weak cleanup remain required. Deterministic tests alone do not qualify a live
 RAF workflow, background execution or heterogeneous multi-page tasks.
 
 ## Exact lifetime protocol
@@ -800,8 +798,7 @@ remaining seven, not an increased ceiling. Its final outcome can qualify only
 after both exact `LeaseEnded` receipts, stale rejection, native identity/counter
 continuity, resource-core quiescence, original native-cohort zero, unchanged human
 ownership, fixture cleanup, normal application shutdown and exact native weak
-drain. See `eval/agentic-browsing/macos-work-resource-retention.md` for the evidence
-boundary and result. This is a provider-free ownership witness, not product
+drain. This is a provider-free ownership witness, not product
 presentation, open-objective task, authenticated session or restart durability.
 
 Reviewed native result (2026-09-06): the pinned source and executable completed
@@ -841,10 +838,9 @@ controller/scoped runtime and original SqliteStore audit in the actual Tauri
 debug bundle. It uses one fixed synthetic-public fixture and the existing
 Keychain loader, with no durable result or successor admission. The render
 holder must completely retire before the first provider turn. The candidate
-and its exact successful synthetic-public fixture witness are recorded in
-`eval/agentic-browsing/macos-retained-controller-luna.md`; that result does not
+passed its exact synthetic-public fixture witness; that result does not
 qualify real public sites. The separately selected
-[real-storefront product brief](../eval/agentic-browsing/macos-retained-public-product-brief.md)
+real-storefront product brief
 reuses the same driver and fixed read-only budgets, with no native navigation,
 action or second observation. On 2026-09-07, the exact `0962db9` source and pinned
 executable completed that actual-app public workflow with one 82-node native

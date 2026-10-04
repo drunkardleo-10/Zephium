@@ -85,9 +85,7 @@ its query/language phases. The authenticated Notion write witness uses two exact
 external transitions for temporary title mutation and restoration. Both keep a
 separate result consumer that independently checks the cited current field
 value; neither turns a model statement into task completion. The
-[M6 record](../eval/agentic-browsing/m6-production-qualification.md) contains the
-local full-application evidence. Authenticated remote-write evidence is recorded
-separately after its real macOS run. Production and BYOK remain stateless; only
+Production and BYOK remain stateless; only
 excluded qualifiers retain provider logs.
 
 The controller has an optional trusted-task initial-readiness gate (default:

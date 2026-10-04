@@ -122,5 +122,4 @@ core; it includes the lab's message pump and fixture server. Short-lived process
 between samples are not captured. These are exploratory measurements, not a
 foreground browser performance benchmark.
 
-After collecting and reviewing evidence, append findings to
-`docs/windows-extensions-handoff.md` and stop. Do not continue to step 2.
+After collecting and reviewing evidence, record the findings and stop. Do not continue to step 2.

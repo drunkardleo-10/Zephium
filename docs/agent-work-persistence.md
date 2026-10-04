@@ -174,8 +174,8 @@ native-factory refusal, bounded wake pressure and exact audit redelivery.
 The optional [macOS composition adapter](agent-work-composition.md) now supplies
 the actual deferred EngineHost factory and explicit trusted task contract. Two
 public Luna runs through that adapter, actual shell and native engine completed
-with durable success and clean shutdown; the [M6 record](../eval/agentic-browsing/m6-production-qualification.md)
-separates that evidence from full desktop UI/bootstrap qualification. Remaining
+with durable success and clean shutdown; full desktop UI/bootstrap
+qualification remains separate. Remaining
 seams are trusted product task/plan authoring and user-facing Work state;
 persisted facts deliberately cannot automatically resume execution. No new UI,
 site tools, platform suspend support or battery qualification is included.

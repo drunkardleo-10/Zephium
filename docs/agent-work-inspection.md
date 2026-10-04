@@ -65,8 +65,7 @@ disabled reads, count/generation refusal, cancel/takeover/suspend, the exact
 turn ceiling, native callback loss and audit debt. They assert no extra native
 captures and no action on read-only/refused paths. Core tests cover exact scope,
 config, baseline, token quality and payload binding for both provider codecs.
-Real application measurements are recorded separately in the
-[M6 engineering record](../eval/agentic-browsing/m6-production-qualification.md).
+Real application measurements are kept out of this document.
 
 ## Native keyword discovery for progressive observations
 
@@ -200,6 +199,5 @@ proposal therefore cannot evict useful prior evidence. Decision-call budgeting
 applies to every progressive/read/action/extraction Work profile, not only
 navigation discovery, and reserves the final mapping call mechanically.
 
-The first authenticated same-page qualification and manual provider-trace
-review are recorded in the
-[macOS Notion evidence](../eval/agentic-browsing/macos-authenticated-notion.md).
+The first authenticated same-page qualification used a disposable workspace
+with manual provider-trace review.

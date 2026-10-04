@@ -1,8 +1,6 @@
 # Zephium frame
 
 Read [the frontend contract](../docs/frontend.md) before changing browser chrome.
-The [frontend handoff](../docs/frontend-handoff.md) records the implemented
-foundation, current capabilities and qualification limits.
 
 - `app`: compose surfaces and independent feature snippets.
 - `features`: own a product concept's presentation and local interaction.

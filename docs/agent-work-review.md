@@ -73,5 +73,4 @@ scheduling change. This is explicit serial execution, not automatic retry or
 concurrent Work. It does not provide UI approval authoring, executable recovery
 after restart, or a reviewed site/effect classifier. The excluded macOS Luna
 qualifier exercises refusal → explicit review → fresh authorized form run
-through the actual Shell/SQLite/composition/native path; see
-[M6](../eval/agentic-browsing/m6-production-qualification.md) for narrow evidence.
+through the actual Shell/SQLite/composition/native path.
