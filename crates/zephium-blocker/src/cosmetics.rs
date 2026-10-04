@@ -378,6 +378,42 @@ impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
         zephium_core::blocker::ContentRuleDigest::from_bytes(self.fingerprint)
     }
 
+    fn generic_selectors(
+        &self,
+        url: &str,
+        tokens: &[String],
+    ) -> Result<Vec<String>, zephium_core::blocker::DocumentStyleFailure> {
+        use zephium_core::blocker::DocumentStyleFailure as Failure;
+        if tokens.len() > 256
+            || tokens.iter().map(String::len).sum::<usize>() > 64 * 1024
+            || tokens.iter().any(|token| {
+                token.len() < 2 || token.len() > 4097 || !matches!(token.as_bytes()[0], b'.' | b'#')
+            })
+        {
+            return Err(Failure::ResourceLimit);
+        }
+        let parsed = url::Url::parse(url).map_err(|_| Failure::InvalidDocument)?;
+        if url.len() > 32768 || !matches!(parsed.scheme(), "http" | "https") {
+            return Err(Failure::InvalidDocument);
+        }
+        let resources = self.selective.url_cosmetic_resources(url);
+        if resources.generichide {
+            return Ok(Vec::new());
+        }
+        let mut matched = self.selective.hidden_class_id_selectors(
+            tokens.iter().filter_map(|token| token.strip_prefix('.')),
+            tokens.iter().filter_map(|token| token.strip_prefix('#')),
+            &resources.exceptions,
+        );
+        matched.sort();
+        matched.dedup();
+        matched.truncate(2048);
+        if matched.iter().map(String::len).sum::<usize>() > MAX_STYLESHEET_BYTES {
+            return Err(Failure::ResourceLimit);
+        }
+        Ok(matched)
+    }
+
     fn document_plan(
         &self,
         url: &str,
@@ -867,5 +903,37 @@ mod tests {
         let quiet = policy.document_plan("https://quiet.example/").unwrap();
         assert_eq!(quiet.generic_index.as_ref(), "[]");
         assert!(quiet.css.contains(".specific{"));
+    }
+    #[test]
+    fn worker_generic_lookup_obeys_domain_exceptions_and_generichide() {
+        use zephium_core::blocker::{DocumentStyleFailure, DocumentStyleProvider};
+        let policy = CosmeticPolicy::compile([
+            "##.ad-slot\n###ad-box\nexcept.example#@#.ad-slot\n@@||quiet.example^$generichide",
+        ])
+        .unwrap();
+        let tokens = vec![
+            ".ad-slot".to_owned(),
+            "#ad-box".to_owned(),
+            ".useful".to_owned(),
+        ];
+        let normal = policy
+            .generic_selectors("https://normal.example/", &tokens)
+            .unwrap();
+        assert!(normal.contains(&".ad-slot".to_owned()));
+        assert!(normal.contains(&"#ad-box".to_owned()));
+        assert!(!normal.contains(&".useful".to_owned()));
+        let excepted = policy
+            .generic_selectors("https://except.example/", &tokens)
+            .unwrap();
+        assert!(!excepted.contains(&".ad-slot".to_owned()));
+        assert!(excepted.contains(&"#ad-box".to_owned()));
+        assert!(policy
+            .generic_selectors("https://quiet.example/", &tokens)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            policy.generic_selectors("https://normal.example/", &vec![".x".to_owned(); 257]),
+            Err(DocumentStyleFailure::ResourceLimit)
+        );
     }
 }

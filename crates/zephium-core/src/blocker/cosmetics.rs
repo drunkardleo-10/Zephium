@@ -21,6 +21,13 @@ pub trait DocumentStyleProvider: Send + Sync + std::fmt::Debug {
     /// Prepared off the UI thread. Generic selectors are a lookup table, not
     /// a stylesheet: the document installs only selectors for observed tokens.
     fn document_plan(&self, document_url: &str) -> Result<DocumentStylePlan, DocumentStyleFailure>;
+    /// Match untrusted, bounded document tokens on the style worker. The page
+    /// receives only selectors, never the shared generic lookup table.
+    fn generic_selectors(
+        &self,
+        document_url: &str,
+        tokens: &[String],
+    ) -> Result<Vec<String>, DocumentStyleFailure>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
