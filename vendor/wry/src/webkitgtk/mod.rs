@@ -1051,7 +1051,7 @@ impl InnerWebView {
               request.deny();
               true
             }
-            PermissionResponse::Default => {
+            PermissionResponse::Default | PermissionResponse::Prompt => {
               request.deny();
               true
             }
@@ -1068,7 +1068,7 @@ impl InnerWebView {
           match response_for(PermissionKind::Microphone) {
             PermissionResponse::Allow => {}
             PermissionResponse::Deny => allow = false,
-            PermissionResponse::Default => allow = false,
+            PermissionResponse::Default | PermissionResponse::Prompt => allow = false,
           }
         }
 
@@ -1077,7 +1077,7 @@ impl InnerWebView {
           match response_for(PermissionKind::Camera) {
             PermissionResponse::Allow => {}
             PermissionResponse::Deny => allow = false,
-            PermissionResponse::Default => allow = false,
+            PermissionResponse::Default | PermissionResponse::Prompt => allow = false,
           }
         }
 
@@ -1112,7 +1112,7 @@ impl InnerWebView {
             request.deny();
             true
           }
-          PermissionResponse::Default => {
+          PermissionResponse::Default | PermissionResponse::Prompt => {
             request.deny();
             true
           }

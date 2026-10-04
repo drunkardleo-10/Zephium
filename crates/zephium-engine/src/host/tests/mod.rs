@@ -841,9 +841,29 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
     let raw_policy = raw_view_construction_policy();
     assert!(raw_policy.contains("with_fullscreen_enabled(false)"));
     assert!(raw_policy.contains("with_picture_in_picture_enabled(false)"));
-    assert!(raw_policy.contains("with_permission_handler(|_| wry::PermissionResponse::Deny)"));
+    assert!(raw_policy.contains("with_permission_handler(raw_content_permission)"));
     assert!(source.contains("with_permission_request_handler(move |request|"));
     assert!(source.contains("page_permissions::admit_native_request("));
+
+    use super::construction::raw_content_permission;
+    use wry::{PermissionKind, PermissionResponse};
+    let media = if cfg!(windows) {
+        PermissionResponse::Prompt
+    } else {
+        PermissionResponse::Deny
+    };
+    assert_eq!(raw_content_permission(PermissionKind::Camera), media);
+    assert_eq!(raw_content_permission(PermissionKind::Microphone), media);
+    for kind in [
+        PermissionKind::DisplayCapture,
+        PermissionKind::Geolocation,
+        PermissionKind::Notifications,
+        PermissionKind::ClipboardRead,
+        PermissionKind::Sensors,
+        PermissionKind::Other,
+    ] {
+        assert_eq!(raw_content_permission(kind), PermissionResponse::Deny);
+    }
 }
 
 #[test]

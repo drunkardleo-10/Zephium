@@ -100,7 +100,9 @@ impl<T> BoundedPendingPermissionRequests<T> {
 fn permission_decision(response: PermissionResponse) -> WKPermissionDecision {
   match response {
     PermissionResponse::Allow => WKPermissionDecision::Grant,
-    PermissionResponse::Deny | PermissionResponse::Default => WKPermissionDecision::Deny,
+    PermissionResponse::Deny | PermissionResponse::Default | PermissionResponse::Prompt => {
+      WKPermissionDecision::Deny
+    }
   }
 }
 

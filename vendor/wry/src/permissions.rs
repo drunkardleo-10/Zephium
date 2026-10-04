@@ -275,6 +275,14 @@ pub enum PermissionResponse {
   /// - **Android**: The default behavior continues the platform permission flow.
   #[default]
   Default,
+  /// Leave camera and microphone requests to the engine's own prompt.
+  ///
+  /// ## Platform-specific
+  ///
+  /// - **Windows**: WebView2 shows its built-in, origin-labelled prompt for
+  ///   camera and microphone requests; every other kind is denied.
+  /// - **macOS / Linux / Android**: Treated as [`Self::Deny`].
+  Prompt,
 }
 
 impl std::fmt::Display for PermissionResponse {
@@ -283,6 +291,7 @@ impl std::fmt::Display for PermissionResponse {
       Self::Allow => write!(f, "allow"),
       Self::Deny => write!(f, "deny"),
       Self::Default => write!(f, "default"),
+      Self::Prompt => write!(f, "prompt"),
     }
   }
 }

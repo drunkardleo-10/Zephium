@@ -985,11 +985,11 @@ impl EngineHost {
                 }
                 admitted
             })
-            // Raw content starts with no device or ambient capabilities. The
-            // pinned Wry revision carries this callback consistently across
-            // WKWebView, WebView2 and WebKitGTK; a future origin-scoped broker
-            // can selectively replace the hard deny.
-            .with_permission_handler(|_| wry::PermissionResponse::Deny)
+            // Raw content starts with no device or ambient capabilities. On
+            // Windows, camera and microphone requests go to WebView2's own
+            // origin-labelled prompt; macOS replaces this handler with the
+            // browser-owned broker below.
+            .with_permission_handler(raw_content_permission)
             // This is a construction-time native policy, not a callback that
             // first materializes attacker-controlled URL/path metadata. Wry
             // installs the cancel handler before initial navigation on every
@@ -2291,6 +2291,16 @@ fn to_wry(r: Rect) -> wry::Rect {
     wry::Rect {
         position: Position::Logical(LogicalPosition::new(r.x, r.y)),
         size: Size::Logical(LogicalSize::new(r.width, r.height)),
+    }
+}
+
+
+pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::PermissionResponse {
+    match kind {
+        wry::PermissionKind::Camera | wry::PermissionKind::Microphone if cfg!(windows) => {
+            wry::PermissionResponse::Prompt
+        }
+        _ => wry::PermissionResponse::Deny,
     }
 }
 

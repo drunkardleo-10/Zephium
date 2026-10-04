@@ -1493,7 +1493,8 @@ impl InnerWebView {
     }
 
     // Install one construction-time broker for every permission. Missing
-    // callbacks, malformed native state, and `Default` all remain denied.
+    // callbacks, malformed native state, and `Default` all remain denied;
+    // `Prompt` defers only camera and microphone to WebView2's own prompt.
     let clipboard = attributes.clipboard;
     let permission_handler = attributes.permission_handler.take();
     unsafe {
@@ -1501,6 +1502,11 @@ impl InnerWebView {
         &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
           let Some(args) = args else { return Ok(()) };
           args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+          // A persisted decision would outlive this broker's policy and
+          // suppress later requests, so nothing set here is saved.
+          if let Ok(args3) = args.cast::<ICoreWebView2PermissionRequestedEventArgs3>() {
+            let _ = args3.SetSavesInProfile(false);
+          }
 
           let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
           args.PermissionKind(&mut kind)?;
@@ -1531,8 +1537,14 @@ impl InnerWebView {
               .map(|handler| handler(permission_kind))
               .unwrap_or(PermissionResponse::Deny)
           };
-          if response == PermissionResponse::Allow {
-            args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+          let media = kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+            || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE;
+          match response {
+            PermissionResponse::Allow => args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?,
+            PermissionResponse::Prompt if media => {
+              args.SetState(COREWEBVIEW2_PERMISSION_STATE_DEFAULT)?
+            }
+            _ => {}
           }
           Ok(())
         })),

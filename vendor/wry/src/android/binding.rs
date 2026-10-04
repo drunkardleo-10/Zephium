@@ -543,7 +543,7 @@ pub unsafe fn onPermissionRequestNative(
   match (handler.handler)(kind) {
     PermissionResponse::Default => ANDROID_PERMISSION_REQUEST_DEFAULT,
     PermissionResponse::Allow => ANDROID_PERMISSION_REQUEST_ALLOW,
-    PermissionResponse::Deny => ANDROID_PERMISSION_REQUEST_DENY,
+    PermissionResponse::Deny | PermissionResponse::Prompt => ANDROID_PERMISSION_REQUEST_DENY,
   }
 }
 
