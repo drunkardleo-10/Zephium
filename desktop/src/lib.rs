@@ -98,6 +98,7 @@ mod presence;
 mod privileged_runtime_windows;
 mod resource_close;
 mod search_providers;
+mod startup_alert;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
 mod webext;
@@ -1092,10 +1093,16 @@ fn contain_tauri_setup_failure<E>(
 }
 
 fn request_startup_failure(app: &tauri::AppHandle, error: impl std::fmt::Display) {
+    let error = error.to_string();
     write_diagnostic(format_args!(
         "startup: failed to initialize Zephium: {error}"
     ));
-    request_orderly_terminal_failure(app);
+    startup_alert::show_then(
+        app,
+        startup_alert::StartupProblem::classify(&error),
+        &error,
+        request_orderly_terminal_failure,
+    );
 }
 
 fn request_shell_terminal_failure(
@@ -5188,12 +5195,12 @@ pub fn run() {
     let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
         Ok(advisory) => advisory,
         Err(error) => {
-            // WebKit is dynamically supplied by macOS. Reject a known
-            // obsolete floor, malformed provenance, or build mismatch
-            // before Builder creates even the privileged blank bootstrap
-            // WKWebView. Review age and newer stable releases are
-            // projected as non-blocking advisories instead.
+            // WebKit is dynamically supplied by macOS. Only an unsupported
+            // or unparseable runtime stops here, before Builder creates even
+            // the privileged blank bootstrap WKWebView; an outdated one
+            // starts with an update advisory.
             diagnostic!("security: {error}");
+            startup_alert::show_blocking(startup_alert::StartupProblem::UnsupportedSystem, &error);
             std::process::exit(78);
         }
     };
@@ -5215,9 +5222,10 @@ pub fn run() {
         Ok(advisory) => advisory,
         Err(error) => {
             // This runs before Builder creates either privileged chrome
-            // or raw content. Obsolete, preview, overridden, or
-            // unparseable runtimes remain hard failures.
+            // or raw content. Preview, overridden, or unparseable runtimes
+            // remain hard failures; an outdated one is an advisory.
             diagnostic!("security: {error}");
+            startup_alert::show_blocking(startup_alert::StartupProblem::UnsupportedSystem, &error);
             std::process::exit(78);
         }
     };
@@ -6323,6 +6331,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .unwrap_or_else(|error| {
             diagnostic!("startup: failed to build Zephium: {error}");
+            #[cfg(not(target_os = "linux"))]
+            startup_alert::show_blocking(
+                startup_alert::StartupProblem::Other,
+                &error.to_string(),
+            );
             std::process::exit(1);
         });
 
