@@ -2,17 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>快速、功能完备的浏览器。<br />为你和你的智能体重新打造的工作环境。</strong></p>
-
-  <p>
-    <a href="https://zephium.app">官网</a>
-    ·
-    <a href="https://github.com/zephium-browser/Zephium/releases/latest">下载</a>
-    ·
-    <a href="../README.md">文档</a>
-    ·
-    <a href="https://discord.gg/tyveTUyEp7">Discord</a>
-  </p>
+  <p><strong>快速、功能完备的浏览器与工作环境，<br />为你和你的智能体重新打造。</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="最新版本" /></a>
@@ -23,20 +13,22 @@
   </p>
 </div>
 
-<p align="center">
-  <a href="../../README.md">English</a> |
-  <strong>简体中文</strong> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.pt-BR.md">Português</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.id.md">Bahasa Indonesia</a> |
-  <a href="README.hi.md">हिन्दी</a>
-</p>
+<details align="center">
+  <summary><sub>选择其他语言</sub></summary>
+  <sub>
+    <a href="../../README.md">English</a> ·
+    <a href="README.ja.md">日本語</a> ·
+    <a href="README.ko.md">한국어</a> ·
+    <a href="README.hi.md">हिन्दी</a> ·
+    <a href="README.es.md">Español</a> ·
+    <a href="README.pt-BR.md">Português</a> ·
+    <a href="README.fr.md">Français</a> ·
+    <a href="README.de.md">Deutsch</a> ·
+    <a href="README.pl.md">Polski</a> ·
+    <a href="README.ru.md">Русский</a> ·
+    <a href="README.id.md">Bahasa Indonesia</a>
+  </sub>
+</details>
 
 <p align="center">
   <img src="../../.github/assets/browse.webp" alt="Browse 模式下的 Zephium，标签页位于侧边栏，已打开 zephium.app" width="960" />
@@ -54,7 +46,7 @@ Zephium 是一款开源浏览器，用 Rust 构建，基于操作系统自带的
 只需一个开关，就能进入 **Work**。你的工作本来就在浏览器里进行，标签页、登录状态和历史记录都在这里。Work 把智能体带到这里，而不是让你转去别处，并且让你亲眼看着它们工作。
 
 > [!NOTE]
-> Zephium 目前处于 **beta** 阶段。它已可用于日常使用并欢迎反馈，但你可能会遇到一些不够完善的地方。请[把你的发现告诉我们](https://github.com/zephium-browser/Zephium/issues)。
+> Zephium 目前处于 beta 阶段，已经可以作为你的日常浏览器。如果哪里不对劲，请[提交 issue](https://github.com/zephium-browser/Zephium/issues)。
 
 ## Work
 
@@ -115,9 +107,8 @@ Work 内置 25 项技能，包括旅行规划、调研、对比与选择、规�
 
 ## 默认保护隐私
 
-- **没有遥测。** Zephium 没有任何分析功能，不收集你的浏览行为。
+- **没有遥测。** Zephium 不会收集或发送任何关于你如何浏览的信息。
 - **无需账号。** 历史记录、任务、笔记、记忆和时间数据都保存在你的设备上。
-- **连接少，且都有迹可循。** 除了你访问的网站，Zephium 只会为应用更新、过滤规则更新、搜索建议、扩展安装，以及你所选择的 AI 提供商和 MCP 服务器而联网。
 - **隐私窗口关闭后不留任何内容。**
 
 ## 下载
@@ -135,8 +126,8 @@ Zephium 会在后台下载更新，并在你选择 **Relaunch to update** 时安
 
 - Linux 和 Intel 版 Mac。
 - 经过代码签名的 Windows 版本。
-- 可选的 Zephium Cloud：为 Work 提供托管 AI，并设有免费额度供试用。
-- 更多内置功能，用来取代体量较大的扩展，例如翻译。
+- 更多经过验证可用的扩展，以及内置于 Zephium 的原生扩展。
+- 还有更多。
 
 ## 从源码构建
 

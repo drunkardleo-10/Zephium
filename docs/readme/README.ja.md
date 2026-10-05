@@ -2,17 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>高速で、機能の揃ったブラウザ。<br />あなたとエージェントのために作り直した、仕事の環境。</strong></p>
-
-  <p>
-    <a href="https://zephium.app">Web サイト</a>
-    ·
-    <a href="https://github.com/zephium-browser/Zephium/releases/latest">ダウンロード</a>
-    ·
-    <a href="../README.md">ドキュメント</a>
-    ·
-    <a href="https://discord.gg/tyveTUyEp7">Discord</a>
-  </p>
+  <p><strong>高速で機能の揃ったブラウザと仕事の環境を、<br />あなたとエージェントのために作り直しました。</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="最新リリース" /></a>
@@ -23,20 +13,22 @@
   </p>
 </div>
 
-<p align="center">
-  <a href="../../README.md">English</a> |
-  <a href="README.zh-CN.md">简体中文</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.fr.md">Français</a> |
-  <strong>日本語</strong> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.pt-BR.md">Português</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.id.md">Bahasa Indonesia</a> |
-  <a href="README.hi.md">हिन्दी</a>
-</p>
+<details align="center">
+  <summary><sub>他の言語で読む</sub></summary>
+  <sub>
+    <a href="../../README.md">English</a> ·
+    <a href="README.zh-CN.md">简体中文</a> ·
+    <a href="README.ko.md">한국어</a> ·
+    <a href="README.hi.md">हिन्दी</a> ·
+    <a href="README.es.md">Español</a> ·
+    <a href="README.pt-BR.md">Português</a> ·
+    <a href="README.fr.md">Français</a> ·
+    <a href="README.de.md">Deutsch</a> ·
+    <a href="README.pl.md">Polski</a> ·
+    <a href="README.ru.md">Русский</a> ·
+    <a href="README.id.md">Bahasa Indonesia</a>
+  </sub>
+</details>
 
 <p align="center">
   <img src="../../.github/assets/browse.webp" alt="Browse モードの Zephium。サイドバーにタブが並び、zephium.app が開いている" width="960" />
@@ -54,7 +46,7 @@ Zephium は、Rust で作られたオープンソースのブラウザです。O
 スイッチひとつで **Work** に切り替わります。仕事はもともとブラウザの中、つまりタブやログイン情報、履歴のある場所で行われています。Work は、どこか別の場所へ移るのではなく、エージェントのほうをそこへ連れてきます。しかも、その仕事ぶりを見届けられます。
 
 > [!NOTE]
-> Zephium は **ベータ版** です。日常的に使えますし、フィードバックも歓迎していますが、粗いところが見つかるかもしれません。見つけた点は[ぜひ報告してください](https://github.com/zephium-browser/Zephium/issues)。
+> Zephium はベータ版ですが、普段使いのブラウザとして使える状態です。うまく動かない点があれば、[issue を作成](https://github.com/zephium-browser/Zephium/issues)してください。
 
 ## Work
 
@@ -115,9 +107,8 @@ Chrome ウェブストアから、そのまま拡張機能をインストール�
 
 ## デフォルトでプライベート
 
-- **テレメトリはありません。** Zephium には解析機能がなく、閲覧の仕方に関する情報は一切収集しません。
+- **テレメトリはありません。** Zephium は、閲覧の仕方に関する情報を収集することも送信することもありません。
 - **アカウントは不要です。** 履歴、タスク、ノート、メモリ、時間のデータは、あなたのデバイスに保存されます。
-- **接続は少なく、すべて明らかです。** 訪問するサイトのほかに Zephium が接続するのは、アプリのアップデート、フィルターリストの更新、検索候補、拡張機能のインストール、そしてあなたが選んだ AI プロバイダーと MCP サーバーだけです。
 - **プライベートウィンドウは、閉じると何も残しません。**
 
 ## ダウンロード
@@ -135,8 +126,8 @@ Zephium はアップデートをバックグラウンドでダウンロードし
 
 - Linux と Intel Mac への対応。
 - コード署名つきの Windows 版。
-- オプションの Zephium Cloud。Work 向けのホスト型 AI で、試せる無料プランもあります。
-- 翻訳など、重い拡張機能の代わりになる内蔵機能の追加。
+- 動作を確認した拡張機能の追加と、Zephium に組み込まれたネイティブ拡張機能。
+- そして、まだまだこれから。
 
 ## ソースからのビルド
 

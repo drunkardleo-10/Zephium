@@ -2,17 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>Un navigateur rapide et complet.<br />Un environnement de travail repensé pour vous et vos agents.</strong></p>
-
-  <p>
-    <a href="https://zephium.app">Site web</a>
-    ·
-    <a href="https://github.com/zephium-browser/Zephium/releases/latest">Télécharger</a>
-    ·
-    <a href="../README.md">Documentation</a>
-    ·
-    <a href="https://discord.gg/tyveTUyEp7">Discord</a>
-  </p>
+  <p><strong>Un navigateur et un environnement de travail rapides et complets,<br />repensés pour vous et vos agents.</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="Dernière version" /></a>
@@ -23,20 +13,22 @@
   </p>
 </div>
 
-<p align="center">
-  <a href="../../README.md">English</a> |
-  <a href="README.zh-CN.md">简体中文</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <strong>Français</strong> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.pt-BR.md">Português</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.id.md">Bahasa Indonesia</a> |
-  <a href="README.hi.md">हिन्दी</a>
-</p>
+<details align="center">
+  <summary><sub>Lire dans une autre langue</sub></summary>
+  <sub>
+    <a href="../../README.md">English</a> ·
+    <a href="README.zh-CN.md">简体中文</a> ·
+    <a href="README.ja.md">日本語</a> ·
+    <a href="README.ko.md">한국어</a> ·
+    <a href="README.hi.md">हिन्दी</a> ·
+    <a href="README.es.md">Español</a> ·
+    <a href="README.pt-BR.md">Português</a> ·
+    <a href="README.de.md">Deutsch</a> ·
+    <a href="README.pl.md">Polski</a> ·
+    <a href="README.ru.md">Русский</a> ·
+    <a href="README.id.md">Bahasa Indonesia</a>
+  </sub>
+</details>
 
 <p align="center">
   <img src="../../.github/assets/browse.webp" alt="Zephium en mode Browse, avec les onglets dans la barre latérale et zephium.app ouvert" width="960" />
@@ -62,9 +54,7 @@ historique. Work y amène les agents au lieu de vous demander d'aller ailleurs,
 et vous laisse les regarder à l'œuvre.
 
 > [!NOTE]
-> Zephium est en **bêta**. Il est prêt pour un usage quotidien et pour recueillir
-> vos retours, et vous pourrez y trouver quelques aspérités. N'hésitez pas à
-> [nous signaler ce que vous trouvez](https://github.com/zephium-browser/Zephium/issues).
+> Zephium est en bêta et prêt à devenir votre navigateur de tous les jours. Si quelque chose ne va pas, merci d'[ouvrir une issue](https://github.com/zephium-browser/Zephium/issues).
 
 ## Work
 
@@ -159,14 +149,9 @@ Firefox, Brave et Edge.
 
 ## Privé par défaut
 
-- **Aucune télémétrie.** Zephium n'a aucun outil d'analyse et ne collecte rien
-  sur la façon dont vous naviguez.
+- **Aucune télémétrie.** Zephium ne collecte ni n'envoie rien sur la façon dont vous naviguez.
 - **Aucun compte requis.** L'historique, les tâches, les notes, la mémoire et le
   temps restent sur votre appareil.
-- **Peu de connexions, toutes connues.** En dehors des sites que vous visitez,
-  Zephium se connecte pour les mises à jour de l'app, les mises à jour des
-  listes de filtres, les suggestions de recherche, l'installation d'extensions,
-  ainsi que les fournisseurs d'IA et les serveurs MCP que vous choisissez.
 - **Les fenêtres privées ne gardent rien** une fois fermées.
 
 ## Téléchargement
@@ -188,10 +173,8 @@ choisissez **Relaunch to update**. Toutes les versions sont sur la
 
 - Linux et les Mac Intel.
 - Des versions Windows signées.
-- Zephium Cloud, en option : de l'IA hébergée pour Work, avec une offre gratuite
-  pour l'essayer.
-- Davantage de fonctions intégrées qui remplacent des extensions lourdes, comme
-  la traduction.
+- Davantage d'extensions dont le fonctionnement est vérifié, et des extensions natives intégrées à Zephium.
+- Et bien plus encore.
 
 ## Compiler depuis les sources
 

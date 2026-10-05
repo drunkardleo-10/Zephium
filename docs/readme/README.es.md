@@ -2,17 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>Un navegador rápido y completo.<br />Un entorno de trabajo reconstruido para ti y tus agentes.</strong></p>
-
-  <p>
-    <a href="https://zephium.app">Sitio web</a>
-    ·
-    <a href="https://github.com/zephium-browser/Zephium/releases/latest">Descargar</a>
-    ·
-    <a href="../README.md">Documentación</a>
-    ·
-    <a href="https://discord.gg/tyveTUyEp7">Discord</a>
-  </p>
+  <p><strong>Un navegador y un entorno de trabajo rápidos y completos,<br />reconstruidos para ti y tus agentes.</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="Última versión" /></a>
@@ -23,20 +13,22 @@
   </p>
 </div>
 
-<p align="center">
-  <a href="../../README.md">English</a> |
-  <a href="README.zh-CN.md">简体中文</a> |
-  <strong>Español</strong> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.pt-BR.md">Português</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.id.md">Bahasa Indonesia</a> |
-  <a href="README.hi.md">हिन्दी</a>
-</p>
+<details align="center">
+  <summary><sub>Leer en otro idioma</sub></summary>
+  <sub>
+    <a href="../../README.md">English</a> ·
+    <a href="README.zh-CN.md">简体中文</a> ·
+    <a href="README.ja.md">日本語</a> ·
+    <a href="README.ko.md">한국어</a> ·
+    <a href="README.hi.md">हिन्दी</a> ·
+    <a href="README.pt-BR.md">Português</a> ·
+    <a href="README.fr.md">Français</a> ·
+    <a href="README.de.md">Deutsch</a> ·
+    <a href="README.pl.md">Polski</a> ·
+    <a href="README.ru.md">Русский</a> ·
+    <a href="README.id.md">Bahasa Indonesia</a>
+  </sub>
+</details>
 
 <p align="center">
   <img src="../../.github/assets/browse.webp" alt="Zephium en modo Browse, con las pestañas en la barra lateral y zephium.app abierto" width="960" />
@@ -61,9 +53,7 @@ agentes hasta allí en lugar de pedirte que te mudes a otro sitio, y te deja
 verlos trabajar.
 
 > [!NOTE]
-> Zephium está en **beta**. Está listo para el uso diario y para recibir
-> comentarios, y es posible que encuentres detalles por pulir. Por favor,
-> [cuéntanos lo que encuentres](https://github.com/zephium-browser/Zephium/issues).
+> Zephium está en beta y listo para ser tu navegador de todos los días. Si algo no funciona bien, por favor [abre un issue](https://github.com/zephium-browser/Zephium/issues).
 
 ## Work
 
@@ -158,14 +148,9 @@ Brave y Edge.
 
 ## Privado por defecto
 
-- **Sin telemetría.** Zephium no tiene analíticas y no recopila nada sobre cómo
-  navegas.
+- **Sin telemetría.** Zephium no recopila ni envía nada sobre cómo navegas.
 - **No necesitas cuenta.** El historial, las tareas, las notas, la memoria y el
   tiempo se quedan en tu dispositivo.
-- **Pocas conexiones, y conocidas.** Además de los sitios que visitas, Zephium
-  se conecta para actualizar la app, actualizar las listas de filtros, obtener
-  sugerencias de búsqueda, instalar extensiones y llegar a los proveedores de IA
-  y los servidores MCP que tú elijas.
 - **Las ventanas privadas no guardan nada** cuando se cierran.
 
 ## Descarga
@@ -187,10 +172,8 @@ eliges **Relaunch to update**. Todas las versiones están en la
 
 - Linux y Macs con Intel.
 - Versiones de Windows firmadas con código.
-- Zephium Cloud, opcional: IA alojada para Work, con un plan gratuito para
-  probarla.
-- Más funciones integradas que sustituyan extensiones pesadas, como la
-  traducción.
+- Más extensiones verificadas que funcionan y extensiones nativas integradas en Zephium.
+- Y mucho más.
 
 ## Compilar desde el código fuente
 

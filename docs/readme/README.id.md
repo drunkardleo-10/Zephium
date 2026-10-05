@@ -2,17 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>Browser yang cepat dan lengkap fiturnya.<br />Lingkungan kerja yang dibangun ulang untuk Anda dan agen Anda.</strong></p>
-
-  <p>
-    <a href="https://zephium.app">Situs web</a>
-    ·
-    <a href="https://github.com/zephium-browser/Zephium/releases/latest">Unduh</a>
-    ·
-    <a href="../README.md">Dokumentasi</a>
-    ·
-    <a href="https://discord.gg/tyveTUyEp7">Discord</a>
-  </p>
+  <p><strong>Browser dan lingkungan kerja yang cepat dan lengkap fiturnya,<br />dibangun ulang untuk Anda dan agen Anda.</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="Rilis terbaru" /></a>
@@ -23,20 +13,22 @@
   </p>
 </div>
 
-<p align="center">
-  <a href="../../README.md">English</a> |
-  <a href="README.zh-CN.md">简体中文</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.pt-BR.md">Português</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <strong>Bahasa Indonesia</strong> |
-  <a href="README.hi.md">हिन्दी</a>
-</p>
+<details align="center">
+  <summary><sub>Baca dalam bahasa lain</sub></summary>
+  <sub>
+    <a href="../../README.md">English</a> ·
+    <a href="README.zh-CN.md">简体中文</a> ·
+    <a href="README.ja.md">日本語</a> ·
+    <a href="README.ko.md">한국어</a> ·
+    <a href="README.hi.md">हिन्दी</a> ·
+    <a href="README.es.md">Español</a> ·
+    <a href="README.pt-BR.md">Português</a> ·
+    <a href="README.fr.md">Français</a> ·
+    <a href="README.de.md">Deutsch</a> ·
+    <a href="README.pl.md">Polski</a> ·
+    <a href="README.ru.md">Русский</a>
+  </sub>
+</details>
 
 <p align="center">
   <img src="../../.github/assets/browse.webp" alt="Zephium dalam mode Browse, dengan tab di bilah samping dan zephium.app terbuka" width="960" />
@@ -62,9 +54,7 @@ sana, bukan menyuruh Anda pindah ke tempat lain, dan memungkinkan Anda
 menyaksikan mereka bekerja.
 
 > [!NOTE]
-> Zephium masih dalam tahap **beta**. Sudah siap dipakai sehari-hari dan siap
-> menerima masukan, tetapi Anda mungkin menemukan bagian yang belum mulus.
-> Silakan [laporkan temuan Anda](https://github.com/zephium-browser/Zephium/issues).
+> Zephium sedang dalam tahap beta dan siap menjadi browser harian Anda. Jika ada yang tidak beres, silakan [buka issue](https://github.com/zephium-browser/Zephium/issues).
 
 ## Work
 
@@ -158,13 +148,9 @@ Edge.
 
 ## Privat secara default
 
-- **Tanpa telemetri.** Zephium tidak punya analitik dan tidak mengumpulkan apa
-  pun tentang cara Anda menjelajah.
+- **Tanpa telemetri.** Zephium tidak mengumpulkan atau mengirim apa pun tentang cara Anda menjelajah.
 - **Tanpa akun.** Riwayat, tugas, catatan, memori, dan waktu tersimpan di
   perangkat Anda.
-- **Sedikit koneksi, semuanya jelas.** Selain situs yang Anda kunjungi, Zephium
-  terhubung untuk pembaruan aplikasi, pembaruan daftar filter, saran pencarian,
-  pemasangan ekstensi, serta penyedia AI dan server MCP yang Anda pilih.
 - **Jendela privat tidak menyimpan apa pun** setelah ditutup.
 
 ## Unduh
@@ -186,10 +172,8 @@ Zephium mengunduh pembaruan di latar belakang dan memasangnya saat Anda memilih
 
 - Linux dan Mac Intel.
 - Build Windows yang ditandatangani kode.
-- Zephium Cloud opsional: AI terhosting untuk Work, dengan paket gratis untuk
-  mencobanya.
-- Lebih banyak fitur bawaan yang menggantikan ekstensi berat, seperti
-  terjemahan.
+- Lebih banyak ekstensi yang terverifikasi berfungsi, dan ekstensi native yang tertanam di Zephium.
+- Dan masih banyak lagi.
 
 ## Build dari sumber
 

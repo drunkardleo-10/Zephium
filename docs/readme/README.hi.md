@@ -2,17 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>एक तेज़, सारी सुविधाओं वाला ब्राउज़र।<br />आपके और आपके एजेंटों के लिए नए सिरे से बना कामकाजी माहौल।</strong></p>
-
-  <p>
-    <a href="https://zephium.app">वेबसाइट</a>
-    ·
-    <a href="https://github.com/zephium-browser/Zephium/releases/latest">डाउनलोड</a>
-    ·
-    <a href="../README.md">दस्तावेज़</a>
-    ·
-    <a href="https://discord.gg/tyveTUyEp7">Discord</a>
-  </p>
+  <p><strong>एक तेज़, सारी सुविधाओं वाला ब्राउज़र और कामकाजी माहौल,<br />आपके और आपके एजेंटों के लिए नए सिरे से बना।</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="नवीनतम रिलीज़" /></a>
@@ -23,20 +13,22 @@
   </p>
 </div>
 
-<p align="center">
-  <a href="../../README.md">English</a> |
-  <a href="README.zh-CN.md">简体中文</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.pt-BR.md">Português</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.id.md">Bahasa Indonesia</a> |
-  <strong>हिन्दी</strong>
-</p>
+<details align="center">
+  <summary><sub>दूसरी भाषा में पढ़ें</sub></summary>
+  <sub>
+    <a href="../../README.md">English</a> ·
+    <a href="README.zh-CN.md">简体中文</a> ·
+    <a href="README.ja.md">日本語</a> ·
+    <a href="README.ko.md">한국어</a> ·
+    <a href="README.es.md">Español</a> ·
+    <a href="README.pt-BR.md">Português</a> ·
+    <a href="README.fr.md">Français</a> ·
+    <a href="README.de.md">Deutsch</a> ·
+    <a href="README.pl.md">Polski</a> ·
+    <a href="README.ru.md">Русский</a> ·
+    <a href="README.id.md">Bahasa Indonesia</a>
+  </sub>
+</details>
 
 <p align="center">
   <img src="../../.github/assets/browse.webp" alt="Browse मोड में Zephium, साइडबार में टैब और zephium.app खुला हुआ" width="960" />
@@ -54,7 +46,7 @@ Zephium एक ओपन-सोर्स ब्राउज़र है, जो
 एक स्विच की दूरी पर है **Work**। आपका काम पहले से ब्राउज़र में ही होता है, जहाँ आपके टैब, लॉगिन और हिस्ट्री हैं। Work एजेंटों को वहीं ले आता है, बजाय इसके कि आपसे कहीं और जाने को कहे, और आपको उन्हें काम करते देखने देता है।
 
 > [!NOTE]
-> Zephium अभी **बीटा** में है। यह रोज़ के इस्तेमाल और फ़ीडबैक के लिए तैयार है, और हो सकता है आपको कुछ कमियाँ मिलें। जो भी मिले, कृपया [उसकी रिपोर्ट करें](https://github.com/zephium-browser/Zephium/issues)।
+> Zephium बीटा में है और आपका रोज़ का ब्राउज़र बनने के लिए तैयार है। अगर कुछ ठीक न लगे, तो कृपया [इश्यू खोलें](https://github.com/zephium-browser/Zephium/issues)।
 
 ## Work
 
@@ -115,9 +107,8 @@ Work में 25 स्किल मिलती हैं, जिनमें 
 
 ## डिफ़ॉल्ट रूप से निजी
 
-- **कोई टेलीमेट्री नहीं।** Zephium में कोई एनालिटिक्स नहीं है और यह आपके ब्राउज़ करने के तरीक़े के बारे में कुछ भी इकट्ठा नहीं करता।
+- **कोई टेलीमेट्री नहीं।** Zephium आपके ब्राउज़ करने के तरीक़े के बारे में कुछ भी इकट्ठा या भेजता नहीं है।
 - **खाते की ज़रूरत नहीं।** हिस्ट्री, टास्क, नोट्स, मेमोरी और समय का डेटा आपके डिवाइस पर रहता है।
-- **गिने-चुने, जाने-पहचाने कनेक्शन।** आपके खोले गए साइटों के अलावा, Zephium सिर्फ़ ऐप अपडेट, फ़िल्टर सूची अपडेट, सर्च सुझाव, एक्सटेंशन इंस्टॉल, और आपके चुने हुए AI प्रोवाइडर और MCP सर्वरों के लिए कनेक्ट होता है।
 - **प्राइवेट विंडो बंद होने के बाद कुछ नहीं रखतीं।**
 
 ## डाउनलोड
@@ -135,8 +126,8 @@ Zephium अपडेट बैकग्राउंड में डाउनल
 
 - Linux और Intel Mac।
 - कोड-साइन किए हुए Windows बिल्ड।
-- वैकल्पिक Zephium Cloud: Work के लिए होस्टेड AI, आज़माने के लिए एक मुफ़्त टियर के साथ।
-- भारी एक्सटेंशनों की जगह लेने वाले और इन-बिल्ट फ़ीचर, जैसे अनुवाद।
+- काम करने की पुष्टि वाले और ज़्यादा एक्सटेंशन, और Zephium में बने नेटिव एक्सटेंशन।
+- और भी बहुत कुछ।
 
 ## सोर्स से बिल्ड करें
 
