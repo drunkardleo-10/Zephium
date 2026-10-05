@@ -224,11 +224,14 @@ kbd {
 
 /* Native material samples arbitrary content. Keep text stronger than on solid
    surfaces, with hierarchy carried by shape and weight rather than opacity. */
-:root[data-material="liquid_glass"] :is(.browser-sidebar, [data-glass-text]) {
-  --color-muted: rgb(244 244 246 / 0.78);
-  --color-faint: rgb(244 244 246 / 0.55);
+:root:not([data-material="none"])[data-material] :is(.browser-sidebar, [data-glass-text]) {
+  --color-label-secondary: #e6e6e9;
+  --color-muted: rgb(244 244 246 / 0.8);
+  --color-faint: rgb(244 244 246 / 0.58);
 }
-:root[data-material="liquid_glass"][data-theme="light"] :is(.browser-sidebar, [data-glass-text]) {
-  --color-muted: rgb(27 28 33 / 0.72);
-  --color-faint: rgb(27 28 33 / 0.55);
+:root:not([data-material="none"])[data-material][data-theme="light"]
+  :is(.browser-sidebar, [data-glass-text]) {
+  --color-label-secondary: #2c2c31;
+  --color-muted: rgb(27 28 33 / 0.8);
+  --color-faint: rgb(27 28 33 / 0.62);
 }

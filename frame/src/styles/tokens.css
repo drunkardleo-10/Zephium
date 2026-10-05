@@ -592,9 +592,9 @@
   --scroll-thumb-hover: rgb(24 24 27 / 0.34);
 
   --color-text: #1c1c1f;
-  --color-label-secondary: #55555c;
-  --color-muted: rgb(28 28 31 / 0.62);
-  --color-faint: rgb(28 28 31 / 0.42);
+  --color-label-secondary: #3c3c43;
+  --color-muted: rgb(28 28 31 / 0.74);
+  --color-faint: rgb(28 28 31 / 0.58);
 
   --color-control: #ffffff;
   --color-control-hover: #f9f9f9;
