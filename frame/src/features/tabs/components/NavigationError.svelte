@@ -28,7 +28,7 @@
   A page the person asked for did not load. Chrome says why in plain words and
   offers the same address again; a secure-connection failure has no way past.
 -->
-<div class="navigation-error" role="alert">
+<div class="failed-page" role="alert">
   <h1>
     {failure.reason === "insecure"
       ? m.navigation_error_insecure_title({ host })
@@ -39,7 +39,7 @@
 </div>
 
 <style>
-  .navigation-error {
+  .failed-page {
     display: grid;
     justify-items: center;
     align-content: center;
