@@ -193,7 +193,11 @@
         trashed={session.trash}
         ontoggle={(id, status) => session.setStatus(id, status)}
         onschedule={(id, day, time) => void session.schedule(id, day, time)}
-        onrename={(id, title) => session.rename(id, title)}
+        onrename={(id, title) => {
+          // A row commits its new title once, on Enter or leaving it.
+          session.rename(id, title);
+          session.commitText(id);
+        }}
         onpin={(id, pinned) => void session.setPinned(id, pinned)}
         ondelete={(id) => session.setTrashed(id, true)}
         onrestore={(id) => session.setTrashed(id, false)}

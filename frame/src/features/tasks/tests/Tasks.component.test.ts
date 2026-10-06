@@ -522,3 +522,18 @@ test("the list behind an open task catches up once it is shown again", async () 
   await screen.getByRole("button", { name: "Back to tasks" }).click();
   await expect.element(screen.getByText("Draft the memo")).toBeVisible();
 });
+
+test("a title renamed from its row is saved as soon as it is entered", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000032";
+  const made = server(profile);
+  const id = seed(made.records, "Old name", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Old name").hover();
+  await screen.getByRole("button", { name: "More actions" }).click();
+  await screen.getByRole("menuitem", { name: "Rename" }).click();
+  const field = screen.container.querySelector<HTMLTextAreaElement>(".task-rename")!;
+  await expect.poll(() => document.activeElement === field).toBe(true);
+  await userEvent.keyboard("New name{Enter}");
+  await expect.poll(() => made.records.get(id)!.draft.title, { timeout: 500 }).toBe("New name");
+});
