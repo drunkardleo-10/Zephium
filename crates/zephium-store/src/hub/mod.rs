@@ -373,6 +373,7 @@ impl Hub {
                 filesystem::configure_profile(&conn)?;
                 migrations::apply(&mut conn, migrations::PROFILE)?;
                 history::enforce_history_budget(&conn)?;
+                resources::prune_receipts(&conn)?;
                 Ok(slot.insert(conn))
             }
         }
