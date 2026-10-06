@@ -292,6 +292,8 @@ pub fn configure(
     }
 
     unsafe { wk.setInspectable(true) };
+    // Pinch magnifies the page the way Safari's does; page zoom stays separate.
+    unsafe { wk.setAllowsMagnification(true) };
     let view: &NSView = &wk;
     // Fill the assigned region and follow window resize in AppKit's layout pass.
     view.setTranslatesAutoresizingMaskIntoConstraints(true);

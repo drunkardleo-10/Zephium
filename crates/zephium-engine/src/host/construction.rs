@@ -1022,7 +1022,11 @@ impl EngineHost {
             // override both native media surfaces per view; compile-time
             // availability is not page authority.
             .with_fullscreen_enabled(false)
-            .with_picture_in_picture_enabled(false)
+            // A playing video may float above other apps; pages that play
+            // are not suspended, so it keeps going while its tab sleeps.
+            .with_picture_in_picture_enabled(true)
+            // Two-finger swipes move through history, as in Safari.
+            .with_back_forward_navigation_gestures(true)
             // WebView2 otherwise enables its address/contact suggestions by
             // default. Raw content should not silently inherit ambient form
             // data before Zephium has an explicit, profile-scoped autofill

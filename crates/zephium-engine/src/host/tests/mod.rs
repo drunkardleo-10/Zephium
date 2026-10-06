@@ -840,7 +840,9 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
     ));
     let raw_policy = raw_view_construction_policy();
     assert!(raw_policy.contains("with_fullscreen_enabled(false)"));
-    assert!(raw_policy.contains("with_picture_in_picture_enabled(false)"));
+    // Picture-in-picture is a per-view grant for tabs a person reads, never
+    // inherited from the chrome's compiled features.
+    assert!(raw_policy.contains("with_picture_in_picture_enabled(true)"));
     assert!(raw_policy.contains("with_permission_handler(move |kind|"));
     assert!(raw_policy.contains("permission_presentation.load(Ordering::Acquire)"));
     assert!(raw_policy.contains("permission_window_is_foreground(permission_window)"));
