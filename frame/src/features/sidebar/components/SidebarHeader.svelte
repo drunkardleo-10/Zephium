@@ -6,7 +6,6 @@
     EllipsisIcon,
     Refresh01Icon,
     Search01Icon,
-    SidebarLeftIcon,
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
   import { blocker, siteMenuState } from "$domain/blocker";
@@ -18,13 +17,11 @@
 
   let {
     compact,
-    ontoggle,
     navigation = true,
     pageControls = true,
     launcher = false,
   }: {
     compact: boolean;
-    ontoggle: () => void;
     navigation?: boolean;
     /** Back, forward and reload act on a page; Work shows none. */
     pageControls?: boolean;
@@ -87,12 +84,7 @@
     style:padding-inline-start={IS_MAC ? "var(--traffic-light-inset)" : "6px"}
     aria-label={m.ui_navigation()}
   >
-    {#if navigation}<IconButton
-        icon={SidebarLeftIcon}
-        label={m.ui_compact_mode()}
-        onclick={ontoggle}
-      />
-    {/if}{#if launcher}<IconButton
+    {#if launcher}<IconButton
         icon={Search01Icon}
         label={m.ui_search_or_enter_an_address()}
         onclick={() => void commands.runCommand("launcher.toggle")}
