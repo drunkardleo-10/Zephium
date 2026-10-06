@@ -42,6 +42,10 @@ pub type AgentLifecycle = Box<dyn AgentBrowserLifecycle>;
 pub enum ShellTerminalFailure {
     ProfileDeletionInvariant,
     ActorExitedUnexpectedly,
+    /// The saved session or its deletion journal could not be opened. The
+    /// store kept it untouched; the person is told so instead of facing an
+    /// empty window that cannot do anything.
+    SessionUnavailable,
 }
 
 impl std::fmt::Display for ShellTerminalFailure {
@@ -51,6 +55,7 @@ impl std::fmt::Display for ShellTerminalFailure {
                 "profile deletion violated a post-retirement invariant"
             }
             Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
+            Self::SessionUnavailable => "the saved session could not be opened",
         })
     }
 }

@@ -5942,6 +5942,24 @@ pub fn run() {
             let terminal_failure_app = app.handle().clone();
             let terminal_failure_shutdown = shutdown.inner().clone();
             let shell_terminal_failure: ShellTerminalFailureCallback = Box::new(move |failure| {
+                // An unopenable session would otherwise leave an empty window
+                // that does nothing. Say so, then quit in order; the store
+                // has kept the saved data as it was.
+                if matches!(failure, zephium_app::ShellTerminalFailure::SessionUnavailable) {
+                    let app = terminal_failure_app.clone();
+                    let shutdown = terminal_failure_shutdown.clone();
+                    let explained = terminal_failure_app.run_on_main_thread(move || {
+                        #[cfg(not(target_os = "linux"))]
+                        startup_alert::show_blocking(
+                            startup_alert::StartupProblem::DamagedProfile,
+                            "the saved tabs and settings could not be opened",
+                        );
+                        request_shell_terminal_failure(&app, &shutdown, failure);
+                    });
+                    if explained.is_ok() {
+                        return;
+                    }
+                }
                 request_shell_terminal_failure(
                     &terminal_failure_app,
                     &terminal_failure_shutdown,

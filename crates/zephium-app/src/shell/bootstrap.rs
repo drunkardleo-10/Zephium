@@ -33,6 +33,7 @@ impl Shell {
                 crate::diagnostic!(
                     "bootstrap: profile deletion journal is unavailable; refusing initialization"
                 );
+                self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
                 return;
             }
         };
@@ -45,6 +46,7 @@ impl Shell {
             crate::diagnostic!(
                 "bootstrap: profile deletion journal exceeds its unique bounded cohort"
             );
+            self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
             return;
         }
         let mut active_item = None;
@@ -110,6 +112,7 @@ impl Shell {
                 // entered a sticky read-only mode. Do not construct first-run
                 // state or let a later shutdown overwrite recoverable data.
                 crate::diagnostic!("bootstrap: explicit session recovery required: {reason}");
+                self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
                 return;
             }
             SessionLoad::Failed => {
@@ -119,6 +122,7 @@ impl Shell {
                 crate::diagnostic!(
                     "bootstrap: session storage is unavailable; refusing initialization"
                 );
+                self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
                 return;
             }
         }
