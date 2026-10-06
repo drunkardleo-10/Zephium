@@ -1,5 +1,6 @@
 import type { IconSvgElement } from "@hugeicons/svelte";
 import {
+  Bug01Icon,
   News01Icon,
   RefreshIcon,
   Shield01Icon,
@@ -14,10 +15,13 @@ import { releaseNotesUrl, updates } from "$domain/updates";
 import * as notices from "./notices.svelte";
 import type { UpdateCard, UpdatePill } from "./select";
 
+const REPORT_URL = "https://github.com/zephium-browser/Zephium/issues/new?template=bug_report.yml";
+
 export type CardView = {
   key: string;
   title: string;
   detail?: string;
+  items?: string[];
   icon: IconSvgElement;
   actions: SidebarCardAction[];
   dismiss: () => void;
@@ -28,6 +32,7 @@ export function cardView(card: UpdateCard): CardView {
     return {
       key: `updated:${card.version}`,
       title: m.update_done_title({ version: card.version }),
+      items: notices.highlights(card.version),
       icon: SparklesIcon,
       actions: [
         {
@@ -36,6 +41,11 @@ export function cardView(card: UpdateCard): CardView {
           dismisses: true,
           onclick: () =>
             void commands.browserOpenUrl(releaseNotesUrl(card.version), true).catch(() => {}),
+        },
+        {
+          label: m.update_report_problem(),
+          icon: Bug01Icon,
+          onclick: () => void commands.browserOpenUrl(REPORT_URL, true).catch(() => {}),
         },
       ],
       dismiss: notices.acknowledgeUpdate,

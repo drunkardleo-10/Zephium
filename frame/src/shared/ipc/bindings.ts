@@ -327,6 +327,11 @@ export const commands = {
 	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
+	/**  What the release now running brought, when it arrived as an update. */
+	updateHighlights: () => __TAURI_INVOKE<{
+	version: string,
+	items: string[],
+} | null>("update_highlights"),
 	/**  Opens the system's own update settings for an outdated macOS or Safari. */
 	openSoftwareUpdate: () => __TAURI_INVOKE<boolean>("open_software_update"),
 	/**
@@ -2030,6 +2035,11 @@ export type UiCommand = string;
 
 export type UiInfo = {
 	material: Material,
+};
+
+export type UpdateHighlights = {
+	version: string,
+	items: string[],
 };
 
 export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;

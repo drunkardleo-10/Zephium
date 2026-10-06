@@ -268,6 +268,7 @@
   "update_installing": "Updating…",
   "update_done_title": "Zephium updated to {version}",
   "update_whats_new": "See what's new",
+  "update_report_problem": "Something broke? Tell us",
   "update_dismiss": "Dismiss",
   "update_security_mac_title": "macOS has security updates",
   "update_security_system_title": "Your system has security updates",

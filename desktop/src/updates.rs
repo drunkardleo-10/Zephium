@@ -1,8 +1,8 @@
 //! Updates from GitHub Releases, signed with Zephium's updater key.
 //!
-//! A check downloads a newer release in the background and parks it on disk;
-//! nothing is installed until the person chooses to relaunch, and the relaunch
-//! goes through the ordinary orderly shutdown so the session is saved first.
+//! A check downloads a newer release in the background and parks it on disk.
+//! It installs when the person relaunches, or on macOS when they quit, always
+//! after the ordinary orderly shutdown has saved the session.
 
 use super::*;
 
@@ -55,6 +55,14 @@ static RELAUNCH_AFTER_EXIT: AtomicBool = AtomicBool::new(false);
 static INSTALL_AFTER_EXIT: Mutex<Option<(Parked, std::path::PathBuf)>> = Mutex::new(None);
 
 const SUPPORTED: bool = !cfg!(debug_assertions) && cfg!(any(target_os = "macos", windows));
+/// The release's highlights, kept from its download for the first launch of it.
+const HIGHLIGHTS: &str = "updates.highlights";
+const MAX_HIGHLIGHTS: usize = 5;
+const MAX_HIGHLIGHT_CHARS: usize = 120;
+/// Native's own schedule backs up the window's: a build whose window cannot
+/// run its script must still be able to update itself.
+const NATIVE_FIRST_CHECK: Duration = Duration::from_secs(5 * 60);
+const NATIVE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 impl Updates {
     fn status(&self) -> UpdateStatus {
@@ -113,11 +121,15 @@ pub(crate) async fn update_check(
     if !authorize(&caller, CallerPolicy::Main, "update_check") {
         return None;
     }
+    Some(run_check(&app).await)
+}
+
+async fn run_check(app: &tauri::AppHandle) -> UpdateStatus {
     let updates = app.state::<Updates>();
     if let Err(status) = updates.begin_check(SUPPORTED) {
-        return Some(status);
+        return status;
     }
-    let next = match check_and_download(&app, &updates).await {
+    let next = match check_and_download(app, &updates).await {
         Ok(status) => status,
         Err(error) => {
             write_diagnostic(format_args!("updates: {error}"));
@@ -125,7 +137,132 @@ pub(crate) async fn update_check(
         }
     };
     updates.set(next.clone());
-    Some(next)
+    next
+}
+
+/// Checks on native's own schedule, unless the person turned automatic
+/// checks off, and tells the window what changed.
+pub(crate) fn schedule_native_checks(app: &tauri::AppHandle) {
+    if !SUPPORTED {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(NATIVE_FIRST_CHECK).await;
+        loop {
+            let wanted = APP_STORE
+                .get()
+                .and_then(|store| store.app_setting("updates.auto-check"))
+                .is_none_or(|value| value != "false");
+            if wanted && !shutdown_started(&app) {
+                let _ = run_check(&app).await;
+                emit_ui_command(&app, "updates.changed");
+            }
+            tokio::time::sleep(NATIVE_CHECK_INTERVAL).await;
+        }
+    });
+}
+
+#[derive(Clone, Debug, Serialize, specta::Type)]
+pub(crate) struct UpdateHighlights {
+    version: String,
+    items: Vec<String>,
+}
+
+/// What the release now running brought, when it arrived as an update.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn update_highlights(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+) -> Option<UpdateHighlights> {
+    if !authorize(&caller, CallerPolicy::Main, "update_highlights") {
+        return None;
+    }
+    let stored = APP_STORE.get()?.app_setting(HIGHLIGHTS)?;
+    let stored: serde_json::Value = serde_json::from_str(&stored).ok()?;
+    let version = stored.get("version")?.as_str()?;
+    if version != app.package_info().version.to_string() {
+        return None;
+    }
+    let items = stored
+        .get("items")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .take(MAX_HIGHLIGHTS)
+        .map(str::to_owned)
+        .collect();
+    Some(UpdateHighlights {
+        version: version.to_owned(),
+        items,
+    })
+}
+
+fn remember_highlights(version: &str, notes: Option<&str>) {
+    let value = serde_json::json!({
+        "version": version,
+        "items": highlights(notes.unwrap_or_default()),
+    });
+    if let Some(store) = APP_STORE.get() {
+        let _ = store.set_app_setting(HIGHLIGHTS.into(), value.to_string());
+    }
+}
+
+/// A release's bullet points as plain words: Markdown emphasis, links,
+/// credits and pull-request references removed, at most five, each short.
+fn highlights(notes: &str) -> Vec<String> {
+    notes
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))
+                .or_else(|| line.strip_prefix("• "))
+        })
+        .map(plain_highlight)
+        .filter(|item| !item.is_empty() && !item.to_ascii_lowercase().starts_with("full changelog"))
+        .take(MAX_HIGHLIGHTS)
+        .collect()
+}
+
+fn plain_highlight(item: &str) -> String {
+    // GitHub's generated notes end each line with " by @someone in <url>".
+    let item = item.split(" by @").next().unwrap_or(item);
+    let mut text = String::new();
+    let mut rest = item;
+    while let Some(open) = rest.find('[') {
+        let (before, after) = rest.split_at(open);
+        text.push_str(before);
+        match after.find("](").zip(after.find(')')) {
+            Some((label_end, link_end)) if label_end < link_end => {
+                text.push_str(&after[1..label_end]);
+                rest = &after[link_end + 1..];
+            }
+            _ => {
+                text.push_str(after);
+                rest = "";
+            }
+        }
+    }
+    text.push_str(rest);
+    let text: String = text
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+        .split_whitespace()
+        .filter(|word| !word.starts_with("http://") && !word.starts_with("https://"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = text
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_owned();
+    let mut chars = text.chars();
+    let mut short: String = chars.by_ref().take(MAX_HIGHLIGHT_CHARS).collect();
+    if chars.next().is_some() {
+        short.push('…');
+    }
+    short
 }
 
 async fn check_and_download(
@@ -188,6 +325,7 @@ async fn check_and_download(
         None => artifact::download(&update.download_url, key, update.signature.clone()).await?,
     };
     let version = update.version.clone();
+    remember_highlights(&version, update.body.as_deref());
     *lock(&updates.parked) = Some(Parked { update, artifact });
     Ok(UpdateStatus::Ready {
         version,
@@ -375,8 +513,39 @@ pub(crate) fn finish_on_exit(app: &tauri::AppHandle) {
             shutdown.authorized_exit_code.load(Ordering::Acquire) == 0
                 && !shutdown.terminal_failure.load(Ordering::Acquire)
         });
-    if RELAUNCH_AFTER_EXIT.swap(false, Ordering::AcqRel) && clean {
-        tauri::process::restart(&app.env());
+    if RELAUNCH_AFTER_EXIT.swap(false, Ordering::AcqRel) {
+        if clean {
+            tauri::process::restart(&app.env());
+        }
+        return;
+    }
+    // An ordinary quit with an update waiting installs it now, so people who
+    // never press Relaunch still update; the next launch is the new version.
+    if clean {
+        install_on_quit(app);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_on_quit(app: &tauri::AppHandle) {
+    let Some(updates) = app.try_state::<Updates>() else {
+        return;
+    };
+    if !matches!(updates.status(), UpdateStatus::Ready { .. }) {
+        return;
+    }
+    let Some(mut parked) = lock(&updates.parked).take() else {
+        return;
+    };
+    let result = parked
+        .artifact
+        .verified_bytes()
+        .map_err(InstallError::from)
+        .and_then(|bytes| parked.update.install(bytes).map_err(InstallError::from));
+    if let Err(error) = result {
+        write_diagnostic(format_args!(
+            "updates: install on quit did not finish: {error}"
+        ));
     }
 }
 
@@ -434,6 +603,34 @@ pub(crate) fn open_software_update(caller: WebviewWindow) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     false
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    #[test]
+    fn release_notes_become_a_short_plain_list() {
+        let notes = "## What's Changed\n\
+* feat(browse): ask before a page opens another app by @crynta in https://github.com/zephium-browser/Zephium/pull/60\n\
+- **Page dialogs** now show as a sheet ([#61](https://github.com/x/y/pull/61)).\n\
+- Fix `confirm()` returning false\n\
+- one\n- two\n- three\n\
+**Full Changelog**: https://github.com/x/y/compare/a...b\n";
+        assert_eq!(
+            highlights(notes),
+            vec![
+                "feat(browse): ask before a page opens another app",
+                "Page dialogs now show as a sheet (#61)",
+                "Fix confirm() returning false",
+                "one",
+                "two",
+            ]
+        );
+        assert!(highlights("").is_empty());
+        let long = format!("- {}", "word ".repeat(60));
+        assert!(highlights(&long)[0].ends_with('…'));
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@
       {#key card.key}<SidebarCard
           title={card.title}
           detail={card.detail}
+          items={card.items}
           actions={card.actions}
           dismissLabel={m.update_dismiss()}
           ondismiss={card.dismiss}

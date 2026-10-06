@@ -14,6 +14,11 @@ const SECURITY = "notice.security-dismissed";
 let version = $state<string | null>(null);
 let seen = $state<string | null>(null);
 let securityDismissed = $state<string | null>(null);
+let releaseHighlights = $state.raw<{ version: string; items: string[] } | null>(null);
+
+/** The running release's highlights, when it arrived as an update. */
+export const highlights = (version: string): string[] =>
+  releaseHighlights?.version === version ? releaseHighlights.items : [];
 let generation = 0;
 let started = false;
 
@@ -45,13 +50,15 @@ export async function init(): Promise<void> {
   if (started) return;
   started = true;
   const at = ++generation;
-  const [about, storedSeen, storedSecurity] = await Promise.all([
+  const [about, storedSeen, storedSecurity, shipped] = await Promise.all([
     commands.aboutInfo().catch(() => null),
     read(SEEN),
     read(SECURITY),
+    commands.updateHighlights().catch(() => null),
   ]);
   if (at !== generation || !about) return;
   version = about.version;
+  releaseHighlights = shipped;
   securityDismissed = storedSecurity;
   // A first run has nothing to announce; it only marks where it started.
   if (storedSeen === "") {
@@ -66,6 +73,7 @@ export function dispose() {
   started = false;
   generation += 1;
   version = seen = securityDismissed = null;
+  releaseHighlights = null;
 }
 
 export function acknowledgeUpdate() {

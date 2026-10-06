@@ -1643,6 +1643,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             updates::update_status,
             updates::update_check,
             updates::update_relaunch,
+            updates::update_highlights,
             updates::open_software_update,
             browser_open_url,
             keymap::keymap_entries,
@@ -5461,6 +5462,7 @@ pub fn run() {
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
                 })?;
+                updates::schedule_native_checks(app.handle());
                 work_models::install(app.handle());
 
                 #[cfg(target_os = "windows")]
