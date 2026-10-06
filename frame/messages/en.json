@@ -262,7 +262,7 @@
   "update_status_checking": "Checking…",
   "update_status_downloading": "Downloading update…",
   "update_status_ready": "Version {version} is ready",
-  "update_status_failed": "Couldn't check for updates",
+  "update_status_failed": "Couldn't complete the update. Try again, or download the latest version.",
   "update_status_unavailable": "Updates are off in development builds",
   "update_check_now": "Check now",
   "update_release_notes": "Release Notes",
@@ -2713,5 +2713,8 @@
   "download_reason_source": "The download source could not be read",
   "download_reason_incomplete_response": "The response ended early",
   "download_resume_help": "Retry Download can resume this interrupted transfer for up to five minutes while its tab stays open.",
-  "download_resume_file_busy": "Close other applications using this file or folder, then use Retry Download. The interrupted transfer expires after five minutes or when its tab closes."
+  "download_resume_file_busy": "Close other applications using this file or folder, then use Retry Download. The interrupted transfer expires after five minutes or when its tab closes.",
+  "update_status_manual": "Version {version} needs to be installed manually from its release page.",
+  "update_install_manual": "Download and install manually",
+  "update_download_latest": "Download latest version"
 }

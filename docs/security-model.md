@@ -1708,8 +1708,14 @@ The following are roadmap items or disabled backends, not current security guara
   packaged enforcement/endurance proof is still a release gate;
 - a custom certificate-error interstitial or anti-phishing service;
 - rollback-resistant update metadata: the updater (`desktop/src/updates.rs`) verifies a
-  minisign signature on GitHub Releases `latest.json` and its artifacts, but enforces
-  no durable highest-accepted-sequence beyond comparing versions;
+  minisign signature on artifacts referenced by HTTPS `latest.json`, including the
+  exact bytes consumed at installation. Metadata is not independently signed, and
+  there is no durable highest-accepted-sequence beyond comparing versions. Payloads
+  are size-bounded and held through anonymous owned files. Windows retains a bounded
+  checkpoint before shutdown; recovery requires fresh HTTPS release metadata and
+  payload verification with the embedded key. The macOS installer
+  restores the original on failed publication, retains its backup if rollback
+  fails, and requires manual installation when app-folder write access is denied;
 - application-level encryption of profiles or session data;
 - Chromium-equivalent full site isolation on every platform.
 

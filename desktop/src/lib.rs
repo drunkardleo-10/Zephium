@@ -5142,6 +5142,10 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     let tauri::RunEvent::ExitRequested { code, api, .. } = event else {
         return;
     };
+    if code != Some(1) && updates::blocks_exit(app) {
+        api.prevent_exit();
+        return;
+    }
     let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
         write_diagnostic(format_args!(
             "shutdown: exit requested before coordinator setup"
@@ -5335,6 +5339,8 @@ pub fn run() {
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
+                #[cfg(target_os = "windows")]
+                updates::restore(app.handle(), &data_dir);
                 #[cfg(feature = "work-product")]
                 zephium_app::work_lead::skills::install_root(data_dir.clone());
                 #[cfg(unix)]
@@ -6066,6 +6072,7 @@ pub fn run() {
                     // shell command queued before close has been snapshotted.
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
+                        if updates::blocks_exit(&exit_handle) { return; }
                         let owner=window_shutdown.clone();
                         let app=exit_handle.clone();
                         let shell=resize_shell.clone();
@@ -6408,7 +6415,7 @@ pub fn run() {
                 "privacy: privileged WebView2 Environment5/PID/HANDLE exit was not proven; leaving this run's UDF generation quarantined"
             );
         }
-        updates::finish_after_exit();
+        updates::finish_after_exit(cleanup_succeeded && exit_code == 0);
         std::process::exit(if cleanup_succeeded || exit_code != 0 {
             exit_code
         } else {

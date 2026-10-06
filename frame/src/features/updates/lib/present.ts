@@ -10,7 +10,7 @@ import * as m from "$shared/i18n/messages";
 import { commands } from "$shared/ipc/bindings";
 import { IS_MAC } from "$shared/platform";
 import type { SidebarCardAction } from "$shared/ui/SidebarCard";
-import { releaseNotesUrl } from "$domain/updates";
+import { releaseNotesUrl, updates } from "$domain/updates";
 import * as notices from "./notices.svelte";
 import type { UpdateCard, UpdatePill } from "./select";
 
@@ -72,4 +72,14 @@ export function cardView(card: UpdateCard): CardView {
 export const PILL_ICON = RefreshIcon;
 
 export const pillLabel = (pill: UpdatePill) =>
-  pill.kind === "ready" ? m.update_relaunch() : m.update_installing();
+  pill.kind === "manual"
+    ? m.update_install_manual()
+    : pill.kind === "ready"
+      ? m.update_relaunch()
+      : m.update_installing();
+
+export function activatePill(pill: UpdatePill) {
+  if (pill.kind === "manual")
+    void commands.browserOpenUrl(releaseNotesUrl(pill.version), true).catch(() => {});
+  else if (pill.kind === "ready") void updates.relaunch();
+}
