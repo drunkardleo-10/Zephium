@@ -475,7 +475,7 @@ pub(crate) fn install(
             windows_extensions: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             dormant: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             desired_dormant: std::collections::HashSet::new(),
@@ -485,7 +485,7 @@ pub(crate) fn install(
             suspend_failed: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_uncertain: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             styles_missed: std::collections::HashSet::new(),
             #[cfg(not(target_os = "macos"))]
             web_contexts: HashMap::new(),

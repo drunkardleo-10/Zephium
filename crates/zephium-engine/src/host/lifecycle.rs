@@ -105,6 +105,11 @@ impl EngineHost {
             self.suspend_uncertain.remove(&id);
             self.styles_missed.remove(&id);
         }
+        #[cfg(target_os = "macos")]
+        {
+            self.dormant.remove(&id);
+            self.styles_missed.remove(&id);
+        }
         for stage in self.stages.values() {
             stage.remove_view(id);
         }

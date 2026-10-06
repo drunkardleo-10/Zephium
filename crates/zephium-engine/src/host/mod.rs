@@ -592,7 +592,7 @@ pub(crate) struct EngineHost {
     // shell's idle policy asked WebView2 to suspend.
     #[cfg(target_os = "windows")]
     hidden: std::collections::HashSet<ItemId>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     dormant: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     desired_dormant: std::collections::HashSet<ItemId>,
@@ -603,7 +603,7 @@ pub(crate) struct EngineHost {
     #[cfg(target_os = "windows")]
     suspend_uncertain: std::collections::HashSet<ItemId>,
     // Dormant views that skipped a cosmetic refresh, owed one when they wake.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     styles_missed: std::collections::HashSet<ItemId>,
     #[cfg(not(target_os = "macos"))]
     web_contexts: HashMap<ProfileId, wry::WebContext>,
