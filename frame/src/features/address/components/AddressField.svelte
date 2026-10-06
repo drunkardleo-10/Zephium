@@ -233,7 +233,9 @@
     -->
     <span class="address-clip">
       <!-- Stays mounted and correct while find borrows the field: native
-           verifies the page's address through it before showing the page. -->
+           verifies the page's address through it before showing the page.
+           At rest a host too long to fit loses its start, not its end, so
+           the site that owns it stays visible: right-to-left only clips. -->
       <input
         bind:this={input}
         class:sr-only={finding}
@@ -263,8 +265,9 @@
         onfocus={beginEditing}
         onblur={endEditing}
         style:text-align={editing ? "start" : "center"}
+        style:direction={editing ? null : "rtl"}
         style:padding-inline-start={editing ? "0" : "var(--address-centering)"}
-        class="min-w-0 flex-1 bg-transparent text-[13.5px] text-label-secondary outline-none placeholder:text-faint focus:text-text"
+        class="min-w-0 flex-1 bg-transparent text-[13.5px] text-ellipsis text-label-secondary outline-none placeholder:text-faint focus:text-text"
       />
       {#if finding}
         <span class="find-glyph" aria-hidden="true"><Icon icon={Search01Icon} size={14} /></span>
