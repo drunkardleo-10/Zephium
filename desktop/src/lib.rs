@@ -4081,14 +4081,21 @@ fn focus_control(
 
 #[tauri::command]
 #[specta::specta]
-fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
+async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !authorize(&caller, CallerPolicy::Both, "setting_get") {
         return None;
     }
     if !SETTING_KEYS.contains(&key.as_str()) {
         return None;
     }
-    APP_STORE.get().and_then(|store| store.app_setting(&key))
+    // A synchronous command runs on the main thread, and the store may be
+    // busy for seconds (an import, a deletion); the read waits off it.
+    tauri::async_runtime::spawn_blocking(move || {
+        APP_STORE.get().and_then(|store| store.app_setting(&key))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
