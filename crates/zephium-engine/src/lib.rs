@@ -2418,14 +2418,14 @@ impl Engine for WebviewEngine {
                 retirement.retire_all_profiles,
             )
         };
+        // A leaf can go inactive between the engine retiring it (a renderer
+        // crash, a failed creation) and the shell reading that event: two
+        // split panes sharing a crashed process do exactly this. Showing
+        // nothing for this layout is enough; the shell lays out again when it
+        // handles the event. It is never a reason to end the browser.
         let Some(item_tokens) = item_tokens else {
             if !already_terminal {
-                fail_native_host_admission(
-                    &self.event_delivery,
-                    &self.retirement,
-                    &self.fatal_security_failure,
-                    "content layout referenced an inactive native view",
-                );
+                eprintln!("engine: content layout named a view that already ended; skipped");
             }
             return NativeDispatch::Rejected;
         };
