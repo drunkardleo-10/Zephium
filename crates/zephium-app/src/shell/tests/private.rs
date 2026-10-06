@@ -96,8 +96,9 @@ fn private_tabs_survive_a_visit_to_the_regular_ones() {
     shell.handle(Command::Run("window.newPrivate".into()));
     let private = active_id(&screen);
 
-    shell.handle(Command::Run("window.leavePrivate".into()));
-    assert_eq!(active_id(&screen), regular);
+    shell.open_external(vec!["https://example.com/".into()]);
+    assert_ne!(active_id(&screen), private);
+    assert_ne!(active_id(&screen), regular);
     shell.handle(Command::Run("window.newPrivate".into()));
 
     assert_eq!(active_id(&screen), private);

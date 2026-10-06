@@ -3,6 +3,7 @@
   import {
     CheckListIcon,
     Clock01Icon,
+    IncognitoIcon,
     Settings01Icon,
     Shield01Icon,
   } from "@hugeicons/core-free-icons";
@@ -274,11 +275,7 @@
     </div>
   {/if}
 
-  {#if incognito}
-    <p class="greeting" style:bottom={`${height - page.mark.y + 24}px`}>
-      {m.private_newtab_note()}
-    </p>
-  {:else if showGreeting}
+  {#if showGreeting}
     <p class="greeting" style:bottom={`${height - page.mark.y + 24}px`}>{greeting}</p>
   {/if}
   <!-- The letters are drawn by the ground; this stands where they are so the
@@ -297,10 +294,9 @@
     </p>
   {/if}
 
+  <!-- A private window has no figures; what it promises stands in their place. -->
   {#if incognito}
-    <p class="note" style:top={`${(page.when ?? page.mark.y + page.mark.h) + 44}px`}>
-      {m.ntp_private()}
-    </p>
+    <p class="note"><Icon icon={IncognitoIcon} size={13} />{m.ntp_private()}</p>
   {/if}
 
   <!-- The day in figures, a card each, along the foot of the page: what it
@@ -516,7 +512,12 @@
   }
 
   .note {
-    max-inline-size: 36ch;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    inset-block-end: 28px;
+    padding-inline: 24px;
     color: var(--color-faint);
     font-size: var(--text-label);
     line-height: 1.5;

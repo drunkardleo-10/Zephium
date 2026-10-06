@@ -817,7 +817,6 @@ impl Shell {
         match id {
             "tab.new" => self.operation_open(),
             "window.newPrivate" => self.operation_enter_private(),
-            "window.leavePrivate" => self.operation_leave_private(),
             "window.closePrivate" => self.operation_close_private(),
             "tab.close" if in_work => self.operation_work_pane_hide(),
             "tab.close" => active.map_or_else(

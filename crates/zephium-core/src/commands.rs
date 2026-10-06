@@ -112,12 +112,6 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::File,
     ),
     command(
-        "window.leavePrivate",
-        "Show Personal Tabs",
-        Keys::NONE,
-        Group::File,
-    ),
-    command(
         "window.closePrivate",
         "Close Private Window",
         Keys::NONE,

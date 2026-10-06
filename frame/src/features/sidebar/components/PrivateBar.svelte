@@ -8,14 +8,11 @@
 
 <!--
   Heads the column while it shows private tabs, in the band the Browse/Work
-  switch holds otherwise: it names the scope and is the way back out of it.
+  switch holds otherwise: it names the scope and closes it.
 -->
 <div class="private-bar" role="group" aria-label={m.private_title()}>
   <Icon icon={IncognitoIcon} size={16} />
   <span class="name">{m.private_title()}</span>
-  <button type="button" class="back" onclick={() => void commands.runCommand("window.leavePrivate")}
-    >{m.private_back()}</button
-  >
   <IconButton
     icon={Cancel01Icon}
     label={m.private_close()}
@@ -47,19 +44,5 @@
     font-weight: 500;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .back {
-    flex: none;
-    padding: 2px 6px;
-    border-radius: var(--radius-inset);
-    font-size: 12px;
-    color: var(--color-muted);
-  }
-
-  .back:hover,
-  .back:focus-visible {
-    color: var(--color-text);
-    background: var(--color-fill);
   }
 </style>
