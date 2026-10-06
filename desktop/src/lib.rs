@@ -7111,9 +7111,9 @@ mod tests {
         assert_eq!(shell.matches("data-zephium-new-tab").count(), 1);
         // The focus cover, when there is one, stands in the same chain ahead
         // of New Tab, so the two never render together.
-        assert!(
-            shell.contains("{:else if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? \"web\") === \"web\" && browserPage.currentPage() === null}")
-        );
+        assert!(shell.contains("{:else if newTabShown}"));
+        assert!(shell
+            .contains(r#"if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;"#));
         assert!(shell.contains("data-zephium-surface="));
         assert!(!shell.contains("transition:"));
         assert!(!shell.contains("out:"));
