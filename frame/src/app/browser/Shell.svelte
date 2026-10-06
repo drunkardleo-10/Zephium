@@ -202,6 +202,22 @@
       if (command.id === "focus.alert=focus") notices.show(m.focus_back_title(), "focus");
     });
   });
+  // A load started from the new tab keeps it on screen until the page
+  // commits, so the content pane never empties between the two.
+  let newTabLoad = $state<string | null>(null);
+  let newTabShown = $derived.by(() => {
+    const tab = tabs.activeTab();
+    if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;
+    return browserPage.currentPage() === null && (!tab.loading || newTabLoad === tab.id);
+  });
+  $effect(() => {
+    const tab = tabs.activeTab();
+    const idle = !!tab && !tab.url && !tab.loading && (tab.content ?? "web") === "web";
+    untrack(() => {
+      if (idle) newTabLoad = tab.id;
+      else if (!tab || tab.url || tab.id !== newTabLoad) newTabLoad = null;
+    });
+  });
   // A search belongs to the page it runs in; moving to another page ends it.
   $effect(() => {
     const active = tabs.activeId();
@@ -370,7 +386,7 @@
           >{#snippet children(View)}<View tab={capacityTab} />{/snippet}</LazyView
         >{/if}
     </main>
-  {:else if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
+  {:else if newTabShown}
     <!--
       A tab opened straight to an address is loading before it has a URL; it
       goes to its page rather than flashing the new tab first.
