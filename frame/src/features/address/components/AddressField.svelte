@@ -266,7 +266,7 @@
         onblur={endEditing}
         style:text-align={editing ? "start" : "center"}
         style:direction={editing ? null : "rtl"}
-        style:padding-inline-start={editing ? "0" : "var(--address-centering)"}
+        style:padding-left={editing ? "0" : "var(--address-centering)"}
         class="min-w-0 flex-1 bg-transparent text-[13.5px] text-ellipsis text-label-secondary outline-none placeholder:text-faint focus:text-text"
       />
       {#if finding}
