@@ -865,6 +865,7 @@ impl InnerWebView {
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,
+        attributes.navigation_failure_handler,
         attributes.navigation_presentation_guard,
         pl_attrs.on_web_content_process_terminate_handler,
         mtm,

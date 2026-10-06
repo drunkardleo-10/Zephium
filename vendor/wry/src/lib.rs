@@ -893,6 +893,9 @@ struct WebViewAttributes<'a> {
   /// The identifier is scoped to this WebView and is opaque to the embedder.
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
 
+  /// Why a main-frame navigation failed, reported before its `Failed` event.
+  pub navigation_failure_handler: Option<Box<dyn Fn(NavigationId, NavigationFailure)>>,
+
   /// Hide the native presentation surface synchronously at each main-frame
   /// commit, before delivering its identity event. Hardened embedders can
   /// then update trusted chrome and explicitly reveal the exact document.
@@ -1035,6 +1038,7 @@ impl Default for WebViewAttributes<'_> {
       picture_in_picture_enabled: false,
       on_page_load_handler: None,
       navigation_event_handler: None,
+      navigation_failure_handler: None,
       navigation_presentation_guard: None,
       proxy_config: None,
       focused: true,
@@ -1726,6 +1730,20 @@ impl<'a> WebViewBuilder<'a> {
     handler: impl Fn(NavigationEvent) + 'static,
   ) -> Self {
     self.attrs.navigation_event_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Reports why a main-frame navigation failed, keyed by the same
+  /// [`NavigationId`] its [`NavigationEventPhase::Failed`] event carries, and
+  /// always before that event. Only the category is reported, never the
+  /// native error text.
+  ///
+  /// Supported on macOS. Other platforms ignore this handler.
+  pub fn with_navigation_failure_handler(
+    mut self,
+    handler: impl Fn(NavigationId, NavigationFailure) + 'static,
+  ) -> Self {
+    self.attrs.navigation_failure_handler = Some(Box::new(handler));
     self
   }
 
@@ -3266,6 +3284,23 @@ pub enum NavigationEventPhase {
   Cancelled,
   /// The navigation terminated with an error.
   Failed,
+}
+
+/// Why a main-frame navigation failed, as a category safe to show a person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationFailure {
+  /// The device has no network connection.
+  Offline,
+  /// The host name did not resolve.
+  HostNotFound,
+  /// The host was found but refused or dropped the connection.
+  Unreachable,
+  /// The server did not answer in time.
+  TimedOut,
+  /// A secure connection could not be established or verified.
+  Insecure,
+  /// Any other failure.
+  Other,
 }
 
 /// Identity-bearing observation of a main-frame navigation.
