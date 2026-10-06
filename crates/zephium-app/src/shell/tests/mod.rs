@@ -336,6 +336,9 @@ pub(crate) struct FakeEngine {
     erasure_requests: Mutex<Vec<ProfileId>>,
     held_erasures: Mutex<Vec<HeldErasure>>,
     hold_erasures: std::sync::atomic::AtomicBool,
+    fills_window_for_fullscreen: std::sync::atomic::AtomicBool,
+    fullscreen_exits: Mutex<Vec<ItemId>>,
+    layout_regions: Mutex<Vec<Option<Rect>>>,
 }
 
 impl FakeEngine {
@@ -611,6 +614,20 @@ impl Engine for FakeEngine {
             .push((profile, item, request, settlement));
         self.native_admission()
     }
+    fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
+        if self
+            .fills_window_for_fullscreen
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
+        } else {
+            zephium_core::ports::engine::FullscreenPresentation::OwnWindow
+        }
+    }
+    fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
+        self.fullscreen_exits.lock().unwrap().push(id);
+        self.native_admission()
+    }
     fn stop_media_capture(
         &self,
         item: ItemId,
@@ -673,6 +690,7 @@ impl Engine for FakeEngine {
         tree: Option<Pane>,
         region: Option<Rect>,
     ) -> NativeDispatch {
+        self.layout_regions.lock().unwrap().push(region);
         let ids: Vec<String> = match (tree, region) {
             (Some(t), Some(_)) => t.tabs().iter().map(|id| id.to_string()).collect(),
             _ => Vec::new(),
@@ -1609,6 +1627,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::FindResult(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
+        Projection::HostFullscreen(_) => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
@@ -1884,6 +1903,7 @@ mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod favicons;
+mod fullscreen;
 mod history;
 #[path = "navigation.rs"]
 mod navigation_tests;

@@ -30,6 +30,7 @@ enum CoalescedKey {
     Presentation(ItemId),
     ChromePresentation(ItemId),
     PresentationFallback(ItemId),
+    Fullscreen(ItemId),
     DiscardProbeTimeout(ItemId),
     ViewCapacityRetry(ItemId),
     BlockerReady(ProfileId),
@@ -88,6 +89,7 @@ impl CoalescedKey {
             EngineEvent::ExtensionPageClosed { id, .. } => Self::ExtensionPageClosed(*id),
             EngineEvent::ExtensionPageChanged { id, .. } => Self::ExtensionPageChanged(*id),
             EngineEvent::MediaCaptureChanged { id, .. } => Self::MediaCapture(*id),
+            EngineEvent::FullscreenChanged { id, .. } => Self::Fullscreen(*id),
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
             EngineEvent::ContentRulesSettled {
                 profile, requested, ..
@@ -105,12 +107,12 @@ impl CoalescedKey {
 // burst.
 const NORMAL_COMMAND_CAPACITY: usize = 960;
 // Each tracked tab can have one latest URL, presentation, navigation failure,
-// terminal view-state, zoom settlement, and native-action failure fact. Each
-// profile can independently have one process-exit fact, compiler-result wake,
-// preference-store wake, native-policy settlement, and durable-deletion
-// callback wakeup. The current
-// single-window shell can have one native split fact, and the process can have
-// one sticky runtime-update fact. Reserve all of those independently of the
+// terminal view-state, zoom settlement, native-action failure, media-capture
+// and fullscreen fact. Each profile can independently have one process-exit
+// fact, compiler-result wake, preference-store wake, native-policy settlement,
+// and durable-deletion callback wakeup. The current single-window shell can
+// have one native split fact, and the process can have one sticky
+// runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 10
     + zephium_core::session::MAX_SESSION_PROFILES * 7
@@ -233,6 +235,7 @@ const _: () = assert!(std::mem::size_of::<TryPushError>() <= 160);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveryKey {
     MediaCapture(ItemId),
+    Fullscreen(ItemId),
     RuntimeRestart,
     MemoryPressure,
     SidebarGuideEnd,
@@ -256,6 +259,9 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
     match command {
         Command::Engine(EngineEvent::MediaCaptureChanged { id, .. }) => {
             Some(RecoveryKey::MediaCapture(*id))
+        }
+        Command::Engine(EngineEvent::FullscreenChanged { id, .. }) => {
+            Some(RecoveryKey::Fullscreen(*id))
         }
         Command::Engine(EngineEvent::RuntimeRestartRequired) => Some(RecoveryKey::RuntimeRestart),
         Command::SetMemoryPressure(_) => Some(RecoveryKey::MemoryPressure),
@@ -1173,6 +1179,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionPageChanged { .. }
                     | EngineEvent::PermissionRequested { .. }
                     | EngineEvent::MediaCaptureChanged { .. }
+                    | EngineEvent::FullscreenChanged { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }

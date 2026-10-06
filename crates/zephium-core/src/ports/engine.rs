@@ -571,6 +571,17 @@ pub enum StageMotion {
     Arrive,
 }
 
+/// Where page content goes when it enters element fullscreen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FullscreenPresentation {
+    /// The engine moves the page into a fullscreen window of its own (WebKit
+    /// on macOS). Browser layout stays as it is.
+    OwnWindow,
+    /// The page fills its own view only (WebView2). The browser makes its
+    /// window fullscreen and lays that one view over the whole of it.
+    FillHostWindow,
+}
+
 /// Exactly-once completion ownership for a per-profile native site snapshot.
 /// Dropping a refused or shutdown task reports failure rather than stranding
 /// an accepted caller. It carries no page data or native handles.
@@ -899,6 +910,15 @@ pub trait Engine {
         _request: PagePermissionRequestId,
         _settlement: PagePermissionRequestSettlement,
     ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// How a page's element fullscreen is presented on this engine.
+    fn fullscreen_presentation(&self) -> FullscreenPresentation {
+        FullscreenPresentation::OwnWindow
+    }
+    /// Asks the page to leave element fullscreen. The result arrives as
+    /// [`EngineEvent::FullscreenChanged`]; picture in picture is unaffected.
+    fn exit_fullscreen(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
     /// Stop capture in the exact committed document. Unsupported engines
@@ -1256,6 +1276,12 @@ pub enum EngineEvent {
         id: ItemId,
         navigation: NavigationPresentationId,
         state: MediaCaptureState,
+    },
+    /// The page entered or left element fullscreen. At most one view per
+    /// engine is reported active at a time.
+    FullscreenChanged {
+        id: ItemId,
+        active: bool,
     },
     FaviconPixels {
         id: ItemId,

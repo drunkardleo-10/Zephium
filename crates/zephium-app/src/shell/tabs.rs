@@ -132,6 +132,7 @@ impl Shell {
         for opener in self.native_openers.values_mut() {
             opener.activate_when_presentable = false;
         }
+        self.end_content_fullscreen_unless(id);
         let Some(win) = self.windows.focused_mut() else {
             return Vec::new();
         };
@@ -152,6 +153,7 @@ impl Shell {
             return NativeWork::default();
         }
         self.forget_removed_tab_state(id);
+        self.forget_content_fullscreen(id);
         self.native_openers.remove(&id);
         // An Essential is kept, not closed: the page ends and the site stays.
         let kept = self.kept_slot(id);

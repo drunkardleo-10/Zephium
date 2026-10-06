@@ -69,6 +69,7 @@ mod about;
 mod blocker_service;
 mod browser_credentials;
 mod browser_import;
+mod content_fullscreen;
 mod default_browser;
 mod diagnostics;
 mod external_links;
@@ -5893,6 +5894,7 @@ pub fn run() {
                     }
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
+                Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
                 Projection::RuntimeStatus(status) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_RUNTIME_STATUS, &status)
                 }

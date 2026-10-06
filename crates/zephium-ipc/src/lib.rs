@@ -1289,8 +1289,15 @@ pub enum Projection {
     UiCommand(String),
     FindResult(FindResultView),
     Search(SearchResults),
-    OpenNote { profile: String, id: String },
+    OpenNote {
+        profile: String,
+        id: String,
+    },
     Layout(LayoutState),
+    /// The page on screen is fullscreen and fills the browser window, which
+    /// should itself be fullscreen until this turns false. Only engines that
+    /// present fullscreen inside the browser window send it.
+    HostFullscreen(bool),
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),

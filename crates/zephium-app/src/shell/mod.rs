@@ -13,6 +13,7 @@ mod extension_browser_surface;
 mod extension_store;
 mod favicon_probe;
 mod favicons;
+mod fullscreen;
 mod history;
 mod operations;
 mod page_permissions;
@@ -225,6 +226,10 @@ pub struct Shell {
     time: time::TimeState,
     window_visible: bool,
     window_focused: bool,
+    // Cells because every relayout, which takes `&self`, re-checks that the
+    // fullscreen page may still be fullscreen and drops it at once if not.
+    content_fullscreen: std::cell::Cell<Option<fullscreen::ContentFullscreen>>,
+    host_fullscreen: std::cell::Cell<bool>,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
     browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
@@ -450,6 +455,8 @@ impl Shell {
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
             window_focused: false,
+            content_fullscreen: std::cell::Cell::new(None),
+            host_fullscreen: std::cell::Cell::new(false),
             browser_page: None,
             browser_page_projected: None,
             browser_return_revision: 0,

@@ -99,6 +99,8 @@ impl Shell {
                 );
                 if capture_invalidated {
                     self.items.set_media_capture(*id, None);
+                    // A replacement view starts out of fullscreen.
+                    self.forget_content_fullscreen(*id);
                 }
             }
             EngineEvent::ProfileProcessExited { profile, .. } => {
@@ -435,6 +437,7 @@ impl Shell {
                     self.project_tab(id);
                 }
             }
+            EngineEvent::FullscreenChanged { id, active } => self.on_fullscreen_changed(id, active),
             EngineEvent::PermissionRequested {
                 id,
                 profile,
@@ -672,7 +675,8 @@ impl Shell {
             | EngineEvent::Captured { id, .. }
             | EngineEvent::HtmlExtracted { id, .. }
             | EngineEvent::FindResult { id, .. } => self.profile_of_item(*id),
-            EngineEvent::MediaCaptureChanged { id, .. } => self.profile_of_item(*id),
+            EngineEvent::MediaCaptureChanged { id, .. }
+            | EngineEvent::FullscreenChanged { id, .. } => self.profile_of_item(*id),
             EngineEvent::PermissionRequested { profile, .. }
             | EngineEvent::WorkPageFavicon { profile, .. } => Some(*profile),
             EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),

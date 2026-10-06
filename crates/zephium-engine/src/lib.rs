@@ -1102,6 +1102,7 @@ impl RetirementGate {
             | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
             | event @ EngineEvent::MediaCaptureChanged { id, .. }
+            | event @ EngineEvent::FullscreenChanged { id, .. }
             | event @ EngineEvent::FaviconPixels { id, .. }
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }

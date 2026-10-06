@@ -34,11 +34,16 @@ impl Shell {
     /// A relayout that is one step of a deliberate change of shape, which
     /// the chrome and the content carry out as a journey.
     pub(super) fn relayout_with(&self, travel: bool) -> NativeDispatch {
+        let filling = self.window_filling_fullscreen();
         let Some(win) = self.windows.focused() else {
             return NativeDispatch::Rejected;
         };
         let browser_page_active = self.active_browser_page().is_some();
-        let tree = if browser_page_active {
+        // A window-filling fullscreen page stands alone; the split it belongs
+        // to is untouched and returns with the next layout after it.
+        let tree = if let Some(id) = filling {
+            Some(Pane::Leaf(id))
+        } else if browser_page_active {
             self.work_pane_tree()
         } else {
             self.pane_tree()
@@ -75,6 +80,9 @@ impl Shell {
         let work_pane = self.work_pane_layout(pane_admitted && present);
         if let Some(pane) = work_pane.as_ref().filter(|pane| pane.presented) {
             l.content = Some(Rect::new(pane.x, pane.y, pane.width, pane.height));
+        }
+        if filling.is_some() {
+            l.content = Some(Rect::new(0.0, 0.0, win.size.width, win.size.height));
         }
         // Raw native children still receive their final geometry while a
         // first navigation is provisional, but macOS must not shrink the
