@@ -30,7 +30,9 @@
         ? request.host
         : null,
   );
-  let openable = $derived(app ? app.app !== null : request.kind === "popup" && request.host !== null);
+  let openable = $derived(
+    app ? app.app !== null : request.kind === "popup" && request.host !== null,
+  );
 
   function answer(value: PageRequestAnswer) {
     void commands.tabsAnswerPageRequest(tab, value).catch(() => {});

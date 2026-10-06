@@ -20,8 +20,7 @@
   let space = $derived(tabs.activeSpaceId());
   $effect(() => {
     const profile = workProfile;
-    const current =
-      profile && space ? untrack(() => environmentSession(profile, space)) : null;
+    const current = profile && space ? untrack(() => environmentSession(profile, space)) : null;
     session = current;
     void current?.start(m.work_env_default_title());
     return () => current?.stopObserving();
