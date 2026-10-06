@@ -1203,7 +1203,12 @@ impl Store for FakeStore {
     }
 
     fn record_focus(&self, record: zephium_core::time::FocusRecord, _day: i64) -> bool {
-        if self.reject_focus_records.load(std::sync::atomic::Ordering::Acquire) { return false; }
+        if self
+            .reject_focus_records
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
         self.recorded_focus.lock().unwrap().push(record);
         true
     }
