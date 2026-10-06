@@ -54,6 +54,18 @@ export const notionEdit = running("confirm-notion", {
   },
 });
 
+export const typeSearch = running("confirm-type", {
+  kind: "confirm",
+  confirm: {
+    site: "collector.example",
+    category: "type",
+    headline: "Type on collector.example?",
+    action: "type into Search",
+    text: "aisle seat WAW-SFO",
+    run_option: true,
+  },
+});
+
 export const deleteRepo = running("confirm-delete", {
   kind: "confirm",
   confirm: {

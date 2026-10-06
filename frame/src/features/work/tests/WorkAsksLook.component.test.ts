@@ -60,6 +60,7 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     f.slackSend,
     f.airbnbBook,
     f.notionEdit,
+    f.typeSearch,
     f.deleteRepo,
     f.historyAsk,
     f.notesAsk,

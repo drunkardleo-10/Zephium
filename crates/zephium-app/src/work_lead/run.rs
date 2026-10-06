@@ -669,6 +669,17 @@ impl LeadRun {
         }
     }
 
+    /// Whether the person named this site or let the run work on it.
+    pub(crate) fn trusts(&self, site: &str) -> bool {
+        self.state().trusted_sites.iter().any(|known| known == site)
+    }
+    pub(crate) fn trust_site(&self, site: &str) {
+        let mut state = self.state();
+        if !state.trusted_sites.iter().any(|known| known == site) {
+            state.trusted_sites.push(site.to_owned());
+        }
+    }
+
     /// From here on an address the model writes itself may carry what it
     /// read, so `admit_address` holds the ones nobody gave it.
     pub(crate) fn mark_private(&self) {

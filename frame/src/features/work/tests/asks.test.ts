@@ -29,6 +29,11 @@ describe("asks", () => {
     expect(asksOf(f.runWith([plain as typeof f.addressAsk]))[0]?.kind).toBe("question");
   });
 
+  test("typing held on a site the person did not name reads as Type with the run option", () => {
+    const [ask] = asksOf(f.runWith([f.typeSearch]));
+    expect(ask).toMatchObject({ kind: "confirm", verb: "Type", runOption: true });
+  });
+
   test("a held step reads as a Confirm with the page's own words and the page's frame", () => {
     const [ask] = asksOf(f.runWith([f.airbnbBook]), [f.tripPage]);
     expect(ask).toMatchObject({

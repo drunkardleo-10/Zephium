@@ -2927,7 +2927,9 @@ export type WorkConfirmCategoryV1 =
 /**  Save or submit a change. */
 "save" | 
 /**  Type into a document that saves as it is typed. */
-"edit";
+"edit" | 
+/**  Type into a site the person did not name, in a run holding their data. */
+"type";
 
 export type WorkConfirmDecisionV1 = "approved" | 
 /**  Approved, and later edits on this site in this run need no question. */

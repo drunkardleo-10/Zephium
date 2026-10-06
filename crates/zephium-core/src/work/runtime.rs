@@ -1388,6 +1388,8 @@ pub enum WorkConfirmCategoryV1 {
     Save,
     /// Type into a document that saves as it is typed.
     Edit,
+    /// Type into a site the person did not name, in a run holding their data.
+    Type,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1455,7 +1457,11 @@ impl WorkConfirmV1 {
         }
         if self.facts.len() > MAX_WORK_CONFIRM_FACTS
             || self.provenance.len() > MAX_WORK_CONFIRM_SITES
-            || (self.run_option && self.category != WorkConfirmCategoryV1::Edit)
+            || (self.run_option
+                && !matches!(
+                    self.category,
+                    WorkConfirmCategoryV1::Edit | WorkConfirmCategoryV1::Type
+                ))
             || (self.decision == Some(WorkConfirmDecisionV1::AllowedForRun) && !self.run_option)
         {
             return Err(WorkError::Invalid);

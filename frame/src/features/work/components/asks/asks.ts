@@ -185,6 +185,8 @@ export function confirmVerb(category: WorkConfirmCategoryV1, action: string): st
     case "save":
     case "edit":
       return "Save";
+    case "type":
+      return "Type";
   }
 }
 

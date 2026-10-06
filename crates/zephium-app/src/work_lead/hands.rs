@@ -355,6 +355,21 @@ where
         if let Some(status) = self.enter_sites(&mut driver, &requests).await {
             return Err(status);
         }
+        // Typing could carry what the run read to a site the person did not
+        // name, so on those sites each field waits for them.
+        let private = self.run.is_private();
+        driver.hold_typing(
+            requests
+                .iter()
+                .filter_map(|request| match &request.kind {
+                    WorkStepKindV1::Read {
+                        url, goal: Some(_), ..
+                    } if private => crate::work_sites::site_of(url),
+                    _ => None,
+                })
+                .filter(|site| !self.run.trusts(site))
+                .collect(),
+        );
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
             let lane = match &request.step {
                 WorkStepKindV1::Read {
@@ -395,6 +410,9 @@ where
                 kinds,
             )
             .await;
+        for site in driver.take_typing_allowed() {
+            self.run.trust_site(&site);
+        }
         let used = driver.used();
         let notices = driver.take_notices();
         {
