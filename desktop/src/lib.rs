@@ -3709,6 +3709,23 @@ fn resource_close_ready(caller: WebviewWindow, token: String, success: bool) -> 
         && resource_close::complete(caller.label(), &token, success)
 }
 
+/// How long a resource call waits for an admission permit. A typing pause
+/// in several views at once queues briefly instead of failing; a call that
+/// still cannot start is refused before it has touched anything.
+const RESOURCE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The whole call, admission included, inside the frame's own deadline.
+const RESOURCE_CALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+
+async fn admit(
+    admission: &'static tokio::sync::Semaphore,
+    wait: std::time::Duration,
+) -> Option<tokio::sync::SemaphorePermit<'static>> {
+    tokio::time::timeout(wait, admission.acquire())
+        .await
+        .ok()?
+        .ok()
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn resource_call(
@@ -3738,7 +3755,8 @@ async fn resource_call(
     };
     let shell = app.state::<Handle>().inner().clone();
     static RESOURCE_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-    let Ok(permit) = RESOURCE_ADMISSION.try_acquire() else {
+    let deadline = tokio::time::Instant::now() + RESOURCE_CALL_DEADLINE;
+    let Some(permit) = admit(&RESOURCE_ADMISSION, RESOURCE_ADMISSION_WAIT).await else {
         return failed(ResourceError::Capacity);
     };
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -3779,7 +3797,7 @@ async fn resource_call(
     }) {
         return failed(ResourceError::Unavailable);
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
+    match tokio::time::timeout_at(deadline, receive).await {
         Ok(Ok(reply)) => reply,
         _ => failed(ResourceError::OutcomeUnknown),
     }
@@ -6542,6 +6560,22 @@ mod tests {
             outcome: OperationOutcome::Applied,
             reason: OperationReason::ProfileDeletionCompleted,
         }
+    }
+
+    #[tokio::test]
+    async fn a_resource_call_waits_briefly_for_admission_instead_of_failing() {
+        use std::time::Duration;
+        static GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let held = super::admit(&GATE, Duration::from_millis(10))
+            .await
+            .unwrap();
+        assert!(super::admit(&GATE, Duration::from_millis(20))
+            .await
+            .is_none());
+        let waiting = tokio::spawn(super::admit(&GATE, Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(held);
+        assert!(waiting.await.unwrap().is_some());
     }
 
     #[test]
