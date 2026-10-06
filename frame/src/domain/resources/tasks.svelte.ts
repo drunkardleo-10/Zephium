@@ -77,6 +77,9 @@ export type TaskInput = {
   list?: string | null;
   inbox?: boolean;
   priority?: TaskPriority;
+  /** The capture field as it read when this was submitted, when it has been
+   *  emptied since. */
+  draft?: string;
 };
 
 /** What a reversible action did, so a surface can offer to take it back. */
@@ -658,7 +661,7 @@ export class TaskSession {
     };
     this.#creation = {
       input: { ...input, title },
-      draft: this.captureDraft,
+      draft: input.draft ?? this.captureDraft,
       error: null,
       command: { version: 1, request_id: crypto.randomUUID(), intent: { kind: "create", draft } },
     };
@@ -1023,9 +1026,15 @@ export class TaskSession {
   /** Another host or actor changed a task. Fetch just that task rather than
    *  reloading every loaded page; a search needs native's matching, so reloads. */
   #observe(id: string, revision: string) {
-    const known = this.items.find((item) => item.id === id);
+    const known = this.#index.get(id);
     if (known && !newerRevision(revision, known.revision)) return;
     if (this.#chain.has(id)) return;
+    // A task created here is announced before its reply arrives, and the reply
+    // carries the record; only what is still unknown after it needs reading.
+    if (!known && this.#creating) {
+      void this.#creating.then(() => this.#observe(id, revision));
+      return;
+    }
     if (!known && this.query.trim()) {
       this.#scheduleRefresh();
       return;

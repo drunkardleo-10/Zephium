@@ -455,3 +455,35 @@ test("typing in a task says nothing about saving unless a save is slow", async (
   release();
   await expect.poll(() => status.textContent).toBe("");
 });
+
+test("the capture field keeps focus and keys while a task is being created", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000028";
+  const made = server(profile);
+  let release!: () => void;
+  let fail = false;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  native.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate") {
+      await gate;
+      if (fail) return { profile, response: { kind: "error", error: "unavailable" } };
+    }
+    return made.call(owner, call);
+  });
+  const screen = await render(TaskHost, { profile, scope: "all" });
+  const field = screen.getByRole("textbox", { name: "New task", exact: true });
+  await field.click();
+  await userEvent.keyboard("Water the plants{Enter}Feed");
+  await expect.element(field).toHaveValue("Feed");
+  await expect.element(field).toBeEnabled();
+  await expect.element(field).toHaveFocus();
+  release();
+  await expect.poll(() => tasks(made.records)).toEqual(["Water the plants"]);
+  await expect.element(field).toHaveValue("Feed");
+
+  // A capture that fails gives its words back to an empty field.
+  fail = true;
+  await userEvent.keyboard(" the cat{Enter}");
+  await expect.element(field).toHaveValue("Feed the cat");
+  expect(tasks(made.records)).toEqual(["Water the plants"]);
+});

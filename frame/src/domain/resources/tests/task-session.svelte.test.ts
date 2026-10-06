@@ -1,13 +1,23 @@
 import { expect, test, vi } from "vitest";
 import type { ResourceSummary } from "$shared/ipc/bindings";
 
-const host = vi.hoisted(() => ({ call: vi.fn() }));
+const host = vi.hoisted(() => ({
+  call: vi.fn(),
+  changed: null as null | ((event: { payload: unknown }) => void),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ resourceCall: host.call });
 });
 vi.mock("$shared/ipc/native-events", () => ({
-  events: { resourceChanged: { listen: async () => () => {} } },
+  events: {
+    resourceChanged: {
+      listen: async (listener: typeof host.changed) => {
+        host.changed = listener;
+        return () => {};
+      },
+    },
+  },
 }));
 
 const profile = "00000000000000000000000001";
@@ -361,5 +371,54 @@ test("a task reads as saving only while a write to it is on its way", async () =
   release();
   await done;
   expect(session.saving(id)).toBe(false);
+  session.stop();
+});
+
+test("a task announced while its own creation is in flight is not read again", async () => {
+  const { resourceTestServer } = await import("$shared/testing/resources/server");
+  const { TaskSession } = await import("../tasks.svelte");
+  const server = resourceTestServer(profile);
+  const reads: string[] = [];
+  host.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "get") reads.push(call.id);
+    const reply = await server.call(owner, call);
+    if (call.kind === "mutate" && reply.response.kind === "applied") {
+      const { id, revision } = reply.response.record;
+      // Native announces the write before the reply reaches the caller.
+      host.changed?.({ payload: { profile, kind: "task", id, revision } });
+      await settled();
+    }
+    return reply;
+  });
+  const session = new TaskSession(profile);
+  await session.start();
+  await session.create({ title: "Announced" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(reads).toEqual([]);
+  expect(session.items.map((item) => item.title)).toEqual(["Announced"]);
+  session.stop();
+});
+
+test("a capture that fails keeps the words it was sent with for its retry", async () => {
+  const { resourceTestServer } = await import("$shared/testing/resources/server");
+  const { TaskSession } = await import("../tasks.svelte");
+  const server = resourceTestServer(profile);
+  let fail = true;
+  host.call.mockImplementation(async (owner, call) =>
+    call.kind === "mutate" && fail
+      ? { profile, response: { kind: "error", error: "unavailable" } }
+      : server.call(owner, call),
+  );
+  const session = new TaskSession(profile);
+  await session.start();
+  // The composer empties its field as it sends, and gives the words back on failure.
+  const saving = session.create({ title: "Buy milk", draft: "Buy milk" });
+  session.captureDraft = "";
+  expect(await saving).toBeNull();
+  session.captureDraft = "Buy milk";
+  fail = false;
+  await session.retry();
+  expect(server.records.size).toBe(1);
+  expect(session.captureDraft).toBe("");
   session.stop();
 });
