@@ -6,7 +6,7 @@
   import { createVirtualWindow } from "$shared/lib/virtual-window.svelte";
   import { createPointerDrag } from "$shared/lib/pointer-drag.svelte";
   import { reorderKeys } from "../lib/task-order";
-  import { sections, type SectionKey, type TaskScope } from "../lib/task-sections";
+  import { createSections, type SectionKey, type TaskScope } from "../lib/task-sections";
   import { today as currentDay, watchToday } from "../lib/today.svelte";
   import Icon from "$shared/ui/Icon";
   import { ArrowRight01Icon } from "@hugeicons/core-free-icons";
@@ -85,6 +85,7 @@
   $effect(() => watchToday());
 
   let searching = $derived(query.trim().length > 0);
+  const sections = createSections();
   let grouped = $derived(
     sections(rows, {
       // A search answers "where is it", which a scope must not veto.

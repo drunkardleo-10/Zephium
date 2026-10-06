@@ -507,3 +507,18 @@ test("hiding the window saves a title being typed at once", async () => {
     delete (document as { visibilityState?: unknown }).visibilityState;
   }
 });
+
+test("the list behind an open task catches up once it is shown again", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000031";
+  const made = server(profile);
+  seed(made.records, "Draft memo", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Draft memo").click();
+  const title = screen.getByRole("textbox", { name: "Rename", exact: true });
+  await title.fill("Draft the memo");
+  // Hidden, the list is not regrouped for every key.
+  expect(screen.container.querySelector(".task-label")?.textContent).toBe("Draft memo");
+  await screen.getByRole("button", { name: "Back to tasks" }).click();
+  await expect.element(screen.getByText("Draft the memo")).toBeVisible();
+});

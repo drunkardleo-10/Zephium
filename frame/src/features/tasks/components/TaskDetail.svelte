@@ -99,77 +99,81 @@
   const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 
   const slow = lagging(() => saving);
-  let current = $derived(STATES.find((entry) => entry.id === task?.status) ?? STATES[0]!);
+  // Each property is read out of the task on its own, so typing a title
+  // rebuilds none of the menus, labels or dates below it.
+  let status = $derived<TaskStatus>(task?.status ?? "open");
+  let priority = $derived<TaskPriority>(task?.priority ?? "none");
+  let duration = $derived(task?.duration ?? null);
+  let inbox = $derived(task?.inbox ?? false);
+  let list = $derived(task?.list ?? null);
+  let createdAt = $derived(task?.createdAt ?? null);
+  let completedAt = $derived(task?.completedAt ?? null);
+
+  let current = $derived(STATES.find((entry) => entry.id === status) ?? STATES[0]!);
   let listTitle = $derived(
-    task?.inbox
+    inbox
       ? m.task_scope_inbox()
-      : (lists.find((list) => list.id === task?.list)?.title ?? m.task_no_list()),
+      : (lists.find((entry) => entry.id === list)?.title ?? m.task_no_list()),
   );
   let footnote = $derived.by(() => {
-    if (!task) return "";
     const parts: string[] = [];
-    if (task.createdAt)
-      parts.push(m.task_added({ date: dateFormat.format(Number(task.createdAt) * 1000) }));
-    if (task.status === "done" && task.completedAt)
-      parts.push(m.task_completed_on({ date: dateFormat.format(Number(task.completedAt) * 1000) }));
+    if (createdAt) parts.push(m.task_added({ date: dateFormat.format(Number(createdAt) * 1000) }));
+    if (status === "done" && completedAt)
+      parts.push(m.task_completed_on({ date: dateFormat.format(Number(completedAt) * 1000) }));
     return parts.join(" · ");
   });
 
-  function statusEntries(current: TaskStatus): MenuEntry[] {
-    return STATES.map((entry) => ({
+  let statusMenu: MenuEntry[] = $derived(
+    STATES.map((entry) => ({
       kind: "item",
       id: entry.id,
       label: entry.label(),
       icon: entry.icon,
-      checked: entry.id === current,
-    }));
-  }
-  function listEntries(row: TaskRow): MenuEntry[] {
-    return [
-      {
-        kind: "item",
-        id: "inbox",
-        label: m.task_scope_inbox(),
-        icon: InboxIcon,
-        checked: row.inbox,
-      },
-      {
-        kind: "item",
-        id: "none",
-        label: m.task_no_list(),
-        checked: !row.inbox && row.list === null,
-      },
-      ...(lists.length ? [{ kind: "separator" as const }] : []),
-      ...lists.map((list) => ({
-        kind: "item" as const,
-        id: list.id,
-        label: list.title,
-        icon: Folder01Icon,
-        checked: row.list === list.id,
-      })),
-    ];
-  }
-  function priorityEntries(current: TaskPriority): MenuEntry[] {
-    return PRIORITIES.map((entry) => ({
+      checked: entry.id === status,
+    })),
+  );
+  let listMenu: MenuEntry[] = $derived([
+    {
+      kind: "item",
+      id: "inbox",
+      label: m.task_scope_inbox(),
+      icon: InboxIcon,
+      checked: inbox,
+    },
+    {
+      kind: "item",
+      id: "none",
+      label: m.task_no_list(),
+      checked: !inbox && list === null,
+    },
+    ...(lists.length ? [{ kind: "separator" as const }] : []),
+    ...lists.map((entry) => ({
+      kind: "item" as const,
+      id: entry.id,
+      label: entry.title,
+      icon: Folder01Icon,
+      checked: list === entry.id,
+    })),
+  ]);
+  let priorityMenu: MenuEntry[] = $derived(
+    PRIORITIES.map((entry) => ({
       kind: "item",
       id: entry.id,
       label: entry.label(),
       icon: PRIORITY_ICON[entry.id],
-      checked: entry.id === current,
-    }));
-  }
-  function estimateEntries(current: number | null): MenuEntry[] {
-    return [
-      ...ESTIMATES.map((minutes) => ({
-        kind: "item" as const,
-        id: String(minutes),
-        label: durationLabel(minutes, DURATION_LABELS),
-        checked: current === minutes,
-      })),
-      { kind: "separator" },
-      { kind: "item", id: "none", label: m.task_duration_clear(), checked: current === null },
-    ];
-  }
+      checked: entry.id === priority,
+    })),
+  );
+  let estimateMenu: MenuEntry[] = $derived([
+    ...ESTIMATES.map((minutes) => ({
+      kind: "item" as const,
+      id: String(minutes),
+      label: durationLabel(minutes, DURATION_LABELS),
+      checked: duration === minutes,
+    })),
+    { kind: "separator" },
+    { kind: "item", id: "none", label: m.task_duration_clear(), checked: duration === null },
+  ]);
 
   // Unmounting a focused field fires no blur, so closing the task, or moving
   // to another, settles its typing here.
@@ -233,7 +237,7 @@
       {#snippet statusValue()}<Menu
           label={m.task_status_label()}
           triggerClass="property-value"
-          entries={statusEntries(row.status)}
+          entries={statusMenu}
           onselect={(id) => ontoggle(row.id, id as TaskStatus)}
           >{#snippet trigger()}<span class="state-value" data-status={row.status}
               ><Icon icon={current.icon} size={14} />{current.label()}</span
@@ -288,7 +292,7 @@
       {#snippet durationValue()}<Menu
           label={m.task_duration()}
           triggerClass="property-value"
-          entries={estimateEntries(row.duration)}
+          entries={estimateMenu}
           onselect={(id) => onduration(row.id, id === "none" ? null : Number(id))}
           >{#snippet trigger()}<span data-empty={row.duration === null}
               >{row.duration
@@ -301,7 +305,7 @@
       {#snippet listValue()}<Menu
           label={m.task_organization()}
           triggerClass="property-value"
-          entries={listEntries(row)}
+          entries={listMenu}
           onselect={(id) =>
             onorganize(row.id, id === "inbox" || id === "none" ? null : id, id === "inbox")}
           >{#snippet trigger()}<span>{listTitle}</span>{/snippet}</Menu
@@ -311,7 +315,7 @@
       {#snippet priorityValue()}<Menu
           label={m.task_priority()}
           triggerClass="property-value"
-          entries={priorityEntries(row.priority)}
+          entries={priorityMenu}
           onselect={(id) => onpriority(row.id, id as TaskPriority)}
           >{#snippet trigger()}<span data-empty={row.priority === "none"}
               >{PRIORITIES.find((entry) => entry.id === row.priority)!.label()}</span
