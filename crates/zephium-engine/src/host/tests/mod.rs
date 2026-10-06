@@ -839,7 +839,7 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
         "/src/host/construction.rs"
     ));
     let raw_policy = raw_view_construction_policy();
-    assert!(raw_policy.contains("with_fullscreen_enabled(false)"));
+    assert!(raw_policy.contains("with_fullscreen_enabled(true)"));
     // Picture-in-picture is a per-view grant for tabs a person reads, never
     // inherited from the chrome's compiled features.
     assert!(raw_policy.contains("with_picture_in_picture_enabled(true)"));
@@ -936,6 +936,43 @@ fn windows_raw_autofill_surfaces_are_mandatory_verified_postconditions() {
             "raw WebView2 autofill postcondition lost invariant: {required}"
         );
     }
+}
+
+#[test]
+fn only_tabs_a_person_reads_may_take_element_fullscreen() {
+    let raw_policy = raw_view_construction_policy();
+    assert_eq!(raw_policy.matches("with_fullscreen_enabled(").count(), 1);
+    assert!(raw_policy.contains("with_fullscreen_enabled(true)"));
+    // Every other native view in the engine keeps it off explicitly; wry's
+    // default follows Cargo features, not page authority.
+    let sources = [
+        include_str!("../construction.rs"),
+        include_str!("../webext_windows.rs"),
+        include_str!("../../platform/macos/agent_context.rs"),
+        include_str!("../../platform/windows/agent_context.rs"),
+        include_str!("../../platform/windows/agentic_semantic_probe.rs"),
+        include_str!("../../platform/windows/agentic_input_probe.rs"),
+    ];
+    let enabled: usize = sources
+        .iter()
+        .map(|source| source.matches("with_fullscreen_enabled(true)").count())
+        .sum();
+    assert_eq!(enabled, 1);
+    for source in &sources[1..] {
+        assert!(source.contains("with_fullscreen_enabled(false)"));
+    }
+    let wry = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vendor/wry/src/wkwebview/mod.rs"
+    ));
+    assert!(wry.contains("_preference.setElementFullscreenEnabled(attributes.fullscreen_enabled)"));
+    let macos_preference = wry
+        .split_once("_preference.setElementFullscreenEnabled(")
+        .expect("public element fullscreen preference")
+        .0;
+    assert!(macos_preference
+        .rsplit_once("#[cfg(")
+        .is_some_and(|(_, cfg)| cfg.starts_with("target_os = \"macos\")")));
 }
 
 #[test]

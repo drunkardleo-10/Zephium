@@ -1019,11 +1019,12 @@ impl EngineHost {
             // privileged chrome and agent views never can.
             .with_devtools(true)
             .with_autoplay(false)
-            // Tauri's macos-private-api feature enables Wry's fullscreen
-            // support through Cargo feature unification. Raw child views must
-            // override both native media surfaces per view; compile-time
-            // availability is not page authority.
-            .with_fullscreen_enabled(false)
+            // A tab a person reads may take the screen for its video, as in
+            // any browser; the host observes every transition and the shell
+            // exits it whenever the tab stops being the one on screen. Other
+            // views (extensions, agents, Work) keep it off per view: Cargo
+            // feature unification makes compile-time support no page grant.
+            .with_fullscreen_enabled(true)
             // A playing video may float above other apps; pages that play
             // are not suspended, so it keeps going while its tab sleeps.
             .with_picture_in_picture_enabled(true)
