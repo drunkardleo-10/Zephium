@@ -60,7 +60,7 @@ test("a new note has no file until it has something in it, then exactly one", as
   await session.create();
   session.edit("# Groceries");
   session.edit("# Groceries\n\nMilk");
-  await settle(700);
+  await settle(1300);
   expect(server.writes().map((call) => call.kind)).toEqual(["create"]);
   expect(session.note?.id).toBeTruthy();
   expect(session.items[0]?.title).toBe("Groceries");
@@ -78,7 +78,7 @@ test("typing saves after a pause, and at least every few seconds while it goes o
   const during = server.writes().length;
   expect(during).toBeGreaterThanOrEqual(1);
   expect(during).toBeLessThanOrEqual(3);
-  await settle(700);
+  await settle(1300);
   expect(server.notes.get(note.id)?.markdown).toBe(`# Plans\n\n${"a".repeat(20)}`);
   expect(session.saveState).toBe("saved");
 });
@@ -109,7 +109,7 @@ test("the browser's own saves do not reload the editor", async () => {
   await session.open(note.id);
   const version = session.note!.version;
   session.edit("# Mine\n\nTyped here");
-  await settle(700);
+  await settle(1300);
   await settle(200);
   expect(session.note!.version).toBe(version);
 });
@@ -120,7 +120,7 @@ test("a save that meets another app's change keeps both until one is chosen", as
   await session.open(note.id);
   session.edit("# Draft\n\nmine");
   server.editOnDisk(note.id, "# Draft\n\ntheirs");
-  await settle(700);
+  await settle(1300);
   expect(session.saveState).toBe("conflict");
   expect(session.conflict?.markdown).toBe("# Draft\n\ntheirs");
   expect(server.notes.get(note.id)?.markdown).toBe("# Draft\n\ntheirs");
@@ -136,7 +136,7 @@ test("choosing the other version replaces the editor's text", async () => {
   await session.open(note.id);
   session.edit("# Draft\n\nmine");
   server.editOnDisk(note.id, "# Draft\n\ntheirs");
-  await settle(700);
+  await settle(1300);
   await session.resolve("theirs");
   expect(session.note?.source).toBe("# Draft\n\ntheirs");
   expect(session.saveState).toBe("saved");
@@ -148,8 +148,8 @@ test("text whose file disappeared is saved as a new note", async () => {
   await session.open(note.id);
   session.edit("# Doomed\n\nstill typing");
   server.removeOnDisk(note.id);
-  await settle(700);
-  await settle(700);
+  await settle(1300);
+  await settle(1300);
   const saved = [...server.notes.values()].find((stored) =>
     stored.markdown.includes("still typing"),
   );
@@ -171,7 +171,7 @@ test("an unknown outcome is retried with the same request, never duplicated", as
     return reply;
   };
   session.edit("# Once\n");
-  await settle(700);
+  await settle(1300);
   expect(session.saveState).toBe("retrying");
   await settle(2000);
   const creates = server.calls.filter((call) => call.kind === "create");
@@ -220,7 +220,7 @@ test("its own saves cost no listing and no link lookups", async () => {
   const before = server.calls.filter((call) => call.kind !== "write").length;
   for (let tick = 1; tick <= 5; tick++) {
     session.edit(`# Plans\n\nSee [[Roadmap]] ${tick}`);
-    await settle(700);
+    await settle(1300);
   }
   expect(server.writes().length).toBe(5);
   expect(server.calls.filter((call) => call.kind !== "write")).toHaveLength(before);
@@ -233,7 +233,7 @@ test("its own saves cost no listing and no link lookups", async () => {
   await session.resolveTargets(["Plans", "Roadmap"]);
   const retitled = server.calls.length;
   session.edit("# Roadmap notes\n\nSee [[Roadmap]]");
-  await settle(900);
+  await settle(1300);
   const since = server.calls.length;
   await session.resolveTargets(["Roadmap"]);
   expect(server.calls.length).toBe(since);
@@ -247,9 +247,9 @@ test("a retitled file takes its new name once the title settles", async () => {
   const note = server.seed("# Draft\n");
   await session.open(note.id);
   session.edit("# Fin\n");
-  await settle(700);
+  await settle(1300);
   session.edit("# Final\n");
-  await settle(700);
+  await settle(1300);
   expect(server.writes().every((call) => call.kind === "write" && !call.settle)).toBe(true);
   expect(server.notes.get(note.id)?.summary.path).toBe("Draft.md");
   await settle(5000);
@@ -272,8 +272,22 @@ test("a note's first save is not mistaken for someone else's new note", async ()
   await session.create();
   const before = server.calls.length;
   session.edit("# Groceries\n");
-  await settle(700);
+  await settle(1300);
   await settle(200);
   expect(server.calls.slice(before).map((call) => call.kind)).toEqual(["create", "backlinks"]);
   expect(session.items[0]?.title).toBe("Groceries");
+});
+
+test("a pause shorter than a breath is not yet a save", async () => {
+  const session = await started();
+  const note = server.seed("# Pace\n");
+  await session.open(note.id);
+  session.edit("# Pace\n\nOne");
+  await settle(800);
+  expect(server.writes()).toEqual([]);
+  session.edit("# Pace\n\nOne two");
+  await settle(800);
+  expect(server.writes()).toEqual([]);
+  await settle(500);
+  expect(server.writes()).toHaveLength(1);
 });

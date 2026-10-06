@@ -198,3 +198,21 @@ test("typing that saves promptly does not flash a saving status", async () => {
   watch.disconnect();
   expect(seen.filter((entry) => entry.includes("Saving"))).toEqual([]);
 });
+
+test("hiding the window saves the open note at once", async () => {
+  await page.viewport(1440, 900);
+  const { screen, server } = await setup();
+  await screen.getByRole("option", { name: /^Weekly review/u }).click();
+  const text = screen.getByRole("textbox", { name: "Note" });
+  await text.getByText("What moved, what stalled, what to drop.").click();
+  await userEvent.keyboard("{End} Hidden.");
+  const id = [...server.notes.values()].find((note) => note.summary.title === "Weekly review")!
+    .summary.id;
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+  try {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await expect.poll(() => server.notes.get(id)?.markdown, { timeout: 500 }).toContain("Hidden.");
+  } finally {
+    delete (document as { visibilityState?: unknown }).visibilityState;
+  }
+});

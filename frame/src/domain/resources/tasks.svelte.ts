@@ -25,9 +25,10 @@ import type {
 const PAGE_SIZE = 100;
 const SEARCH_DEBOUNCE_MS = 180;
 const REFRESH_DEBOUNCE_MS = 100;
-/** Long enough that ordinary typing commits once, short enough that closing the
- *  panel mid-sentence has almost always already saved. */
-const TEXT_DEBOUNCE_MS = 400;
+/** A pause long enough to be the end of a thought rather than of a word.
+ *  Leaving the field, the task or the window saves at once, so closing
+ *  mid-sentence never waits on it. */
+const TEXT_DEBOUNCE_MS = 1000;
 const UNDO_DEPTH = 16;
 /** A busy or unanswered write is sent again after each of these. Short, so a
  *  closing window still sees it settle. */
@@ -1180,10 +1181,22 @@ export async function taskLists(profile: string, today: string): Promise<TaskLis
 }
 
 const sessions = new SvelteMap<string, TaskSession>();
+let watching = false;
+/** A hidden window may be closed or suspended without another chance to
+ *  save, so what is being typed is saved as it hides. */
+function watchVisibility() {
+  if (watching || typeof document === "undefined") return;
+  watching = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "hidden") return;
+    for (const session of sessions.values()) session.commitText();
+  });
+}
 export function taskSession(profile: string, host: string): TaskSession {
   const key = `${profile}:${host}`;
   const existing = sessions.get(key);
   if (existing) return existing;
+  watchVisibility();
   // Never evict an active session or an unresolved user edit to satisfy a cache cap.
   // Built under its own root: a session outlives the view that first asked for
   // it, and deriveds created during that view's setup would die with it.

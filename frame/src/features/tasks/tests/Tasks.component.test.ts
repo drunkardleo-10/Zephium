@@ -487,3 +487,23 @@ test("the capture field keeps focus and keys while a task is being created", asy
   await expect.element(field).toHaveValue("Feed the cat");
   expect(tasks(made.records)).toEqual(["Water the plants"]);
 });
+
+test("hiding the window saves a title being typed at once", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000029";
+  const made = server(profile);
+  const id = seed(made.records, "Plan", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Plan").click();
+  const title = screen.getByRole("textbox", { name: "Rename", exact: true });
+  await title.fill("Plan the trip");
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+  try {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await expect
+      .poll(() => made.records.get(id)!.draft.title, { timeout: 500 })
+      .toBe("Plan the trip");
+  } finally {
+    delete (document as { visibilityState?: unknown }).visibilityState;
+  }
+});

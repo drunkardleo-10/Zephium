@@ -491,3 +491,19 @@ test("a capture that fails keeps the words it was sent with for its retry", asyn
   expect(session.captureDraft).toBe("");
   session.stop();
 });
+
+test("a short pause mid-sentence is not yet a save", async () => {
+  const { session, id } = await editingSession("Write");
+  const sent = recordMutations();
+  vi.useFakeTimers();
+  session.rename(id, "Write the");
+  await vi.advanceTimersByTimeAsync(600);
+  expect(sent).toEqual([]);
+  session.rename(id, "Write the report");
+  await vi.advanceTimersByTimeAsync(600);
+  expect(sent).toEqual([]);
+  await vi.advanceTimersByTimeAsync(500);
+  vi.useRealTimers();
+  expect(sent).toEqual(["update_task"]);
+  session.stop();
+});

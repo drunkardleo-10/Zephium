@@ -11,8 +11,9 @@ import { registerCloseTask } from "$shared/lib/close";
 import { blank, outline } from "./outline";
 import { noteCall } from "./transport";
 
-/** Typing pauses this long before a save. */
-const SAVE_IDLE = 600;
+/** Typing pauses this long before a save. Leaving the note or the window
+ *  saves at once. */
+const SAVE_IDLE = 1200;
 /** Continuous typing still saves at least this often. */
 const SAVE_LONGEST = 4000;
 const RETRY_DELAYS = [1500, 4000, 10_000, 30_000];
