@@ -4785,6 +4785,7 @@ fn build_menu(
         .item(&appearance)
         .separator()
         .item(&item("url.focus")?)
+        .item(&item("page.devtools")?)
         .build()?;
     let history = SubmenuBuilder::new(handle, "History")
         .item(&item("nav.back")?)

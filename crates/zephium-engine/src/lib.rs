@@ -2706,6 +2706,10 @@ impl Engine for WebviewEngine {
         self.run_for_active_item(id, move |h| h.print(id))
     }
 
+    fn open_devtools(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.open_devtools(id))
+    }
+
     fn open_external_app(&self, url: &str) -> NativeDispatch {
         if zephium_core::navigation::external_app_link(url).is_none() {
             return NativeDispatch::Rejected;

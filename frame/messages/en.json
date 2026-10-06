@@ -217,6 +217,7 @@
   "command_note_new": "New note",
   "command_split_choose": "Split view",
   "command_page_print": "Print",
+  "command_page_devtools": "Developer Tools",
   "command_tab_close": "Close tab",
   "command_page_copy_link": "Copy link",
   "command_sidebar_compact": "Compact mode",

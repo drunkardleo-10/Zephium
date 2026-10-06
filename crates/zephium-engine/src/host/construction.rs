@@ -1013,7 +1013,9 @@ impl EngineHost {
             // WebView2 warm spares; focus is granted only by explicit user
             // interaction with a presented content view.
             .with_focused(false)
-            .with_devtools(cfg!(debug_assertions))
+            // Pages a person reads can be inspected, as in any browser; the
+            // privileged chrome and agent views never can.
+            .with_devtools(true)
             .with_autoplay(false)
             // Tauri's macos-private-api feature enables Wry's fullscreen
             // support through Cargo feature unification. Raw child views must

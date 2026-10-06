@@ -768,6 +768,10 @@ pub trait Engine {
     /// None clears the profile; this never closes an active page.
     fn forget_discarded_state(&self, _profile: ProfileId, _item: Option<ItemId>) {}
     fn print(&self, id: ItemId) -> NativeDispatch;
+    /// Opens the page's own inspector. Browser chrome is never inspectable.
+    fn open_devtools(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Rejected
+    }
     /// Hands an application link the person allowed to the system.
     fn open_external_app(&self, _url: &str) -> NativeDispatch {
         NativeDispatch::Rejected

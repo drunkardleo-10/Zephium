@@ -176,6 +176,12 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::View,
     ),
     command(
+        "page.devtools",
+        "Developer Tools",
+        split("CmdOrCtrl+Alt+I", "Ctrl+Shift+I"),
+        Group::View,
+    ),
+    command(
         "url.focus",
         "Open Location",
         Keys::same("CmdOrCtrl+L"),

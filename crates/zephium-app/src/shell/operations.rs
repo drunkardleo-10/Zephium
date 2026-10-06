@@ -877,6 +877,14 @@ impl Shell {
                     mutation_result(native)
                 },
             ),
+            "page.devtools" => active.map_or_else(
+                || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
+                |id| {
+                    let mut native = NativeWork::default();
+                    native.record(self.engine.open_devtools(id));
+                    mutation_result(native)
+                },
+            ),
             "zoom.in" => self.operation_adjust_zoom(Some(0.1)),
             "zoom.out" => self.operation_adjust_zoom(Some(-0.1)),
             "zoom.reset" => self.operation_adjust_zoom(None),

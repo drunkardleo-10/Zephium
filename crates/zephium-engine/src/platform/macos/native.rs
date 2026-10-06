@@ -291,7 +291,7 @@ pub fn configure(
         }
     }
 
-    unsafe { wk.setInspectable(cfg!(debug_assertions)) };
+    unsafe { wk.setInspectable(true) };
     let view: &NSView = &wk;
     // Fill the assigned region and follow window resize in AppKit's layout pass.
     view.setTranslatesAutoresizingMaskIntoConstraints(true);
