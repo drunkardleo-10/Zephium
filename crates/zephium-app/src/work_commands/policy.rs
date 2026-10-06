@@ -479,6 +479,16 @@ fn simple(args: &[String]) -> (Class, Reason) {
     {
         return (Class::Read, Reason::Inspection);
     }
+    // Inline code is a program nobody reviewed; the folder approval for
+    // builds and tests does not extend to it.
+    if (matches!(p, "python" | "python3" | "ruby" | "perl")
+        && a.iter().any(|s| matches!(*s, "-c" | "-e" | "-E")))
+        || (matches!(p, "node" | "bun" | "deno")
+            && a.iter()
+                .any(|s| matches!(*s, "-e" | "-p" | "--eval" | "--print")))
+    {
+        return ask(Reason::ShellSyntax);
+    }
     if matches!(
         p,
         "cargo"
@@ -571,7 +581,7 @@ fn simple(args: &[String]) -> (Class, Reason) {
     if matches!(p, "mkdir" | "cp" | "mv" | "touch" | "cd") {
         return write(Reason::FileChange);
     }
-    write(Reason::UnknownProgram)
+    ask(Reason::UnknownProgram)
 }
 
 #[cfg(test)]
@@ -678,7 +688,6 @@ mod tests {
             "cat < a",
         ];
         let writes = [
-            "env",
             "cargo check",
             "cargo test",
             "cargo build",
@@ -724,7 +733,8 @@ mod tests {
             "mv a b",
             "touch a",
             "sed -i s/a/b/ a",
-            "custom",
+            "python3 script.py",
+            "node build.js",
             "echo hi > a",
             "cat a >> b",
             "sort -o b a",
@@ -736,6 +746,12 @@ mod tests {
             "cargo test || echo failed",
         ];
         let asks = [
+            "custom",
+            "env",
+            "python3 -c 'import os'",
+            "node -e 'fetch(1)'",
+            "node --eval x",
+            "perl -e x",
             "curl example.com",
             "wget example.com",
             "ssh host",
