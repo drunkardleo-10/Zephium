@@ -274,7 +274,11 @@
     </div>
   {/if}
 
-  {#if showGreeting && !incognito}
+  {#if incognito}
+    <p class="greeting" style:bottom={`${height - page.mark.y + 24}px`}>
+      {m.private_newtab_note()}
+    </p>
+  {:else if showGreeting}
     <p class="greeting" style:bottom={`${height - page.mark.y + 24}px`}>{greeting}</p>
   {/if}
   <!-- The letters are drawn by the ground; this stands where they are so the

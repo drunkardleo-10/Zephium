@@ -45,7 +45,7 @@
   import { focus } from "$domain/time";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { ModeTabs, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
+  import { ModeTabs, PrivateBar, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
@@ -243,6 +243,7 @@
   class:pb-0={inWork}
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
+  data-private={tabs.profile()?.kind === "incognito" || undefined}
 >
   <Sidebar
     >{#snippet browserBody(compact)}
@@ -250,7 +251,9 @@
         {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
-      {:else}<div class="sidebar-head"><ModeTabs /></div>{/if}
+      {:else}<div class="sidebar-head">
+          {#if tabs.profile()?.kind === "incognito"}<PrivateBar />{:else}<ModeTabs />{/if}
+        </div>{/if}
       <!-- One column in both environments: only what it lists changes, and the
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
