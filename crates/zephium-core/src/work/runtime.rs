@@ -1434,8 +1434,8 @@ pub struct WorkConfirmV1 {
 }
 
 pub const MAX_WORK_CONFIRM_FACTS: usize = 12;
-const MAX_WORK_CONFIRM_LINE_BYTES: usize = 300;
-const MAX_WORK_CONFIRM_TEXT_BYTES: usize = 4096;
+pub const MAX_WORK_CONFIRM_LINE_BYTES: usize = 300;
+pub const MAX_WORK_CONFIRM_TEXT_BYTES: usize = 4096;
 const MAX_WORK_CONFIRM_SITES: usize = 8;
 
 impl WorkConfirmV1 {
