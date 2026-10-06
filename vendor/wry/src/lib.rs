@@ -867,9 +867,12 @@ struct WebViewAttributes<'a> {
   ///
   /// ## Platform-specific
   ///
-  /// - **macOS:** Requires the `fullscreen` feature and uses WebKit private
-  ///   preferences. Embedders rendering untrusted content should disable this
-  ///   per view until they own a gesture- and origin-labelled broker.
+  /// - **macOS:** WebKit's public element fullscreen preference, set for
+  ///   every view. Defaults to on only with the `fullscreen` feature; an
+  ///   embedder that enables it should observe `fullscreenState` and exit
+  ///   fullscreen whenever the view stops being the one on screen.
+  /// - **iOS:** Requires the `fullscreen` feature and uses WebKit private
+  ///   preferences.
   /// - Other platforms: Unsupported and ignored.
   pub fullscreen_enabled: bool,
 
@@ -1170,10 +1173,9 @@ impl<'a> WebViewBuilder<'a> {
 
   /// Enables or disables page-triggered native fullscreen media surfaces.
   ///
-  /// This is currently implemented only on macOS and requires Wry's
-  /// `fullscreen` feature. Disable it explicitly for untrusted browser views;
-  /// feature unification can otherwise enable the private WebKit preference
-  /// process-wide at compile time.
+  /// This is currently implemented only on Apple platforms. Set it per view:
+  /// feature unification can otherwise change the default for every view
+  /// at compile time.
   pub fn with_fullscreen_enabled(mut self, enabled: bool) -> Self {
     self.attrs.fullscreen_enabled = enabled;
     self
