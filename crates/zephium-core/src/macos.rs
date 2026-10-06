@@ -338,6 +338,9 @@ pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
 mod tests {
     use super::*;
 
+    const OVERDUE: u64 = SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
+        + crate::runtime_security::RUNTIME_REVIEW_GRACE_SECONDS;
+
     const BUILD: &str = "21624.3.4.5.6";
 
     fn assess_at_review(
@@ -491,26 +494,13 @@ mod tests {
             ))
         );
         assert_eq!(
-            assess_runtime(
-                "26.7.1",
-                "26.6.1",
-                BUILD,
-                BUILD,
-                SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
-            ),
+            assess_runtime("26.7.1", "26.6.1", BUILD, BUILD, OVERDUE,),
             Ok(RuntimeSecurityAdvisories::from_advisory(
                 RuntimeSecurityAdvisory::review_overdue(),
             ))
         );
 
-        let combined = assess_runtime(
-            "27.0.0",
-            "27.0",
-            BUILD,
-            BUILD,
-            SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
-        )
-        .unwrap();
+        let combined = assess_runtime("27.0.0", "27.0", BUILD, BUILD, OVERDUE).unwrap();
         assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
         assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
     }

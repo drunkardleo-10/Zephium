@@ -380,6 +380,9 @@ pub const fn production_release_security_is_current(unix_seconds: u64) -> bool {
 mod tests {
     use super::*;
 
+    const OVERDUE: u64 = SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
+        + crate::runtime_security::RUNTIME_REVIEW_GRACE_SECONDS;
+
     #[test]
     fn parses_every_documented_channel_and_stable_runtime() {
         let stable: WebView2Version = "151.0.4129.59".parse().unwrap();
@@ -518,21 +521,14 @@ mod tests {
             ))
         );
         assert_eq!(
-            assess_runtime(
-                LATEST_REVIEWED_TEXT,
-                SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
-            ),
+            assess_runtime(LATEST_REVIEWED_TEXT, OVERDUE),
             Ok((
                 LATEST_REVIEWED,
                 RuntimeSecurityAdvisories::from_advisory(RuntimeSecurityAdvisory::review_overdue(),)
             ))
         );
 
-        let (_, combined) = assess_runtime(
-            "155.0.0.0",
-            SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
-        )
-        .unwrap();
+        let (_, combined) = assess_runtime("155.0.0.0", OVERDUE).unwrap();
         assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
         assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
     }
