@@ -18,7 +18,7 @@
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
   import { TabRail } from "$features/tabs";
-  import { loadTabCapacityState } from "$features/tabs";
+  import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
   import { requestTab } from "$session/work-tab.svelte";
@@ -218,6 +218,25 @@
       else if (!tab || tab.url || tab.id !== newTabLoad) newTabLoad = null;
     });
   });
+  // A load that failed over a page still showing leaves that page in place;
+  // a notice says the new address did not open.
+  let failureNoticed: string | null = null;
+  $effect(() => {
+    const tab = tabs.activeTab();
+    const failure = tab?.failure;
+    const key = failure && tab.url ? `${tab.id} ${failure.url} ${failure.reason}` : null;
+    untrack(() => {
+      if (key === null || key === failureNoticed) return;
+      failureNoticed = key;
+      let host = failure?.url ?? "";
+      try {
+        host = new URL(host).host || host;
+      } catch {
+        // The address is shown as given.
+      }
+      notices.show(m.navigation_error_notice({ host }));
+    });
+  });
   // A search belongs to the page it runs in; moving to another page ends it.
   $effect(() => {
     const active = tabs.activeId();
@@ -388,6 +407,21 @@
           retryLabel={m.surface_retry()}
           >{#snippet children(View)}<View tab={capacityTab} />{/snippet}</LazyView
         >{/if}
+    </main>
+  {:else if tabs.activeTab()?.failure && !tabs.activeTab()?.url && !tabs.activeTab()?.loading && browserPage.currentPage() === null}
+    {@const failedTab = tabs.activeTab()}
+    {@const failure = failedTab?.failure}
+    <!-- A first load that failed: the pane says why instead of a blank new tab. -->
+    <main class="min-w-0 flex-1 ps-2">
+      <div class="content-pane h-full w-full overflow-hidden">
+        {#if failedTab && failure}<LazyView
+            loader={loadNavigationError}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(View)}<View tab={failedTab} {failure} />{/snippet}</LazyView
+          >{/if}
+      </div>
     </main>
   {:else if newTabShown}
     <!--
