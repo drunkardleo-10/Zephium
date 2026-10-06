@@ -275,8 +275,8 @@ Any change that breaks one of these invariants must fail review and release:
     unsupported system: macOS older than 14, Safari older than major 26, or an
     unparseable version, with a native alert and exit status 78. The canonical
     system Safari bundle and the framework actually supplying `WKWebView` must have
-    the expected identifiers. Supported releases below the reviewed Sonoma, Sequoia
-    or Tahoe security floor, a Safari/WebKit build mismatch (typically Safari
+    the expected identifiers. Supported releases below the reviewed Sonoma, Sequoia,
+    Tahoe or macOS 27 recommendation (including Safari for that line), a Safari/WebKit build mismatch (typically Safari
     updated without a restart), and a newer stable OS/Safari major are admitted with
     an update-recommended or unreviewed-runtime advisory.
 13. The content-policy lifecycle never treats absence as allow-all. Every profile must
@@ -1270,7 +1270,7 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version. The reviewed security floor and latest recommendation are
-  `154.0.4258.53`, published October 1, 2026. An older Stable runtime is admitted
+  `154.0.4258.62`, published October 5, 2026. An older Stable runtime is admitted
   with an update-recommended advisory. A newer stable major receives
   an unreviewed-runtime advisory. Preview-channel and malformed strings are
   refused (exit 78 with a native alert).
@@ -1278,21 +1278,23 @@ These inherited properties must not be overstated:
   environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
-  expire this review after October 11, 2026; runtime reports an overdue-review
+  expire this review after October 13, 2026; runtime reports an overdue-review
   advisory instead. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
   incorporated the update on July 16. Microsoft listed CVE-2026-85046 as
   exploited in the wild in Stable `152.0.4191.62` on September 2, then published
-  Stable security updates through `154.0.4258.53` on October 1.
+  Stable security updates through `154.0.4258.62` on October 5.
   Microsoft publishes no WebView2-specific per-CVE applicability matrix;
   Zephium therefore treats the shared runtime release as a conservative floor
   rather than claiming each listed CVE applies to WebView2. The October 2 review
   independently confirmed matching x86, x64, and ARM64 WebView2 packages in the
   Microsoft Update Catalog and raised both the floor and recommendation; the
-  October 4 recheck found no newer Stable security release. See
-  [the review evidence](windows-webview2-security-review-2026-10-02.md).
+  October 6 review raised them to `154.0.4258.62`. On October 6 Microsoft
+  again acknowledged a pending Chromium security fix, so production
+  publication is blocked until a later Stable release is reviewed. See
+  [the review evidence](windows-webview2-security-review-2026-10-06.md).
   The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into
@@ -1368,13 +1370,14 @@ These inherited properties must not be overstated:
   and both privileged WebViews use non-persistent stores. Bundle metadata requires
   macOS 14.0 or newer.
 - Before Tauri constructs any WebView, runtime admission requires macOS 14 or newer
-  with Safari 26 or newer. The reviewed security floor, which is also the current
-  recommendation, is Sonoma 14.8.9 or Sequoia 15.8.1 with Safari 26.6.1, or
-  Tahoe 26.7.1 (August 6/18 and September 28 releases). A supported system below
-  that floor, or one whose canonical Safari bundle build differs from the loaded
-  `com.apple.WebKit` framework build, starts with an update-recommended advisory.
-  Newer stable major lines (macOS 27, Safari 27) receive an unreviewed-runtime
-  advisory. The review expires for CI/release after October 11, while runtime
+  with Safari 26 or newer. The reviewed recommendation is Sonoma 14.8.9 with
+  Safari 26.6.1, Sequoia 15.8.1 or Tahoe 26.7.1 with Safari 27 (which carries
+  WebKit fixes those point releases do not), or macOS 27.0.1 (September 14/28
+  releases). A supported system below that, or one whose canonical Safari bundle
+  build differs from the loaded `com.apple.WebKit` framework build, starts with
+  an update-recommended advisory. Newer major lines (macOS 28, Safari 28)
+  receive an unreviewed-runtime advisory. The review expires for CI/release
+  after October 13, while runtime
   keeps starting and reports review age to privileged chrome.
 - Overlay configuration keeps Tao's allocated `TaoWindow` class and instance layout
   intact. Zephium does not use `object_setClass` to turn that live object into an
