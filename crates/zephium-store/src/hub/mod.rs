@@ -99,6 +99,9 @@ pub struct Hub {
     /// files are preserved and never retried, opened read-write, or recreated
     /// during this process.
     degraded_profiles: HashSet<ProfileId>,
+    /// Visits recorded per profile since history was last held to its row
+    /// cap; the cap's ordered walk runs once per batch of visits, not each.
+    visits_since_prune: HashMap<ProfileId, u32>,
     legacy_state_purged: bool,
     recovery_required: Option<String>,
     /// One unpredictable token shared by every Hub constructed in this
@@ -189,6 +192,7 @@ impl Hub {
             profiles: HashMap::new(),
             registry: HashSet::new(),
             degraded_profiles: HashSet::new(),
+            visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             recovery_required,
             deletion_process_generation,
@@ -296,6 +300,7 @@ impl Hub {
             profiles: HashMap::new(),
             registry: HashSet::new(),
             degraded_profiles: HashSet::new(),
+            visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             recovery_required: None,
             deletion_process_generation: deletion_process_generation(),
@@ -365,7 +370,7 @@ impl Hub {
                     Some(dir) => open_database(&dir.join(format!("profile-{id}.sqlite")))?,
                     None => Connection::open_in_memory()?,
                 };
-                configure(&conn)?;
+                filesystem::configure_profile(&conn)?;
                 migrations::apply(&mut conn, migrations::PROFILE)?;
                 history::enforce_history_budget(&conn)?;
                 Ok(slot.insert(conn))
