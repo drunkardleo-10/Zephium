@@ -1947,6 +1947,8 @@ impl Shell {
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_address_tests;
 #[cfg(all(test, feature = "work-planning"))]
 mod work_context_tests;
 #[cfg(all(test, feature = "work-runtime"))]

@@ -311,6 +311,26 @@ where
         &self,
         requests: Vec<Request>,
     ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
+        let mut refused = Vec::new();
+        let mut admitted = Vec::with_capacity(requests.len());
+        for request in requests {
+            if let WorkStepKindV1::Read { url, .. } = &request.kind {
+                if let Err(why) = self.run.admit_address(url, self.part).await {
+                    refused.push((request.call, why, true));
+                    continue;
+                }
+            }
+            admitted.push(request);
+        }
+        let mut results = self.run_admitted(admitted).await?;
+        results.extend(refused);
+        Ok(results)
+    }
+
+    async fn run_admitted(
+        &self,
+        requests: Vec<Request>,
+    ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -426,6 +446,18 @@ where
                     .collect()
             })
             .unwrap_or_default();
+        if new.iter().any(|step| {
+            step.account.is_some()
+                || matches!(
+                    step.kind,
+                    WorkStepKindV1::List { .. }
+                        | WorkStepKindV1::ReadFile { .. }
+                        | WorkStepKindV1::SearchFiles { .. }
+                        | WorkStepKindV1::RunCommand { .. }
+                )
+        }) {
+            self.run.mark_private();
+        }
         let mut used_steps = BTreeSet::new();
         let mut results = Vec::new();
         for request in &requests {
@@ -805,6 +837,7 @@ where
                 line.push_str(&format!(" · url {homepage}"));
             }
             for image in &subject.image_candidates {
+                self.run.allow_url(image);
                 line.push_str(&format!(" · photo {image}"));
             }
             if subject.image_candidates.is_empty() {
@@ -812,6 +845,7 @@ where
                 if let Some((_, image, key)) =
                     facts.iter().find(|(path, ..)| Some(path) == page.as_ref())
                 {
+                    self.run.allow_url(image);
                     line.push_str(&format!(" · photo {image} [{key}]"));
                 }
             }

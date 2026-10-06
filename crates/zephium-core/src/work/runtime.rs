@@ -1368,6 +1368,9 @@ pub enum WorkAskPurposeV1 {
     /// Whether the agent may read a folder on this Mac the request named;
     /// the step's local fact carries the folder.
     Folder,
+    /// Whether to open a page address the agent wrote itself after reading
+    /// the person's own information; the prompt is the address.
+    Address,
 }
 
 /// What a held step would commit.

@@ -2524,7 +2524,12 @@ export type WorkAskPurposeV1 =
  *  Whether the agent may read a folder on this Mac the request named;
  *  the step's local fact carries the folder.
  */
-"folder";
+"folder" | 
+/**
+ *  Whether to open a page address the agent wrote itself after reading
+ *  the person's own information; the prompt is the address.
+ */
+"address";
 
 export type WorkAttemptFact = {
 	id: WorkAttemptId,
