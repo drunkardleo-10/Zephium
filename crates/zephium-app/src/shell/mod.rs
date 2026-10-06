@@ -234,6 +234,8 @@ pub struct Shell {
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
     runtime_restart_required: bool,
+    /// The saved session could not be restored this launch and was set aside.
+    session_set_aside: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
@@ -457,6 +459,7 @@ impl Shell {
             work_pane: None,
             work_pane_generation: 0,
             runtime_restart_required: false,
+            session_set_aside: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,

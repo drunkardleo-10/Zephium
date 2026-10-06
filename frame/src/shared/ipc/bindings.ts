@@ -1735,6 +1735,11 @@ export type RuntimeSecurityUpdateTarget = "zephium" | "operating_system" | "brow
 export type RuntimeStatus = {
 	restart_required: boolean,
 	/**
+	 *  The saved session could not be restored this launch: its bytes were
+	 *  kept in a file and the browser started with fresh tabs.
+	 */
+	session_set_aside: boolean,
+	/**
 	 *  Bounded fail-closed aggregate of ownership scopes whose latest native
 	 *  user-content observation was not exactly applied. An impossible
 	 *  over-capacity observation contributes at most one sentinel. No script,

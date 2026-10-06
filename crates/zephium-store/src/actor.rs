@@ -306,6 +306,8 @@ enum Cmd {
     VisitWake,
     SettingWake,
     Load(Sender<SessionLoad>),
+    /// Sets an unrestorable session aside and loads the restarted one.
+    SetAsideSession(Sender<Option<(SessionLoad, Option<std::path::PathBuf>)>>),
     UpdateProfileBlockerConfig(
         ProfileId,
         BlockerConfigRevision,
@@ -819,6 +821,12 @@ impl Store for SqliteStore {
         }
         rx.recv_timeout(STORE_RPC_TIMEOUT)
             .unwrap_or(SessionLoad::Failed)
+    }
+
+    fn set_aside_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.try_send(Cmd::SetAsideSession(tx)).ok()?;
+        rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
     fn update_profile_blocker_config(
@@ -1587,35 +1595,18 @@ fn actor(
                         false,
                     );
                 }
-                let loaded = match hub.load_authoritative() {
-                    Ok(Some(authoritative)) => {
-                        let profiles = hub.degraded_profile_ids();
-                        if profiles.is_empty() {
-                            SessionLoad::Loaded {
-                                state: authoritative.state,
-                                blocker_configs: authoritative.blocker_configs,
-                            }
-                        } else {
-                            SessionLoad::LoadedWithDegradedProfiles {
-                                state: authoritative.state,
-                                profiles,
-                                blocker_configs: authoritative.blocker_configs,
-                            }
-                        }
-                    }
-                    Ok(None) => SessionLoad::Absent,
-                    Err(_) if hub.recovery_reason().is_some() => SessionLoad::RecoveryRequired {
-                        reason: hub
-                            .recovery_reason()
-                            .unwrap_or("authoritative session requires recovery")
-                            .to_owned(),
-                    },
+                let loaded = session_load(&mut hub);
+                let _ = reply.send(loaded);
+            }
+            Some(Cmd::SetAsideSession(reply)) => {
+                let restarted = match hub.set_aside_recovery() {
+                    Ok(file) => Some((session_load(&mut hub), file)),
                     Err(error) => {
-                        eprintln!("store: session load failed: {error}");
-                        SessionLoad::Failed
+                        eprintln!("store: setting the unrestorable session aside failed: {error}");
+                        None
                     }
                 };
-                let _ = reply.send(loaded);
+                let _ = reply.send(restarted);
             }
             Some(Cmd::UpdateProfileBlockerConfig(profile, expected, next, done)) => {
                 let outcome = match hub.update_profile_blocker_config(profile, expected, next) {
@@ -2282,6 +2273,38 @@ fn flush(hub: &mut Hub, pending: &mut Option<PendingSession>) -> bool {
             save.failed(Instant::now());
             *pending = Some(save);
             false
+        }
+    }
+}
+
+/// The session the hub holds, as the shell receives it.
+fn session_load(hub: &mut Hub) -> SessionLoad {
+    match hub.load_authoritative() {
+        Ok(Some(authoritative)) => {
+            let profiles = hub.degraded_profile_ids();
+            if profiles.is_empty() {
+                SessionLoad::Loaded {
+                    state: authoritative.state,
+                    blocker_configs: authoritative.blocker_configs,
+                }
+            } else {
+                SessionLoad::LoadedWithDegradedProfiles {
+                    state: authoritative.state,
+                    profiles,
+                    blocker_configs: authoritative.blocker_configs,
+                }
+            }
+        }
+        Ok(None) => SessionLoad::Absent,
+        Err(_) if hub.recovery_reason().is_some() => SessionLoad::RecoveryRequired {
+            reason: hub
+                .recovery_reason()
+                .unwrap_or("authoritative session requires recovery")
+                .to_owned(),
+        },
+        Err(error) => {
+            eprintln!("store: session load failed: {error}");
+            SessionLoad::Failed
         }
     }
 }

@@ -856,6 +856,8 @@ pub(crate) struct FakeStore {
     panic_on_shutdown: std::sync::atomic::AtomicBool,
     load_failed: Mutex<bool>,
     recovery_reason: Mutex<Option<String>>,
+    /// What `set_aside_session` restarts with; `None` cannot set aside.
+    pub(crate) set_aside: Mutex<Option<SessionState>>,
     degraded_profiles: Mutex<Vec<ProfileId>>,
     site_preferences: Mutex<Arc<zephium_core::blocker::BlockerSitePreferences>>,
     site_store_calls: std::sync::atomic::AtomicUsize,
@@ -1025,6 +1027,13 @@ impl Store for FakeStore {
             }
         })
     }
+    fn set_aside_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        let state = self.set_aside.lock().unwrap().take()?;
+        *self.recovery_reason.lock().unwrap() = None;
+        *self.saved.lock().unwrap() = Some(state);
+        Some((self.load_session(), None))
+    }
+
     fn load_session(&self) -> SessionLoad {
         self.load_session_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);

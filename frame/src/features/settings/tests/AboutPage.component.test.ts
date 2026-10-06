@@ -100,6 +100,7 @@ test("a system behind on security updates is explained where the rail sends peop
   native.status = { state: "upToDate" };
   emitNativeEvent("runtimeStatusChanged", {
     restart_required: false,
+    session_set_aside: false,
     user_content_degraded_scope_count: 0,
     security_advisories: [
       { kind: "review_overdue", update_target: "zephium" },

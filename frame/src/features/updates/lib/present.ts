@@ -1,5 +1,6 @@
 import type { IconSvgElement } from "@hugeicons/svelte";
 import {
+  Alert02Icon,
   Bug01Icon,
   News01Icon,
   RefreshIcon,
@@ -28,6 +29,16 @@ export type CardView = {
 };
 
 export function cardView(card: UpdateCard): CardView {
+  if (card.kind === "session") {
+    return {
+      key: "session",
+      title: m.session_set_aside_title(),
+      detail: m.session_set_aside_detail(),
+      icon: Alert02Icon,
+      actions: [],
+      dismiss: notices.dismissSession,
+    };
+  }
   if (card.kind === "updated") {
     return {
       key: `updated:${card.version}`,

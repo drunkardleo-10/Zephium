@@ -46,6 +46,8 @@ pub enum ShellTerminalFailure {
     /// store kept it untouched; the person is told so instead of facing an
     /// empty window that cannot do anything.
     SessionUnavailable,
+    /// The saved session was written by a newer Zephium and is kept for it.
+    SessionFromNewerVersion,
 }
 
 impl std::fmt::Display for ShellTerminalFailure {
@@ -56,6 +58,7 @@ impl std::fmt::Display for ShellTerminalFailure {
             }
             Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
             Self::SessionUnavailable => "the saved session could not be opened",
+            Self::SessionFromNewerVersion => "the saved session belongs to a newer Zephium",
         })
     }
 }

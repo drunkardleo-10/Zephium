@@ -921,6 +921,9 @@ pub enum OperationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// The saved session could not be restored this launch: its bytes were
+    /// kept in a file and the browser started with fresh tabs.
+    pub session_set_aside: bool,
     /// Bounded fail-closed aggregate of ownership scopes whose latest native
     /// user-content observation was not exactly applied. An impossible
     /// over-capacity observation contributes at most one sentinel. No script,

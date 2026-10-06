@@ -5955,13 +5955,24 @@ pub fn run() {
                 // An unopenable session would otherwise leave an empty window
                 // that does nothing. Say so, then quit in order; the store
                 // has kept the saved data as it was.
-                if matches!(failure, zephium_app::ShellTerminalFailure::SessionUnavailable) {
+                if matches!(
+                    failure,
+                    zephium_app::ShellTerminalFailure::SessionUnavailable
+                        | zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+                ) {
                     let app = terminal_failure_app.clone();
                     let shutdown = terminal_failure_shutdown.clone();
                     let explained = terminal_failure_app.run_on_main_thread(move || {
                         #[cfg(not(target_os = "linux"))]
                         startup_alert::show_blocking(
-                            startup_alert::StartupProblem::DamagedProfile,
+                            if matches!(
+                                failure,
+                                zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+                            ) {
+                                startup_alert::StartupProblem::NewerProfile
+                            } else {
+                                startup_alert::StartupProblem::DamagedProfile
+                            },
                             "the saved tabs and settings could not be opened",
                         );
                         request_shell_terminal_failure(&app, &shutdown, failure);

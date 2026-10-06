@@ -14,6 +14,8 @@ const SECURITY = "notice.security-dismissed";
 let version = $state<string | null>(null);
 let seen = $state<string | null>(null);
 let securityDismissed = $state<string | null>(null);
+/** Only this launch: the notice is about what happened as it started. */
+let sessionDismissed = $state(false);
 let releaseHighlights = $state.raw<{ version: string; items: string[] } | null>(null);
 
 /** The running release's highlights, when it arrived as an update. */
@@ -30,7 +32,12 @@ export const current = (): Notices =>
     seen,
     securityDismissed,
     advisories: runtime.status().security_advisories,
+    sessionSetAside: runtime.status().session_set_aside && !sessionDismissed,
   });
+
+export function dismissSession() {
+  sessionDismissed = true;
+}
 
 function remember(key: string, value: string) {
   // A write that did not land only means the notice is shown again next launch.

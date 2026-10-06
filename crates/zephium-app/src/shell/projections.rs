@@ -144,6 +144,7 @@ impl Shell {
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,
+            session_set_aside: self.session_set_aside,
             user_content_degraded_scope_count: self.user_content_status.degraded_scope_count(),
             security_advisories: self
                 .engine

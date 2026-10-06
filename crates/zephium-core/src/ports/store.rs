@@ -98,6 +98,10 @@ pub enum ProfileDeletionFinalizeOutcome {
     Failed,
 }
 
+/// `SessionLoad::RecoveryRequired` for a session saved by a newer Zephium: it
+/// opens again once that version is back, so it is never set aside.
+pub const NEWER_SESSION_REASON: &str = "authoritative session is newer than supported";
+
 /// Result of reading the authoritative browser session.
 ///
 /// `Failed` is deliberately distinct from `Absent`: callers may initialize a
@@ -344,6 +348,12 @@ pub trait Store {
         }
     }
     fn load_session(&self) -> SessionLoad;
+    /// After `RecoveryRequired`: keeps the unrestorable session's bytes in a
+    /// file and restarts the session from the profile registry with no tabs.
+    /// Returns the restarted load and the file, or `None` when it could not.
+    fn set_aside_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        None
+    }
     /// Durably replaces a profile's blocker preference only when `expected`
     /// is still authoritative. The storage adapter allocates the next checked
     /// revision and invokes `done` after transaction settlement.
