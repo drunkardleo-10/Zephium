@@ -255,6 +255,22 @@ function current(row: TaskRow, field: TaskField): TaskField | null {
   }
 }
 
+function byId<T extends { id: string }>(items: readonly T[]): ReadonlyMap<string, T> {
+  return new Map(items.map((item) => [item.id, item]));
+}
+
+function sameSteps(left: readonly TaskStep[], right: readonly TaskStep[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (step, index) =>
+        step.id === right[index]!.id &&
+        step.title === right[index]!.title &&
+        step.completed === right[index]!.completed,
+    )
+  );
+}
+
 /** A host owns a query and transient edits. Rust owns task identity and outcomes.
  * Jobs keep their request identity until settlement; failed drafts survive hiding
  * the host. An earlier reply only removes its own overlay, never newer input. */
@@ -285,7 +301,9 @@ export class TaskSession {
   #jobs = new SvelteMap<string, Job[]>();
   #chain = new SvelteMap<string, Promise<boolean>>();
   #textTimers = new SvelteMap<string, ReturnType<typeof setTimeout>>();
-  #commit = new SvelteMap<string, () => void>();
+  /** A text field's pending save. `settle` is the reader leaving the field,
+   *  which may tidy what they typed; a pause in typing may not. */
+  #commit = new SvelteMap<string, (settle: boolean) => void>();
   #undo = $state.raw<Undoable[]>([]);
   #serial = 0;
   #creation = $state.raw<{
@@ -326,6 +344,8 @@ export class TaskSession {
       row: TaskRow;
     }
   >();
+
+  #index = $derived(byId(this.items));
 
   rows: TaskRow[] = $derived.by(() => {
     const rows = this.items.flatMap((item) => {
@@ -439,7 +459,7 @@ export class TaskSession {
     this.#textTimers.clear();
     const commits = [...this.#commit.values()];
     this.#commit.clear();
-    for (const commit of commits) commit();
+    for (const commit of commits) commit(true);
     await Promise.allSettled([
       ...this.#chain.values(),
       ...(this.#creating ? [this.#creating] : []),
@@ -736,60 +756,100 @@ export class TaskSession {
 
   #edit(id: string, field: "title" | "description", value: string) {
     const key = `${field}:${id}`;
-    const base = this.#row(id)?.[field] ?? null;
     this.#drafts.set(id, { ...this.#drafts.get(id), [field]: value });
     clearTimeout(this.#textTimers.get(key));
-    // Keep the first edit's base value across the whole typing interval.
-    if (!this.#commit.has(key))
-      this.#commit.set(key, () => {
-        const patch = this.#drafts.get(id);
-        const raw = patch?.[field];
+    // The base is what this typing replaces, taken when it began and never from
+    // a draft: a draft is not what native holds, so expecting it would conflict.
+    if (!this.#commit.has(key)) {
+      const base = this.#settled(id)?.[field] ?? null;
+      const commit = (settle: boolean) => {
+        const raw = this.#drafts.get(id)?.[field];
         if (raw === undefined || raw === null) return;
-        const text = field === "title" ? raw.trim() : raw;
-        if (field === "title" && !text) {
-          this.error = "invalid";
+        if (field === "title" && !raw.trim()) {
+          // A blank title is a word being retyped, not a save; leaving it
+          // blank gives the old title back.
+          if (settle) this.#dropDraft(id, field);
+          else this.#commit.set(key, commit);
           return;
         }
-        const remaining = { ...patch };
-        delete remaining[field];
-        if (Object.keys(remaining).length) this.#drafts.set(id, remaining);
-        else this.#drafts.delete(id);
+        this.#dropDraft(id, field);
+        const text = field === "title" ? raw.trim() : raw;
+        if (text === base) return;
         void this.#update(id, [{ field, value: text }], {
           reversible: false,
           expect: base === null ? [] : [{ field, value: base }],
         });
-      });
+      };
+      this.#commit.set(key, commit);
+    }
     this.#debounce(key);
   }
 
   renameStep(id: string, stepId: string, title: string) {
-    const base = this.#row(id)?.steps;
+    const base = this.#settled(id)?.steps;
     if (!base) return;
-    const steps = base.map((step) =>
+    const steps = (this.#drafts.get(id)?.steps ?? base).map((step) =>
       step.id === stepId ? { ...step, title: title.slice(0, 256) } : step,
     );
     this.#drafts.set(id, { ...this.#drafts.get(id), steps });
     const key = `steps:${id}`;
     clearTimeout(this.#textTimers.get(key));
-    if (!this.#commit.has(key))
-      this.#commit.set(key, () => {
-        const draft = this.#drafts.get(id);
-        const value = draft?.steps;
-        if (!value) return;
-        if (value.some((step) => !step.title.trim())) {
-          this.error = "invalid";
+    if (!this.#commit.has(key)) {
+      const commit = (settle: boolean) => {
+        const draft = this.#drafts.get(id)?.steps;
+        if (!draft) return;
+        if (!settle && draft.some((step) => !step.title.trim())) {
+          this.#commit.set(key, commit);
           return;
         }
-        const remaining = { ...draft };
-        delete remaining.steps;
-        if (Object.keys(remaining).length) this.#drafts.set(id, remaining);
-        else this.#drafts.delete(id);
+        this.#dropDraft(id, "steps");
+        // A step left blank keeps the title it had.
+        const value = settle
+          ? draft.flatMap((step) => {
+              const title = step.title.trim()
+                ? step.title
+                : base.find((old) => old.id === step.id)?.title;
+              return title ? [{ ...step, title }] : [];
+            })
+          : draft;
+        if (sameSteps(value, base)) return;
         void this.#update(id, [{ field: "steps", value }], {
           reversible: false,
           expect: [{ field: "steps", value: base }],
         });
-      });
+      };
+      this.#commit.set(key, commit);
+    }
     this.#debounce(key);
+  }
+
+  /** Saves whatever is being typed into a task now, as leaving its fields
+   *  does; every task's when no id is given. */
+  commitText(id?: string) {
+    for (const [key, commit] of [...this.#commit]) {
+      if (id !== undefined && key.slice(key.indexOf(":") + 1) !== id) continue;
+      clearTimeout(this.#textTimers.get(key));
+      this.#textTimers.delete(key);
+      this.#commit.delete(key);
+      commit(true);
+    }
+  }
+
+  #dropDraft(id: string, field: keyof Patch) {
+    const remaining = { ...this.#drafts.get(id) };
+    delete remaining[field];
+    if (Object.keys(remaining).length) this.#drafts.set(id, remaining);
+    else this.#drafts.delete(id);
+  }
+
+  /** What native holds plus writes on their way, without anything still
+   *  being typed. */
+  #settled(id: string): TaskRow | undefined {
+    const item = this.#index.get(id);
+    if (!item) return undefined;
+    let row = toRow(item, this.#metadata.get(id), this.#bodies.get(id));
+    for (const job of this.#jobs.get(id) ?? []) row = { ...row, ...job.patch };
+    return row;
   }
 
   async updateSteps(id: string, steps: TaskStep[]) {
@@ -853,7 +913,7 @@ export class TaskSession {
         this.#textTimers.delete(key);
         const commit = this.#commit.get(key);
         this.#commit.delete(key);
-        commit?.();
+        commit?.(false);
       }, TEXT_DEBOUNCE_MS),
     );
   }

@@ -50,6 +50,7 @@
     onsteprename,
     onrename,
     ondescribe,
+    oncommit,
     onpin,
     onremove,
     onopenpage,
@@ -70,6 +71,8 @@
     onsteprename: (id: string, step: string, title: string) => void;
     onrename: (id: string, title: string) => void;
     ondescribe: (id: string, description: string) => void;
+    /** Saves what is being typed into the task now, as leaving it does. */
+    oncommit?: (id: string) => void;
     onpin: (id: string, pinned: boolean) => void;
     onremove: (id: string) => void;
     onopenpage: (url: string) => void;
@@ -162,6 +165,16 @@
     ];
   }
 
+  // Unmounting a focused field fires no blur, so closing the task, or moving
+  // to another, settles its typing here.
+  let taskId = $derived(task?.id ?? null);
+  $effect(() => {
+    const id = taskId;
+    return () => {
+      if (id) oncommit?.(id);
+    };
+  });
+
   function fit(element: HTMLTextAreaElement, value: string | null) {
     function size(_value: string | null) {
       queueMicrotask(() => {
@@ -197,6 +210,7 @@
         data-status={row.status}
         use:fit={row.title}
         aria-label={m.task_rename()}
+        aria-invalid={!row.title.trim() || undefined}
         rows="1"
         maxlength="256"
         readonly={trashed}
@@ -204,7 +218,8 @@
         onkeydown={(event) => {
           if (event.key === "Enter") event.preventDefault();
         }}
-        oninput={(event) => onrename(row.id, event.currentTarget.value)}></textarea>
+        oninput={(event) => onrename(row.id, event.currentTarget.value)}
+        onblur={() => oncommit?.(row.id)}></textarea>
     </div>
 
     <div class="detail-properties">
@@ -316,13 +331,15 @@
       rows="2"
       readonly={trashed || row.description === null}
       value={row.description ?? ""}
-      oninput={(event) => ondescribe(row.id, event.currentTarget.value)}></textarea>
+      oninput={(event) => ondescribe(row.id, event.currentTarget.value)}
+      onblur={() => oncommit?.(row.id)}></textarea>
 
     <TaskSubtasks
       steps={row.steps ?? []}
       disabled={trashed || row.description === null}
       onchange={(steps) => onsteps(row.id, steps)}
       onrename={(step, title) => onsteprename(row.id, step, title)}
+      onsettle={() => oncommit?.(row.id)}
     />
 
     {#if row.context}<button

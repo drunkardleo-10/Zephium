@@ -251,3 +251,79 @@ test("a deadline and an estimate are written and undone like any other field", a
   expect(details()).toEqual([null, null]);
   session.stop();
 });
+
+function recordMutations() {
+  const sent: string[] = [];
+  const forward = host.call.getMockImplementation()!;
+  host.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate") sent.push(call.command.intent.kind);
+    return forward(owner, call);
+  });
+  return sent;
+}
+
+test("a title cleared to retype it neither fails nor conflicts", async () => {
+  const { server, session, id } = await editingSession("Call mom");
+  const sent = recordMutations();
+  vi.useFakeTimers();
+  session.rename(id, "");
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(sent).toEqual([]);
+  expect(session.failure).toBeNull();
+  session.rename(id, "Call dad");
+  await vi.advanceTimersByTimeAsync(2000);
+  vi.useRealTimers();
+  expect(await session.flush()).toBe(true);
+  expect(server.records.get(id)?.draft.title).toBe("Call dad");
+  expect(session.failure).toBeNull();
+  session.stop();
+});
+
+test("leaving a title blank gives back the one it had", async () => {
+  const { server, session, id } = await editingSession("Call mom");
+  const sent = recordMutations();
+  session.rename(id, "  ");
+  session.commitText(id);
+  expect(session.rows.find((row) => row.id === id)?.title).toBe("Call mom");
+  session.rename(id, "");
+  expect(await session.flush()).toBe(true);
+  expect(sent).toEqual([]);
+  expect(server.records.get(id)?.draft.title).toBe("Call mom");
+  expect(session.retained).toBe(false);
+  session.stop();
+});
+
+test("a blank step title waits, and leaving it keeps the old title", async () => {
+  const { server, session, id } = await editingSession("Pack");
+  await session.load(id);
+  await session.updateSteps(id, [
+    { id: "step-0000000000000001", title: "Socks", completed: false },
+  ]);
+  const sent = recordMutations();
+  vi.useFakeTimers();
+  session.renameStep(id, "step-0000000000000001", "");
+  await vi.advanceTimersByTimeAsync(2000);
+  vi.useRealTimers();
+  expect(sent).toEqual([]);
+  expect(session.failure).toBeNull();
+  session.renameStep(id, "step-0000000000000001", "Shoes");
+  expect(await session.flush()).toBe(true);
+  const content = server.records.get(id)!.draft.content;
+  expect(content.kind === "task" && content.details.steps?.map((step) => step.title)).toEqual([
+    "Shoes",
+  ]);
+  session.renameStep(id, "step-0000000000000001", "");
+  expect(await session.flush()).toBe(true);
+  expect(session.rows.find((row) => row.id === id)?.steps?.[0]?.title).toBe("Shoes");
+  session.stop();
+});
+
+test("unchanged text after typing writes nothing", async () => {
+  const { session, id } = await editingSession("Same");
+  const sent = recordMutations();
+  session.rename(id, "Samey");
+  session.rename(id, "Same");
+  expect(await session.flush()).toBe(true);
+  expect(sent).toEqual([]);
+  session.stop();
+});

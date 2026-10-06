@@ -224,6 +224,7 @@
           onsteprename={(id, step, title) => session.renameStep(id, step, title)}
           onrename={(id, title) => session.rename(id, title)}
           ondescribe={(id, text) => session.describe(id, text)}
+          oncommit={(id) => session.commitText(id)}
           onpin={(id, pinned) => void session.setPinned(id, pinned)}
           onremove={(id) => {
             opened = false;
