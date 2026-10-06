@@ -1,4 +1,5 @@
 use super::*;
+mod activity_writes;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::ids::{ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
@@ -56,6 +57,7 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
             PagePermissionMutationAdmission::default(),
         )),
         agent_audit_delivery_admission: OnceLock::new(),
+        activity_admission: Arc::new(Mutex::new(activity::ActivityAdmission::default())),
         lifecycle: RwLock::new(ActorLifecycle {
             join: None,
             exited: Mutex::new(exited),

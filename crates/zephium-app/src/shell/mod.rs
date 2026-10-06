@@ -1507,6 +1507,20 @@ impl Shell {
         {
             crate::diagnostic!("shutdown: final time flush panicked");
         }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.flush_pending_focus_records(true);
+            !self.has_unadmitted_time_writes()
+        })) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.retryable_shutdown_failure(ack);
+                return;
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: focus admission preflight panicked");
+                terminal_clean = false;
+            }
+        }
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.persist())).is_err() {
             crate::diagnostic!("shutdown: final session snapshot panicked");
             terminal_clean = false;
@@ -1890,6 +1904,9 @@ impl Shell {
                 next,
                 removed,
             } => self.on_history_surface_read(token, profile, visits, next, removed),
+            StoreReadResult::HistorySurfaceFailed { token, profile } => {
+                self.on_history_surface_failed(token, profile)
+            }
             StoreReadResult::Bookmarks {
                 token,
                 profile,

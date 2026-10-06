@@ -553,6 +553,12 @@ pub trait Store {
         false
     }
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32;
+    /// Clears history only after earlier activity writes settle. `None`
+    /// means the durability barrier or deletion failed; zero rows is a
+    /// successful, distinct result. Legacy stores retain their old contract.
+    fn clear_history_checked(&self, profile: ProfileId, since: Option<i64>) -> Option<u32> {
+        Some(self.clear_history(profile, since))
+    }
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
     /// Age in seconds of the cached icon for a page origin, None when absent.

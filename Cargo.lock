@@ -7641,6 +7641,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "ulid",
  "url",
  "windows",
  "zephium-agentic",

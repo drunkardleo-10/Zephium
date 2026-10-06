@@ -822,6 +822,9 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    reject_time_clears: std::sync::atomic::AtomicBool,
+    reject_focus_records: std::sync::atomic::AtomicBool,
+    recorded_focus: Mutex<Vec<zephium_core::time::FocusRecord>>,
     pub(crate) statistics:
         Mutex<std::collections::HashMap<ProfileId, zephium_core::blocker::BlockerStatistics>>,
     pub(crate) statistics_writes: std::sync::atomic::AtomicUsize,
@@ -1178,6 +1181,18 @@ impl Store for FakeStore {
         _keep_from_hour: i64,
     ) -> bool {
         self.recorded_time.lock().unwrap().push((profile, tallies));
+        true
+    }
+
+    fn clear_time(&self, _profile: ProfileId, _since_hour: Option<i64>) -> bool {
+        !self
+            .reject_time_clears
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn record_focus(&self, record: zephium_core::time::FocusRecord, _day: i64) -> bool {
+        if self.reject_focus_records.load(std::sync::atomic::Ordering::Acquire) { return false; }
+        self.recorded_focus.lock().unwrap().push(record);
         true
     }
 
