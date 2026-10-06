@@ -1497,10 +1497,18 @@ struct AsyncChrome {
     pending: Mutex<VecDeque<(ChromePresentation, ChromePresentationCallback)>>,
     browser_returns: Mutex<VecDeque<(u64, ItemsState, ChromePresentationCallback)>>,
     reject_admission: std::sync::atomic::AtomicBool,
+    frames: Mutex<Vec<ChromeFrame>>,
+}
+
+impl AsyncChrome {
+    fn last_frame(&self) -> Option<ChromeFrame> {
+        self.frames.lock().unwrap().last().cloned()
+    }
 }
 
 impl GeometryChrome for AsyncChrome {
-    fn position(&self, _frame: ChromeFrame) -> bool {
+    fn position(&self, frame: ChromeFrame) -> bool {
+        self.frames.lock().unwrap().push(frame);
         true
     }
 }
