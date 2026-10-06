@@ -6,6 +6,7 @@
     EllipsisIcon,
     Refresh01Icon,
     Search01Icon,
+    SidebarLeftIcon,
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
   import { blocker, siteMenuState } from "$domain/blocker";
@@ -17,11 +18,13 @@
 
   let {
     compact,
+    ontoggle,
     navigation = true,
     pageControls = true,
     launcher = false,
   }: {
     compact: boolean;
+    ontoggle: () => void;
     navigation?: boolean;
     /** Back, forward and reload act on a page; Work shows none. */
     pageControls?: boolean;
@@ -84,11 +87,23 @@
     style:padding-inline-start={IS_MAC ? "var(--traffic-light-inset)" : "6px"}
     aria-label={m.ui_navigation()}
   >
-    {#if launcher}<IconButton
-        icon={Search01Icon}
-        label={m.ui_search_or_enter_an_address()}
-        onclick={() => void commands.runCommand("launcher.toggle")}
+    <!-- Beside a tool panel the panel's own close button already gives the
+         column back, so a second way to the same shape would only crowd the
+         lights. -->
+    {#if navigation && !launcher}<IconButton
+        icon={SidebarLeftIcon}
+        label={m.ui_compact_mode()}
+        onclick={ontoggle}
       />
+    {/if}<!-- The search glyph reads closer to the lights than the toggle's
+         does, so it keeps a little more room. -->{#if launcher}<span
+        class="ms-1.5 flex"
+        ><IconButton
+          icon={Search01Icon}
+          label={m.ui_search_or_enter_an_address()}
+          onclick={() => void commands.runCommand("launcher.toggle")}
+        /></span
+      >
     {/if}<span class="flex-1" aria-hidden="true"></span>
 
     {#if navigation && pageControls}<div

@@ -166,6 +166,7 @@
   {#if !settings || !IS_WINDOWS}<SidebarHeader
       compact={headerCompact}
       launcher={!navigating && tools.activeTool() !== null}
+      ontoggle={toggleShape}
       navigation={!navigating}
       pageControls={!inWork}
     />{/if}

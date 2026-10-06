@@ -269,6 +269,7 @@
     >{#snippet browserBody(compact)}
       {#if compact && (inWork || toolHost.activeTool() !== null)}
         {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
+        {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
       {:else if !incognito}<div class="sidebar-head"><ModeTabs /></div>{/if}
       <!-- One column in both environments: only what it lists changes, and the
