@@ -383,6 +383,10 @@ export class TaskSession {
       [...this.#jobs.values()].flat().find((job) => job.error)?.error ??
       this.error,
   );
+  /** Whether a write to this task is on its way to native. */
+  saving(id: string): boolean {
+    return this.#chain.has(id);
+  }
   get undoable() {
     return this.#undo.length > 0;
   }

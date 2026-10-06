@@ -256,6 +256,7 @@
           >{#snippet children(TaskDetail)}{#key selected.id}
               <TaskDetail
                 task={selected}
+                saving={session.saving(selected.id)}
                 today={today()}
                 lists={session.lists}
                 compact={!wide.current}

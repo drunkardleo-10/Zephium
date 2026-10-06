@@ -209,6 +209,7 @@
       retryLabel={m.surface_retry()}
       >{#snippet children(TaskDetail)}<TaskDetail
           task={selected}
+          saving={session.saving(selected.id)}
           today={today()}
           lists={session.lists}
           compact

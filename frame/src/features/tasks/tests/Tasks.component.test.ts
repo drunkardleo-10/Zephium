@@ -423,3 +423,35 @@ test("a Today row does not repeat the day its section already names", async () =
   // A month out, the row has to say which day.
   expect(chipFor("Quarterly review")).not.toBe("");
 });
+
+test("typing in a task says nothing about saving unless a save is slow", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000027";
+  const made = server(profile);
+  const id = seed(made.records, "Call mom", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Call mom").click();
+  const title = screen.getByRole("textbox", { name: "Rename", exact: true });
+  const status = screen.container.querySelector(".detail-save")!;
+
+  const seen: string[] = [];
+  const watch = new MutationObserver(() => seen.push(status.textContent ?? ""));
+  watch.observe(status, { childList: true, characterData: true, subtree: true });
+  await title.fill("Call mom today");
+  await expect
+    .poll(() => made.records.get(id)!.draft.title, { timeout: 4000 })
+    .toBe("Call mom today");
+  expect(seen.filter((text) => text.includes("Saving"))).toEqual([]);
+  watch.disconnect();
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  native.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate") await gate;
+    return made.call(owner, call);
+  });
+  await title.fill("Call mom tonight");
+  await expect.element(screen.getByText("Saving…")).toBeVisible();
+  release();
+  await expect.poll(() => status.textContent).toBe("");
+});

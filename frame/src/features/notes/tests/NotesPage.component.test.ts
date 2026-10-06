@@ -178,3 +178,23 @@ test("a narrow window shows the list or the note, with a way back", async () => 
   await screen.getByRole("button", { name: "Notes", exact: true }).click();
   await expect.element(screen.getByRole("option", { name: /^Packing list/u })).toBeVisible();
 });
+
+test("typing that saves promptly does not flash a saving status", async () => {
+  await page.viewport(1440, 900);
+  const { screen, server } = await setup();
+  await screen.getByRole("option", { name: /^Weekly review/u }).click();
+  const text = screen.getByRole("textbox", { name: "Note" });
+  const status = screen.container.querySelector(".stage-status")!;
+  const seen: string[] = [];
+  const watch = new MutationObserver(() => seen.push(status.textContent ?? ""));
+  watch.observe(status, { childList: true, characterData: true, subtree: true });
+  await text.getByText("What moved, what stalled, what to drop.").click();
+  await userEvent.keyboard("{End} Then rest.");
+  const id = [...server.notes.values()].find((note) => note.summary.title === "Weekly review")!
+    .summary.id;
+  await expect
+    .poll(() => server.notes.get(id)?.markdown, { timeout: 4000 })
+    .toContain("Then rest.");
+  watch.disconnect();
+  expect(seen.filter((entry) => entry.includes("Saving"))).toEqual([]);
+});

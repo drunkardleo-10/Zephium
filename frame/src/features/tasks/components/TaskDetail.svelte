@@ -24,6 +24,7 @@
     SparklesIcon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
+  import { lagging } from "$shared/lib/lag.svelte";
   import type { TaskRow, TaskStatus, TaskList, TaskPriority, TaskStep } from "$domain/resources";
   import { dueLabel, dueTone, durationLabel, hostOf } from "../lib/task-sections";
   import { PRIORITY_ICON } from "../lib/priority";
@@ -39,6 +40,7 @@
     lists = [],
     compact = false,
     trashed = false,
+    saving = false,
     onclose,
     ontoggle,
     onschedule,
@@ -60,6 +62,8 @@
     lists?: readonly TaskList[];
     compact?: boolean;
     trashed?: boolean;
+    /** A write to the task is on its way to native. */
+    saving?: boolean;
     onclose?: () => void;
     ontoggle: (id: string, status: TaskStatus) => void;
     onschedule: (id: string, day: string | null, time: string | null) => void;
@@ -93,6 +97,7 @@
   const ESTIMATES = [15, 30, 45, 60, 90, 120, 180, 240, 480];
   const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 
+  const slow = lagging(() => saving);
   let current = $derived(STATES.find((entry) => entry.id === task?.status) ?? STATES[0]!);
   let listTitle = $derived(
     task?.inbox
@@ -366,7 +371,7 @@
         label={compact ? m.task_back_list() : m.task_close_detail()}
         onclick={onclose}
       />{/if}
-    <span class="detail-save" role="status">{task?.pending ? m.task_saving() : ""}</span>
+    <span class="detail-save" role="status">{slow.current ? m.task_saving() : ""}</span>
     <!-- The few things a task can have done to it, shown rather than folded
          into a menu that would hold only them. -->
     {#if task}

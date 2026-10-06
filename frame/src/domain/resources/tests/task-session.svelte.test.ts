@@ -344,3 +344,22 @@ test("a pause after a space saves the words as typed, and leaving tidies them", 
   expect(server.records.get(id)?.draft.title).toBe("Call mom");
   session.stop();
 });
+
+test("a task reads as saving only while a write to it is on its way", async () => {
+  const { server, session, id } = await editingSession("Slow");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  host.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate") await gate;
+    return server.call(owner, call);
+  });
+  session.rename(id, "Slower");
+  // Typing that has not been sent yet is not a save.
+  expect(session.saving(id)).toBe(false);
+  const done = session.flush();
+  expect(session.saving(id)).toBe(true);
+  release();
+  await done;
+  expect(session.saving(id)).toBe(false);
+  session.stop();
+});
