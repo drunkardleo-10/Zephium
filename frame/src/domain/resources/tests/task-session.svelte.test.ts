@@ -327,3 +327,20 @@ test("unchanged text after typing writes nothing", async () => {
   expect(sent).toEqual([]);
   session.stop();
 });
+
+test("a pause after a space saves the words as typed, and leaving tidies them", async () => {
+  const { server, session, id } = await editingSession("Call");
+  vi.useFakeTimers();
+  session.rename(id, "Call ");
+  await vi.advanceTimersByTimeAsync(2000);
+  vi.useRealTimers();
+  await session.flush();
+  expect(server.records.get(id)?.draft.title).toBe("Call ");
+  // The field still reads what was typed, so the next word follows the space.
+  expect(session.rows.find((row) => row.id === id)?.title).toBe("Call ");
+  session.rename(id, "Call mom ");
+  session.commitText(id);
+  await session.flush();
+  expect(server.records.get(id)?.draft.title).toBe("Call mom");
+  session.stop();
+});

@@ -773,7 +773,9 @@ export class TaskSession {
           return;
         }
         this.#dropDraft(id, field);
-        const text = field === "title" ? raw.trim() : raw;
+        // Trimming while the field is in use would rewrite it under the
+        // caret, so a trailing space is kept until the reader leaves.
+        const text = field === "title" && settle ? raw.trim() : raw;
         if (text === base) return;
         void this.#update(id, [{ field, value: text }], {
           reversible: false,
@@ -806,9 +808,7 @@ export class TaskSession {
         // A step left blank keeps the title it had.
         const value = settle
           ? draft.flatMap((step) => {
-              const title = step.title.trim()
-                ? step.title
-                : base.find((old) => old.id === step.id)?.title;
+              const title = step.title.trim() || base.find((old) => old.id === step.id)?.title;
               return title ? [{ ...step, title }] : [];
             })
           : draft;
