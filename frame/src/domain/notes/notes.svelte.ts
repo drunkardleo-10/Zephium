@@ -24,6 +24,8 @@ const PAGE = 100;
 const REFRESH_DELAY = 120;
 const SEARCH_DELAY = 140;
 const NOTICE_MS = 6000;
+/** Top-level blocks read for a row's title and preview while typing. */
+const PREVIEW_BLOCKS = 24;
 
 export type SaveState = "saved" | "unsaved" | "saving" | "retrying" | "conflict" | "failed";
 
@@ -41,6 +43,9 @@ export type OpenNote = {
 };
 
 export type NoteNotice = { kind: "trashed"; id: string; title: string; at: number };
+
+/** The editor's text as Markdown, at most `blocks` top-level blocks of it. */
+export type NoteReader = (blocks?: number) => string;
 
 /** A `[[target]]` as native matches it to a title or a file name. */
 function linkKey(target: string): string {
@@ -85,6 +90,9 @@ export class NoteSession {
   linksRevision = $state(0);
 
   #markdown = "";
+  /** Reads the editor's text when it is next needed; set while typing has
+   *  moved on from `#markdown`. */
+  #reader: NoteReader | null = null;
   #base: string | null = null;
   #edits = 0;
   #savedEdits = 0;
@@ -125,7 +133,20 @@ export class NoteSession {
   }
 
   get markdown(): string {
+    return this.#read();
+  }
+
+  #read(): string {
+    if (this.#reader) {
+      this.#markdown = this.#reader();
+      this.#reader = null;
+    }
     return this.#markdown;
+  }
+
+  #text(markdown: string): void {
+    this.#markdown = markdown;
+    this.#reader = null;
   }
 
   get active(): boolean {
@@ -185,7 +206,7 @@ export class NoteSession {
     if (this.saveState === "saved" && this.note?.id) {
       this.#resume = this.note.id;
       this.note = null;
-      this.#markdown = "";
+      this.#text("");
       this.backlinks = [];
     }
   }
@@ -327,7 +348,7 @@ export class NoteSession {
     this.openError = null;
     clearTimeout(this.#timer);
     this.#unsettle(record.summary.title);
-    this.#markdown = record.markdown;
+    this.#text(record.markdown);
     this.#base = record.summary.revision;
     this.#edits = this.#savedEdits = 0;
     this.#createRequest = null;
@@ -351,7 +372,7 @@ export class NoteSession {
     clearTimeout(this.#timer);
     this.#unsettle(null);
     this.note = null;
-    this.#markdown = "";
+    this.#text("");
     this.#base = null;
     this.#resume = null;
     this.backlinks = [];
@@ -364,14 +385,14 @@ export class NoteSession {
   async close(): Promise<boolean> {
     const note = this.note;
     if (!note) return true;
-    if (!note.id && blank(this.#markdown)) {
+    if (!note.id && blank(this.#read())) {
       this.#release();
       return true;
     }
     if (!(await this.settle())) return false;
     if (this.note !== note && this.note?.id !== note.id) return true;
     const id = this.note?.id;
-    const empty = id && note.editable && blank(this.#markdown);
+    const empty = id && note.editable && blank(this.#read());
     this.#release();
     // An emptied note is not worth a file; it goes where deleted notes go.
     if (empty) {
@@ -391,7 +412,7 @@ export class NoteSession {
       // Shown in place of the note, so choosing it is never a silent no-op.
       const summary = this.items.find((item) => item.id === id) ?? null;
       this.#document++;
-      this.#markdown = "";
+      this.#text("");
       this.note = {
         id,
         summary,
@@ -417,7 +438,7 @@ export class NoteSession {
     this.#document++;
     this.openError = null;
     this.#unsettle(null);
-    this.#markdown = markdown;
+    this.#text(markdown);
     this.#base = null;
     this.#edits = markdown ? 1 : 0;
     this.#savedEdits = 0;
@@ -439,9 +460,14 @@ export class NoteSession {
 
   // Editing
 
-  edit(markdown: string): void {
-    if (!this.note?.editable || markdown === this.#markdown) return;
-    this.#markdown = markdown;
+  /** Takes typing. The editor passes a reader rather than its text, so a
+   *  keystroke costs a few blocks of serializing for the row's preview and
+   *  the whole note is written out only when it is saved. */
+  edit(input: string | NoteReader): void {
+    if (!this.note?.editable) return;
+    if (typeof input !== "string") this.#reader = input;
+    else if (input === this.#read()) return;
+    else this.#markdown = input;
     this.#edits++;
     this.#preview();
     if (this.saveState === "conflict") return;
@@ -456,12 +482,17 @@ export class NoteSession {
   #preview(): void {
     const summary = this.note?.summary;
     if (!summary) return;
-    const { heading, preview } = outline(this.#markdown);
+    const { heading, preview } = outline(this.#head());
     const title = heading ?? summary.title;
     if (title === summary.title && preview === summary.preview) return;
     const next = { ...summary, title, preview };
     this.note = { ...this.note!, summary: next };
     this.items = this.items.map((item) => (item.id === next.id ? next : item));
+  }
+
+  /** Enough of the text for a title and a preview. */
+  #head(): string {
+    return this.#reader ? this.#reader(PREVIEW_BLOCKS) : this.#markdown;
   }
 
   #schedule(delay: number): void {
@@ -509,8 +540,8 @@ export class NoteSession {
 
   #write(settle = false): Promise<boolean> {
     const note = this.note!;
-    const markdown = this.#markdown;
     const edits = this.#edits;
+    const markdown = this.#read();
     const epoch = this.#epoch;
     const document = this.#document;
     this.saveState = "saving";
@@ -579,7 +610,7 @@ export class NoteSession {
     this.#retries = 0;
     this.saveError = null;
     if (this.note) {
-      const { heading, preview } = outline(this.#markdown);
+      const { heading, preview } = outline(this.#head());
       const current =
         this.#savedEdits === this.#edits
           ? summary
@@ -615,7 +646,7 @@ export class NoteSession {
       request_id: crypto.randomUUID(),
       id: note.id,
       base_revision: base,
-      markdown: this.#markdown,
+      markdown: this.#read(),
       settle: true,
     });
     if (document !== this.#document) return;
@@ -729,7 +760,7 @@ export class NoteSession {
     if (this.notice?.id === id) this.dismissNotice();
     if (this.trash) this.items = this.items.filter((item) => item.id !== id);
     else this.#upsert(result.summary);
-    if (this.note?.id === id) this.#load({ summary: result.summary, markdown: this.#markdown });
+    if (this.note?.id === id) this.#load({ summary: result.summary, markdown: this.#read() });
     return true;
   }
 
@@ -743,7 +774,7 @@ export class NoteSession {
 
   /** A note's Markdown as it is on disk, or as typed if it is open. */
   async markdownOf(id: string): Promise<string | null> {
-    if (this.note?.id === id) return this.#markdown;
+    if (this.note?.id === id) return this.#read();
     const result = await this.#call({ kind: "get", id });
     return result.kind === "record" ? result.record.markdown : null;
   }

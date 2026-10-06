@@ -291,3 +291,31 @@ test("a pause shorter than a breath is not yet a save", async () => {
   await settle(500);
   expect(server.writes()).toHaveLength(1);
 });
+
+test("typing reads the whole note out only to save it", async () => {
+  const note = server.seed("# Long\n");
+  const session = await started();
+  await session.open(note.id);
+  const reads: (number | undefined)[] = [];
+  for (let tick = 1; tick <= 5; tick++) {
+    const text = `# Long read\n\n${"word ".repeat(tick)}`;
+    session.edit((blocks) => {
+      reads.push(blocks);
+      return text;
+    });
+  }
+  expect(reads.every((blocks) => blocks !== undefined)).toBe(true);
+  expect(session.items.find((item) => item.id === note.id)?.title).toBe("Long read");
+  await settle(1300);
+  expect(reads.filter((blocks) => blocks === undefined)).toHaveLength(1);
+  expect(server.notes.get(note.id)?.markdown).toBe(`# Long read\n\n${"word ".repeat(5)}`);
+});
+
+test("leaving a note saves typing that was never read out", async () => {
+  const session = await started();
+  const note = server.seed("# Quick\n");
+  await session.open(note.id);
+  session.edit(() => "# Quick\n\nlast words");
+  expect(await session.close()).toBe(true);
+  expect(server.notes.get(note.id)?.markdown).toBe("# Quick\n\nlast words");
+});
