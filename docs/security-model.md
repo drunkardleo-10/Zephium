@@ -310,8 +310,11 @@ JavaScript history/window calls. Native URL/history observers are mandatory on a
 platforms. They deduplicate bounded state and close the view if an engine source escapes
 the URL policy, so chrome never presents a pre-navigation URL over a forbidden document.
 
-**Permissions and downloads.** Geolocation, notifications, screen capture and every
-other permission exposed by Wry are denied in every view. Camera and microphone are
+**Permissions and downloads.** Geolocation, notifications and other permissions
+routed through Wry's permission callback are denied in every view. Display
+capture uses separate native paths: ordinary human OS-picker consent is not a
+camera/microphone grant, and a deny callback alone does not prove agent display
+capture containment. That boundary still requires native qualification. Camera and microphone are
 the only exceptions, and only for ordinary human tabs. On Windows, those tabs defer
 camera and microphone to WebView2's own origin-labelled prompt
 (`PermissionResponse::Prompt`); Zephium stores nothing in the profile, and work,
@@ -327,7 +330,10 @@ overflow, stale identities, callback panic, navigation, focus loss, window hide 
 shutdown all deny. Decisions are one-time only: `remember_enabled` is false, so
 nothing is written to the profile until the browser can list and revoke grants. The
 store and its atomic remembered-choice path exist behind that switch and are covered by
-tests, not by shipped behavior. Extension pages and offscreen documents deny media
+tests, not by shipped behavior. macOS capture indicators observe native Active/Muted
+state and stop the exact resident document through WebKit; provisional navigation
+does not hide ongoing capture. Windows has no equivalent verified capture-state
+projection. Packaged device-permission, stop and iframe-lifetime checks remain required. Extension pages and offscreen documents deny media
 capture. The bundle carries camera and microphone usage descriptions and the matching
 `desktop/Entitlements.plist` entries; those grant no authority by themselves.
 [WebKit requests system validation before its UI-client policy

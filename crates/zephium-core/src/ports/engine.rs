@@ -25,6 +25,27 @@ pub enum MemoryPressure {
     Critical,
 }
 
+/// Native capture observations; page JavaScript cannot establish these facts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureDeviceState {
+    #[default]
+    None,
+    Active,
+    Muted,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MediaCaptureState {
+    pub camera: CaptureDeviceState,
+    pub microphone: CaptureDeviceState,
+}
+
+impl MediaCaptureState {
+    pub fn is_capturing(self) -> bool {
+        self.camera != CaptureDeviceState::None || self.microphone != CaptureDeviceState::None
+    }
+}
+
 /// A prepared extension package the user has consented to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebExtensionLoad {
@@ -872,6 +893,15 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Stop capture in the exact committed document. Unsupported engines
+    /// expose no live indicator or pretend to stop through page JavaScript.
+    fn stop_media_capture(
+        &self,
+        _item: ItemId,
+        _navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Installs one exact, immutable profile-scoped content policy.
     ///
     /// Queue admission is not native application. The terminal result arrives
@@ -1194,6 +1224,11 @@ pub enum EngineEvent {
     LoadingChanged {
         id: ItemId,
         loading: bool,
+    },
+    MediaCaptureChanged {
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        state: MediaCaptureState,
     },
     FaviconPixels {
         id: ItemId,

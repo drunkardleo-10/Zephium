@@ -196,6 +196,7 @@ export const commands = {
 	 *  but cannot mint or alter authority.
 	 */
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
+	captureStop: (itemId: string, navigationId: string) => __TAURI_INVOKE<OperationAdmission>("capture_stop", { itemId, navigationId }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
@@ -663,6 +664,8 @@ export type BrowserCredentialCapabilityView = {
 };
 
 export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
+
+export type CaptureDeviceStateView = "none" | "active" | "muted";
 
 /**
  *  A note that changed, and the revision it now has on disk, or `None` when
@@ -1166,6 +1169,12 @@ export type MediaAssetV1_Serialize = {
 	origin: MediaOrigin,
 	width?: number | null,
 	height?: number | null,
+};
+
+export type MediaCaptureView = {
+	navigation_id: string,
+	camera: CaptureDeviceStateView,
+	microphone: CaptureDeviceStateView,
 };
 
 /**  Outcome of a native file import into the profile's media store. */
@@ -1865,6 +1874,7 @@ export type TabView = {
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,
+	capture?: MediaCaptureView | null,
 };
 
 /**

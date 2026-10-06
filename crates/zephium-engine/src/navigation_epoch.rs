@@ -462,6 +462,29 @@ impl NavigationEpochTracker {
         }
     }
 
+    /// Native media state still belongs to the previous resident document
+    /// during a provisional load. This observation/stop identity grants no
+    /// permission, presentation, scripting or navigation authority.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn resident_media_epoch(&self) -> Option<NavigationEpoch> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return None;
+        }
+        let current = state.current.as_ref()?;
+        if current.phase == TrackedNavigationPhase::Committed {
+            Some(current.epoch)
+        } else {
+            current
+                .previous_committed
+                .as_ref()
+                .map(|previous| previous.epoch)
+        }
+    }
+
     pub(crate) fn committed_snapshot(&self) -> Option<(NavigationEpoch, String)> {
         let state = self
             .state
@@ -643,6 +666,41 @@ mod tests {
         );
         tracker.release_auth_cleanup();
         assert!(!tracker.auth_cleanup_is_owned());
+    }
+
+    #[test]
+    fn media_observation_keeps_the_resident_document_during_failed_provisional_load() {
+        let tracker = NavigationEpochTracker::new();
+        let resident = commit(
+            &tracker,
+            81,
+            "https://call.example/",
+            "https://call.example/",
+        );
+        tracker.begin("https://next.example/").unwrap();
+        tracker.observe_navigation(&event(
+            82,
+            NavigationEventPhase::Started,
+            "https://next.example/",
+        ));
+        assert!(tracker.current_committed().is_none());
+        assert_eq!(tracker.resident_media_epoch(), Some(resident));
+        tracker.observe_navigation(&event(
+            82,
+            NavigationEventPhase::Failed,
+            "https://next.example/",
+        ));
+        assert_eq!(tracker.resident_media_epoch(), Some(resident));
+        let replacement = commit(
+            &tracker,
+            83,
+            "https://next.example/",
+            "https://next.example/",
+        );
+        assert_eq!(tracker.resident_media_epoch(), Some(replacement));
+        assert_ne!(replacement, resident);
+        tracker.revoke();
+        assert!(tracker.resident_media_epoch().is_none());
     }
 
     #[test]

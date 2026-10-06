@@ -78,6 +78,24 @@ impl Items {
         self.items.get_mut(&id).and_then(Item::tab_mut)
     }
 
+    pub fn set_media_capture(
+        &mut self,
+        id: ItemId,
+        capture: Option<(
+            crate::ports::engine::NavigationPresentationId,
+            crate::ports::engine::MediaCaptureState,
+        )>,
+    ) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        if tab.capture == capture {
+            return false;
+        }
+        tab.capture = capture;
+        true
+    }
+
     pub fn roots(&self, placement: Placement) -> &[ItemId] {
         self.roots.get(&placement).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -495,6 +513,7 @@ impl Items {
             return false;
         }
         tab.view = false;
+        tab.capture = None;
         tab.loading = false;
         tab.lifecycle = Lifecycle::Hibernated;
         true
@@ -513,6 +532,7 @@ impl Items {
         self.pending_navigations.remove(&id);
         if let Some(tab) = self.tab_mut(id) {
             tab.view = false;
+            tab.capture = None;
             tab.loading = false;
             tab.lifecycle = Lifecycle::Hibernated;
             tab.title = "Page failed to open".into();

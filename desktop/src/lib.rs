@@ -1587,6 +1587,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browser_credentials::browser_credential_capability,
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
+            capture_stop,
             blocker_status,
             blocker_stats,
             blocker_set_enabled,
@@ -2972,6 +2973,35 @@ fn page_permission_respond(
             request,
             decision,
         },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn capture_stop(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    item_id: String,
+    navigation_id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "capture_stop")
+        || shutdown_started(caller.app_handle())
+        || !bounded(&item_id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(item) = ItemId::parse(&item_id).filter(|item| item.to_string() == item_id) else {
+        return rejected_operation();
+    };
+    let Some(navigation) = fixed_nonzero_hex(&navigation_id)
+        .map(zephium_core::ports::engine::NavigationPresentationId::from_raw)
+    else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::StopMediaCapture { item, navigation },
     )
 }
 
@@ -5975,6 +6005,7 @@ pub fn run() {
             let initial =
                 platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));
             shell.dispatch(Command::SetWindowSize(initial));
+            shell.dispatch(Command::SetWindowFocused(window.is_focused().unwrap_or(false)));
 
             let resize_shell = shell.clone();
             let resize_window = window.clone();
@@ -6084,6 +6115,7 @@ pub fn run() {
                         }
                     }
                     tauri::WindowEvent::Focused(true) => {
+                        resize_shell.dispatch(Command::SetWindowFocused(true));
                         // Some window managers restore without a distinct
                         // resize notification. Wake content before it can be
                         // interacted with.
@@ -6094,6 +6126,7 @@ pub fn run() {
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false) => {
+                        resize_shell.dispatch(Command::SetWindowFocused(false));
                         if resize_window.is_minimized().unwrap_or(false) {
                             resize_shell.dispatch(Command::SetWindowVisible(false));
                         }

@@ -119,6 +119,11 @@ pub struct TabState {
     pub can_go_forward: bool,
     pub zoom: f64,
     pub lifecycle: Lifecycle,
+    /// Process-local native state, never restored or persisted.
+    pub capture: Option<(
+        crate::ports::engine::NavigationPresentationId,
+        crate::ports::engine::MediaCaptureState,
+    )>,
     // Distinct from `url`: a restored/hibernated tab has a url but no live view.
     pub(crate) view: bool,
 }
@@ -135,6 +140,7 @@ impl TabState {
             can_go_forward: false,
             zoom: 1.0,
             lifecycle: Lifecycle::Inactive,
+            capture: None,
             view: false,
         }
     }

@@ -957,6 +957,13 @@ impl EngineHost {
             builder
         };
 
+        #[cfg(target_os = "windows")]
+        let permission_presentation = presentation_permit.clone();
+        #[cfg(target_os = "windows")]
+        let permission_window = match self.parent.0 {
+            raw_window_handle::RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+            _ => 0,
+        };
         let mut builder = builder
             .with_bounds(to_wry(bounds))
             // Construction itself may enter a native message loop. On
@@ -1004,7 +1011,15 @@ impl EngineHost {
             // Windows, camera and microphone requests go to WebView2's own
             // origin-labelled prompt; macOS replaces this handler with the
             // browser-owned broker below.
-            .with_permission_handler(raw_content_permission)
+            .with_permission_handler(move |kind| {
+                #[cfg(target_os = "windows")]
+                if !permission_presentation.load(Ordering::Acquire)
+                    || !crate::platform::imp::permission_window_is_foreground(permission_window)
+                {
+                    return wry::PermissionResponse::Deny;
+                }
+                raw_content_permission(kind)
+            })
             // This is a construction-time native policy, not a callback that
             // first materializes attacker-controlled URL/path metadata. Wry
             // installs the cancel handler before initial navigation on every
@@ -1856,6 +1871,25 @@ impl EngineHost {
         }
 
         let observation_id = id.clone();
+        #[cfg(target_os = "macos")]
+        let capture_observer = {
+            let capture_id = id.clone();
+            let capture_permit = event_permit.clone();
+            let capture_navigation = navigation.clone();
+            let capture_sink = self.sink.clone();
+            crate::platform::macos::capture::CaptureObserver::install(&view, move |state| {
+                if let Some(epoch) = capture_navigation.resident_media_epoch() {
+                    capture_permit.emit(
+                        &capture_sink,
+                        EngineEvent::MediaCaptureChanged {
+                            id: capture_id.get(),
+                            navigation: epoch.presentation_id(),
+                            state,
+                        },
+                    );
+                }
+            })
+        };
         let observation_permit = event_permit.clone();
         let observation_navigation = navigation.clone();
         let observer = match crate::platform::imp::install_navigation_observer(
@@ -1938,6 +1972,8 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            #[cfg(target_os = "macos")]
+            _capture_observer: capture_observer,
             replay_safety,
             discard_probe_lease: std::cell::RefCell::new(None),
             #[cfg(target_os = "macos")]

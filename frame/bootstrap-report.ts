@@ -132,7 +132,7 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
             /^src\/features\/tools\/components\/(previews\/|ToolSlot\.svelte|ToolFrame\.svelte)/u.test(
               id,
             ) ||
-            /^src\/domain\/(tabs|blocker|extensions|runtime|permissions)\//u.test(id) ||
+            /^src\/domain\/(tabs|blocker|extensions|runtime|permissions|capture)\//u.test(id) ||
             [
               "src/app/browser/BrowserApp.svelte",
               "src/styles/global.css",

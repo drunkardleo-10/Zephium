@@ -218,6 +218,7 @@ pub struct Shell {
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
     window_visible: bool,
+    window_focused: bool,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
     browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
@@ -438,6 +439,7 @@ impl Shell {
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
+            window_focused: false,
             browser_page: None,
             browser_page_projected: None,
             browser_return_revision: 0,
@@ -763,6 +765,15 @@ impl Shell {
                 }
                 None => self.pending_size = size,
             },
+            Command::SetWindowFocused(focused) => {
+                self.window_focused = focused;
+                if !focused {
+                    self.cancel_page_permission_if_not_foreground();
+                }
+            }
+            Command::StopMediaCapture { item, navigation } => {
+                let _ = self.operation_stop_media_capture(item, navigation);
+            }
             Command::SetWindowVisible(visible) => {
                 if self.window_visible != visible {
                     self.window_visible = visible;

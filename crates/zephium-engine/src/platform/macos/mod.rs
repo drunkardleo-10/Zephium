@@ -25,6 +25,7 @@ pub(crate) mod agentic_resource_driver;
 mod agentic_semantic_probe;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
+pub(crate) mod capture;
 mod content_filter;
 mod credentials;
 mod find;
@@ -127,6 +128,7 @@ pub use agentic_semantic_probe::{
 
 use dispatch2::DispatchObject as _;
 
+pub(crate) use native::permission_owner_is_focused;
 #[cfg(feature = "native-page-permission-probes")]
 pub(crate) use native::run_page_permission_probe;
 #[cfg(feature = "native-isolation-probes")]

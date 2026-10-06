@@ -317,6 +317,7 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
     shutdown_result: Mutex<Option<bool>>,
@@ -608,6 +609,17 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((profile, item, request, settlement));
+        self.native_admission()
+    }
+    fn stop_media_capture(
+        &self,
+        item: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        self.media_capture_stops
+            .lock()
+            .unwrap()
+            .push((item, navigation));
         self.native_admission()
     }
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {

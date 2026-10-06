@@ -5,6 +5,9 @@ use super::*;
 impl Shell {
     pub(super) fn handle_operation(&mut self, command: Command) -> OperationDisposition {
         match command {
+            Command::StopMediaCapture { item, navigation } => {
+                self.operation_stop_media_capture(item, navigation)
+            }
             Command::ShowBrowserPage(page) => self.operation_show_browser_page(page),
             Command::WorkPaneShow { target, rect } => self.operation_work_pane_show(target, rect),
             Command::WorkPaneHide => self.operation_work_pane_hide(),
@@ -59,6 +62,32 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::UnsupportedCommand,
             ),
+        }
+    }
+
+    pub(super) fn operation_stop_media_capture(
+        &mut self,
+        item: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> OperationDisposition {
+        if !self.item_in_focused_scope(item)
+            || !self.items.tab(item).is_some_and(|tab| {
+                tab.capture
+                    .is_some_and(|(current, state)| current == navigation && state.is_capturing())
+            })
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if self.engine.stop_media_capture(item, navigation) == NativeDispatch::Scheduled {
+            operation_result(
+                OperationOutcome::Deferred,
+                OperationReason::NativeWorkPending,
+            )
+        } else {
+            operation_result(
+                OperationOutcome::NativeAdmissionFailed,
+                OperationReason::NativeDispatchRejected,
+            )
         }
     }
 

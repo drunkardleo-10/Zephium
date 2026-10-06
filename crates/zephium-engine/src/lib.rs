@@ -1100,6 +1100,7 @@ impl RetirementGate {
             | event @ EngineEvent::ZoomSettled { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
+            | event @ EngineEvent::MediaCaptureChanged { id, .. }
             | event @ EngineEvent::FaviconPixels { id, .. }
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }
@@ -2308,6 +2309,22 @@ impl Engine for WebviewEngine {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (profile, item, request, settlement);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn stop_media_capture(
+        &self,
+        id: ItemId,
+        navigation: zephium_core::ports::engine::NavigationPresentationId,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            self.run_for_active_item(id, move |host| host.stop_media_capture(id, navigation))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (id, navigation);
             NativeDispatch::Unsupported
         }
     }

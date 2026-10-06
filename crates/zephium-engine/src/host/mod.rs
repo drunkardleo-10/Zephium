@@ -141,6 +141,8 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    #[cfg(target_os = "macos")]
+    _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     replay_safety: Rc<discard::ReplaySafety>,
     discard_probe_lease: std::cell::RefCell<Option<discard::ProbeLease>>,
     #[cfg(target_os = "macos")]
