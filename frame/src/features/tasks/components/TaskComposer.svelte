@@ -1,6 +1,7 @@
 <script lang="ts">
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import Icon from "$shared/ui/Icon";
+  import { fitTextarea, scrollParent } from "$shared/lib/fit";
   import Menu, { type MenuEntry } from "$shared/ui/Menu";
   import {
     Add01Icon,
@@ -173,10 +174,8 @@
   }
 
   function grow(node: HTMLTextAreaElement, _value: string) {
-    const size = () => {
-      node.style.height = "auto";
-      node.style.height = `${node.scrollHeight}px`;
-    };
+    let scroller: HTMLElement | null | undefined;
+    const size = () => fitTextarea(node, (scroller ??= scrollParent(node)));
     size();
     return { update: size };
   }

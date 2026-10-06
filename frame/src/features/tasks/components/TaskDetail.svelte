@@ -25,6 +25,7 @@
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import { lagging } from "$shared/lib/lag.svelte";
+  import { fitTextarea, scrollParent } from "$shared/lib/fit";
   import type { TaskRow, TaskStatus, TaskList, TaskPriority, TaskStep } from "$domain/resources";
   import { dueLabel, dueTone, durationLabel, hostOf } from "../lib/task-sections";
   import { PRIORITY_ICON } from "../lib/priority";
@@ -181,11 +182,12 @@
   });
 
   function fit(element: HTMLTextAreaElement, value: string | null) {
+    let scroller: HTMLElement | null | undefined;
     function size(_value: string | null) {
       queueMicrotask(() => {
         if (!element.isConnected) return;
-        element.style.height = "auto";
-        element.style.height = `${element.scrollHeight}px`;
+        scroller ??= scrollParent(element);
+        fitTextarea(element, scroller);
       });
     }
     size(value);
