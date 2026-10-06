@@ -277,6 +277,9 @@ impl Shell {
             })
         });
         self.record_tab_projection_revisions(&sidebar.tabs);
+        if let Ok(mut views) = self.presentation.last_tab_views.try_borrow_mut() {
+            views.retain(|id, _| self.items.tab(*id).is_some());
+        }
         Some(ItemsState {
             projection_revision: format!("{:032x}", self.next_projection_revision()),
             profile: Some(profile_view),
@@ -414,7 +417,31 @@ impl Shell {
             view.icon = None;
             view.availability = None;
         }
+        self.stable_revision(id, view)
+    }
+
+    /// Keeps the revision of a tab whose view did not change since it was
+    /// last offered; a changed view keeps its new revision and is remembered.
+    fn stable_revision(&self, id: ItemId, view: TabView) -> TabView {
+        if let Ok(views) = self.presentation.last_tab_views.try_borrow() {
+            if let Some(previous) = views.get(&id) {
+                let unchanged = TabView {
+                    projection_revision: previous.projection_revision.clone(),
+                    ..view.clone()
+                };
+                if unchanged == *previous {
+                    return unchanged;
+                }
+            }
+        }
+        self.remember_tab_view(id, &view);
         view
+    }
+
+    pub(super) fn remember_tab_view(&self, id: ItemId, view: &TabView) {
+        if let Ok(mut views) = self.presentation.last_tab_views.try_borrow_mut() {
+            views.insert(id, view.clone());
+        }
     }
 
     pub(super) fn presentation_tab_view(

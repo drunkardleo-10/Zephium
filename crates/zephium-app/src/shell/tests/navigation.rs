@@ -322,3 +322,38 @@ fn a_blocked_new_tab_can_be_opened_from_its_notice() {
     });
     assert_eq!(last(&screen).tabs.len(), tabs_before + 1);
 }
+
+#[test]
+fn an_unchanged_tab_keeps_its_revision_across_snapshots() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    let revision_of = |screen: &Screen, id: ItemId| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+            .projection_revision
+    };
+    let before = revision_of(&screen, first);
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::Activate(second));
+    assert_eq!(
+        revision_of(&screen, first),
+        before,
+        "switching tabs changed nothing about it"
+    );
+
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id: first,
+        title: "Renamed".into(),
+    }));
+    shell.project_items();
+    assert!(
+        revision_of(&screen, first) > before,
+        "a changed tab gets a newer revision"
+    );
+}
