@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[derive(Clone)]
 pub(super) struct Native {
     operation: ICoreWebView2DownloadOperation,
-    permit: EventPermit,
+    pub(super) permit: EventPermit,
 }
 pub(super) struct Delegate {
     operation: ICoreWebView2DownloadOperation,
