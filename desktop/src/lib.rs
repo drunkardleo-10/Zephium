@@ -4679,6 +4679,7 @@ fn build_menu(
         .build()?;
     let file = SubmenuBuilder::new(handle, "File")
         .item(&item("tab.new")?)
+        .item(&item("window.newPrivate")?)
         .item(&item("note.new")?)
         .item(&item("split.choose")?)
         .separator()
@@ -4924,6 +4925,7 @@ fn build_chrome_menu(
     let item =
         |id: &str, enabled: bool| build_command_menu_item_enabled(handle, &resolved, id, enabled);
     let new_tab = item("tab.new", true)?;
+    let new_private = item("window.newPrivate", true)?;
     let reopen = item("tab.reopen", true)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let bookmark = item("bookmark.add", page)?;
@@ -4937,8 +4939,18 @@ fn build_chrome_menu(
     Menu::with_items(
         handle,
         &[
-            &new_tab, &reopen, &first, &bookmark, &copy_link, &second, &split, &compact, &third,
-            &bookmarks, &settings,
+            &new_tab,
+            &new_private,
+            &reopen,
+            &first,
+            &bookmark,
+            &copy_link,
+            &second,
+            &split,
+            &compact,
+            &third,
+            &bookmarks,
+            &settings,
         ],
     )
 }
@@ -5046,6 +5058,7 @@ fn build_profile_menu(
     let account = MenuItemBuilder::with_id("settings.account", "Account…").build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let new_tab = item("tab.new")?;
+    let new_private = item("window.newPrivate")?;
     let split = MenuItemBuilder::with_id("split.choose", "Split View…").build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
     let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
@@ -5065,6 +5078,7 @@ fn build_profile_menu(
             &account,
             &first,
             &new_tab,
+            &new_private,
             &split,
             &second,
             &notes,
