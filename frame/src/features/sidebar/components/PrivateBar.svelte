@@ -52,7 +52,7 @@
   .back {
     flex: none;
     padding: 2px 6px;
-    border-radius: 6px;
+    border-radius: var(--radius-inset);
     font-size: 12px;
     color: var(--color-muted);
   }
