@@ -6,6 +6,8 @@ mod download;
 #[cfg(target_os = "macos")]
 mod drag_drop;
 mod navigation;
+#[cfg(target_os = "macos")]
+mod script_dialog;
 #[cfg(feature = "mac-proxy")]
 mod proxy;
 #[cfg(target_os = "macos")]

@@ -1803,8 +1803,13 @@ impl EngineHost {
             // configure() deliberately denies menus for generic/agent views.
             // Only this human-view constructor installed both the bounded
             // ContextMenuRequested filter and the SaveAsUIShowing denial hook.
+            // Tabs a person reads also get WebView2's own page dialogs, which
+            // name the origin that asks; agent views keep them denied.
             if unsafe { view.webview().Settings() }
-                .and_then(|settings| unsafe { settings.SetAreDefaultContextMenusEnabled(true) })
+                .and_then(|settings| unsafe {
+                    settings.SetAreDefaultContextMenusEnabled(true)?;
+                    settings.SetAreDefaultScriptDialogsEnabled(true)
+                })
                 .is_err()
             {
                 if report_failure {
