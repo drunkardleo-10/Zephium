@@ -332,38 +332,46 @@ mod qa_settings_recovery_tests {
     }
 
     #[test]
+    fn a_session_saved_under_older_canonical_rules_recovers_in_canonical_form() {
+        let (dir, mut state) = marked_directory(REASON);
+        let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+        state.active_item = Some(ItemId::from(999_999));
+        let data = serde_json::to_string(&state).unwrap();
+        meta.execute(
+            "UPDATE session_snapshot SET data = ?1 WHERE id = 1",
+            [&data],
+        )
+        .unwrap();
+        meta.execute(
+            "UPDATE session_recovery SET data = ?1 WHERE id = 1",
+            [data.as_bytes()],
+        )
+        .unwrap();
+        drop(meta);
+
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert!(hub.recovery_reason().is_none());
+        let loaded = hub.load().unwrap().expect("the session is restored");
+        assert_eq!(loaded, core_session::canonicalize(state));
+        assert_ne!(loaded.active_item, Some(ItemId::from(999_999)));
+    }
+
+    #[test]
     fn unrelated_or_changed_recovery_markers_remain_read_only() {
-        for case in ["other-reason", "changed-snapshot", "still-noncanonical"] {
+        for case in ["other-reason", "changed-snapshot"] {
             let reason = if case == "other-reason" {
                 "unrelated recovery"
             } else {
                 REASON
             };
-            let (dir, mut state) = marked_directory(reason);
+            let (dir, _state) = marked_directory(reason);
             let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
-            match case {
-                "changed-snapshot" => {
-                    meta.execute(
-                        "UPDATE session_snapshot SET data = data || ' ' WHERE id = 1",
-                        [],
-                    )
-                    .unwrap();
-                }
-                "still-noncanonical" => {
-                    state.active_item = Some(ItemId::from(999_999));
-                    let data = serde_json::to_string(&state).unwrap();
-                    meta.execute(
-                        "UPDATE session_snapshot SET data = ?1 WHERE id = 1",
-                        [&data],
-                    )
-                    .unwrap();
-                    meta.execute(
-                        "UPDATE session_recovery SET data = ?1 WHERE id = 1",
-                        [data.as_bytes()],
-                    )
-                    .unwrap();
-                }
-                _ => {}
+            if case == "changed-snapshot" {
+                meta.execute(
+                    "UPDATE session_snapshot SET data = data || ' ' WHERE id = 1",
+                    [],
+                )
+                .unwrap();
             }
             drop(meta);
             let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
@@ -653,17 +661,15 @@ impl Hub {
                     "authoritative snapshot does not match profile registry",
                 ));
             }
-            if core_session::canonicalize(state.clone()) != state {
-                self.quarantine_authoritative(
-                    "authoritative session is not in exact canonical form",
-                    version,
-                    Some(data.as_bytes()),
-                )?;
-                return Err(invalid_data(
-                    "authoritative session is not in exact canonical form",
-                ));
+            // Canonical form is the sanitizer, and its rules tighten between
+            // releases. A session saved by an earlier build that decodes and
+            // matches the registry is restored in today's canonical form;
+            // locking the store over it would cost the person every tab.
+            let canonical = core_session::canonicalize(state.clone());
+            if canonical != state {
+                eprintln!("store: restoring a session saved under older canonical rules");
             }
-            return Ok(Some(state));
+            return Ok(Some(canonical));
         }
 
         // One-time compatibility reader for databases created before the
@@ -795,13 +801,12 @@ impl Hub {
         self.recovery_required.as_deref()
     }
 
-    /// An earlier QA build temporarily represented Settings as a typed tab.
-    /// Its later removal made that otherwise valid snapshot fail the exact
-    /// canonicalization gate and enter read-only recovery. Clear only that
-    /// specific marker when its preserved bytes still equal the current
-    /// bounded snapshot and the complete state is canonical again. Shell
-    /// retires the legacy row after loading and saves the resulting session.
-    pub(super) fn recover_qa_settings_tab_quarantine(&mut self) -> rusqlite::Result<bool> {
+    /// Earlier builds put a valid session that was not in the then-exact
+    /// canonical form (an older QA build's Settings tab, or rules that
+    /// tightened later) into read-only recovery. Clear that specific marker
+    /// when its preserved bytes still equal the current bounded snapshot;
+    /// loading restores the canonical form and the next save publishes it.
+    pub(super) fn recover_canonical_form_quarantine(&mut self) -> rusqlite::Result<bool> {
         const REASON: &str = "authoritative session is not in exact canonical form";
         if self.recovery_required.as_deref() != Some(REASON) {
             return Ok(false);
@@ -846,20 +851,10 @@ impl Hub {
         let Some(state) = decode_authoritative_snapshot(&data) else {
             return Ok(false);
         };
-        let qa_settings = state.items.iter().any(|item| {
-            item.parent.is_none()
-                && matches!(item.placement, Placement::Space { .. })
-                && matches!(
-                    item.kind,
-                    PersistedKind::BrowserTab {
-                        page: zephium_core::item::BrowserOwnedTab::Settings
-                    }
-                )
-        });
-        if !qa_settings
-            || self.validate_authoritative_registry(&state).is_err()
-            || core_session::canonicalize(state.clone()) != state
-        {
+        // Loading now restores such a session in today's canonical form, so
+        // any quarantine for this reason alone is lifted once the preserved
+        // bytes still decode and match the registry.
+        if self.validate_authoritative_registry(&state).is_err() {
             return Ok(false);
         }
         let removed = self.meta.execute(

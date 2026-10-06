@@ -2275,9 +2275,9 @@ fn semantic_session_corruption_is_quarantined_exactly_and_store_becomes_read_onl
         let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
         hub.save(&sample()).unwrap();
     }
-    let mut invalid = sample();
-    invalid.active_item = Some(ItemId::from(999_999));
-    let original = serde_json::to_string(&invalid).unwrap();
+    // A session saved under older canonical rules is restored, not locked;
+    // one that no longer decodes still is.
+    let original = r#"{"profiles":7}"#.to_owned();
     let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
     meta.execute(
         "UPDATE session_snapshot SET data = ?1 WHERE id = 1",
@@ -2290,7 +2290,7 @@ fn semantic_session_corruption_is_quarantined_exactly_and_store_becomes_read_onl
     let SessionLoad::RecoveryRequired { reason } = store.load_session() else {
         panic!("semantic corruption did not enter explicit recovery mode")
     };
-    assert!(reason.contains("canonical"), "{reason}");
+    assert!(reason.contains("corrupt"), "{reason}");
     assert_eq!(
         load_page_permissions(store.as_ref(), ProfileId::from(1)),
         PagePermissionCatalogLoadOutcome::Failed

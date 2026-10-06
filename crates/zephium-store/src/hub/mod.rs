@@ -202,7 +202,7 @@ impl Hub {
             ambiguous_time_commit_once: false,
         };
         hub.load_registry()?;
-        let _ = hub.recover_qa_settings_tab_quarantine()?;
+        let _ = hub.recover_canonical_form_quarantine()?;
         // The snapshot and registry must agree before profile files are
         // migrated, purged, or reconciled. A corrupt authoritative row must
         // fail startup without destroying the only recoverable profile data.
