@@ -1129,7 +1129,9 @@ These inherited properties must not be overstated:
 - "Zero telemetry" currently means no first-party Zephium telemetry client is wired
   into this tree. It does not mean pages make no requests or that OS WebViews and
   services make no vendor requests. For example, WebView2 content protection remains
-  enabled and may follow Microsoft/OS policy. A production privacy claim needs a
+  enabled and may follow Microsoft/OS policy. Zephium configures custom crash
+  reporting to prevent WebView2's automatic crash upload; this does not disable
+  separately governed required diagnostics or SmartScreen. A production privacy claim needs a
   platform-by-platform traffic audit.
 - A sandbox limits impact; it does not make engine vulnerabilities impossible. Native
   engine security updates are part of the product's security boundary.
