@@ -10,14 +10,14 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
-    NSWindowOrderingMode, NSWorkspace,
+    NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSCursor,
+    NSEvent, NSEventMask, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWorkspace,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSValue,
+    ns_string, MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSNumber,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSValue,
 };
 use objc2_quartz_core::{
     kCAFillModeForwards, CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, CATransaction,
@@ -635,8 +635,7 @@ impl ContentStage {
         view.setTranslatesAutoresizingMaskIntoConstraints(false);
         view.setFrame(host.view.frame());
         if let Some(layer) = view.layer() {
-            let color = NSColor::windowBackgroundColor();
-            layer.setBackgroundColor(Some(&color.CGColor()));
+            layer.setBackgroundColor(Some(&page_ground(self).CGColor()));
             if let Some(image) = image {
                 let contents: &AnyObject = image.as_ref();
                 // SAFETY: a CGImage is valid layer contents; the layer retains it.
@@ -1832,6 +1831,28 @@ fn translation(from: f64, to: f64, seconds: f64) -> Retained<CABasicAnimation> {
     animation.setDuration(seconds);
     animation.setTimingFunction(Some(&emphasized()));
     animation
+}
+
+/// The frame's content ground (`--color-page` in frame/src/styles/tokens.css),
+/// so a cover reads as the empty content pane, not a step to another grey.
+fn page_ground(view: &NSView) -> Retained<NSColor> {
+    // SAFETY: immutable framework constants.
+    let (aqua, dark) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
+    let is_dark = view
+        .effectiveAppearance()
+        .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[aqua, dark]))
+        .is_some_and(|name| name.isEqualToString(dark));
+    let (red, green, blue) = if is_dark {
+        crate::platform::PAGE_GROUND_DARK
+    } else {
+        crate::platform::PAGE_GROUND_LIGHT
+    };
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from(red) / 255.0,
+        f64::from(green) / 255.0,
+        f64::from(blue) / 255.0,
+        1.0,
+    )
 }
 
 fn fade_out(view: &Retained<NSView>) {
