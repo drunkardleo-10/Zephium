@@ -74,14 +74,14 @@ fn both_successful_view_insertion_paths_reconcile_retained_layouts() {
 fn retained_layouts_accept_reserved_views_awaiting_native_construction() {
     let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
     let macos = stages
-        .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_content(")
+        .split("#[cfg(target_os = \"macos\")]\n    fn apply_content(")
         .nth(1)
         .expect("macOS host layout")
         .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_drop_indicator")
         .next()
         .expect("bounded macOS host layout");
     let other = stages
-        .split("#[cfg(not(target_os = \"macos\"))]\n    pub(crate) fn set_content(")
+        .split("#[cfg(not(target_os = \"macos\"))]\n    fn apply_content(")
         .nth(1)
         .expect("Windows/Linux host layout")
         .split("#[cfg(not(target_os = \"macos\"))]\n    pub(crate) fn set_drop_indicator")
@@ -728,7 +728,7 @@ fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
         .is_some());
 
     let mac_host_layout = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"))
-        .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_content(")
+        .split("#[cfg(target_os = \"macos\")]\n    fn apply_content(")
         .nth(1)
         .expect("macOS host layout")
         .split("#[cfg(target_os = \"macos\")]\n    pub(crate) fn set_drop_indicator")
@@ -936,4 +936,87 @@ fn windows_raw_autofill_surfaces_are_mandatory_verified_postconditions() {
             "raw WebView2 autofill postcondition lost invariant: {required}"
         );
     }
+}
+
+#[test]
+fn the_macos_stage_never_moves_a_page_webkit_is_showing_fullscreen() {
+    let stage = include_str!("../../platform/macos/stage.rs")
+        .split_once("#[cfg(test)]")
+        .expect("stage tests boundary")
+        .0;
+    let guard = "fullscreen::webkit_owns(&view.view, self)";
+    for mutation in [
+        "view.view.setFrame(",
+        "view.view.setHidden(",
+        "view.view.removeFromSuperview()",
+    ] {
+        let mut found = 0;
+        for (at, _) in stage.match_indices(mutation) {
+            found += 1;
+            let before = &stage[..at];
+            let function = [before.rfind("\n    fn "), before.rfind("\n    pub fn ")]
+                .into_iter()
+                .flatten()
+                .max()
+                .expect("enclosing function");
+            assert!(
+                before[function..].contains(guard),
+                "{mutation} at byte {at} has no fullscreen guard in its function"
+            );
+        }
+        assert!(found > 0, "{mutation} no longer appears in the stage");
+    }
+    // A page WebKit still holds is registered without being re-parented.
+    let insert = stage
+        .split_once("pub fn insert_view(")
+        .expect("insert_view")
+        .1
+        .split_once("pub fn remove_view(")
+        .expect("remove_view")
+        .0;
+    assert!(insert.contains("let presenting = super::fullscreen::in_transition(&view);"));
+    assert!(insert.contains("if !presenting {\n            self.addSubview(&view);"));
+    let pending = include_str!("../../platform/macos/mod.rs")
+        .split_once("pub fn enforce_navigation_pending(")
+        .expect("pending hide")
+        .1
+        .split_once("\n}\n")
+        .expect("pending hide body")
+        .0;
+    assert!(pending.contains("fullscreen::in_transition(&native_webview(view))"));
+}
+
+#[test]
+fn a_closed_fullscreen_page_is_handed_back_before_teardown() {
+    let lifecycle = include_str!("../lifecycle.rs");
+    let close = lifecycle
+        .split_once("pub(crate) fn close(&mut self, id: ItemId)")
+        .expect("close")
+        .1
+        .split_once("pub(super) fn shutdown(")
+        .expect("close body")
+        .0;
+    let forget = close
+        .find("self.forget_fullscreen(id);")
+        .expect("ledger forget");
+    let removed = close
+        .find("let removed = self.views.remove(&id);")
+        .expect("removal");
+    assert!(forget < removed);
+    assert!(close.contains("self.retire_fullscreen_view(view)"));
+    let fullscreen = include_str!("../fullscreen.rs");
+    assert!(fullscreen.contains("fullscreen::close_presentations(&view.view, finish)"));
+    assert!(fullscreen.contains("schedule_presentation_timeout(RETIRE_DEADLINE"));
+    // Picture in picture survives a tab switch: only closing uses the API
+    // that also ends it.
+    let platform = include_str!("../../platform/macos/fullscreen.rs");
+    let exit = platform
+        .split_once("pub(crate) fn exit(")
+        .expect("exit")
+        .1
+        .split_once("pub(crate) fn close_presentations(")
+        .expect("exit body")
+        .0;
+    assert!(exit.contains("WKContentWorld::defaultClientWorld"));
+    assert!(!exit.contains("closeAllMediaPresentations"));
 }

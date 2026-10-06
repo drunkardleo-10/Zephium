@@ -27,6 +27,8 @@ mod agentic_semantic_probe;
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod apps;
 pub(crate) mod capture;
+pub(crate) mod fullscreen;
+pub(crate) use fullscreen::{exit as exit_fullscreen, state as fullscreen_state};
 mod content_filter;
 mod credentials;
 mod find;
@@ -294,6 +296,12 @@ pub(crate) fn current_document_evidence(
 }
 
 pub fn enforce_navigation_pending(view: &wry::WebView) -> bool {
+    // The stage already lost this view's readiness and hides it the moment
+    // WebKit hands it back; hiding it inside the fullscreen window would
+    // blank the page WebKit is animating home.
+    if fullscreen::in_transition(&native_webview(view)) {
+        return true;
+    }
     view.set_visible(false).is_ok()
 }
 

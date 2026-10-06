@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use super::dispatch::with_fullscreen_observation;
 #[cfg(target_os = "windows")]
 use super::dispatch::with_profile_exit;
 use super::dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
@@ -1993,6 +1995,37 @@ impl EngineHost {
                 }
             })
         };
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let fullscreen_observer = {
+            let fullscreen_id = id.clone();
+            let fullscreen_permit = event_permit.clone();
+            let changed = move || {
+                if fullscreen_permit.active_token().is_none() {
+                    return;
+                }
+                let id = fullscreen_id.get();
+                let queued_permit = fullscreen_permit.clone();
+                with_fullscreen_observation(id, move |host| {
+                    host.native_fullscreen_changed(id, &queued_permit);
+                });
+            };
+            #[cfg(target_os = "macos")]
+            {
+                crate::platform::macos::fullscreen::FullscreenObserver::install(&view, changed)
+            }
+            #[cfg(target_os = "windows")]
+            match crate::platform::imp::install_fullscreen_observer(&view, changed) {
+                Ok(observer) => observer,
+                Err(error) => {
+                    eprintln!("engine: required fullscreen observer failed: {error}");
+                    if report_failure {
+                        event_permit
+                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    }
+                    return None;
+                }
+            }
+        };
         let observation_permit = event_permit.clone();
         let observation_navigation = navigation.clone();
         let observer = match crate::platform::imp::install_navigation_observer(
@@ -2077,6 +2110,8 @@ impl EngineHost {
         Some(ObservedView {
             #[cfg(target_os = "macos")]
             _capture_observer: capture_observer,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            _fullscreen_observer: fullscreen_observer,
             replay_safety,
             discard_probe_lease: std::cell::RefCell::new(None),
             #[cfg(target_os = "macos")]

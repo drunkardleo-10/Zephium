@@ -143,6 +143,8 @@ impl EngineHost {
             view.presentation_permit.store(false, Ordering::Release);
             view.title_ready = None;
         }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.fullscreen_document_committed(id);
         let mut stages_pending = true;
         for stage in self.stages.values() {
             // Do not short-circuit: every retained stage must lose the old

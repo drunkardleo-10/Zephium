@@ -65,6 +65,8 @@ struct AppliedPlacement {
     controller_size: Option<(i32, i32)>,
     rounded: Option<(i32, i32, i32)>,
     notified_screen_origin: Option<(i32, i32)>,
+    /// Raised above every sibling for the fullscreen page it shows.
+    raised: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,6 +77,7 @@ struct PlacementDelta {
     controller_size: bool,
     rounded: bool,
     notify_parent_position: bool,
+    raise: bool,
 }
 
 impl PlacementDelta {
@@ -88,6 +91,7 @@ fn placement_delta(
     visible: bool,
     rect: Option<PhysicalRect>,
     radius: i32,
+    fullscreen: bool,
     parent_screen_origin: Option<(i32, i32)>,
 ) -> PlacementDelta {
     let mut delta = PlacementDelta {
@@ -106,6 +110,7 @@ fn placement_delta(
     delta.container_rect = applied.container_rect != rect;
     delta.controller_size = applied.controller_size != Some((width, height));
     delta.rounded = applied.rounded != Some((width, height, radius));
+    delta.raise = applied.raised != Some(fullscreen);
     delta.notify_parent_position = parent_screen_origin.is_some_and(|(parent_x, parent_y)| {
         applied.notified_screen_origin
             != Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
@@ -158,6 +163,8 @@ struct State {
     slide: Option<Slide>,
     /// Paint covers by view, each with the token of the handoff that owns it.
     covers: HashMap<ItemId, (HWND, u64)>,
+    /// The page shown fullscreen: square corners, above everything else.
+    fullscreen: Option<ItemId>,
 }
 
 /// The page travelling beside the sidebar. Child windows cannot be moved by
@@ -249,6 +256,7 @@ impl Stage {
             pending_motion: None,
             slide: None,
             covers: HashMap::new(),
+            fullscreen: None,
         }));
         Self { state }
     }
@@ -340,6 +348,21 @@ impl Stage {
 
     pub fn has_view(&self, id: ItemId) -> bool {
         self.state.borrow().views.contains_key(&id)
+    }
+
+    /// Marks the page shown fullscreen, which the shell lays over the whole
+    /// window: it loses its rounded corners and is raised above siblings.
+    pub fn set_fullscreen(&self, id: Option<ItemId>) {
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return;
+        };
+        if state.fullscreen == id {
+            return;
+        }
+        let previous = std::mem::replace(&mut state.fullscreen, id);
+        state.dirty.extend(previous.into_iter().chain(id));
+        drop(state);
+        schedule_sync(&self.state);
     }
 
     /// Desired visibility, including children awaiting their first paint. A
@@ -837,6 +860,7 @@ struct NativePlacement {
     rect: Option<PhysicalRect>,
     show: bool,
     radius: i32,
+    fullscreen: bool,
     screen_origin: Option<(i32, i32)>,
     applied: AppliedPlacement,
     delta: PlacementDelta,
@@ -979,7 +1003,20 @@ fn placement_may_reveal(state: &Rc<RefCell<State>>, placement: &NativePlacement)
 }
 
 fn sync(state: &Rc<RefCell<State>>) {
-    let (parent, gap, origin, size, offset, hidden, tree, ready, visible, dirty, revision) = {
+    let (
+        parent,
+        gap,
+        origin,
+        size,
+        offset,
+        hidden,
+        tree,
+        ready,
+        visible,
+        dirty,
+        revision,
+        fullscreen,
+    ) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
@@ -1012,6 +1049,7 @@ fn sync(state: &Rc<RefCell<State>>) {
             state.visible.clone(),
             dirty,
             state.revision,
+            state.fullscreen,
         )
     };
     let sliding = offset != 0.0;
@@ -1050,7 +1088,16 @@ fn sync(state: &Rc<RefCell<State>>) {
                     && rect.is_some()
                     && view.presentation_permit.load(Ordering::Acquire);
                 let applied = view.applied.get();
-                let mut delta = placement_delta(applied, show, rect, radius, parent_screen_origin);
+                let fullscreen = fullscreen == Some(id);
+                let radius = if fullscreen { 0 } else { radius };
+                let mut delta = placement_delta(
+                    applied,
+                    show,
+                    rect,
+                    radius,
+                    fullscreen,
+                    parent_screen_origin,
+                );
                 // WebView2 is told where it sits once the journey is over,
                 // not on every step of it.
                 if sliding {
@@ -1069,6 +1116,7 @@ fn sync(state: &Rc<RefCell<State>>) {
                     rect,
                     show,
                     radius,
+                    fullscreen,
                     screen_origin: parent_screen_origin,
                     applied,
                     delta,
@@ -1156,7 +1204,18 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
             return;
         }
     }
-    if placement.delta.rounded {
+    if placement.delta.rounded && placement.radius == 0 {
+        // A fullscreen page is square: drop the region rather than round by zero.
+        if unsafe { SetWindowRgn(placement.container, None, true) } == 0 {
+            failed = true;
+        } else {
+            applied.rounded = Some((width, height, 0));
+        }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
+    } else if placement.delta.rounded {
         let region = unsafe {
             CreateRoundRectRgn(
                 0,
@@ -1175,6 +1234,31 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
             failed = true;
         } else {
             applied.rounded = Some((width, height, placement.radius));
+        }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
+    }
+    if placement.delta.raise {
+        if !placement.fullscreen {
+            applied.raised = Some(false);
+        } else if unsafe {
+            SetWindowPos(
+                placement.container,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            )
+        }
+        .is_ok()
+        {
+            applied.raised = Some(true);
+        } else {
+            failed = true;
         }
         if !placement_is_current(state, placement) {
             conceal_superseded_placement(state, placement, applied);
@@ -1465,6 +1549,7 @@ mod tests {
             controller_size: Some((800, 600)),
             rounded: Some((800, 600, 16)),
             notified_screen_origin: Some((110, 220)),
+            raised: Some(false),
         };
 
         assert_eq!(
@@ -1473,6 +1558,7 @@ mod tests {
                 true,
                 Some((10, 20, 800, 600)),
                 16,
+                false,
                 Some((100, 200)),
             ),
             PlacementDelta::default()
@@ -1489,10 +1575,12 @@ mod tests {
                 controller_size: Some((640, 480)),
                 rounded: Some((640, 480, 16)),
                 notified_screen_origin: Some((0, 0)),
+                raised: Some(false),
             },
             false,
             Some((500, 500, 1, 1)),
             48,
+            false,
             Some((900, 900)),
         );
 
@@ -1514,10 +1602,12 @@ mod tests {
                 controller_size: Some((800, 600)),
                 rounded: Some((800, 600, 16)),
                 notified_screen_origin: Some((110, 220)),
+                raised: Some(false),
             },
             true,
             Some((10, 20, 900, 700)),
             16,
+            false,
             Some((100, 200)),
         );
 
@@ -1530,6 +1620,60 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_squares_and_raises_the_page_once() {
+        let windowed = AppliedPlacement {
+            window_visible: Some(true),
+            controller_visible: Some(true),
+            container_rect: Some((0, 0, 1920, 1080)),
+            controller_size: Some((1920, 1080)),
+            rounded: Some((1920, 1080, 16)),
+            notified_screen_origin: Some((0, 0)),
+            raised: Some(false),
+        };
+        let entering = placement_delta(
+            windowed,
+            true,
+            Some((0, 0, 1920, 1080)),
+            0,
+            true,
+            Some((0, 0)),
+        );
+        assert_eq!(
+            entering,
+            PlacementDelta {
+                rounded: true,
+                raise: true,
+                ..PlacementDelta::default()
+            }
+        );
+        let fullscreen = AppliedPlacement {
+            rounded: Some((1920, 1080, 0)),
+            raised: Some(true),
+            ..windowed
+        };
+        assert!(placement_delta(
+            fullscreen,
+            true,
+            Some((0, 0, 1920, 1080)),
+            0,
+            true,
+            Some((0, 0)),
+        )
+        .is_empty());
+        // Leaving puts the corners back and forgets the raise without
+        // reordering siblings that never overlap it.
+        let leaving = placement_delta(
+            fullscreen,
+            true,
+            Some((256, 8, 1656, 1064)),
+            16,
+            false,
+            Some((0, 0)),
+        );
+        assert!(leaving.rounded && leaving.raise && leaving.container_rect);
+    }
+
+    #[test]
     fn parent_move_only_notifies_webview2() {
         let delta = placement_delta(
             AppliedPlacement {
@@ -1539,10 +1683,12 @@ mod tests {
                 controller_size: Some((800, 600)),
                 rounded: Some((800, 600, 16)),
                 notified_screen_origin: Some((110, 220)),
+                raised: Some(false),
             },
             true,
             Some((10, 20, 800, 600)),
             16,
+            false,
             Some((200, 300)),
         );
 

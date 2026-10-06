@@ -22,6 +22,8 @@ mod extension_browser_surface;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod focus;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod fullscreen;
 mod generic_styles;
 mod lifecycle;
 mod navigation;
@@ -143,6 +145,11 @@ struct Spare {
 struct ObservedView {
     #[cfg(target_os = "macos")]
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
+    #[cfg(target_os = "macos")]
+    _fullscreen_observer:
+        objc2::rc::Retained<crate::platform::macos::fullscreen::FullscreenObserver>,
+    #[cfg(target_os = "windows")]
+    _fullscreen_observer: crate::platform::imp::FullscreenObserver,
     replay_safety: Rc<discard::ReplaySafety>,
     discard_probe_lease: std::cell::RefCell<Option<discard::ProbeLease>>,
     #[cfg(target_os = "macos")]
@@ -557,6 +564,12 @@ pub(crate) struct EngineHost {
     /// open pages without rebuilding them.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fullscreen: crate::fullscreen::FullscreenLedger,
+    #[cfg(target_os = "macos")]
+    fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,
+    #[cfg(target_os = "macos")]
+    next_fullscreen_retirement: u64,
     #[cfg(target_os = "macos")]
     stages: HashMap<WindowId, Retained<ContentStage>>,
     #[cfg(not(target_os = "macos"))]

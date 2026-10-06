@@ -28,6 +28,9 @@ mod cdp;
 mod content_filter;
 mod find;
 pub(crate) use find::{find, FindReport, FindSession};
+mod fullscreen;
+pub(crate) use fullscreen::{exit_fullscreen, fullscreen_state};
+pub use fullscreen::{install_fullscreen_observer, FullscreenObserver};
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 mod cookie_storage_diagnostic;
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -138,7 +141,9 @@ use webview2_com::{
     NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler,
     ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
+};
 use windows::Win32::{
     Foundation::{HANDLE, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
@@ -1754,7 +1759,7 @@ pub fn install_accelerators(
     item: impl Fn() -> zephium_core::ids::ItemId + 'static,
 ) -> windows_core::Result<Option<AcceleratorRegistration>> {
     let controller = view.controller();
-    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_controller, args| {
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |controller, args| {
         let Some(args) = args else {
             return Ok(());
         };
@@ -1771,6 +1776,19 @@ pub fn install_accelerators(
         let ctrl = down(VK_CONTROL.0 as i32);
         let shift = down(VK_SHIFT.0 as i32);
         let alt = down(VK_MENU.0 as i32);
+        // Escape always leaves fullscreen, whatever the page does with the
+        // key; the page still receives it.
+        if key == u32::from(VK_ESCAPE.0)
+            && !ctrl
+            && !shift
+            && !alt
+            && controller
+                .as_ref()
+                .and_then(|controller| unsafe { controller.CoreWebView2() }.ok())
+                .is_some_and(|core| fullscreen::exit_core(&core))
+        {
+            return Ok(());
+        }
         let hit = shortcuts
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
