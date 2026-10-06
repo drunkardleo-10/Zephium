@@ -34,9 +34,9 @@ let profiles = 0;
 async function setup() {
   profiles++;
   native.profile = `01J9ZQ3V6Q4M8Y2K7T5R1N0C${String(profiles).padStart(2, "0")}`;
-  const server = notesTestServer(native.profile, (notes, reset) =>
+  const server = notesTestServer(native.profile, (notes, reset, links) =>
     queueMicrotask(() =>
-      emitNativeEvent("notesChanged", { profile: native.profile, notes, reset }),
+      emitNativeEvent("notesChanged", { profile: native.profile, notes, reset, links }),
     ),
   );
   native.call.mockImplementation(server.call);

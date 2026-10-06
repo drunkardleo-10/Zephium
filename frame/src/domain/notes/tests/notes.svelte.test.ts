@@ -31,8 +31,8 @@ let server: ReturnType<typeof notesTestServer>;
 
 beforeEach(() => {
   vi.useFakeTimers();
-  server = notesTestServer(profile, (notes: ChangedNote[], reset: boolean) =>
-    queueMicrotask(() => host.listener?.({ payload: { profile, notes, reset } })),
+  server = notesTestServer(profile, (notes: ChangedNote[], reset: boolean, links: string[]) =>
+    queueMicrotask(() => host.listener?.({ payload: { profile, notes, reset, links } })),
   );
   host.call = server.call;
 });
@@ -228,8 +228,52 @@ test("its own saves cost no listing and no link lookups", async () => {
     server.notes.get(note.id)?.summary.revision,
   );
 
-  // A new title can change where links lead, so everyone looks again.
+  // A new title changes where links to the old and the new title lead, and
+  // nothing else: the listing already shows it and other links stay cached.
+  await session.resolveTargets(["Plans", "Roadmap"]);
+  const retitled = server.calls.length;
   session.edit("# Roadmap notes\n\nSee [[Roadmap]]");
   await settle(900);
-  expect(server.calls.at(-1)?.kind).toBe("list");
+  const since = server.calls.length;
+  await session.resolveTargets(["Roadmap"]);
+  expect(server.calls.length).toBe(since);
+  await session.resolveTargets(["Plans"]);
+  expect(server.calls.slice(since).map((call) => call.kind)).toEqual(["resolve"]);
+  expect(server.calls.slice(retitled).some((call) => call.kind === "list")).toBe(false);
+});
+
+test("a retitled file takes its new name once the title settles", async () => {
+  const session = await started();
+  const note = server.seed("# Draft\n");
+  await session.open(note.id);
+  session.edit("# Fin\n");
+  await settle(700);
+  session.edit("# Final\n");
+  await settle(700);
+  expect(server.writes().every((call) => call.kind === "write" && !call.settle)).toBe(true);
+  expect(server.notes.get(note.id)?.summary.path).toBe("Draft.md");
+  await settle(5000);
+  expect(server.notes.get(note.id)?.summary.path).toBe("Final.md");
+  expect(session.items.find((item) => item.id === note.id)?.path).toBe("Final.md");
+});
+
+test("leaving a retitled note gives its file the new name at once", async () => {
+  const session = await started();
+  const note = server.seed("# Draft\n");
+  await session.open(note.id);
+  session.edit("# Final\n\nDone");
+  expect(await session.close()).toBe(true);
+  expect(server.notes.get(note.id)?.summary.path).toBe("Final.md");
+  expect(server.notes.get(note.id)?.markdown).toBe("# Final\n\nDone");
+});
+
+test("a note's first save is not mistaken for someone else's new note", async () => {
+  const session = await started();
+  await session.create();
+  const before = server.calls.length;
+  session.edit("# Groceries\n");
+  await settle(700);
+  await settle(200);
+  expect(server.calls.slice(before).map((call) => call.kind)).toEqual(["create", "backlinks"]);
+  expect(session.items[0]?.title).toBe("Groceries");
 });

@@ -20,6 +20,7 @@
     autofocus = false,
     linksRevision = 0,
     onchange,
+    onleave,
     onopenlink,
     onopennote,
     resolve,
@@ -33,6 +34,8 @@
     autofocus?: boolean;
     linksRevision?: number;
     onchange: (markdown: string) => void;
+    /** Focus left the note's text for somewhere outside the editor. */
+    onleave?: () => void;
     onopenlink: (href: string) => void;
     onopennote: (target: string) => void;
     resolve: (targets: string[]) => Promise<Record<string, NoteSummary | null>>;
@@ -218,6 +221,7 @@
         if (!(event.relatedTarget as HTMLElement | null)?.closest(".note-format, .note-float")) {
           focused = false;
           linking = false;
+          onleave?.();
         }
       },
     });

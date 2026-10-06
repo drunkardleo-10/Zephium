@@ -111,6 +111,7 @@
               autofocus={autofocus && note.id === null}
               linksRevision={session.linksRevision}
               onchange={(markdown) => session.edit(markdown)}
+              onleave={() => void session.settle()}
               onopenlink={openLink}
               onopennote={(target) => void openNote(target)}
               resolve={(targets) => session.resolveTargets(targets)}

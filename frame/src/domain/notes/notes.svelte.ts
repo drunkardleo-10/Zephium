@@ -16,6 +16,8 @@ const SAVE_IDLE = 600;
 /** Continuous typing still saves at least this often. */
 const SAVE_LONGEST = 4000;
 const RETRY_DELAYS = [1500, 4000, 10_000, 30_000];
+/** A retitle left alone this long is finished, and the file may take the name. */
+const TITLE_SETTLE = 5000;
 const PAGE = 100;
 /** Listing refreshes after file changes wait for a burst to settle. */
 const REFRESH_DELAY = 120;
@@ -38,6 +40,13 @@ export type OpenNote = {
 };
 
 export type NoteNotice = { kind: "trashed"; id: string; title: string; at: number };
+
+/** A `[[target]]` as native matches it to a title or a file name. */
+function linkKey(target: string): string {
+  const text = target.split(/[#^]/u)[0]!.trim();
+  const stem = text.endsWith(".md") || text.endsWith(".MD") ? text.slice(0, -3) : text;
+  return stem.normalize("NFC").toLowerCase().replace(/\s+/gu, " ").trim();
+}
 
 function sorted(items: NoteSummary[]): NoteSummary[] {
   return [...items].sort(
@@ -83,6 +92,16 @@ export class NoteSession {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #firstUnsaved = 0;
   #retries = 0;
+  /** The title the open note's file was last allowed to follow. */
+  #settledTitle: string | null = null;
+  /** A save changed the title since, so a settling write is owed. */
+  #unsettled = false;
+  /** The title the settling timer was last started for. */
+  #timedTitle: string | null = null;
+  #settleTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Notes announced while a new note's first save was on its way, taken to
+   *  be that note until its reply says which it is. */
+  #assumed: string[] = [];
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   #searchTimer: ReturnType<typeof setTimeout> | undefined;
   #noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -127,7 +146,7 @@ export class NoteSession {
     this.#lifetime = new AbortController();
     const stop = await events.notesChanged.listen(({ payload }) => {
       if (epoch !== this.#epoch || payload.profile !== this.profile) return;
-      this.#changed(payload.notes, payload.reset);
+      this.#changed(payload.notes, payload.reset, payload.links);
     });
     if (!this.#active || epoch !== this.#epoch) {
       stop();
@@ -153,9 +172,10 @@ export class NoteSession {
     this.#stop = null;
     // Pending text is saved before the host's calls are cut off.
     const lifetime = this.#lifetime;
-    void this.flush().finally(() => {
+    void this.settle().finally(() => {
       if (!this.#active) lifetime.abort();
     });
+    clearTimeout(this.#settleTimer);
     this.items = [];
     this.next = null;
     this.loaded = false;
@@ -174,7 +194,7 @@ export class NoteSession {
     if (inactive) this.#lifetime = new AbortController();
     try {
       if (this.saveState === "retrying" || this.saveState === "failed") this.saveState = "unsaved";
-      return await this.flush();
+      return await this.settle();
     } finally {
       if (inactive) this.#lifetime.abort();
     }
@@ -239,19 +259,44 @@ export class NoteSession {
     await this.reload();
   }
 
-  #changed(notes: { id: string; revision: string | null }[], reset: boolean): void {
+  #changed(
+    notes: { id: string; revision: string | null }[],
+    reset: boolean,
+    links: string[],
+  ): void {
+    const creating = this.note !== null && this.note.id === null && this.#writing !== null;
+    if (creating)
+      for (const changed of notes)
+        if (
+          !this.items.some((item) => item.id === changed.id) &&
+          !this.#assumed.includes(changed.id)
+        )
+          this.#assumed.push(changed.id);
     // Its own saves are news to everyone but this session, which has put the
     // row where it belongs already.
     const own = (changed: { id: string; revision: string | null }) =>
-      changed.id === this.note?.id && (this.#writing !== null || changed.revision === this.#base);
-    const stale = notes.some(
-      (changed) =>
-        !own(changed) &&
-        this.items.some((item) => item.id === changed.id && item.revision !== changed.revision),
+      changed.id === this.note?.id
+        ? this.#writing !== null || changed.revision === this.#base
+        : creating && this.#assumed.includes(changed.id);
+    const others = notes.filter((changed) => !own(changed));
+    // A rename keeps the revision, so a listed note named by links is stale too.
+    const stale = others.some((changed) =>
+      this.items.some(
+        (item) =>
+          item.id === changed.id && (item.revision !== changed.revision || links.length > 0),
+      ),
     );
-    if (reset || stale) this.#scheduleRefresh();
+    if ((reset && (others.length > 0 || notes.length === 0)) || stale) this.#scheduleRefresh();
     if (reset) {
       this.#targets.clear();
+      this.linksRevision++;
+    } else if (links.length) {
+      for (const [target, found] of this.#targets)
+        if (
+          links.includes(linkKey(target)) ||
+          (found && notes.some((changed) => changed.id === found.id))
+        )
+          this.#targets.delete(target);
       this.linksRevision++;
     }
     const id = this.note?.id;
@@ -280,6 +325,7 @@ export class NoteSession {
     this.#document++;
     this.openError = null;
     clearTimeout(this.#timer);
+    this.#unsettle(record.summary.title);
     this.#markdown = record.markdown;
     this.#base = record.summary.revision;
     this.#edits = this.#savedEdits = 0;
@@ -302,6 +348,7 @@ export class NoteSession {
     this.#document++;
     this.openError = null;
     clearTimeout(this.#timer);
+    this.#unsettle(null);
     this.note = null;
     this.#markdown = "";
     this.#base = null;
@@ -320,7 +367,7 @@ export class NoteSession {
       this.#release();
       return true;
     }
-    if (!(await this.flush())) return false;
+    if (!(await this.settle())) return false;
     if (this.note !== note && this.note?.id !== note.id) return true;
     const id = this.note?.id;
     const empty = id && note.editable && blank(this.#markdown);
@@ -368,6 +415,7 @@ export class NoteSession {
     }
     this.#document++;
     this.openError = null;
+    this.#unsettle(null);
     this.#markdown = markdown;
     this.#base = null;
     this.#edits = markdown ? 1 : 0;
@@ -421,12 +469,19 @@ export class NoteSession {
     this.#timer = setTimeout(() => void this.flush(false), Math.max(0, Math.min(delay, overdue)));
   }
 
+  /** Saves everything typed and lets the file take its note's new title, as
+   *  leaving the note does. */
+  settle(): Promise<boolean> {
+    return this.flush(true, true);
+  }
+
   /** Saves until the file holds everything typed, or a save cannot proceed.
    *  A background save (`drain: false`) writes once and leaves typing that
    *  continued meanwhile to the next pause, so a long burst is not a burst
    *  of writes. */
-  async flush(drain = true): Promise<boolean> {
+  async flush(drain = true, settle = false): Promise<boolean> {
     clearTimeout(this.#timer);
+    let followed = false;
     for (;;) {
       if (this.#writing) {
         if (!drain) return false;
@@ -436,9 +491,14 @@ export class NoteSession {
       if (this.saveState === "conflict" || this.saveState === "failed") return false;
       if (!this.note || this.#savedEdits === this.#edits) {
         if (this.saveState !== "retrying") this.saveState = "saved";
+        if (settle && this.#unsettled && this.saveState === "saved" && !followed) {
+          followed = true;
+          await this.#follow();
+          continue;
+        }
         return this.saveState === "saved";
       }
-      if (!(await this.#write())) return false;
+      if (!(await this.#write(settle))) return false;
       if (!drain) {
         if (this.saveState === "unsaved") this.#schedule(SAVE_IDLE);
         return this.saveState === "saved";
@@ -446,7 +506,7 @@ export class NoteSession {
     }
   }
 
-  #write(): Promise<boolean> {
+  #write(settle = false): Promise<boolean> {
     const note = this.note!;
     const markdown = this.#markdown;
     const edits = this.#edits;
@@ -467,18 +527,20 @@ export class NoteSession {
               id: note.id,
               base_revision: this.#base!,
               markdown,
+              settle,
             }
           : { kind: "create", request_id: request, markdown },
       );
+      if (!note.id) this.#identify(result.kind === "applied" ? result.summary.id : null);
       // The editor moved on to another note; this one is saved as far as it goes.
       if (document !== this.#document) return true;
       switch (result.kind) {
         case "applied":
-          this.#applied(result.summary, edits);
+          this.#applied(result.summary, edits, settle || !note.id);
           return true;
         case "conflict":
           if (result.current.markdown === markdown) {
-            this.#applied(result.current.summary, edits);
+            this.#applied(result.current.summary, edits, false);
             return true;
           }
           this.conflict = result.current;
@@ -497,9 +559,20 @@ export class NoteSession {
     return work;
   }
 
-  #applied(summary: NoteSummary, edits: number): void {
+  /** `settled`: the file name now follows the title, or never has to. */
+  #applied(summary: NoteSummary, edits: number, settled: boolean): void {
     const created = !this.note?.id;
     this.#base = summary.revision;
+    if (settled) this.#unsettle(summary.title);
+    else if (summary.title !== this.#settledTitle) {
+      this.#unsettled = true;
+      // Timed from the last change to the title, not from every save.
+      if (summary.title !== this.#timedTitle) {
+        this.#timedTitle = summary.title;
+        clearTimeout(this.#settleTimer);
+        this.#settleTimer = setTimeout(() => void this.settle(), TITLE_SETTLE);
+      }
+    }
     this.#savedEdits = Math.max(this.#savedEdits, edits);
     this.#createRequest = null;
     this.#retries = 0;
@@ -525,6 +598,51 @@ export class NoteSession {
       return;
     }
     this.items = sorted([...this.items.filter((item) => item.id !== summary.id), summary]);
+  }
+
+  /** Lets a saved note's file take its title. Only the name is at stake, and
+   *  native keeps what it was named after, so a failure waits for the next
+   *  time the note is left rather than holding anything up. */
+  async #follow(): Promise<void> {
+    const note = this.note;
+    const base = this.#base;
+    if (!note?.id || !note.editable || base === null) return;
+    const document = this.#document;
+    this.#unsettled = false;
+    const result = await this.#call({
+      kind: "write",
+      request_id: crypto.randomUUID(),
+      id: note.id,
+      base_revision: base,
+      markdown: this.#markdown,
+      settle: true,
+    });
+    if (document !== this.#document) return;
+    if (result.kind !== "applied" || result.summary.revision !== this.#base) {
+      this.#unsettled ||= result.kind !== "applied";
+      return;
+    }
+    this.#settledTitle = result.summary.title;
+    const path = result.summary.path;
+    if (this.note?.summary && this.note.summary.path !== path) {
+      this.note = { ...this.note, summary: { ...this.note.summary, path } };
+      this.items = this.items.map((item) => (item.id === note.id ? { ...item, path } : item));
+    }
+  }
+
+  #unsettle(title: string | null): void {
+    clearTimeout(this.#settleTimer);
+    this.#settledTitle = title;
+    this.#timedTitle = null;
+    this.#unsettled = false;
+  }
+
+  /** A new note's first save has landed, or failed: announcements taken to be
+   *  it that were another note's are a listing change after all. */
+  #identify(id: string | null): void {
+    const strangers = this.#assumed.some((assumed) => assumed !== id);
+    this.#assumed = [];
+    if (strangers) this.#scheduleRefresh();
   }
 
   #failed(error: NoteError, epoch: number): boolean {

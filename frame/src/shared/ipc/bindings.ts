@@ -1203,7 +1203,13 @@ export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: s
  *  Replaces the file only if it still holds `base_revision`. Replaying the
  *  same write after an unknown outcome succeeds without a second change.
  */
-{ kind: "write"; request_id: string; id: string; base_revision: string; markdown: string } | { kind: "set_pinned"; id: string; pinned: boolean } | { kind: "trash"; id: string } | { kind: "restore"; id: string } | 
+{ kind: "write"; request_id: string; id: string; base_revision: string; markdown: string; 
+/**
+ *  The person has stopped retitling the note, or left it. Only then
+ *  does a file named after its title take the new one, so typing a
+ *  heading does not rename the file on every pause.
+ */
+settle?: boolean } | { kind: "set_pinned"; id: string; pinned: boolean } | { kind: "trash"; id: string } | { kind: "restore"; id: string } | 
 /**  Permanent. Only a note already in the trash can be deleted. */
 { kind: "delete"; id: string } | { kind: "resolve"; targets: string[] } | { kind: "backlinks"; id: string } | 
 /**  Shows the note, or the folder when `id` is absent, in the system file manager. */
@@ -1217,6 +1223,12 @@ export type NoteChanges = {
 	profile: string,
 	notes: ChangedNote[],
 	reset: boolean,
+	/**
+	 *  Link keys that may now lead to a different note, because a note's
+	 *  title or file name changed from or to them. A retitled note is news
+	 *  for its links, not for the listing.
+	 */
+	links: string[],
 };
 
 export type NoteDocument = NoteDocument_Serialize | NoteDocument_Deserialize;
