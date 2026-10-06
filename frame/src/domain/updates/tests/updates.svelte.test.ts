@@ -17,6 +17,9 @@ vi.mock("$shared/ipc/bindings", async () => {
 vi.mock("$domain/preferences", () => ({
   preferences: { value: () => native.autoCheck },
 }));
+vi.mock("$shared/ipc/native-events", () => ({
+  events: { uiCommand: { listen: async () => () => {} } },
+}));
 
 const HOUR = 60 * 60 * 1000;
 let page: EventTarget & { visibilityState: DocumentVisibilityState };
