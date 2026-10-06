@@ -772,7 +772,7 @@ impl Shell {
                     if !visible {
                         // OS pointer capture cannot remain authoritative while
                         // its window is hidden/minimized.
-                        self.divider = None;
+                        self.drop_divider();
                         if let Some(active) = self.windows.focused().and_then(|w| w.active) {
                             self.touch(active);
                         }
@@ -987,7 +987,10 @@ impl Shell {
             Command::DropTab { id, x, y } => {
                 let _ = self.operation_drop_tab(id, x, y);
             }
-            Command::DividerGrab { x, y } => self.divider = self.locate_divider(x, y),
+            Command::DividerGrab { x, y } => {
+                self.drop_divider();
+                self.divider = self.locate_divider(x, y);
+            }
             Command::DividerDrag { x, y } => self.divider_drag(x, y),
             Command::DividerRelease { x, y } => {
                 let _ = self.operation_divider_release(x.zip(y));

@@ -441,7 +441,7 @@ impl Shell {
         }) else {
             return false;
         };
-        self.divider = None;
+        self.drop_divider();
         let remaining = tree.remove(id);
         let replacement = failed_was_active
             .then(|| {

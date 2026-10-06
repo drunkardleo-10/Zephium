@@ -189,7 +189,7 @@ impl Shell {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
         win.splits = tree.remove(id).filter(|rest| rest.tabs().len() > 1);
-        self.divider = None;
+        self.drop_divider();
         mutation_result(self.commit(Vec::new()))
     }
 
@@ -723,7 +723,7 @@ impl Shell {
         if let Some((x, y)) = final_pointer {
             self.divider_drag(x, y);
         }
-        if self.divider.take().is_none() {
+        if !self.commit_divider() {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         self.schedule_persist();
