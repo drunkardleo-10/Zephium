@@ -182,6 +182,15 @@ impl EngineHost {
                     .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
                 return;
             }
+            #[cfg(target_os = "macos")]
+            super::webext::bind_auth_flow_view(partition.profile(), id, &event_token, url);
+            #[cfg(target_os = "macos")]
+            super::webext::bind_auth_cleanup_fence(
+                partition.profile(),
+                id,
+                &spare.view.event_permit,
+                &spare.view.navigation,
+            );
             let Some(epoch) = spare.view.navigation.begin(url) else {
                 eprintln!("engine: could not establish adopted-view navigation epoch");
                 self.sink
@@ -267,6 +276,8 @@ impl EngineHost {
             return;
         }
         let cell = Rc::new(Cell::new(id));
+        #[cfg(target_os = "macos")]
+        super::webext::bind_auth_flow_view(partition.profile(), id, &event_token, url);
         if let Some(view) = self.build_view(
             cell,
             partition,
@@ -654,6 +665,13 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
+        #[cfg(target_os = "macos")]
+        super::webext::bind_auth_cleanup_fence(
+            partition.profile(),
+            id.get(),
+            &event_permit,
+            &navigation,
+        );
         let title_navigation = navigation.clone();
         let on_load = self.sink.clone();
         let load_permit = event_permit.clone();
@@ -967,10 +985,6 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
-                #[cfg(target_os = "macos")]
-                if super::webext::intercept_auth_redirect(&target) {
-                    return false;
-                }
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
                 // WebView2 asks only about top-level loads here; WebKit asks
@@ -1032,12 +1046,25 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let replay = replay_safety.clone();
+            let auth_tab = id.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
-                if super::webext::intercept_auth_redirect(&target) {
-                    return false;
-                }
                 let admitted = frame_permit.allows_navigation(&target)
                     && frame_navigation.admits_target(&target);
+                if admitted
+                    && super::webext::intercept_auth_redirect(
+                        partition.profile(),
+                        auth_tab.get(),
+                        &frame_permit,
+                        &frame_navigation,
+                        action.target_is_main_frame,
+                        &target,
+                    )
+                {
+                    return false;
+                }
+                if admitted {
+                    super::webext::note_auth_native_navigation(&frame_navigation, action);
+                }
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
                 }

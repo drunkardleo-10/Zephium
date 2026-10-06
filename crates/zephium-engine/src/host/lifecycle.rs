@@ -261,6 +261,7 @@ impl EngineHost {
     fn shutdown_common(&mut self) {
         #[cfg(target_os = "macos")]
         {
+            self.webext.cancel_auth_flows();
             self.discarded_states.clear();
             self.prepared_discard_states.clear();
         }

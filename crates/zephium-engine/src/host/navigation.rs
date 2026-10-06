@@ -744,6 +744,7 @@ impl EngineHost {
             return;
         }
         if let Some(view) = self.views.get(&id) {
+            view.navigation.release_auth_cleanup();
             crate::platform::imp::stop_loading(view);
         }
     }
@@ -766,6 +767,9 @@ impl EngineHost {
 
     fn invoke_navigation_action(&mut self, id: ItemId, action: NativeAction) {
         let Some((permit, navigation, failed)) = self.views.get(&id).map(|view| {
+            // The user has taken control of this tab even if the native
+            // reload/history call fails. Auth cleanup cannot take it back.
+            view.navigation.release_auth_cleanup();
             let result = match action {
                 NativeAction::Reload => view.reload(),
                 NativeAction::GoBack => view.go_back(),
