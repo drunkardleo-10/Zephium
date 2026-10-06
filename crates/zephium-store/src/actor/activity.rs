@@ -106,7 +106,11 @@ impl ActivityWritePermit {
             .copied()
             .unwrap_or(0)
             .checked_add(1)?;
-        if state.quarantined.contains(&scope) || scope_count > MAX_PENDING_ACTIVITY_WRITES_PER_SCOPE
+        // A clear replaces whatever is stuck before it, so it is never the
+        // write a quarantine refuses.
+        let clears = matches!(write, ActivityWrite::ClearTime(..));
+        if (state.quarantined.contains(&scope) && !clears)
+            || scope_count > MAX_PENDING_ACTIVITY_WRITES_PER_SCOPE
         {
             return None;
         }
@@ -211,11 +215,17 @@ impl PendingActivityWrites {
     }
 
     pub(super) fn push(&mut self, write: ActivityWrite, permit: ActivityWritePermit) {
-        self.lanes
-            .entry(write.scope())
-            .or_default()
-            .queue
-            .push_back((write, permit));
+        let lane = self.lanes.entry(write.scope()).or_default();
+        if matches!(write, ActivityWrite::ClearTime(_, None)) {
+            // Clearing all time erases every tally still waiting to be
+            // written, including one that keeps failing.
+            lane.queue
+                .retain(|(queued, _)| !matches!(queued, ActivityWrite::RecordTime(..)));
+            lane.permanent_failure = false;
+            lane.retry.clear();
+            permit.quarantine(false);
+        }
+        lane.queue.push_back((write, permit));
     }
 
     pub(super) fn forget_profile(&mut self, profile: ProfileId) {
@@ -266,6 +276,23 @@ impl PendingActivityWrites {
         session: &mut Option<PendingSession>,
     ) -> bool {
         self.flush_scope(ActivityScope::Focus, hub, session, false)
+    }
+
+    /// True when everything still queued is recorded time or focus that
+    /// failed permanently. Shutdown does not wait on those: the process ends
+    /// either way, and holding the exit unclean would only postpone updates.
+    /// A pending clear always counts.
+    pub(super) fn only_unrecoverable_records(&self) -> bool {
+        self.lanes.values().all(|lane| {
+            lane.queue.is_empty()
+                || (lane.permanent_failure
+                    && lane.queue.iter().all(|(write, _)| {
+                        matches!(
+                            write,
+                            ActivityWrite::RecordTime(..) | ActivityWrite::RecordFocus(..)
+                        )
+                    }))
+        })
     }
 
     pub(super) fn flush(
@@ -351,6 +378,7 @@ impl PendingActivityWrites {
                     return false;
                 }
                 Err(_) => {
+                    eprintln!("store: an activity write failed and is held until the next flush");
                     permit.quarantine(true);
                     lane.permanent_failure = true;
                     lane.retry.clear();

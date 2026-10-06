@@ -1990,7 +1990,15 @@ fn actor(
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
                 let session_durable = flush(&mut hub, &mut pending);
-                let activity_durable = activity.flush(&mut hub, &mut pending, true);
+                let activity_durable = activity.flush(&mut hub, &mut pending, true) || {
+                    let lost = activity.only_unrecoverable_records();
+                    if lost {
+                        eprintln!(
+                            "store: shutting down with time or focus records that keep failing"
+                        );
+                    }
+                    lost
+                };
                 let visits_durable = session_durable
                     && flush_visits(
                         &mut hub,

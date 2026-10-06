@@ -146,7 +146,7 @@ fn activity_failed_clear_cannot_erase_a_later_accepted_write() {
 }
 
 #[test]
-fn activity_focus_failure_makes_shutdown_retryable_and_recovers() {
+fn activity_focus_failure_does_not_hold_shutdown() {
     let (dir, store, _observer) = fixture();
     let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
     fail_inserts(&meta, "focus_sessions");
@@ -161,23 +161,19 @@ fn activity_focus_failure_makes_shutdown_retryable_and_recovers() {
         })
     ));
     assert!(result.recv_timeout(REPLY_TIMEOUT).unwrap().is_none());
-    assert_eq!(
-        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
-        StoreShutdownOutcome::RetryableFailure
-    );
-    assert_eq!(store.activity_admission.lock().unwrap().commands, 1);
-    recover(&meta);
+    // A record that keeps failing cannot outlive the process. Holding the
+    // exit unclean for it would only postpone updates on every quit.
     assert_eq!(
         store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
         StoreShutdownOutcome::Clean
     );
+    assert_eq!(store.activity_admission.lock().unwrap().commands, 0);
     assert_eq!(
-        meta.query_row("SELECT focused_ms FROM focus_sessions", [], |row| row
+        meta.query_row("SELECT count(*) FROM focus_sessions", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
-        3_000
+        0
     );
-    assert_eq!(store.activity_admission.lock().unwrap().commands, 0);
 }
 
 #[test]
@@ -616,4 +612,26 @@ fn activity_profile_clear_is_not_held_by_a_foreign_failed_visit() {
     assert!(store
         .history_page(ProfileId::from(3), "", None, None, 50)
         .is_empty());
+}
+
+#[test]
+fn activity_clearing_all_time_replaces_a_write_that_keeps_failing() {
+    let (_dir, store, observer) = fixture();
+    let profile = ProfileId::from(1);
+    assert!(store.record_time(profile, tally(100, 500), 0));
+    assert!(durable(&store));
+    observer
+        .execute_batch(
+            "CREATE TRIGGER injected_tally_failure BEFORE INSERT ON time_spent
+         BEGIN SELECT RAISE(ABORT, 'fixture tally failure'); END;",
+        )
+        .unwrap();
+    assert!(store.record_time(profile, tally(101, 1_000), 0));
+    assert!(!durable(&store));
+
+    // The stuck tally is exactly what the clear erases, so the clear is never
+    // the write a quarantine refuses, and it settles the profile again.
+    assert!(store.clear_time(profile, None));
+    assert!(durable(&store));
+    assert_eq!(total(&observer), 0);
 }
