@@ -1738,7 +1738,8 @@ impl<'a> WebViewBuilder<'a> {
   /// always before that event. Only the category is reported, never the
   /// native error text.
   ///
-  /// Supported on macOS. Other platforms ignore this handler.
+  /// Supported on macOS and Windows. On Windows, WebView2's own error page
+  /// is hidden and never reported as a commit. Other platforms ignore it.
   pub fn with_navigation_failure_handler(
     mut self,
     handler: impl Fn(NavigationId, NavigationFailure) + 'static,

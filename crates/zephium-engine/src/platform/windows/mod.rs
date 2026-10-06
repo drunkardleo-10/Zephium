@@ -119,7 +119,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment, ICoreWebView2Environment10,
     ICoreWebView2Environment5, ICoreWebView2Environment7, ICoreWebView2Environment8,
     ICoreWebView2Profile2, ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10,
-    ICoreWebView2_13, ICoreWebView2_18, ICoreWebView2_5,
+    ICoreWebView2_13, ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
     COREWEBVIEW2_PDF_TOOLBAR_ITEMS_PRINT, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE,
@@ -128,14 +128,15 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
-    COREWEBVIEW2_PROCESS_KIND_BROWSER,
+    COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BasicAuthenticationRequestedEventHandler,
     BrowserProcessExitedEventHandler, ClearBrowsingDataCompletedHandler,
     ClientCertificateRequestedEventHandler, HistoryChangedEventHandler,
     LaunchingExternalUriSchemeEventHandler, NavigationStartingEventHandler,
-    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
+    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler,
+    ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows::Win32::{
@@ -251,16 +252,34 @@ pub fn configure(
     let core18 = core.cast::<ICoreWebView2_18>()?;
     let core10 = core.cast::<ICoreWebView2_10>()?;
     let core5 = core.cast::<ICoreWebView2_5>()?;
+    let core14 = core.cast::<ICoreWebView2_14>()?;
     let mut policy = SecurityPolicy {
         core: core.clone(),
         core18: core18.clone(),
         core10: core10.clone(),
         core5: core5.clone(),
+        core14: core14.clone(),
         frame_token: None,
         external_token: None,
         basic_auth_token: None,
         client_certificate_token: None,
+        certificate_error_token: None,
     };
+
+    // A certificate the system does not trust ends the navigation, as it
+    // does on macOS. WebView2's default interstitial can offer a way past.
+    let certificate_error =
+        ServerCertificateErrorDetectedEventHandler::create(Box::new(|_, args| {
+            if let Some(args) = args {
+                unsafe { args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL)? };
+            }
+            Ok(())
+        }));
+    let mut certificate_error_token = 0_i64;
+    unsafe {
+        core14.add_ServerCertificateErrorDetected(&certificate_error, &mut certificate_error_token)
+    }?;
+    policy.certificate_error_token = Some(certificate_error_token);
 
     // HTTP authentication and client-certificate selection have independent
     // native default dialogs; PermissionRequested and script-dialog settings
@@ -399,10 +418,12 @@ pub struct SecurityPolicy {
     core18: ICoreWebView2_18,
     core10: ICoreWebView2_10,
     core5: ICoreWebView2_5,
+    core14: ICoreWebView2_14,
     frame_token: Option<i64>,
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
     client_certificate_token: Option<i64>,
+    certificate_error_token: Option<i64>,
 }
 
 impl SecurityPolicy {
@@ -455,6 +476,9 @@ impl Drop for SecurityPolicy {
         }
         if let Some(token) = self.client_certificate_token.take() {
             let _ = unsafe { self.core5.remove_ClientCertificateRequested(token) };
+        }
+        if let Some(token) = self.certificate_error_token.take() {
+            let _ = unsafe { self.core14.remove_ServerCertificateErrorDetected(token) };
         }
     }
 }

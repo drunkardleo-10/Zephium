@@ -29,7 +29,7 @@ use wry::{DownloadPolicy, WebViewBuilder};
 use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::ports::engine::NavigationFailureReason;
 use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
@@ -1477,9 +1477,10 @@ impl EngineHost {
 
         #[cfg(target_os = "macos")]
         let load_replay = replay_safety.clone();
-        // WebKit says why a navigation failed just before its Failed event;
-        // chrome uses it to explain a failed address the person asked for.
-        #[cfg(target_os = "macos")]
+        // The engine says why a navigation failed just before its Failed
+        // event; chrome uses it to explain a failed address the person asked
+        // for, in place of WebKit's blank or WebView2's own error page.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let failure_permit = load_permit.clone();
             let failure_sink = on_load.clone();
@@ -2471,7 +2472,7 @@ pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::Permissi
 #[cfg(test)]
 mod tests;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
     match failure {
         wry::NavigationFailure::Offline => NavigationFailureReason::Offline,
