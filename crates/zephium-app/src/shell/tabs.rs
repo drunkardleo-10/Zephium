@@ -231,7 +231,11 @@ impl Shell {
         if let Some(kept) = kept {
             self.restore_kept_slot(kept);
         }
-        self.commit(fx)
+        let mut native = self.commit(fx);
+        if let Some(ended) = self.end_private_session_if_empty() {
+            native.merge(ended);
+        }
+        native
     }
 
     /// Where an Essential sits, so closing it can leave it there unloaded.

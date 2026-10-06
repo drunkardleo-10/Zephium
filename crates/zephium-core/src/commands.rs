@@ -105,6 +105,24 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::App,
     ),
     command("tab.new", "New Tab", Keys::same("CmdOrCtrl+T"), Group::File),
+    command(
+        "window.newPrivate",
+        "New Private Window",
+        Keys::same("CmdOrCtrl+Shift+N"),
+        Group::File,
+    ),
+    command(
+        "window.leavePrivate",
+        "Show Personal Tabs",
+        Keys::NONE,
+        Group::File,
+    ),
+    command(
+        "window.closePrivate",
+        "Close Private Window",
+        Keys::NONE,
+        Group::File,
+    ),
     // Ctrl+Alt is AltGr on many Windows and Linux layouts, so only macOS
     // gets a default here.
     command(

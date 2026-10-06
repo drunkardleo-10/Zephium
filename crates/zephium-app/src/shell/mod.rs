@@ -18,6 +18,7 @@ mod operations;
 mod page_permissions;
 mod persistence;
 mod presentation;
+mod private;
 mod profile_deletion;
 mod projections;
 mod scope;
@@ -214,6 +215,7 @@ pub struct Shell {
     presentation: PresentationState,
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
+    private: Option<private::PrivateSession>,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
@@ -435,6 +437,7 @@ impl Shell {
             presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
+            private: None,
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
@@ -925,6 +928,7 @@ impl Shell {
                     .focused()
                     .map(|window| window.profile)
                     .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| !self.incognito_profile(*profile))
                 {
                     self.store.resource_call(
                         profile,
@@ -956,6 +960,7 @@ impl Shell {
                     .focused()
                     .map(|window| window.profile)
                     .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| !self.incognito_profile(*profile))
                 {
                     self.store.import_media(
                         profile,

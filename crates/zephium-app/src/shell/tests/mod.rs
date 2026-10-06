@@ -1840,6 +1840,7 @@ mod operations;
 mod page_permissions;
 mod persistence;
 mod presentation;
+mod private;
 mod profile_deletion;
 mod projections;
 mod search;

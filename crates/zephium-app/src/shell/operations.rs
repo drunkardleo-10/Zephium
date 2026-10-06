@@ -344,6 +344,11 @@ impl Shell {
             self.pending_external.extend(urls.into_iter().take(room));
             return;
         }
+        // Another application's link is not a private page: it opens with
+        // the regular tabs, the way a private window leaves it to another.
+        if self.private_shown() {
+            let _ = self.operation_leave_private();
+        }
         for url in urls.into_iter().take(limit) {
             if zephium_core::navigation::external_target(&url).is_some() {
                 let _ = self.operation_open_url(url, true);
@@ -782,6 +787,9 @@ impl Shell {
         };
         match id {
             "tab.new" => self.operation_open(),
+            "window.newPrivate" => self.operation_enter_private(),
+            "window.leavePrivate" => self.operation_leave_private(),
+            "window.closePrivate" => self.operation_close_private(),
             "tab.close" if in_work => self.operation_work_pane_hide(),
             "tab.close" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
