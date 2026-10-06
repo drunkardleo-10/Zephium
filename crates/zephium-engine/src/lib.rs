@@ -4245,7 +4245,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_referencing_an_inactive_view_is_terminal_before_dispatch() {
+    fn layout_referencing_an_ended_view_shows_nothing_and_keeps_running() {
         let retirement = Arc::new(Mutex::new(RetirementGate::default()));
         let dispatch_calls = Arc::new(AtomicUsize::new(0));
         let counted_dispatch = dispatch_calls.clone();
@@ -4280,8 +4280,8 @@ mod tests {
         );
 
         assert_eq!(dispatch_calls.load(Ordering::Relaxed), 0);
-        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
-        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+        assert!(!lock_retirement_gate(&retirement).retire_all_profiles);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
