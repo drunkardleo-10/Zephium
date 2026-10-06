@@ -304,6 +304,14 @@ pub(crate) fn restore(app: &tauri::AppHandle, directory: &std::path::Path) {
     if !path.exists() {
         return;
     }
+    // The installer replaced this build and exited before Zephium could clean
+    // up; running the retained version means the update finished.
+    if recovery::retained_version(&path)
+        .is_some_and(|version| version == app.package_info().version.to_string())
+    {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
     app.state::<Updates>().set(UpdateStatus::Checking);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {

@@ -32,6 +32,14 @@ pub(super) fn load_matching(
     Ok(load(path)?.and_then(|(metadata, bytes)| (metadata == *trusted_release).then_some(bytes)))
 }
 
+/// The version the retained update would install, read only to recognise an
+/// update that already finished; it is never authority to install.
+pub(super) fn retained_version(path: &Path) -> Option<String> {
+    let (metadata, _) = load(path).ok()??;
+    let version = metadata.get("version")?.as_str()?;
+    Some(version.trim_start_matches('v').to_owned())
+}
+
 fn load(path: &Path) -> io::Result<Option<(serde_json::Value, Vec<u8>)>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -96,6 +104,15 @@ mod tests {
         save(&path, &metadata, b"replacement").unwrap();
         assert_eq!(load(&path).unwrap().unwrap().1, b"replacement");
     }
+    #[test]
+    fn a_finished_update_is_recognised_by_its_version() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("pending-update");
+        assert_eq!(retained_version(&path), None);
+        save(&path, &serde_json::json!({"version":"v1.2.3"}), b"signed").unwrap();
+        assert_eq!(retained_version(&path).as_deref(), Some("1.2.3"));
+    }
+
     #[test]
     fn retained_version_and_signature_cannot_override_fresh_release_metadata() {
         let root = tempfile::tempdir().unwrap();
