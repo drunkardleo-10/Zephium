@@ -423,12 +423,13 @@ impl Stage {
     /// region clips it, it never takes focus, and it absorbs pointer input
     /// until the page has painted. It grants no presentation authority.
     pub fn cover(&self, id: ItemId, token: u64) -> bool {
-        let Some((container, parent)) = self
-            .state
-            .try_borrow()
-            .ok()
-            .and_then(|state| Some((state.views.get(&id)?.container, state.parent)))
-        else {
+        // Only a page the window is about to show needs hiding until it
+        // paints; a hidden tab's navigation would poll for nothing.
+        let Some((container, parent)) = self.state.try_borrow().ok().and_then(|state| {
+            (!state.hidden && state.visible.contains(&id))
+                .then(|| Some((state.views.get(&id)?.container, state.parent)))
+                .flatten()
+        }) else {
             return false;
         };
         let module = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
