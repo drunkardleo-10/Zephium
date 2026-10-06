@@ -7442,6 +7442,7 @@ dependencies = [
  "gtk",
  "image",
  "json-patch",
+ "libc",
  "minisign-verify",
  "objc2",
  "objc2-app-kit",

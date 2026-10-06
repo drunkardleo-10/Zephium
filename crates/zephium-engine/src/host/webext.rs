@@ -1206,7 +1206,14 @@ impl Host for Bridge {
             LogLevel::Warning => "warning",
             LogLevel::Error => "error",
         };
-        eprintln!("extension {extension} {tag}: {message}{suffix}");
+        // What extensions log is often page addresses, page text or tokens.
+        // The local log a person may attach to a report keeps only its size.
+        if cfg!(debug_assertions) {
+            eprintln!("extension {extension} {tag}: {message}{suffix}");
+        } else {
+            let length = message.chars().count();
+            eprintln!("extension {extension} {tag}: {length} characters{suffix}");
+        }
     }
 
     fn tab_request(&self, request: TabRequest, done: TabRequestDone) {

@@ -158,6 +158,11 @@
       >{m.about_copy_details()}</Button
     >
   </SettingsRow>
+  <SettingsRow title={m.about_logs()} description={m.about_logs_help()}>
+    <Button size="compact" onclick={() => void commands.diagnosticsShowLogs().catch(() => false)}
+      >{m.about_logs_show()}</Button
+    >
+  </SettingsRow>
 </SettingsGroup>
 <SettingsGroup title={m.settings_advanced()}>
   <SettingsRow

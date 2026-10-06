@@ -754,9 +754,10 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
             return;
         };
-        if let Err(error) = view.load_url(url) {
+        if view.load_url(url).is_err() {
             view.navigation.fail_synchronous(epoch);
-            eprintln!("engine: navigation failed: {error}");
+            // The engine's error text can carry the address.
+            eprintln!("engine: navigation could not start");
             self.sink
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
         }

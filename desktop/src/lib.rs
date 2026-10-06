@@ -70,6 +70,7 @@ mod blocker_service;
 mod browser_credentials;
 mod browser_import;
 mod default_browser;
+mod diagnostics;
 mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
@@ -1562,6 +1563,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_navigate,
             tabs_reload,
             tabs_answer_page_request,
+            diagnostics_show_logs,
             tabs_back,
             tabs_forward,
             work_pane_show,
@@ -2652,6 +2654,13 @@ fn tabs_navigate(
         id,
         input,
     })
+}
+
+/// Shows the folder with Zephium's local log and crash report.
+#[tauri::command]
+#[specta::specta]
+fn diagnostics_show_logs(caller: WebviewWindow) -> bool {
+    authorize(&caller, CallerPolicy::Main, "diagnostics_show_logs") && diagnostics::reveal()
 }
 
 #[tauri::command]
@@ -5395,6 +5404,16 @@ pub fn run() {
                     // schema/corruption failure is still actionable without
                     // constructing WebView2 state merely to initialize logs.
                     platform::imp::redirect_stderr(&data_dir);
+                    diagnostics::install(data_dir.clone());
+                    diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    // Finder-launched apps write stderr nowhere; keep it in
+                    // a private, bounded log the person can choose to share.
+                    let logs = app.path().app_log_dir()?;
+                    platform::imp::redirect_stderr(&logs);
+                    diagnostics::install(logs);
                     diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
                 }
 
