@@ -144,3 +144,47 @@ fn invalid_committed_url_events_have_no_state_or_history_side_effects() {
         .unwrap();
     assert_eq!(tab.url.as_deref(), Some("https://b.example/"));
 }
+
+#[test]
+fn a_failed_address_is_explained_until_the_next_attempt() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    use zephium_ipc::TabFailureReason;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let failure = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .and_then(|tab| tab.failure)
+    };
+
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::Offline,
+    }));
+    assert_eq!(failure(&screen), None, "a page's own load names no address");
+
+    shell.handle(Command::Navigate {
+        id,
+        input: "unreachable.example".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::HostNotFound,
+    }));
+    let shown = failure(&screen).expect("the failed address is explained");
+    assert_eq!(shown.url, "https://unreachable.example/");
+    assert_eq!(shown.reason, TabFailureReason::HostNotFound);
+
+    shell.handle(Command::Navigate {
+        id,
+        input: "example.com".into(),
+    });
+    assert_eq!(
+        failure(&screen),
+        None,
+        "a new attempt clears the explanation"
+    );
+}

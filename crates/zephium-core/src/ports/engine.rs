@@ -958,6 +958,18 @@ pub struct DiscardProbeId(pub u64);
 /// This does not describe page-load completion. Reload/history success still
 /// settles through the ordinary navigation callbacks; this enum exists so an
 /// HRESULT/native refusal is never silently discarded.
+/// Why a navigation the person asked for did not load, as a category safe
+/// to show them. Never carries native error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationFailureReason {
+    Offline,
+    HostNotFound,
+    Unreachable,
+    TimedOut,
+    Insecure,
+    Other,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NativeAction {
     Reload,
@@ -1174,6 +1186,13 @@ pub enum EngineEvent {
     NavigationFailed {
         id: ItemId,
         request: NavigationRequestId,
+    },
+    /// Why the view's current main-frame navigation failed, reported before
+    /// its failure settles, only where the engine can tell (macOS; WebView2
+    /// shows its own error pages).
+    NavigationFailureReported {
+        id: ItemId,
+        reason: NavigationFailureReason,
     },
     /// The exact native zoom invocation settled. `applied_scale` is the
     /// adapter's last successfully applied scale for this view generation, so

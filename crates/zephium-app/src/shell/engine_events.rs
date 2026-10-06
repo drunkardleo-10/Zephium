@@ -86,6 +86,7 @@ impl Shell {
             | EngineEvent::PresentationPending { id, .. }
             | EngineEvent::PresentationReady { id, .. }
             | EngineEvent::NavigationFailed { id, .. }
+            | EngineEvent::NavigationFailureReported { id, .. }
             | EngineEvent::ViewCreationFailed { id }
             | EngineEvent::Crashed { id }
             | EngineEvent::ViewDiscarded { id, .. } => {
@@ -417,6 +418,11 @@ impl Shell {
                     self.project_tab(id);
                 }
             }
+            EngineEvent::NavigationFailureReported { id, reason } => {
+                if self.items.record_navigation_failure(id, reason) {
+                    self.project_tab(id);
+                }
+            }
             EngineEvent::ZoomSettled {
                 id,
                 request,
@@ -603,6 +609,7 @@ impl Shell {
             | EngineEvent::PresentationPending { id, .. }
             | EngineEvent::PresentationReady { id, .. }
             | EngineEvent::NavigationFailed { id, .. }
+            | EngineEvent::NavigationFailureReported { id, .. }
             | EngineEvent::ZoomSettled { id, .. }
             | EngineEvent::NativeActionFailed { id, .. }
             | EngineEvent::LoadingChanged { id, .. }

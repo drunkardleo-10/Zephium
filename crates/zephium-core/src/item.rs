@@ -119,8 +119,17 @@ pub struct TabState {
     pub can_go_forward: bool,
     pub zoom: f64,
     pub lifecycle: Lifecycle,
+    /// The last navigation the person asked for that did not load. Runtime
+    /// only: never persisted, and cleared by the next attempt or commit.
+    pub failure: Option<NavigationFailure>,
     // Distinct from `url`: a restored/hibernated tab has a url but no live view.
     pub(crate) view: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationFailure {
+    pub url: Url,
+    pub reason: crate::ports::engine::NavigationFailureReason,
 }
 
 impl TabState {
@@ -135,6 +144,7 @@ impl TabState {
             can_go_forward: false,
             zoom: 1.0,
             lifecycle: Lifecycle::Inactive,
+            failure: None,
             view: false,
         }
     }

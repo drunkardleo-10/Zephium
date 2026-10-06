@@ -31,9 +31,31 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub availability: Option<TabAvailability>,
+    /// The last navigation the person asked for that did not load, until the
+    /// next attempt or commit. Never carries native error text.
+    #[serde(default)]
+    #[specta(optional)]
+    pub failure: Option<TabFailure>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabFailure {
+    pub url: String,
+    pub reason: TabFailureReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabFailureReason {
+    Offline,
+    HostNotFound,
+    Unreachable,
+    TimedOut,
+    Insecure,
+    Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

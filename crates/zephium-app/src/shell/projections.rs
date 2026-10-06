@@ -563,6 +563,20 @@ fn tab_view(
         loading: tab.loading,
         popup_blocked: tab.popup_blocked,
         availability: None,
+        failure: tab.failure.as_ref().map(|failure| {
+            use zephium_core::ports::engine::NavigationFailureReason as Reason;
+            zephium_ipc::TabFailure {
+                url: failure.url.to_string(),
+                reason: match failure.reason {
+                    Reason::Offline => zephium_ipc::TabFailureReason::Offline,
+                    Reason::HostNotFound => zephium_ipc::TabFailureReason::HostNotFound,
+                    Reason::Unreachable => zephium_ipc::TabFailureReason::Unreachable,
+                    Reason::TimedOut => zephium_ipc::TabFailureReason::TimedOut,
+                    Reason::Insecure => zephium_ipc::TabFailureReason::Insecure,
+                    Reason::Other => zephium_ipc::TabFailureReason::Other,
+                },
+            }
+        }),
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
         icon,

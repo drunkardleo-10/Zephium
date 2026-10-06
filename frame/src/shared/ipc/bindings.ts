@@ -1827,6 +1827,13 @@ export type TabChanged = TabView;
  */
 export type TabContentView = "web" | "settings" | "extensions" | "extension_owned";
 
+export type TabFailure = {
+	url: string,
+	reason: TabFailureReason,
+};
+
+export type TabFailureReason = "offline" | "host_not_found" | "unreachable" | "timed_out" | "insecure" | "other";
+
 /**
  *  What the tab menu can offer for the tab it opens on, as the sidebar sees
  *  it. Only availability: the shell checks every action again.
@@ -1862,6 +1869,11 @@ export type TabView = {
 	 *  or title, and an explicit retry remains a fresh navigation intent.
 	 */
 	availability?: TabAvailability | null,
+	/**
+	 *  The last navigation the person asked for that did not load, until the
+	 *  next attempt or commit. Never carries native error text.
+	 */
+	failure?: TabFailure | null,
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,

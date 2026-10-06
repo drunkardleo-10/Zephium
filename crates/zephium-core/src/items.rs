@@ -45,6 +45,8 @@ pub struct Items {
 #[derive(Clone, Debug)]
 struct PendingNavigation {
     request: NavigationRequestId,
+    /// The address asked for, when known, so a failure can name it.
+    url: Option<Url>,
 }
 
 impl Items {
@@ -365,8 +367,13 @@ impl Items {
             return Vec::new();
         }
         let request = self.mint_navigation_request();
-        self.pending_navigations
-            .insert(id, PendingNavigation { request });
+        self.pending_navigations.insert(
+            id,
+            PendingNavigation {
+                request,
+                url: Some(url.clone()),
+            },
+        );
         let Some(tab) = self.tab_mut(id) else {
             // Keep this path non-panicking even if a future mutation is added
             // between the existence check and this borrow.  A failed admission
@@ -375,6 +382,7 @@ impl Items {
             self.pending_navigations.remove(&id);
             return Vec::new();
         };
+        tab.failure = None;
         let url = url.to_string();
         if tab.view {
             vec![Effect::Navigate { id, url, request }]
@@ -396,7 +404,7 @@ impl Items {
         }
         let request = self.mint_navigation_request();
         self.pending_navigations
-            .insert(id, PendingNavigation { request });
+            .insert(id, PendingNavigation { request, url: None });
         Some(request)
     }
 
@@ -543,6 +551,7 @@ impl Items {
             }
             tab.url = Some(url);
             tab.popup_blocked = false;
+            tab.failure = None;
             self.pending_navigations.remove(&id);
             true
         } else {
@@ -561,6 +570,28 @@ impl Items {
             self.pending_navigations.remove(&id);
         }
         current
+    }
+
+    /// Remembers why the address the person asked for did not load, so chrome
+    /// can say so and offer it again. A page's own navigation has no pending
+    /// address and is left alone.
+    pub fn record_navigation_failure(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationFailureReason,
+    ) -> bool {
+        let Some(url) = self
+            .pending_navigations
+            .get(&id)
+            .and_then(|pending| pending.url.clone())
+        else {
+            return false;
+        };
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.failure = Some(crate::item::NavigationFailure { url, reason });
+        true
     }
 
     #[cfg(test)]

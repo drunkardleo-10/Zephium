@@ -29,6 +29,8 @@ use wry::{DownloadPolicy, WebViewBuilder};
 use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
+#[cfg(target_os = "macos")]
+use zephium_core::ports::engine::NavigationFailureReason;
 use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
 #[cfg(target_os = "macos")]
@@ -1374,6 +1376,23 @@ impl EngineHost {
 
         #[cfg(target_os = "macos")]
         let load_replay = replay_safety.clone();
+        // WebKit says why a navigation failed just before its Failed event;
+        // chrome uses it to explain a failed address the person asked for.
+        #[cfg(target_os = "macos")]
+        {
+            let failure_permit = load_permit.clone();
+            let failure_sink = on_load.clone();
+            let failure_id = load_id.clone();
+            builder = builder.with_navigation_failure_handler(move |_navigation, reason| {
+                failure_permit.emit(
+                    &failure_sink,
+                    EngineEvent::NavigationFailureReported {
+                        id: failure_id.get(),
+                        reason: failure_reason(reason),
+                    },
+                );
+            });
+        }
         builder = builder.with_navigation_event_handler(move |event| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if event.phase == wry::NavigationEventPhase::Committed && event.url != "about:blank" {
@@ -2311,3 +2330,15 @@ pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::Permissi
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "macos")]
+fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
+    match failure {
+        wry::NavigationFailure::Offline => NavigationFailureReason::Offline,
+        wry::NavigationFailure::HostNotFound => NavigationFailureReason::HostNotFound,
+        wry::NavigationFailure::Unreachable => NavigationFailureReason::Unreachable,
+        wry::NavigationFailure::TimedOut => NavigationFailureReason::TimedOut,
+        wry::NavigationFailure::Insecure => NavigationFailureReason::Insecure,
+        wry::NavigationFailure::Other => NavigationFailureReason::Other,
+    }
+}
