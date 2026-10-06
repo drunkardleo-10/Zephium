@@ -4,28 +4,37 @@
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
+
+  let { compact = false }: { compact?: boolean } = $props();
+  const close = () => void commands.runCommand("window.closePrivate");
 </script>
 
 <!--
-  Heads the column while it shows private tabs, in the band the Browse/Work
-  switch holds otherwise: it names the scope and closes it.
+  The foot of the column while it shows private tabs, where tools and kept
+  sites stand otherwise: it names the scope and closes it.
 -->
-<div class="private-bar" role="group" aria-label={m.private_title()}>
-  <Icon icon={IncognitoIcon} size={16} />
-  <span class="name">{m.private_title()}</span>
-  <IconButton
-    icon={Cancel01Icon}
-    label={m.private_close()}
-    size={14}
-    buttonSize={24}
-    onclick={() => void commands.runCommand("window.closePrivate")}
-  />
-</div>
+{#if compact}
+  <IconButton icon={IncognitoIcon} label={m.private_close()} size={16} onclick={close} />
+{:else}
+  <div class="private-bar" role="group" aria-label={m.private_title()}>
+    <Icon icon={IncognitoIcon} size={16} />
+    <span class="name">{m.private_title()}</span>
+    <IconButton
+      icon={Cancel01Icon}
+      label={m.private_close()}
+      size={14}
+      buttonSize={24}
+      onclick={close}
+    />
+  </div>
+{/if}
 
 <style>
   .private-bar {
     display: flex;
-    flex: 1;
+    flex: none;
+    box-sizing: border-box;
+    inline-size: 100%;
     align-items: center;
     gap: 6px;
     min-width: 0;

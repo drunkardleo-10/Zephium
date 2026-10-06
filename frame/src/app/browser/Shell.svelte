@@ -110,6 +110,7 @@
   });
   let splitting = $state(false);
   let inWork = $derived(browserPage.currentPage() === "work");
+  let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
   let modeSwitched = $state(false);
   let shownMode: boolean | null = null;
@@ -262,7 +263,7 @@
   class:pb-0={inWork}
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
-  data-private={tabs.profile()?.kind === "incognito" || undefined}
+  data-private={incognito || undefined}
 >
   <Sidebar
     >{#snippet browserBody(compact)}
@@ -270,9 +271,7 @@
         {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
-      {:else}<div class="sidebar-head">
-          {#if tabs.profile()?.kind === "incognito"}<PrivateBar />{:else}<ModeTabs />{/if}
-        </div>{/if}
+      {:else if !incognito}<div class="sidebar-head"><ModeTabs /></div>{/if}
       <!-- One column in both environments: only what it lists changes, and the
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
@@ -312,7 +311,9 @@
             <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
+    {/snippet}{#snippet dock(compact)}{#if compact && incognito}<PrivateBar
+          compact
+        />{:else if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
             profile={tabs.profile()?.id ?? ""}
           />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock compact tools={!inWork}>
           {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
@@ -322,7 +323,10 @@
               entries={railEssentials}
               onSelect={selectTab}
             />{/snippet}
-        </Dock>{:else}<Dock>
+        </Dock>{:else if incognito}
+        <!-- A private window keeps nothing, so it has no tools or kept sites;
+             its foot names the scope and closes it. -->
+        <PrivateBar />{:else}<Dock>
           {#snippet above()}
             <div
               class="dock-sites"

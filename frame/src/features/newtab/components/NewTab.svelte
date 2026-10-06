@@ -3,7 +3,6 @@
   import {
     CheckListIcon,
     Clock01Icon,
-    IncognitoIcon,
     Settings01Icon,
     Shield01Icon,
   } from "@hugeicons/core-free-icons";
@@ -296,7 +295,7 @@
 
   <!-- A private window has no figures; what it promises stands in their place. -->
   {#if incognito}
-    <p class="note"><Icon icon={IncognitoIcon} size={13} />{m.ntp_private()}</p>
+    <p class="note">{m.ntp_private()}</p>
   {/if}
 
   <!-- The day in figures, a card each, along the foot of the page: what it
@@ -512,10 +511,6 @@
   }
 
   .note {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
     inset-block-end: 28px;
     padding-inline: 24px;
     color: var(--color-faint);
