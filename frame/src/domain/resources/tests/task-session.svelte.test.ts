@@ -75,7 +75,7 @@ test("a session restarted straight after being stopped still loads", async () =>
   expect(session.error).toBeNull();
 });
 
-test("a session that stays stopped lets go of its rows", async () => {
+test("a stopped session keeps its rows to draw while they are read again", async () => {
   const { taskSession } = await import("../tasks.svelte");
   serve();
   const session = taskSession(profile, "released");
@@ -84,8 +84,36 @@ test("a session that stays stopped lets go of its rows", async () => {
 
   session.stop();
   await settled();
-  expect(session.items.length).toBe(0);
+  expect(session.items.length).toBe(1);
   expect(session.error).toBeNull();
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  const forward = host.call.getMockImplementation()!;
+  host.call.mockImplementation(async (owner, call) => {
+    await answered;
+    return forward(owner, call);
+  });
+  const restarted = session.start();
+  await settled();
+  // Shown again, the host has rows while the listing is read, not "Loading…".
+  expect(session.loading).toBe(true);
+  expect(session.rows.length).toBe(1);
+  answer();
+  await restarted;
+  session.stop();
+});
+
+test("the least recently used clean session is let go, never one with unsaved work", async () => {
+  const { taskSession } = await import("../tasks.svelte");
+  serve();
+  const keep = taskSession(profile, "lru-unsaved");
+  keep.captureDraft = "half a thought";
+  const first = taskSession(profile, "lru-0");
+  const others = Array.from({ length: 8 }, (_, index) => taskSession(profile, `lru-${index + 1}`));
+  expect(taskSession(profile, "lru-unsaved")).toBe(keep);
+  expect(taskSession(profile, "lru-0")).not.toBe(first);
+  expect(taskSession(profile, `lru-8`)).toBe(others.at(-1));
+  keep.captureDraft = "";
 });
 
 async function editingSession(name: string) {

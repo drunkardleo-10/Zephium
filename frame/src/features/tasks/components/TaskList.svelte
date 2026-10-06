@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import * as m from "$shared/i18n/messages";
   import type { TaskList, TaskRow as Row, TaskStatus } from "$domain/resources";
@@ -176,6 +176,16 @@
     }
   });
   $effect(() => () => observer.disconnect());
+  // Heights of rows that have left the list would otherwise pile up for as
+  // long as the list stays open.
+  $effect(() => {
+    const live = rows;
+    untrack(() => {
+      if (measured.size <= live.length) return;
+      const ids = new Set(live.map((row) => row.id));
+      for (const id of [...measured.keys()]) if (!ids.has(id)) measured.delete(id);
+    });
+  });
 
   function measure(node: HTMLElement, id: string) {
     observed.set(node, id);

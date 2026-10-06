@@ -2,7 +2,7 @@ import { SvelteDate, SvelteMap, SvelteSet } from "svelte/reactivity";
 import { registerCloseTask } from "$shared/lib/close";
 import { events } from "$shared/ipc/native-events";
 import { resourceCall } from "./transport";
-import { mergePage, newerRevision } from "./resource-model";
+import { mergePage, newerRevision, settleInto } from "./resource-model";
 import type {
   ResourceCall_Deserialize as ResourceCall,
   ResourceDraft_Deserialize as ResourceDraft,
@@ -396,6 +396,9 @@ export class TaskSession {
   saving(id: string): boolean {
     return this.#chain.has(id);
   }
+  get active(): boolean {
+    return this.#active;
+  }
   get undoable() {
     return this.#undo.length > 0;
   }
@@ -455,15 +458,13 @@ export class TaskSession {
     this.#observed.clear();
     this.#stop?.();
     this.#stop = null;
+    // The rows stay, so a host shown again draws them while they are read
+    // afresh instead of flashing empty; the registry lets go of a clean,
+    // stopped session once others need the room.
     void this.flush().then((saved) => {
       if (epoch !== this.#epoch) return;
       this.loading = false;
-      if (!saved || this.retained) return;
-      this.items = [];
-      this.#bodies.clear();
-      this.#metadata.clear();
-      this.next = null;
-      this.error = null;
+      if (saved && !this.retained) this.error = null;
     });
   }
 
@@ -608,6 +609,7 @@ export class TaskSession {
     );
     this.items = more ? mergePage(this.items, page.items) : mergePage(page.items, retained);
     this.next = page.next;
+    if (!more) this.#prune();
     const selected = this.items.find((item) => item.id === this.selectedId);
     if (selected && this.#bodies.get(selected.id)?.revision !== selected.revision)
       void this.load(selected.id);
@@ -1018,11 +1020,14 @@ export class TaskSession {
     // A session nobody is viewing, such as the launcher's capture, keeps no
     // projection: it would only grow with every task it saves.
     if (task.kind !== "task" || !this.#active) return;
-    const old = this.items.find((item) => item.id === record.id);
+    const old = this.#index.get(record.id);
     if (old && BigInt(old.revision) > BigInt(record.revision)) return;
-    if (record.trashed !== this.trash)
+    if (record.trashed !== this.trash) {
       this.items = this.items.filter((item) => item.id !== record.id);
-    else this.items = mergePage(this.items, [summarize(record)]);
+      this.#prune();
+      return;
+    }
+    this.items = settleInto(this.items, summarize(record));
     this.#metadata.set(record.id, metadataOf(record.id, task));
     this.#bodies.set(record.id, {
       steps: detailsOf(task).steps,
@@ -1061,10 +1066,19 @@ export class TaskSession {
       const found = await this.#call({ kind: "get", id });
       if (epoch !== this.#epoch) return;
       if (found.kind === "record") this.#accept(found.record);
-      else if (found.kind === "error" && found.error === "not_found")
+      else if (found.kind === "error" && found.error === "not_found") {
         this.items = this.items.filter((item) => item.id !== id);
+        this.#prune();
+      }
     }
     this.#scheduleOverview();
+  }
+
+  /** Lets go of what was read for tasks no longer listed. */
+  #prune() {
+    const listed = this.#index;
+    for (const id of [...this.#metadata.keys()]) if (!listed.has(id)) this.#metadata.delete(id);
+    for (const id of [...this.#bodies.keys()]) if (!listed.has(id)) this.#bodies.delete(id);
   }
 
   async saveList(title: string, id?: string): Promise<TaskList | null> {
@@ -1180,7 +1194,13 @@ export async function taskLists(profile: string, today: string): Promise<TaskLis
   return response.kind === "task_overview" ? response.lists : [];
 }
 
-const sessions = new SvelteMap<string, TaskSession>();
+/** Sessions kept for hosts to come back to, beyond which the one used least
+ *  recently is let go. One that is showing, or that holds anything unsaved,
+ *  is never let go to make room. */
+const MAX_SESSIONS = 6;
+type Kept = { session: TaskSession; dispose: () => void; used: number };
+const sessions = new SvelteMap<string, Kept>();
+let uses = 0;
 let watching = false;
 /** A hidden window may be closed or suspended without another chance to
  *  save, so what is being typed is saved as it hides. */
@@ -1189,23 +1209,43 @@ function watchVisibility() {
   watching = true;
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "hidden") return;
-    for (const session of sessions.values()) session.commitText();
+    for (const { session } of sessions.values()) session.commitText();
   });
+}
+function makeRoom() {
+  while (sessions.size >= MAX_SESSIONS) {
+    let oldest: [string, Kept] | undefined;
+    for (const entry of sessions)
+      if (
+        !entry[1].session.active &&
+        !entry[1].session.retained &&
+        (!oldest || entry[1].used < oldest[1].used)
+      )
+        oldest = entry;
+    if (!oldest) return;
+    const [key, { session, dispose }] = oldest;
+    sessions.delete(key);
+    session.removeCloseTask();
+    dispose();
+  }
 }
 export function taskSession(profile: string, host: string): TaskSession {
   const key = `${profile}:${host}`;
   const existing = sessions.get(key);
-  if (existing) return existing;
+  if (existing) {
+    existing.used = ++uses;
+    return existing.session;
+  }
   watchVisibility();
-  // Never evict an active session or an unresolved user edit to satisfy a cache cap.
+  makeRoom();
   // Built under its own root: a session outlives the view that first asked for
   // it, and deriveds created during that view's setup would die with it.
   let built: TaskSession | undefined;
-  $effect.root(() => {
+  const dispose = $effect.root(() => {
     built = new TaskSession(profile);
   });
   // Without a DOM there is no reactive owner to escape, and no root either.
   const session = built ?? new TaskSession(profile);
-  sessions.set(key, session);
+  sessions.set(key, { session, dispose, used: ++uses });
   return session;
 }
