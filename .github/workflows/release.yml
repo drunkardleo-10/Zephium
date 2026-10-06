@@ -27,7 +27,7 @@ jobs:
   gate:
     name: Gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 70
+    timeout-minutes: 150
     permissions:
       contents: read
       actions: read
@@ -98,10 +98,17 @@ jobs:
         run: |
           set -euo pipefail
           candidate="$(git rev-parse HEAD)"
-          for attempt in $(seq 1 120); do
+          for attempt in $(seq 1 270); do
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${candidate}&event=push&per_page=100")"
-            if jq -e --arg sha "${candidate}" '.workflow_runs | any(.head_sha == $sha and .head_branch == "main" and .event == "push" and .conclusion == "success")' <<< "${runs}" >/dev/null; then
+            main='[.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .event == "push")]'
+            if jq -e --arg sha "${candidate}" "${main} | any(.conclusion == \"success\")" <<< "${runs}" >/dev/null; then
               exit 0
+            fi
+            # Every run for this commit finished and none passed: waiting
+            # cannot help. Re-run CI for the commit, then this workflow.
+            if jq -e --arg sha "${candidate}" "${main} | length > 0 and all(.status == \"completed\")" <<< "${runs}" >/dev/null; then
+              echo "::error::Main CI for release commit ${candidate} finished without success. Re-run it, then re-run this release."
+              exit 1
             fi
             sleep 30
           done
