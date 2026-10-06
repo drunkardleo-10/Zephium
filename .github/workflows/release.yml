@@ -98,8 +98,10 @@ jobs:
         run: |
           set -euo pipefail
           candidate="$(git rev-parse HEAD)"
-          for attempt in $(seq 1 270); do
+          for _ in $(seq 1 270); do
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${candidate}&event=push&per_page=100")"
+            # $sha is a jq variable, bound by --arg below, not a shell one.
+            # shellcheck disable=SC2016
             main='[.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .event == "push")]'
             if jq -e --arg sha "${candidate}" "${main} | any(.conclusion == \"success\")" <<< "${runs}" >/dev/null; then
               exit 0
