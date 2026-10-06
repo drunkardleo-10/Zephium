@@ -1087,7 +1087,7 @@ impl ContentStage {
             if created || changed_mode {
                 let paint = block2::RcBlock::new(|| {
                     let color = if dragging {
-                        NSColor::controlAccentColor()
+                        NSColor::labelColor()
                     } else {
                         NSColor::secondaryLabelColor()
                     };

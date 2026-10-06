@@ -18,9 +18,8 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, S
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, CreateSolidBrush,
-    DeleteDC, DeleteObject, FillRect, GetDC, GetSysColor, ReleaseDC, SelectObject, SetWindowRgn,
-    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    COLOR_HIGHLIGHT, DIB_RGB_COLORS, HDC,
+    DeleteDC, DeleteObject, FillRect, GetDC, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HDC,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -49,6 +48,9 @@ const INDICATOR_RADIUS: f64 = 10.0;
 const INDICATOR_BORDER: f64 = 1.5;
 const INDICATOR_FILL: f64 = 0.12;
 const INDICATOR_STROKE: f64 = 0.42;
+// The resize guide is the label colour, as on macOS, not the system accent.
+const GUIDE_ON_DARK: (u8, u8, u8) = (0xff, 0xff, 0xff);
+const GUIDE_ON_LIGHT: (u8, u8, u8) = (0x1d, 0x1d, 0x1f);
 const MAX_NATIVE_RETRIES: u8 = 2;
 
 type PhysicalRect = (i32, i32, i32, i32);
@@ -594,10 +596,16 @@ impl Stage {
                 let resized = s.indicator_size != (w, h) || s.indicator_resize != resize;
                 s.indicator_size = (w, h);
                 s.indicator_resize = resize;
+                let parent = s.parent;
                 drop(s);
                 unsafe {
                     if resized {
-                        draw_indicator(hwnd, top_left.x, top_left.y, w, h, scale, resize);
+                        let guide = if dark_theme(parent) {
+                            GUIDE_ON_DARK
+                        } else {
+                            GUIDE_ON_LIGHT
+                        };
+                        draw_indicator(hwnd, top_left.x, top_left.y, w, h, scale, resize, guide);
                     }
                     let _ = SetWindowPos(
                         hwnd,
@@ -716,7 +724,8 @@ unsafe extern "system" fn cover_proc(
 
 /// The frame's content ground for the app theme, read from the root window's
 /// dark-mode attribute, which the app sets for forced and system themes alike.
-fn page_ground(parent: HWND) -> COLORREF {
+/// The window follows the app theme through DWM; dark when unknown.
+fn dark_theme(parent: HWND) -> bool {
     let root = unsafe { GetAncestor(parent, GA_ROOT) };
     let mut dark = BOOL(1);
     let read = unsafe {
@@ -727,7 +736,11 @@ fn page_ground(parent: HWND) -> COLORREF {
             std::mem::size_of::<BOOL>() as u32,
         )
     };
-    let (red, green, blue) = if read.is_err() || dark.as_bool() {
+    read.is_err() || dark.as_bool()
+}
+
+fn page_ground(parent: HWND) -> COLORREF {
+    let (red, green, blue) = if dark_theme(parent) {
         crate::platform::PAGE_GROUND_DARK
     } else {
         crate::platform::PAGE_GROUND_LIGHT
@@ -1332,7 +1345,17 @@ fn finish_native_placement(
 
 /// Premultiplied BGRA rounded rect pushed through UpdateLayeredWindow:
 /// translucent white fill, brighter border, signed-distance antialiasing.
-fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64, resize: bool) {
+#[allow(clippy::too_many_arguments)]
+fn draw_indicator(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    scale: f64,
+    resize: bool,
+    guide: (u8, u8, u8),
+) {
     let header = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: w,
@@ -1358,7 +1381,6 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64, resize
         let radius = (INDICATOR_RADIUS * scale).min(w.min(h) as f64 / 2.0);
         let border = INDICATOR_BORDER * scale;
         let (half_w, half_h) = (w as f64 / 2.0, h as f64 / 2.0);
-        let accent = GetSysColor(COLOR_HIGHLIGHT);
         for row in 0..h as usize {
             for col in 0..w as usize {
                 let dx = (col as f64 + 0.5 - half_w).abs() - half_w + radius;
@@ -1374,9 +1396,9 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64, resize
                 };
                 let v = (alpha * 255.0).round() as u32;
                 pixels[row * w as usize + col] = if resize {
-                    let red = ((accent & 0xff) as f64 * alpha).round() as u32;
-                    let green = (((accent >> 8) & 0xff) as f64 * alpha).round() as u32;
-                    let blue = (((accent >> 16) & 0xff) as f64 * alpha).round() as u32;
+                    let red = (f64::from(guide.0) * alpha).round() as u32;
+                    let green = (f64::from(guide.1) * alpha).round() as u32;
+                    let blue = (f64::from(guide.2) * alpha).round() as u32;
                     (v << 24) | (red << 16) | (green << 8) | blue
                 } else {
                     (v << 24) | (v << 16) | (v << 8) | v
