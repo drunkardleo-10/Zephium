@@ -1105,6 +1105,15 @@ impl EngineHost {
             let auth_tab = id.clone();
             let action_app_link = app_link.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
+                // A page's own srcdoc, data: and blob: frames (challenge and
+                // payment widgets, editors) load under WebKit's origin rules;
+                // browser policy governs what a tab itself may show.
+                if action.target_is_main_frame == Some(false)
+                    && zephium_core::navigation::is_subframe_document(&target)
+                {
+                    return frame_permit.allows_navigation("about:blank")
+                        && frame_navigation.admits_target("about:blank");
+                }
                 let admitted = frame_permit.allows_navigation(&target)
                     && frame_navigation.admits_target(&target);
                 if !admitted && action_app_link(&target) {

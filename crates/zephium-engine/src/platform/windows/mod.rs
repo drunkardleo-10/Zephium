@@ -359,9 +359,12 @@ pub fn configure(
             args.SetCancel(true)?;
             let mut uri = PWSTR::null();
             args.Uri(&mut uri)?;
-            if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
-                .is_some_and(|uri| zephium_core::navigation::is_allowed_str(&uri))
-            {
+            if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT).is_some_and(
+                |uri| {
+                    zephium_core::navigation::is_allowed_str(&uri)
+                        || zephium_core::navigation::is_subframe_document(&uri)
+                },
+            ) {
                 args.SetCancel(false)?;
             }
         }

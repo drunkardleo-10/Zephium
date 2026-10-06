@@ -152,6 +152,20 @@ pub fn external_target(argument: &str) -> Option<Url> {
         .filter(|url| matches!(url.scheme(), "http" | "https") && is_allowed(url))
 }
 
+/// A document a page builds for one of its own frames: an `about:srcdoc` or
+/// `about:blank` frame, or one from `data:` or `blob:`. The engine keeps
+/// these in the page's own origin rules; they are never a top-level page.
+pub fn is_subframe_document(target: &str) -> bool {
+    if target.len() > MAX_URL_BYTES {
+        return false;
+    }
+    Url::parse(target).is_ok_and(|url| match url.scheme() {
+        "about" => matches!(url.path(), "blank" | "srcdoc"),
+        "data" | "blob" => true,
+        _ => false,
+    })
+}
+
 /// Schemes a page never hands to another application: they load browser
 /// content, run script, reach files or shares, or reach Windows handlers
 /// that have been used to run code from a link.
@@ -267,6 +281,26 @@ fn looks_like_host(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frames_may_hold_documents_their_page_builds() {
+        for frame in [
+            "about:srcdoc",
+            "about:blank#top",
+            "data:text/html,<p>hi</p>",
+            "blob:https://challenges.example/0f1e",
+        ] {
+            assert!(super::is_subframe_document(frame), "{frame}");
+        }
+        for frame in [
+            "about:settings",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "zoommtg://x",
+        ] {
+            assert!(!super::is_subframe_document(frame), "{frame}");
+        }
+    }
+
     #[test]
     fn only_application_links_are_handed_to_applications() {
         for link in [
