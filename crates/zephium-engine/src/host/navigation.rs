@@ -505,10 +505,22 @@ impl EngineHost {
                     snapshot,
                 )
             });
+        #[cfg(target_os = "windows")]
+        let cover = self
+            .views
+            .get(&id)
+            .filter(|view| !view.presentable)
+            .and_then(|view| {
+                crate::platform::imp::PaintCover::begin(
+                    id,
+                    &view.view,
+                    self.stages.values().cloned(),
+                )
+            });
         if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
             return;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let previous = self.views.get_mut(&id).and_then(|view| {
                 if view.presentable {
@@ -519,9 +531,9 @@ impl EngineHost {
                     std::mem::replace(&mut view.paint_cover, cover)
                 }
             });
-            // Removing an old native cover may re-enter AppKit. Do not hold a
-            // view borrow or publish a permit until exact attribution is
-            // rechecked after that cleanup.
+            // Removing an old native cover may re-enter the platform UI. Do
+            // not hold a view borrow or publish a permit until exact
+            // attribution is rechecked after that cleanup.
             drop(previous);
         }
         if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {

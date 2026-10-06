@@ -1939,7 +1939,7 @@ impl EngineHost {
             applied_zoom: 1.0,
             presentable: false,
             presentation_announced: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             paint_cover: None,
             title_ready: None,
             nonpresentable_bootstrap: (!report_failure && !native_popup).then_some(epoch),

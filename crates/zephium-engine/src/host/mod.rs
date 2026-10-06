@@ -157,7 +157,7 @@ struct ObservedView {
     suspend_deadline: Option<crate::platform::imp::ContentPolicyTimeout>,
     #[cfg(target_os = "windows")]
     suspend_attempt: Option<Arc<discard::SuspendAttempt>>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     paint_cover: Option<crate::platform::imp::PaintCover>,
     site_scope: Rc<content_styles::ViewSiteScope>,
     content_styles: Arc<content_styles::DocumentStyleState>,

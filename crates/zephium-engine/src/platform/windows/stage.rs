@@ -13,21 +13,24 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
-use windows::core::PCWSTR;
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
-    DeleteObject, GetDC, GetSysColor, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA,
-    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, COLOR_HIGHLIGHT,
-    DIB_RGB_COLORS,
+    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, CreateSolidBrush,
+    DeleteDC, DeleteObject, FillRect, GetDC, GetSysColor, ReleaseDC, SelectObject, SetWindowRgn,
+    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+    COLOR_HIGHLIGHT, DIB_RGB_COLORS, HDC,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, RegisterClassW, SetTimer,
-    SetWindowPos, ShowWindow, UpdateLayeredWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNA, ULW_ALPHA, USER_TIMER_MINIMUM, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClientRect, GetWindowLongPtrW,
+    KillTimer, LoadCursorW, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    UpdateLayeredWindow, GA_ROOT, GWLP_USERDATA, HWND_TOP, IDC_ARROW, MA_NOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, ULW_ALPHA,
+    USER_TIMER_MINIMUM, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use wry::WebViewExtWindows;
 
@@ -151,6 +154,8 @@ struct State {
     /// Motion asked of the next `apply`, and the slide it started.
     pending_motion: Option<StageMotion>,
     slide: Option<Slide>,
+    /// Paint covers by view, each with the token of the handoff that owns it.
+    covers: HashMap<ItemId, (HWND, u64)>,
 }
 
 /// The page travelling beside the sidebar. Child windows cannot be moved by
@@ -241,6 +246,7 @@ impl Stage {
             on_placement_failure: Rc::new(on_placement_failure),
             pending_motion: None,
             slide: None,
+            covers: HashMap::new(),
         }));
         Self { state }
     }
@@ -402,6 +408,97 @@ impl Stage {
         state.dirty.remove(&id);
         state.visibility_uncertain.remove(&id);
         state.visible.remove(&id);
+        let cover = state.covers.remove(&id);
+        drop(state);
+        if let Some((cover, _)) = cover {
+            let _ = unsafe { DestroyWindow(cover) };
+        }
+    }
+
+    /// Stacks an opaque child in the page ground over the WebView2 inside its
+    /// container. Installed while the container is still hidden, so the reveal
+    /// shows the ground instead of WebView2's white default; the container's
+    /// region clips it, it never takes focus, and it absorbs pointer input
+    /// until the page has painted. It grants no presentation authority.
+    pub fn cover(&self, id: ItemId, token: u64) -> bool {
+        let Some((container, parent)) = self
+            .state
+            .try_borrow()
+            .ok()
+            .and_then(|state| Some((state.views.get(&id)?.container, state.parent)))
+        else {
+            return false;
+        };
+        let module = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
+        let Ok(cover) = (unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                cover_class(),
+                PCWSTR::null(),
+                WS_CHILD | WS_CLIPSIBLINGS,
+                0,
+                0,
+                COVER_EXTENT,
+                COVER_EXTENT,
+                Some(container),
+                None,
+                Some(module.into()),
+                None,
+            )
+        }) else {
+            return false;
+        };
+        unsafe { SetWindowLongPtrW(cover, GWLP_USERDATA, page_ground(parent).0 as isize) };
+        let _ = unsafe {
+            SetWindowPos(
+                cover,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+        let _ = unsafe { ShowWindow(cover, SW_SHOWNA) };
+        // Window creation can pump; the view may have been replaced meanwhile.
+        let previous = match self.state.try_borrow_mut() {
+            Ok(mut state)
+                if state
+                    .views
+                    .get(&id)
+                    .is_some_and(|view| view.container == container) =>
+            {
+                Ok(state.covers.insert(id, (cover, token)))
+            }
+            _ => Err(()),
+        };
+        match previous {
+            Ok(previous) => {
+                if let Some((previous, _)) = previous {
+                    let _ = unsafe { DestroyWindow(previous) };
+                }
+                true
+            }
+            Err(()) => {
+                let _ = unsafe { DestroyWindow(cover) };
+                false
+            }
+        }
+    }
+
+    pub fn uncover(&self, id: ItemId, token: u64) {
+        let cover =
+            self.state
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut state| match state.covers.get(&id) {
+                    Some(&(_, owner)) if owner == token => state.covers.remove(&id),
+                    _ => None,
+                });
+        if let Some((cover, _)) = cover {
+            let _ = unsafe { DestroyWindow(cover) };
+        }
     }
 
     /// Reveal one exact raw-view generation after privileged chrome verified
@@ -573,6 +670,91 @@ unsafe extern "system" fn plain_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Larger than any container; the container's client area and region clip it.
+const COVER_EXTENT: i32 = 0x4000;
+
+fn cover_class() -> PCWSTR {
+    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    let name = NAME.get_or_init(|| {
+        let name = wide("ZephiumPaintCover");
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(cover_proc),
+            lpszClassName: PCWSTR(name.as_ptr()),
+            hInstance: unsafe { GetModuleHandleW(None) }.unwrap_or_default().into(),
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
+            ..Default::default()
+        };
+        unsafe { RegisterClassW(&class) };
+        name
+    });
+    PCWSTR(name.as_ptr())
+}
+
+unsafe extern "system" fn cover_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => {
+            let color = COLORREF(unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as u32);
+            let brush = unsafe { CreateSolidBrush(color) };
+            let mut rect = RECT::default();
+            if unsafe { GetClientRect(hwnd, &mut rect) }.is_ok() {
+                unsafe { FillRect(HDC(wparam.0 as _), &rect, brush) };
+            }
+            let _ = unsafe { DeleteObject(brush.into()) };
+            LRESULT(1)
+        }
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// The frame's content ground for the app theme, read from the root window's
+/// dark-mode attribute, which the app sets for forced and system themes alike.
+fn page_ground(parent: HWND) -> COLORREF {
+    let root = unsafe { GetAncestor(parent, GA_ROOT) };
+    let mut dark = BOOL(1);
+    let read = unsafe {
+        DwmGetWindowAttribute(
+            root,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            (&mut dark as *mut BOOL).cast(),
+            std::mem::size_of::<BOOL>() as u32,
+        )
+    };
+    let (red, green, blue) = if read.is_err() || dark.as_bool() {
+        crate::platform::PAGE_GROUND_DARK
+    } else {
+        crate::platform::PAGE_GROUND_LIGHT
+    };
+    COLORREF(u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16))
+}
+
+/// WebView2 may restack its own child when it becomes visible; keep the cover
+/// above it.
+fn raise_cover(state: &Rc<RefCell<State>>, id: ItemId) {
+    let cover = state
+        .try_borrow()
+        .ok()
+        .and_then(|state| state.covers.get(&id).map(|&(cover, _)| cover));
+    if let Some(cover) = cover {
+        let _ = unsafe {
+            SetWindowPos(
+                cover,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+    }
 }
 
 unsafe extern "system" fn layout_timer_proc(_: HWND, _: u32, timer: usize, _: u32) {
@@ -1042,6 +1224,7 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         } else if applied.controller_visible == Some(true) && placement.delta.window_visibility {
             let _ = unsafe { ShowWindow(placement.container, SW_SHOWNA) };
             applied.window_visible = Some(true);
+            raise_cover(state, placement.id);
         }
         if !placement_may_reveal(state, placement) {
             // Both COM visibility and ShowWindow can pump a nested native

@@ -47,6 +47,7 @@ mod semantic_runtime;
 // The bounded native capture adapter is compiled now, but the Windows host
 // keeps screenshot dispatch closed with semantic support until qualification.
 mod native_paths;
+mod paint;
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
 mod semantic_screenshot;
@@ -75,6 +76,7 @@ pub(crate) use content_filter::{
     prepare as prepare_content_policy, same_policy as same_content_policy,
     ContentPolicyRegistration, NativeContentPolicy,
 };
+pub(crate) use paint::PaintCover;
 pub use stage::Stage;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use timeout::schedule_content_policy_timeout;
