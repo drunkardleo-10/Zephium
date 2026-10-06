@@ -559,9 +559,36 @@ impl Items {
         }
     }
 
-    pub fn set_popup_blocked(&mut self, id: ItemId, blocked: bool) {
-        if let Some(tab) = self.tab_mut(id) {
-            tab.popup_blocked = blocked;
+    pub fn set_page_request(&mut self, id: ItemId, request: crate::item::PageRequest) -> bool {
+        match self.tab_mut(id) {
+            Some(tab) if tab.content == TabContent::Web => {
+                tab.page_request = Some(Box::new(request));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn take_page_request(&mut self, id: ItemId) -> Option<crate::item::PageRequest> {
+        self.tab_mut(id)?
+            .page_request
+            .take()
+            .map(|request| *request)
+    }
+
+    /// A new tab from this page did open, so an earlier refusal is moot.
+    pub fn clear_blocked_popup(&mut self, id: ItemId) -> bool {
+        match self.tab_mut(id) {
+            Some(tab)
+                if matches!(
+                    tab.page_request.as_deref(),
+                    Some(crate::item::PageRequest::Popup { .. })
+                ) =>
+            {
+                tab.page_request = None;
+                true
+            }
+            _ => false,
         }
     }
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
@@ -570,7 +597,7 @@ impl Items {
                 return false;
             }
             tab.url = Some(url);
-            tab.popup_blocked = false;
+            tab.page_request = None;
             tab.failure = None;
             self.pending_navigations.remove(&id);
             true

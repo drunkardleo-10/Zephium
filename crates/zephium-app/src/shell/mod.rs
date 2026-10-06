@@ -16,6 +16,7 @@ mod favicons;
 mod history;
 mod operations;
 mod page_permissions;
+mod page_requests;
 mod persistence;
 mod presentation;
 mod private;
@@ -216,6 +217,9 @@ pub struct Shell {
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
     private: Option<private::PrivateSession>,
+    /// Sites allowed to open a kind of application link without asking,
+    /// for this run only.
+    external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
@@ -439,6 +443,7 @@ impl Shell {
             zoom: ZoomState::default(),
             divider: None,
             private: None,
+            external_apps_allowed: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
@@ -740,6 +745,9 @@ impl Shell {
             }
             Command::Reload(id) => {
                 let _ = self.operation_reload(id);
+            }
+            Command::AnswerPageRequest { id, decision } => {
+                let _ = self.operation_answer_page_request(id, decision);
             }
             Command::GoBack(id) => {
                 let _ = self.operation_history(id, false);

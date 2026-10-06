@@ -197,6 +197,17 @@ pub enum TabAction {
     CloseBelow,
 }
 
+/// What the person chose for a page's request to open another application
+/// or a blocked new tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageRequestDecision {
+    Allow,
+    /// Allow, and let this site open the same kind of link without asking
+    /// again until Zephium quits.
+    AlwaysAllow,
+    Dismiss,
+}
+
 #[derive(Clone, Debug)]
 pub enum Command {
     WorkDocument(crate::WorkDocumentSubmission),
@@ -296,6 +307,11 @@ pub enum Command {
         input: String,
     },
     Reload(ItemId),
+    /// The person's answer to what the tab's page asked for.
+    AnswerPageRequest {
+        id: ItemId,
+        decision: PageRequestDecision,
+    },
     GoBack(ItemId),
     GoForward(ItemId),
     SplitWith {

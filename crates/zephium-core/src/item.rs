@@ -114,7 +114,9 @@ pub struct TabState {
     pub title: String,
     pub url: Option<Url>,
     pub loading: bool,
-    pub popup_blocked: bool,
+    /// Something the page asked for that waits on the person. Runtime only,
+    /// and cleared when the tab commits another document.
+    pub page_request: Option<Box<PageRequest>>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub zoom: f64,
@@ -132,6 +134,16 @@ pub struct TabState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageRequest {
+    /// A link for an application on this computer, and that application's
+    /// name when the system knows one.
+    ExternalApp { url: Url, app: Option<String> },
+    /// A new tab the page tried to open that was not let through, with its
+    /// address when it was an ordinary web page.
+    Popup { url: Option<Url> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NavigationFailure {
     pub url: Url,
     pub reason: crate::ports::engine::NavigationFailureReason,
@@ -144,7 +156,7 @@ impl TabState {
             title: "New Tab".into(),
             url: None,
             loading: false,
-            popup_blocked: false,
+            page_request: None,
             can_go_back: false,
             can_go_forward: false,
             zoom: 1.0,

@@ -565,7 +565,7 @@ impl Shell {
             return;
         }
         self.record_view_creation(child);
-        self.items.set_popup_blocked(source, false);
+        self.items.clear_blocked_popup(source);
         self.project_tab(source);
         self.native_openers.insert(
             child,

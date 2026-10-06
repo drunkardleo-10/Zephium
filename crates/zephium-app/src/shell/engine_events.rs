@@ -364,9 +364,19 @@ impl Shell {
                 adoption,
             } => self.adopt_linked_native_tab(id, child, foreground, adoption),
             EngineEvent::NativeTabCloseRequested { id } => self.close_owned_native_tab(id),
-            EngineEvent::PageOpenBlocked { id } => {
-                self.items.set_popup_blocked(id, true);
-                self.project_tab(id);
+            EngineEvent::PageOpenBlocked { id, url } => {
+                let url = url
+                    .and_then(|url| url::Url::parse(&url).ok())
+                    .filter(|url| url.as_str() != "about:blank" && navigation::is_allowed(url));
+                if self
+                    .items
+                    .set_page_request(id, zephium_core::item::PageRequest::Popup { url })
+                {
+                    self.project_tab(id);
+                }
+            }
+            EngineEvent::ExternalAppRequested { id, url, app } => {
+                self.on_external_app_requested(id, url, app)
             }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::LinkedDownloadStarted { id } => {
@@ -650,7 +660,8 @@ impl Shell {
             | EngineEvent::DiscardSafety { id, .. }
             | EngineEvent::NavState { id, .. }
             | EngineEvent::NativeTabCloseRequested { id }
-            | EngineEvent::PageOpenBlocked { id }
+            | EngineEvent::PageOpenBlocked { id, .. }
+            | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::FocusBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }

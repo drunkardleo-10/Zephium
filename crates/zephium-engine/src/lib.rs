@@ -1106,7 +1106,8 @@ impl RetirementGate {
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }
             | event @ EngineEvent::NativeTabCloseRequested { id }
-            | event @ EngineEvent::PageOpenBlocked { id }
+            | event @ EngineEvent::PageOpenBlocked { id, .. }
+            | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::FocusBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
@@ -2703,6 +2704,18 @@ impl Engine for WebviewEngine {
 
     fn print(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.print(id))
+    }
+
+    fn open_external_app(&self, url: &str) -> NativeDispatch {
+        if zephium_core::navigation::external_app_link(url).is_none() {
+            return NativeDispatch::Rejected;
+        }
+        let url = url.to_owned();
+        NativeDispatch::from_scheduled(self.run(move || {
+            if !platform::imp::open_external_app(&url) {
+                eprintln!("engine: no application opened an allowed link");
+            }
+        }))
     }
 
     fn set_user_content(

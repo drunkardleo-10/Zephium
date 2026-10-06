@@ -1561,6 +1561,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             onboarding_finish,
             tabs_navigate,
             tabs_reload,
+            tabs_answer_page_request,
             tabs_back,
             tabs_forward,
             work_pane_show,
@@ -2650,6 +2651,29 @@ fn tabs_navigate(
     dispatch_with_id(caller.app_handle(), &shell, &id, |id| Command::Navigate {
         id,
         input,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn tabs_answer_page_request(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+    answer: zephium_ipc::PageRequestAnswer,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_answer_page_request") {
+        return rejected_operation();
+    }
+    let decision = match answer {
+        zephium_ipc::PageRequestAnswer::Allow => zephium_app::PageRequestDecision::Allow,
+        zephium_ipc::PageRequestAnswer::AlwaysAllow => {
+            zephium_app::PageRequestDecision::AlwaysAllow
+        }
+        zephium_ipc::PageRequestAnswer::Dismiss => zephium_app::PageRequestDecision::Dismiss,
+    };
+    dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
+        Command::AnswerPageRequest { id, decision }
     })
 }
 

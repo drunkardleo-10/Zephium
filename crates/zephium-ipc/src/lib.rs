@@ -24,8 +24,10 @@ pub struct TabView {
     #[serde(default)]
     pub content: TabContentView,
     pub loading: bool,
+    /// What the page asked for that waits on the person.
     #[serde(default)]
-    pub popup_blocked: bool,
+    #[specta(optional)]
+    pub page_request: Option<PageRequestView>,
     /// Transient native residency state. It never replaces the committed URL
     /// or title, and an explicit retry remains a fresh navigation intent.
     #[serde(default)]
@@ -42,6 +44,28 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub capture: Option<MediaCaptureView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PageRequestView {
+    /// Open a link in another application. `app` is its name when the system
+    /// knows one; `scheme` names the kind of link otherwise.
+    ExternalApp {
+        site: Option<String>,
+        scheme: String,
+        app: Option<String>,
+    },
+    /// A new tab the page tried to open; `host` is set when it can be opened.
+    Popup { host: Option<String> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PageRequestAnswer {
+    Allow,
+    AlwaysAllow,
+    Dismiss,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

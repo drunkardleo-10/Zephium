@@ -561,7 +561,25 @@ fn tab_view(
             }
         },
         loading: tab.loading,
-        popup_blocked: tab.popup_blocked,
+        page_request: tab.page_request.as_deref().map(|request| match request {
+            zephium_core::item::PageRequest::ExternalApp { url, app } => {
+                zephium_ipc::PageRequestView::ExternalApp {
+                    site: tab
+                        .url
+                        .as_ref()
+                        .and_then(|url| url.host_str())
+                        .map(str::to_owned),
+                    scheme: url.scheme().to_owned(),
+                    app: app.clone(),
+                }
+            }
+            zephium_core::item::PageRequest::Popup { url } => zephium_ipc::PageRequestView::Popup {
+                host: url
+                    .as_ref()
+                    .and_then(|url| url.host_str())
+                    .map(str::to_owned),
+            },
+        }),
         availability: None,
         failure: tab.failure.as_ref().map(|failure| {
             use zephium_core::ports::engine::NavigationFailureReason as Reason;

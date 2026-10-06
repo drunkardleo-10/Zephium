@@ -25,12 +25,14 @@ pub(crate) mod agentic_resource_driver;
 mod agentic_semantic_probe;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
+mod apps;
 pub(crate) mod capture;
 mod content_filter;
 mod credentials;
 mod find;
 mod native;
 mod navigation;
+pub(crate) use apps::{external_app_name, open_external_app};
 mod paint;
 pub(crate) use paint::{PageSnapshot, PaintCover};
 mod session_state;

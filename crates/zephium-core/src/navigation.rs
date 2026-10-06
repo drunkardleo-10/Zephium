@@ -152,6 +152,76 @@ pub fn external_target(argument: &str) -> Option<Url> {
         .filter(|url| matches!(url.scheme(), "http" | "https") && is_allowed(url))
 }
 
+/// Schemes a page never hands to another application: they load browser
+/// content, run script, reach files or shares, or reach Windows handlers
+/// that have been used to run code from a link.
+const NOT_FOR_APPS: &[&str] = &[
+    "about",
+    "afp",
+    "asset",
+    "blob",
+    "chrome",
+    "chrome-extension",
+    "data",
+    "disk",
+    "disks",
+    "edge",
+    "file",
+    "filesystem",
+    "ftp",
+    "hcp",
+    "http",
+    "https",
+    "ie.http",
+    "intent",
+    "ipc",
+    "javascript",
+    "mk",
+    "ms-appinstaller",
+    "ms-cxh",
+    "ms-cxh-full",
+    "ms-help",
+    "ms-its",
+    "ms-msdt",
+    "ms-officecmd",
+    "ms-search",
+    "ms-settings",
+    "nfs",
+    "nntp",
+    "res",
+    "safari-web-extension",
+    "search",
+    "search-ms",
+    "shell",
+    "smb",
+    "tauri",
+    "vbscript",
+    "view-source",
+    "vnd.ms.radio",
+    "webkit-extension",
+    "ws",
+    "wss",
+    "x-apple-systempreferences",
+    "zephium",
+];
+
+/// A link meant for an application on this computer, such as `zoommtg:`,
+/// `mailto:` or `slack:`. It never loads in a tab; the person decides
+/// whether the application it names may open it.
+pub fn external_app_link(target: &str) -> Option<Url> {
+    if target.len() > MAX_URL_BYTES {
+        return None;
+    }
+    let url = Url::parse(target).ok()?;
+    let scheme = url.scheme();
+    (scheme.len() <= 64
+        && !NOT_FOR_APPS.contains(&scheme)
+        && !scheme.starts_with("zephium")
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(url)
+}
+
 /// Syntactic browser-tab target. Windows extension documents additionally
 /// require the engine's live, profile-specific installation grant. This is not
 /// permission to load an extension or to expose its resources to web pages.
@@ -197,6 +267,37 @@ fn looks_like_host(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_application_links_are_handed_to_applications() {
+        for link in [
+            "zoommtg://zoom.us/join?confno=123",
+            "mailto:someone@example.com",
+            "msteams:/l/meetup-join/1",
+            "slack://open",
+            "tel:+15551234",
+        ] {
+            assert!(super::external_app_link(link).is_some(), "{link}");
+        }
+        for link in [
+            "https://zoom.us/j/1",
+            "http://example.com/",
+            "about:blank",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "file:///etc/passwd",
+            "blob:https://example.com/1",
+            "ms-msdt:/id PCWDiagnostic",
+            "search-ms:query=x",
+            "smb://host/share",
+            "zephium://settings",
+            "chrome-extension://abc/page.html",
+            "mailto://user:secret@example.com",
+            "not a url",
+        ] {
+            assert!(super::external_app_link(link).is_none(), "{link}");
+        }
+    }
+
     use super::*;
     use proptest::prelude::*;
 

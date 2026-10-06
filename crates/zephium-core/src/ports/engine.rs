@@ -768,6 +768,10 @@ pub trait Engine {
     /// None clears the profile; this never closes an active page.
     fn forget_discarded_state(&self, _profile: ProfileId, _item: Option<ItemId>) {}
     fn print(&self, id: ItemId) -> NativeDispatch;
+    /// Hands an application link the person allowed to the system.
+    fn open_external_app(&self, _url: &str) -> NativeDispatch {
+        NativeDispatch::Rejected
+    }
     /// Atomically replaces one ownership scope's desired injected content.
     /// Queue admission is not native application; the terminal outcome is
     /// reported as [`EngineEvent::UserContentSettled`]. `Rejected` is a
@@ -1307,6 +1311,15 @@ pub enum EngineEvent {
     },
     PageOpenBlocked {
         id: ItemId,
+        /// The refused page, only when it is an ordinary web address.
+        url: Option<String>,
+    },
+    /// The page asked to open a link in another application. Nothing is
+    /// opened until the person allows it.
+    ExternalAppRequested {
+        id: ItemId,
+        url: String,
+        app: Option<String>,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {

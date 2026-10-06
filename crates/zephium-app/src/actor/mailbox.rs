@@ -80,9 +80,8 @@ impl CoalescedKey {
             | EngineEvent::PresentationReady { id, .. } => Self::Presentation(*id),
             EngineEvent::NavState { id, .. } => Self::Navigation(*id),
             EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
-            EngineEvent::NativeActionFailed { id, .. } | EngineEvent::PageOpenBlocked { id } => {
-                Self::NativeAction(*id)
-            }
+            EngineEvent::NativeActionFailed { id, .. }
+            | EngineEvent::PageOpenBlocked { id, .. } => Self::NativeAction(*id),
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 Self::ExtensionActions(*profile)
             }

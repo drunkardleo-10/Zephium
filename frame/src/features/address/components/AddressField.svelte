@@ -16,6 +16,7 @@
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
   import IconButton from "$shared/ui/IconButton";
+  import PageRequestCard from "./PageRequestCard.svelte";
   import * as find from "../lib/find.svelte";
   import { flushSync, untrack, type Snippet } from "svelte";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
@@ -188,6 +189,8 @@
       window.removeEventListener("blur", away);
     };
   });
+
+  let pageRequest = $derived(tabs.activeTab()?.page_request ?? null);
 </script>
 
 <!--
@@ -369,11 +372,14 @@
     {/if}
   {/if}
   {#if failed}<p id="address-error" role="alert" class="sr-only">{m.browser_nav_failed()}</p>{/if}
-  {#if tabs.activeTab()?.popup_blocked}
-    <p class="popup-notice" role="status" title={m.address_popup_blocked()}>
+  {#if pageRequest && compact}
+    <p class="popup-notice" role="status" title={m.page_request_waiting()}>
       <Icon icon={Alert02Icon} size={14} />
-      {#if !compact}<span>{m.address_popup_blocked()}</span>{/if}
     </p>
+  {:else if pageRequest}
+    {#key `${tabs.activeId()}:${JSON.stringify(pageRequest)}`}
+      <PageRequestCard tab={tabs.activeId()!} request={pageRequest} />
+    {/key}
   {/if}
 </form>
 

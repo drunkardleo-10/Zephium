@@ -112,6 +112,7 @@ export const commands = {
 	onboardingFinish: () => __TAURI_INVOKE<boolean>("onboarding_finish"),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
+	tabsAnswerPageRequest: (id: string, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, answer }),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
 	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
 	/**
@@ -1371,6 +1372,17 @@ export type PagePermissionPromptView = {
 	prompt: PagePermissionPromptEntryView | null,
 };
 
+export type PageRequestAnswer = "allow" | "always_allow" | "dismiss";
+
+export type PageRequestView = 
+/**
+ *  Open a link in another application. `app` is its name when the system
+ *  knows one; `scheme` names the kind of link otherwise.
+ */
+{ kind: "external_app"; site: string | null; scheme: string; app: string | null } | 
+/**  A new tab the page tried to open; `host` is set when it can be opened. */
+{ kind: "popup"; host: string | null };
+
 export type PanelIntent = 
 /**  The hidden renderer has settled its asynchronous work. */
 { type: "idle"; revision: string } | { type: "search" } | { type: "dismiss" } | 
@@ -1868,7 +1880,8 @@ export type TabView = {
 	/**  Explicit content owner. Internal pages never carry a navigable URL. */
 	content?: TabContentView,
 	loading: boolean,
-	popup_blocked?: boolean,
+	/**  What the page asked for that waits on the person. */
+	page_request?: PageRequestView | null,
 	/**
 	 *  Transient native residency state. It never replaces the committed URL
 	 *  or title, and an explicit retry remains a fresh navigation intent.

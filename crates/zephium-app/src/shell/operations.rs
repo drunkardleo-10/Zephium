@@ -23,6 +23,9 @@ impl Shell {
             Command::RenameFocusedProfile(name) => self.operation_rename_focused_profile(&name),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
+            Command::AnswerPageRequest { id, decision } => {
+                self.operation_answer_page_request(id, decision)
+            }
             Command::GoBack(id) => self.operation_history(id, false),
             Command::GoForward(id) => self.operation_history(id, true),
             Command::SplitWith { other, axis } => self.operation_split(other, axis),

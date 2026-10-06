@@ -701,6 +701,37 @@ impl EngineHost {
         let policy_navigation = navigation.clone();
         #[cfg(target_os = "macos")]
         let (frame_permit, frame_navigation) = (event_permit.clone(), navigation.clone());
+        // A page's link for another application never loads; it becomes a
+        // request the person answers in chrome. One per second per view, so
+        // a page cannot flood it.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let app_link = {
+            let permit = event_permit.clone();
+            let sink = self.sink.clone();
+            let item = id.clone();
+            let last = Cell::new(None::<std::time::Instant>);
+            Rc::new(move |target: &str| -> bool {
+                if zephium_core::navigation::external_app_link(target).is_none() {
+                    return false;
+                }
+                let now = std::time::Instant::now();
+                if last
+                    .get()
+                    .is_none_or(|old| now.duration_since(old) >= std::time::Duration::from_secs(1))
+                {
+                    last.set(Some(now));
+                    permit.emit(
+                        &sink,
+                        EngineEvent::ExternalAppRequested {
+                            id: item.get(),
+                            url: target.to_owned(),
+                            app: crate::platform::imp::external_app_name(target),
+                        },
+                    );
+                }
+                true
+            })
+        };
         let focus_shuts = {
             let gate = self.focus_gate.clone();
             let permit = event_permit.clone();
@@ -966,6 +997,8 @@ impl EngineHost {
             raw_window_handle::RawWindowHandle::Win32(handle) => handle.hwnd.get(),
             _ => 0,
         };
+        #[cfg(target_os = "windows")]
+        let navigation_app_link = app_link.clone();
         let mut builder = builder
             .with_bounds(to_wry(bounds))
             // Construction itself may enter a native message loop. On
@@ -996,6 +1029,12 @@ impl EngineHost {
             .with_navigation_handler(move |target| {
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
+                // WebView2 may ask here before LaunchingExternalUriScheme; the
+                // shared one-per-second limit keeps that to one request.
+                #[cfg(target_os = "windows")]
+                if !admitted {
+                    navigation_app_link(&target);
+                }
                 // WebView2 asks only about top-level loads here; WebKit asks
                 // about frames too, so focus is checked for it below, where
                 // the main frame is known.
@@ -1064,9 +1103,13 @@ impl EngineHost {
         {
             let replay = replay_safety.clone();
             let auth_tab = id.clone();
+            let action_app_link = app_link.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
                 let admitted = frame_permit.allows_navigation(&target)
                     && frame_navigation.admits_target(&target);
+                if !admitted && action_app_link(&target) {
+                    return false;
+                }
                 if admitted
                     && super::webext::intercept_auth_redirect(
                         partition.profile(),
@@ -1127,7 +1170,11 @@ impl EngineHost {
             let burst = Cell::new((std::time::Instant::now(), 0u8));
             let last_blocked = Cell::new(None::<std::time::Instant>);
             let popup_sink = self.sink.clone();
+            let popup_app_link = app_link.clone();
             builder = builder.with_new_window_req_handler(move |url, features| {
+                if features.user_initiated && popup_app_link(&url) {
+                    return wry::NewWindowResponse::Deny;
+                }
                 // Bound script-triggered bursts without delaying ordinary rapid
                 // modifier-clicks. Physical controllers have a separate cap.
                 let now = std::time::Instant::now();
@@ -1138,7 +1185,10 @@ impl EngineHost {
                         last_blocked.set(Some(now));
                         permit.emit(
                             &popup_sink,
-                            EngineEvent::PageOpenBlocked { id: source.get() },
+                            EngineEvent::PageOpenBlocked {
+                                id: source.get(),
+                                url: Some(url.clone()),
+                            },
                         );
                     }
                 };
@@ -1705,7 +1755,7 @@ impl EngineHost {
             return None;
         }
         #[cfg(target_os = "windows")]
-        let security_policy = match crate::platform::imp::configure(
+        let mut security_policy = match crate::platform::imp::configure(
             &view,
             12.0,
             matches!(partition, Partition::Ephemeral(_)),
@@ -1725,6 +1775,19 @@ impl EngineHost {
                 return None;
             }
         };
+        #[cfg(target_os = "windows")]
+        {
+            let link = app_link.clone();
+            if let Err(error) = security_policy.route_external_uris(move |uri| {
+                link(uri);
+            }) {
+                eprintln!("security: content WebView2 app-link routing failed: {error}");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
+        }
         #[cfg(target_os = "windows")]
         {
             use wry::WebViewExtWindows;

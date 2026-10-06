@@ -46,7 +46,9 @@ mod semantic_action;
 mod semantic_runtime;
 // The bounded native capture adapter is compiled now, but the Windows host
 // keeps screenshot dispatch closed with semantic support until qualification.
+mod apps;
 mod native_paths;
+pub(crate) use apps::{external_app_name, open_external_app};
 mod paint;
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
@@ -398,6 +400,43 @@ pub struct SecurityPolicy {
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
     client_certificate_token: Option<i64>,
+}
+
+impl SecurityPolicy {
+    /// Human tabs: WebView2 still never launches an app link itself; each
+    /// one goes to `request`, so the browser can ask the person first.
+    pub fn route_external_uris(
+        &mut self,
+        request: impl Fn(&str) + 'static,
+    ) -> windows_core::Result<()> {
+        let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            unsafe {
+                args.SetCancel(true)?;
+                let mut uri = PWSTR::null();
+                args.Uri(&mut uri)?;
+                if let Some(uri) =
+                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                {
+                    request(&uri);
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0_i64;
+        // The new handler is in place before the cancel-only one goes, so no
+        // moment exists where WebView2 would fall back to launching apps.
+        unsafe {
+            self.core18
+                .add_LaunchingExternalUriScheme(&handler, &mut token)?
+        };
+        if let Some(previous) = self.external_token.replace(token) {
+            let _ = unsafe { self.core18.remove_LaunchingExternalUriScheme(previous) };
+        }
+        Ok(())
+    }
 }
 
 impl Drop for SecurityPolicy {

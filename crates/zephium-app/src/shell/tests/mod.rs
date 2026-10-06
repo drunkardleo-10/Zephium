@@ -761,6 +761,10 @@ impl Engine for FakeEngine {
     fn print(&self, _id: ItemId) -> NativeDispatch {
         self.native_admission()
     }
+    fn open_external_app(&self, url: &str) -> NativeDispatch {
+        self.log(format!("open-app {url}"));
+        self.native_admission()
+    }
     fn set_user_content(
         &self,
         _scope: ContentScope,
