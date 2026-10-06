@@ -29,6 +29,11 @@ const REFRESH_DEBOUNCE_MS = 100;
  *  panel mid-sentence has almost always already saved. */
 const TEXT_DEBOUNCE_MS = 400;
 const UNDO_DEPTH = 16;
+/** A busy or unanswered write is sent again after each of these. Short, so a
+ *  closing window still sees it settle. */
+const RETRY_DELAYS = [500, 1500, 4000];
+/** The fields whose change can move a task between views, lists or counts. */
+const COUNTED = new Set<TaskField["field"]>(["status", "schedule", "deadline", "organization"]);
 /** A row drawn for a task native has not created yet. It has no id to act on. */
 const PLACEHOLDER = "pending:";
 
@@ -673,7 +678,7 @@ export class TaskSession {
     const creation = this.#creation;
     if (!creation) return Promise.resolve(null);
     this.#creating = (async () => {
-      const response = await this.#call({ kind: "mutate", command: creation.command });
+      const response = await this.#mutate(creation.command);
       if (response.kind !== "applied" || response.request_id !== creation.command.request_id) {
         const error = response.kind === "error" ? response.error : "outcome_unknown";
         this.#creation = { ...creation, error };
@@ -960,6 +965,7 @@ export class TaskSession {
     const running = this.#chain.get(id);
     if (running) return running;
     const run = (async () => {
+      let counted = false;
       while (this.#jobs.get(id)?.length) {
         const job = this.#jobs.get(id)![0]!;
         if (job.error) return false;
@@ -980,7 +986,7 @@ export class TaskSession {
           }
           job.command = { version: 1, request_id: crypto.randomUUID(), intent };
         }
-        const response = await this.#call({ kind: "mutate", command: job.command });
+        const response = await this.#mutate(job.command);
         if (response.kind !== "applied" || response.request_id !== job.command.request_id) {
           this.#fail(id, job, response.kind === "error" ? response.error : "outcome_unknown");
           return false;
@@ -991,8 +997,10 @@ export class TaskSession {
         if (rest.length) this.#jobs.set(id, rest);
         else this.#jobs.delete(id);
         if (job.undo) this.#remember(job.undo);
+        counted ||= !job.set || job.set.some((field) => COUNTED.has(field.field));
       }
-      this.#scheduleOverview();
+      // Totals only move with what places a task; typing a title moves none.
+      if (counted) this.#scheduleOverview();
       return true;
     })().finally(() => this.#chain.delete(id));
     this.#chain.set(id, run);
@@ -1095,7 +1103,7 @@ export class TaskSession {
     const command = this.#listMutation;
     if (!command) return Promise.resolve(null);
     this.#listBusy = (async () => {
-      const response = await this.#call({ kind: "mutate", command });
+      const response = await this.#mutate(command);
       if (response.kind !== "task_list_applied" || response.request_id !== command.request_id) {
         this.#listFailure = response.kind === "error" ? response.error : "outcome_unknown";
         return null;
@@ -1111,6 +1119,22 @@ export class TaskSession {
       return response.list;
     })().finally(() => (this.#listBusy = null));
     return this.#listBusy;
+  }
+
+  /** A busy or unanswered write is sent again as the same request, which
+   *  native settles once however often it arrives. */
+  async #mutate(command: ResourceCommand) {
+    for (let attempt = 0; ; attempt++) {
+      const response = await this.#call({ kind: "mutate", command });
+      const delay = RETRY_DELAYS[attempt];
+      if (
+        delay === undefined ||
+        response.kind !== "error" ||
+        (response.error !== "capacity" && response.error !== "outcome_unknown")
+      )
+        return response;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
 
   #ack(request: string) {

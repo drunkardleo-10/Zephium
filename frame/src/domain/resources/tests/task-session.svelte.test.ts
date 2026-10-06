@@ -111,29 +111,98 @@ test("undoing a date change consumes history instead of recording its inverse", 
   session.stop();
 });
 
-test("a lost create reply is recovered by replaying one request", async () => {
+test("a lost create reply is replayed as the same request without being asked", async () => {
   const { resourceTestServer } = await import("$shared/testing/resources/server");
   const { TaskSession } = await import("../tasks.svelte");
   const server = resourceTestServer(profile);
-  let lose = true;
+  const requests: string[] = [];
   host.call.mockImplementation(async (owner, call) => {
     const result = await server.call(owner, call);
-    if (call.kind === "mutate" && lose) {
-      lose = false;
-      return { profile, response: { kind: "error", error: "outcome_unknown" } };
-    }
-    return result;
+    if (call.kind !== "mutate") return result;
+    requests.push(call.command.request_id);
+    return requests.length === 1
+      ? { profile, response: { kind: "error", error: "outcome_unknown" } }
+      : result;
+  });
+  const session = new TaskSession(profile);
+  await session.start();
+  vi.useFakeTimers();
+  const created = session.create({ title: "Keep this thought" });
+  await vi.advanceTimersByTimeAsync(1000);
+  vi.useRealTimers();
+  expect(await created).toBeTruthy();
+  expect(server.records.size).toBe(1);
+  expect(new Set(requests).size).toBe(1);
+  expect(session.failure).toBeNull();
+  session.stop();
+});
+
+test("a write native never answers is kept, and retried as one request", async () => {
+  const { resourceTestServer } = await import("$shared/testing/resources/server");
+  const { TaskSession } = await import("../tasks.svelte");
+  const server = resourceTestServer(profile);
+  let answering = false;
+  host.call.mockImplementation(async (owner, call) => {
+    const result = await server.call(owner, call);
+    return call.kind === "mutate" && !answering
+      ? { profile, response: { kind: "error", error: "outcome_unknown" } }
+      : result;
   });
   const session = new TaskSession(profile);
   await session.start();
   session.captureDraft = "Keep this thought";
-  expect(await session.create({ title: session.captureDraft })).toBeNull();
+  vi.useFakeTimers();
+  const created = session.create({ title: session.captureDraft });
+  await vi.advanceTimersByTimeAsync(10_000);
+  vi.useRealTimers();
+  expect(await created).toBeNull();
   expect(session.captureDraft).toBe("Keep this thought");
+  expect(session.failure).toBe("outcome_unknown");
   expect(await session.flush()).toBe(false);
+  answering = true;
   await session.retry();
   expect(server.records.size).toBe(1);
   expect(session.captureDraft).toBe("");
   expect(session.failure).toBeNull();
+  session.stop();
+});
+
+test("a busy native takes the same edit a moment later", async () => {
+  const { server, session, id } = await editingSession("Busy");
+  let busy = true;
+  host.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate" && busy) {
+      busy = false;
+      return { profile, response: { kind: "error", error: "capacity" } };
+    }
+    return server.call(owner, call);
+  });
+  session.rename(id, "Busy day");
+  vi.useFakeTimers();
+  const saved = session.flush();
+  await vi.advanceTimersByTimeAsync(1000);
+  vi.useRealTimers();
+  expect(await saved).toBe(true);
+  expect(server.records.get(id)?.draft.title).toBe("Busy day");
+  expect(session.failure).toBeNull();
+  session.stop();
+});
+
+test("typing into a task asks for no new totals", async () => {
+  const { server, session, id } = await editingSession("Totals");
+  // Creating it moved the totals; that refresh is not this test's.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const calls: string[] = [];
+  host.call.mockImplementation(async (owner, call) => {
+    calls.push(call.kind);
+    return server.call(owner, call);
+  });
+  session.rename(id, "Totals stay");
+  await session.flush();
+  await session.setPinned(id, true);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(calls).toContain("mutate");
+  expect(calls).not.toContain("task_overview");
   session.stop();
 });
 
