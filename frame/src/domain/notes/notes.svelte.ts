@@ -54,12 +54,12 @@ function linkKey(target: string): string {
   return stem.normalize("NFC").toLowerCase().replace(/\s+/gu, " ").trim();
 }
 
-function sorted(items: NoteSummary[]): NoteSummary[] {
-  return [...items].sort(
-    (a, b) =>
-      Number(b.pinned) - Number(a.pinned) ||
-      Number(b.modified_at) - Number(a.modified_at) ||
-      (a.id < b.id ? 1 : -1),
+/** The listing's order: pinned first, then most recently changed. */
+function listed(a: NoteSummary, b: NoteSummary): number {
+  return (
+    Number(b.pinned) - Number(a.pinned) ||
+    Number(b.modified_at) - Number(a.modified_at) ||
+    (a.id < b.id ? 1 : -1)
   );
 }
 
@@ -625,11 +625,24 @@ export class NoteSession {
 
   /** Puts a saved note's row where the listing would, without a reload. */
   #upsert(summary: NoteSummary): void {
-    if (this.trash || this.query) {
-      this.items = this.items.map((item) => (item.id === summary.id ? summary : item));
+    const at = this.items.findIndex((item) => item.id === summary.id);
+    const before = this.items[at - 1];
+    const after = this.items[at + 1];
+    // Saving the note already at the top of its place, the usual case while
+    // typing, leaves the order as it is; only a note that moved is sorted.
+    if (
+      at >= 0 &&
+      (this.trash ||
+        this.query ||
+        ((!before || listed(before, summary) < 0) && (!after || listed(summary, after) < 0)))
+    ) {
+      const items = [...this.items];
+      items[at] = summary;
+      this.items = items;
       return;
     }
-    this.items = sorted([...this.items.filter((item) => item.id !== summary.id), summary]);
+    if (this.trash || this.query) return;
+    this.items = [...this.items.filter((item) => item.id !== summary.id), summary].sort(listed);
   }
 
   /** Lets a saved note's file take its title. Only the name is at stake, and

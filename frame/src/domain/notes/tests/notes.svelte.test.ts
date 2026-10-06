@@ -319,3 +319,20 @@ test("leaving a note saves typing that was never read out", async () => {
   expect(await session.close()).toBe(true);
   expect(server.notes.get(note.id)?.markdown).toBe("# Quick\n\nlast words");
 });
+
+test("a save keeps the list's order unless the note has moved in it", async () => {
+  server.seed("# Older\n");
+  server.seed("# Newer\n");
+  const session = await started();
+  expect(session.items.map((item) => item.title)).toEqual(["Newer", "Older"]);
+  const newer = session.items[0]!;
+  await session.open(newer.id);
+  session.edit("# Newer\n\nmore");
+  await settle(1300);
+  expect(session.items.map((item) => item.title)).toEqual(["Newer", "Older"]);
+  expect(session.items[0]!.revision).not.toBe(newer.revision);
+  await session.open(session.items[1]!.id);
+  session.edit("# Older\n\nrevived");
+  await settle(1300);
+  expect(session.items.map((item) => item.title)).toEqual(["Older", "Newer"]);
+});
