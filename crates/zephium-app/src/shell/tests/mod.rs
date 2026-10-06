@@ -317,6 +317,7 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
     shutdown_result: Mutex<Option<bool>>,
@@ -610,6 +611,17 @@ impl Engine for FakeEngine {
             .push((profile, item, request, settlement));
         self.native_admission()
     }
+    fn stop_media_capture(
+        &self,
+        item: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        self.media_capture_stops
+            .lock()
+            .unwrap()
+            .push((item, navigation));
+        self.native_admission()
+    }
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {
         if self
             .reject_navigation_dispatch
@@ -822,6 +834,9 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    reject_time_clears: std::sync::atomic::AtomicBool,
+    reject_focus_records: std::sync::atomic::AtomicBool,
+    recorded_focus: Mutex<Vec<zephium_core::time::FocusRecord>>,
     pub(crate) statistics:
         Mutex<std::collections::HashMap<ProfileId, zephium_core::blocker::BlockerStatistics>>,
     pub(crate) statistics_writes: std::sync::atomic::AtomicUsize,
@@ -1178,6 +1193,23 @@ impl Store for FakeStore {
         _keep_from_hour: i64,
     ) -> bool {
         self.recorded_time.lock().unwrap().push((profile, tallies));
+        true
+    }
+
+    fn clear_time(&self, _profile: ProfileId, _since_hour: Option<i64>) -> bool {
+        !self
+            .reject_time_clears
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn record_focus(&self, record: zephium_core::time::FocusRecord, _day: i64) -> bool {
+        if self
+            .reject_focus_records
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        self.recorded_focus.lock().unwrap().push(record);
         true
     }
 

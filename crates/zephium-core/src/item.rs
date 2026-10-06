@@ -121,7 +121,12 @@ pub struct TabState {
     pub lifecycle: Lifecycle,
     /// The last navigation the person asked for that did not load. Runtime
     /// only: never persisted, and cleared by the next attempt or commit.
-    pub failure: Option<NavigationFailure>,
+    pub failure: Option<Box<NavigationFailure>>,
+    /// Process-local native state, never restored or persisted.
+    pub capture: Option<(
+        crate::ports::engine::NavigationPresentationId,
+        crate::ports::engine::MediaCaptureState,
+    )>,
     // Distinct from `url`: a restored/hibernated tab has a url but no live view.
     pub(crate) view: bool,
 }
@@ -145,6 +150,7 @@ impl TabState {
             zoom: 1.0,
             lifecycle: Lifecycle::Inactive,
             failure: None,
+            capture: None,
             view: false,
         }
     }

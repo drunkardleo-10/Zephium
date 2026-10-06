@@ -1182,6 +1182,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::RunSearchAction { .. }
             | Command::InvokeExtensionAction { .. }
             | Command::RespondToPagePermissionPrompt { .. }
+            | Command::StopMediaCapture { .. }
             | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
             | Command::Focus(_)

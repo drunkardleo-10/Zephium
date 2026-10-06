@@ -220,6 +220,7 @@ pub struct Shell {
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
     window_visible: bool,
+    window_focused: bool,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
     browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
@@ -441,6 +442,7 @@ impl Shell {
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
+            window_focused: false,
             browser_page: None,
             browser_page_projected: None,
             browser_return_revision: 0,
@@ -766,6 +768,15 @@ impl Shell {
                 }
                 None => self.pending_size = size,
             },
+            Command::SetWindowFocused(focused) => {
+                self.window_focused = focused;
+                if !focused {
+                    self.cancel_page_permission_if_not_foreground();
+                }
+            }
+            Command::StopMediaCapture { item, navigation } => {
+                let _ = self.operation_stop_media_capture(item, navigation);
+            }
             Command::SetWindowVisible(visible) => {
                 if self.window_visible != visible {
                     self.window_visible = visible;
@@ -1515,6 +1526,20 @@ impl Shell {
         {
             crate::diagnostic!("shutdown: final time flush panicked");
         }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.flush_pending_focus_records(true);
+            !self.has_unadmitted_time_writes()
+        })) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.retryable_shutdown_failure(ack);
+                return;
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: focus admission preflight panicked");
+                terminal_clean = false;
+            }
+        }
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.persist())).is_err() {
             crate::diagnostic!("shutdown: final session snapshot panicked");
             terminal_clean = false;
@@ -1898,6 +1923,9 @@ impl Shell {
                 next,
                 removed,
             } => self.on_history_surface_read(token, profile, visits, next, removed),
+            StoreReadResult::HistorySurfaceFailed { token, profile } => {
+                self.on_history_surface_failed(token, profile)
+            }
             StoreReadResult::Bookmarks {
                 token,
                 profile,

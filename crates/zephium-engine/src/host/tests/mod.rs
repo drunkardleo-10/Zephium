@@ -841,7 +841,9 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
     let raw_policy = raw_view_construction_policy();
     assert!(raw_policy.contains("with_fullscreen_enabled(false)"));
     assert!(raw_policy.contains("with_picture_in_picture_enabled(false)"));
-    assert!(raw_policy.contains("with_permission_handler(raw_content_permission)"));
+    assert!(raw_policy.contains("with_permission_handler(move |kind|"));
+    assert!(raw_policy.contains("permission_presentation.load(Ordering::Acquire)"));
+    assert!(raw_policy.contains("permission_window_is_foreground(permission_window)"));
     assert!(source.contains("with_permission_request_handler(move |request|"));
     assert!(source.contains("page_permissions::admit_native_request("));
 

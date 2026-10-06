@@ -27,9 +27,10 @@ jobs:
   gate:
     name: Gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 70
     permissions:
       contents: read
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       pubkey: ${{ steps.version.outputs.pubkey }}
@@ -90,6 +91,22 @@ jobs:
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "pubkey=${pubkey}" >> "${GITHUB_OUTPUT}"
+
+      - name: Require successful CI for this exact release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse HEAD)"
+          for attempt in $(seq 1 120); do
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${candidate}&event=push&per_page=100")"
+            if jq -e --arg sha "${candidate}" '.workflow_runs | any(.head_sha == $sha and .head_branch == "main" and .event == "push" and .conclusion == "success")' <<< "${runs}" >/dev/null; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::No successful main CI run exists for release commit ${candidate}."
+          exit 1
 
       # Strict engine and advisory reviews, blocker seed freshness, and
       # outstanding vendor fixes.

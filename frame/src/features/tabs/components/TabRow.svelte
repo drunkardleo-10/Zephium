@@ -5,6 +5,8 @@
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
   import Icon from "$shared/ui/Icon";
+  import CaptureControl from "$shared/ui/CaptureControl";
+  import { stopCaptureFor } from "$domain/capture";
 
   let {
     cascade = 0,
@@ -88,6 +90,17 @@
     />
     <span data-zephium-tab-label class="tab-label">{tab.title}</span>
   </button>
+  {#if tab.capture}
+    <span style:margin-inline-end={closable ? "28px" : "4px"}>
+      {#key tab.capture.navigation_id}
+        <CaptureControl
+          site={tab.url ?? tab.title}
+          capture={tab.capture}
+          onStop={stopCaptureFor(tab.id, tab.capture.navigation_id)}
+        />
+      {/key}
+    </span>
+  {/if}
   {#if closable}
     <button
       type="button"

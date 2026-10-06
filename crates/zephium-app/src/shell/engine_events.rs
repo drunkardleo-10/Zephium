@@ -91,6 +91,15 @@ impl Shell {
             | EngineEvent::Crashed { id }
             | EngineEvent::ViewDiscarded { id, .. } => {
                 self.cancel_page_permission_for_item(*id);
+                let capture_invalidated = matches!(
+                    &event,
+                    EngineEvent::ViewCreationFailed { .. }
+                        | EngineEvent::Crashed { .. }
+                        | EngineEvent::ViewDiscarded { .. }
+                );
+                if capture_invalidated {
+                    self.items.set_media_capture(*id, None);
+                }
             }
             EngineEvent::ProfileProcessExited { profile, .. } => {
                 self.cancel_page_permission_for_profile(*profile);
@@ -392,6 +401,30 @@ impl Shell {
             EngineEvent::PageMemory { id, profile, bytes } => {
                 self.on_page_memory(id, profile, bytes)
             }
+            EngineEvent::MediaCaptureChanged {
+                id,
+                navigation,
+                state,
+            } => {
+                let current_document = self
+                    .presentation
+                    .pending_presentations
+                    .get(&id)
+                    .map(|pending| pending.navigation)
+                    .or_else(|| {
+                        self.presentation
+                            .presented_navigations
+                            .get(&id)
+                            .map(|(current, _)| *current)
+                    });
+                if current_document == Some(navigation)
+                    && self
+                        .items
+                        .set_media_capture(id, state.is_capturing().then_some((navigation, state)))
+                {
+                    self.project_tab(id);
+                }
+            }
             EngineEvent::PermissionRequested {
                 id,
                 profile,
@@ -628,6 +661,7 @@ impl Shell {
             | EngineEvent::Captured { id, .. }
             | EngineEvent::HtmlExtracted { id, .. }
             | EngineEvent::FindResult { id, .. } => self.profile_of_item(*id),
+            EngineEvent::MediaCaptureChanged { id, .. } => self.profile_of_item(*id),
             EngineEvent::PermissionRequested { profile, .. }
             | EngineEvent::WorkPageFavicon { profile, .. } => Some(*profile),
             EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),

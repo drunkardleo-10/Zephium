@@ -196,6 +196,7 @@ export const commands = {
 	 *  but cannot mint or alter authority.
 	 */
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
+	captureStop: (itemId: string, navigationId: string) => __TAURI_INVOKE<OperationAdmission>("capture_stop", { itemId, navigationId }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
@@ -315,16 +316,12 @@ export const commands = {
 	os: string,
 	arch: string,
 } | null>("about_info"),
-	updateStatus: () => __TAURI_INVOKE<
-/**  Development and unsupported builds never update themselves. */
-{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" } | null>("update_status"),
+	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
 	/**
 	 *  Checks for a newer release and downloads it. Returns the resulting status;
 	 *  a check already in flight, or an update already waiting, is reported as is.
 	 */
-	updateCheck: () => __TAURI_INVOKE<
-/**  Development and unsupported builds never update themselves. */
-{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" } | null>("update_check"),
+	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
 	/**  Opens the system's own update settings for an outdated macOS or Safari. */
@@ -664,6 +661,8 @@ export type BrowserCredentialCapabilityView = {
 
 export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
 
+export type CaptureDeviceStateView = "none" | "active" | "muted";
+
 /**
  *  A note that changed, and the revision it now has on disk, or `None` when
  *  it no longer exists.
@@ -766,14 +765,14 @@ export type DocumentNode_Serialize = {
 
 export type DoubleTap = "off" | "command" | "option";
 
-export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "resume"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
 
 export type DownloadCleanup = {
 	running: boolean,
 	error: DownloadError | null,
 };
 
-export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "permission" | "network" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
+export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "permission" | "network" | "connection_lost" | "timeout" | "authentication" | "certificate" | "server" | "source" | "file_busy" | "file_too_large" | "integrity" | "runtime" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
 
 /**
  *  The default saves straight to the system Downloads folder, as other
@@ -789,7 +788,7 @@ export type DownloadPreferences = {
 
 export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; removed: string[]; cleanup: DownloadCleanup } | { kind: "page"; entries: DownloadView[]; next: string | null; supported: boolean; cleanup: DownloadCleanup } | { kind: "preferences"; preferences: DownloadPreferences; supported: boolean; site_downloads_require_confirmation: boolean } | { kind: "accepted" } | { kind: "applied" } | { kind: "error"; error: DownloadError };
 
-export type DownloadState = "pending" | "receiving" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
+export type DownloadState = "pending" | "receiving" | "paused" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
 
 export type DownloadView = {
 	id: string,
@@ -1166,6 +1165,12 @@ export type MediaAssetV1_Serialize = {
 	origin: MediaOrigin,
 	width?: number | null,
 	height?: number | null,
+};
+
+export type MediaCaptureView = {
+	navigation_id: string,
+	camera: CaptureDeviceStateView,
+	microphone: CaptureDeviceStateView,
 };
 
 /**  Outcome of a native file import into the profile's media store. */
@@ -1877,6 +1882,7 @@ export type TabView = {
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,
+	capture?: MediaCaptureView | null,
 };
 
 /**
@@ -2011,9 +2017,11 @@ export type UiInfo = {
 	material: Material,
 };
 
-export type UpdateStatus = 
-/**  Development and unsupported builds never update themselves. */
-{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" };
+export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
+
+export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+
+export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
 /**  An extension's run-time request for access, awaiting the user's answer. */
 export type WebExtensionAccessRequestView = {

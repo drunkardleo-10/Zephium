@@ -5,9 +5,8 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import SidebarCard from "$shared/ui/SidebarCard";
-  import { updates } from "$domain/updates";
   import * as notices from "../lib/notices.svelte";
-  import { PILL_ICON, cardView, pillLabel } from "../lib/present";
+  import { PILL_ICON, activatePill, cardView, pillLabel } from "../lib/present";
 
   let selected = $derived(notices.current());
   let card = $derived(selected.card ? cardView(selected.card) : null);
@@ -31,7 +30,9 @@
         title={pillLabel(pill)}
         icon={PILL_ICON}
         pending={pill.kind === "installing"}
-        onclick={() => void updates.relaunch()}
+        onclick={() => {
+          if (pill) activatePill(pill);
+        }}
       />
     {/if}
   </div>

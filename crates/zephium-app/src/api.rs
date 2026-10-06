@@ -315,6 +315,13 @@ pub enum Command {
     /// windows hide native content views so the engine can lower their memory
     /// priority and, after the normal idle grace, suspend them.
     SetWindowVisible(bool),
+    /// OS focus is separate from visibility: background pages may keep playing
+    /// audio, but they may not initiate or retain browser-owned device consent.
+    SetWindowFocused(bool),
+    StopMediaCapture {
+        item: ItemId,
+        navigation: zephium_core::ports::engine::NavigationPresentationId,
+    },
     /// The sidebar's width, and whether it changed by a deliberate change of
     /// shape — a toggle, a snap, a tool opening — that the content should
     /// travel with, rather than by a drag that it should simply follow.

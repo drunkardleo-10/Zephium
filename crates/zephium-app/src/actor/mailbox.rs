@@ -55,6 +55,7 @@ enum CoalescedKey {
     Split(zephium_core::ids::WindowId),
     WindowSize,
     WindowVisible,
+    MediaCapture(ItemId),
     MemoryPressure,
     SidebarWidth,
     SidebarGuide,
@@ -87,6 +88,7 @@ impl CoalescedKey {
             }
             EngineEvent::ExtensionPageClosed { id, .. } => Self::ExtensionPageClosed(*id),
             EngineEvent::ExtensionPageChanged { id, .. } => Self::ExtensionPageChanged(*id),
+            EngineEvent::MediaCaptureChanged { id, .. } => Self::MediaCapture(*id),
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
             EngineEvent::ContentRulesSettled {
                 profile, requested, ..
@@ -111,7 +113,7 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 // single-window shell can have one native split fact, and the process can have
 // one sticky runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
-const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 9
+const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 10
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
@@ -231,6 +233,7 @@ const _: () = assert!(std::mem::size_of::<TryPushError>() <= 160);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveryKey {
+    MediaCapture(ItemId),
     RuntimeRestart,
     MemoryPressure,
     SidebarGuideEnd,
@@ -252,6 +255,9 @@ enum RecoveryKey {
 
 fn recovery_key(command: &Command) -> Option<RecoveryKey> {
     match command {
+        Command::Engine(EngineEvent::MediaCaptureChanged { id, .. }) => {
+            Some(RecoveryKey::MediaCapture(*id))
+        }
         Command::Engine(EngineEvent::RuntimeRestartRequired) => Some(RecoveryKey::RuntimeRestart),
         Command::SetMemoryPressure(_) => Some(RecoveryKey::MemoryPressure),
         Command::SidebarResizeGuide(None) => Some(RecoveryKey::SidebarGuideEnd),
@@ -1141,7 +1147,8 @@ fn command_is_critical(command: &Command) -> bool {
     }
     matches!(
         command,
-        Command::BlockerReady(_)
+        Command::SetWindowFocused(false)
+            | Command::BlockerReady(_)
             | Command::SetMemoryPressure(_)
             | Command::SidebarResizeGuide(None)
             | Command::BlockerStoreReady(_)
@@ -1166,6 +1173,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionPageClosed { .. }
                     | EngineEvent::ExtensionPageChanged { .. }
                     | EngineEvent::PermissionRequested { .. }
+                    | EngineEvent::MediaCaptureChanged { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }

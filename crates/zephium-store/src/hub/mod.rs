@@ -21,6 +21,7 @@ mod resources;
 mod session;
 mod settings;
 mod time;
+pub(crate) use time::{TimeBatchId, MAX_TIME_BATCH_RECEIPTS};
 mod userscripts;
 #[cfg(all(windows, feature = "work-execution"))]
 mod windows_work_storage;
@@ -111,6 +112,8 @@ pub struct Hub {
     fail_profile_deletion_after_local_purge_once: bool,
     #[cfg(test)]
     ambiguous_page_permission_commit_once: bool,
+    #[cfg(test)]
+    ambiguous_time_commit_once: bool,
 }
 
 pub(crate) struct AuthoritativeLoad {
@@ -195,6 +198,8 @@ impl Hub {
             fail_profile_deletion_after_local_purge_once: false,
             #[cfg(test)]
             ambiguous_page_permission_commit_once: false,
+            #[cfg(test)]
+            ambiguous_time_commit_once: false,
         };
         hub.load_registry()?;
         let _ = hub.recover_qa_settings_tab_quarantine()?;
@@ -300,6 +305,8 @@ impl Hub {
             fail_profile_deletion_after_local_purge_once: false,
             #[cfg(test)]
             ambiguous_page_permission_commit_once: false,
+            #[cfg(test)]
+            ambiguous_time_commit_once: false,
         })
     }
 

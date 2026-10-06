@@ -580,5 +580,25 @@ fn tab_view(
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
         icon,
+        capture: tab.capture.filter(|(_, state)| state.is_capturing()).map(
+            |(navigation, state)| {
+                let device = |value| match value {
+                    zephium_core::ports::engine::CaptureDeviceState::None => {
+                        zephium_ipc::CaptureDeviceStateView::None
+                    }
+                    zephium_core::ports::engine::CaptureDeviceState::Active => {
+                        zephium_ipc::CaptureDeviceStateView::Active
+                    }
+                    zephium_core::ports::engine::CaptureDeviceState::Muted => {
+                        zephium_ipc::CaptureDeviceStateView::Muted
+                    }
+                };
+                zephium_ipc::MediaCaptureView {
+                    navigation_id: format!("{:016x}", navigation.into_raw()),
+                    camera: device(state.camera),
+                    microphone: device(state.microphone),
+                }
+            },
+        ),
     }
 }

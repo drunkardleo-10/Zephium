@@ -384,6 +384,26 @@ impl EngineHost {
             );
             self.refresh_document_styles(id);
         }
+        #[cfg(target_os = "macos")]
+        if let Some(view) = self
+            .views
+            .get(&id)
+            .filter(|view| view.navigation.current_committed() == Some(epoch))
+        {
+            let state = crate::platform::macos::capture::sample(
+                &crate::platform::macos::native_webview(&view.view),
+            );
+            if view.navigation.current_committed() == Some(epoch) {
+                event_permit.emit(
+                    &self.sink,
+                    EngineEvent::MediaCaptureChanged {
+                        id,
+                        navigation: epoch.presentation_id(),
+                        state,
+                    },
+                );
+            }
+        }
         self.navigation_snapshots
             .get(&id)
             .and_then(|snapshot| snapshot.url.as_deref())
@@ -756,6 +776,7 @@ impl EngineHost {
             return;
         }
         if let Some(view) = self.views.get(&id) {
+            view.navigation.release_auth_cleanup();
             crate::platform::imp::stop_loading(view);
         }
     }
@@ -778,6 +799,9 @@ impl EngineHost {
 
     fn invoke_navigation_action(&mut self, id: ItemId, action: NativeAction) {
         let Some((permit, navigation, failed)) = self.views.get(&id).map(|view| {
+            // The user has taken control of this tab even if the native
+            // reload/history call fails. Auth cleanup cannot take it back.
+            view.navigation.release_auth_cleanup();
             let result = match action {
                 NativeAction::Reload => view.reload(),
                 NativeAction::GoBack => view.go_back(),

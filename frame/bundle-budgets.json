@@ -29,9 +29,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
-    "js": 380700,
-    "css": 108600,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365430 measured over the prior 362000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366421 JS and 107854 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (368184 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (377106 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 379726 JS and 108516 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 380700 JS and 108516 CSS bytes measured."
+    "js": 389800,
+    "css": 109500,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365430 measured over the prior 362000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366421 JS and 107854 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (368184 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (377106 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 379726 JS and 108516 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 380700 JS and 108516 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 389731 JS and 109427 CSS bytes measured."
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
     "js": 1262430,
@@ -44,9 +44,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 485700,
-    "css": 112600,
-    "description": "History's header keeps one control: a menu, shared with Tasks, that opens the full page or closes the panel. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (470174 measured over the prior 466800 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 471378 JS and 111840 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (473141 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (482063 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 484683 JS and 112502 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 485657 JS and 112502 CSS bytes measured."
+    "js": 494700,
+    "css": 113500,
+    "description": "History's header keeps one control: a menu, shared with Tasks, that opens the full page or closes the panel. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (470174 measured over the prior 466800 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 471378 JS and 111840 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (473141 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (482063 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 484683 JS and 112502 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 485657 JS and 112502 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 494688 JS and 113413 CSS bytes measured."
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
     "js": 1267323,
@@ -59,9 +59,9 @@
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
-    "js": 335900,
+    "js": 336500,
     "css": 16900,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 328604 JS and 16195 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (330616 JS measured, 4 Oct). Update and security notice strings join the shared catalog (334421 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 335822 JS and 16195 CSS bytes measured."
+    "description": "Time and focus strings, the focus cover's included, join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 328604 JS and 16195 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (330616 JS measured, 4 Oct). Update and security notice strings join the shared catalog (334421 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 335822 JS and 16195 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 336467 JS and 16195 CSS bytes measured."
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
     "js": 1064301,
@@ -99,23 +99,23 @@
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
-    "js": 335300,
+    "js": 335900,
     "css": 18000,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 327945 JS and 15957 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (329957 JS measured, 4 Oct). Update and security notice strings join the shared catalog (333762 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 335168 JS and 15957 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 335241 JS and 15957 CSS bytes measured."
+    "description": "Time and focus strings, the focus cover's included, join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 327945 JS and 15957 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (329957 JS measured, 4 Oct). Update and security notice strings join the shared catalog (333762 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 335168 JS and 15957 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 335241 JS and 15957 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 335813 JS and 15957 CSS bytes measured."
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
-    "js": 486000,
-    "css": 112600,
-    "description": "Time's header keeps one control: a menu, shared with Tasks, for the page, its settings and closing. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (470407 measured over the prior 467100 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 471685 JS and 111840 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (473448 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (482370 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 484990 JS and 112502 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 485964 JS and 112502 CSS bytes measured."
+    "js": 495000,
+    "css": 113500,
+    "description": "Time's header keeps one control: a menu, shared with Tasks, for the page, its settings and closing. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (470407 measured over the prior 467100 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 471685 JS and 111840 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (473448 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (482370 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 484990 JS and 112502 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 485964 JS and 112502 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 494995 JS and 113413 CSS bytes measured."
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
     "js": 283200,
     "css": 4500
   },
   "lazy:features/notes/components/Notes.svelte": {
-    "js": 315900,
+    "js": 316000,
     "css": 19300,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 310704 JS and 18493 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (310863 JS measured, 4 Oct). Update and security notice strings join the shared catalog (314673 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 315862 JS and 18493 CSS bytes measured."
+    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 310704 JS and 18493 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (310863 JS measured, 4 Oct). Update and security notice strings join the shared catalog (314673 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 315862 JS and 18493 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 315925 JS and 18493 CSS bytes measured."
   },
   "lazy:features/tasks/components/Tasks.svelte": {
     "js": 362700,
@@ -157,14 +157,14 @@
     "css": 12600
   },
   "lazy:features/library/components/LibraryPage.svelte": {
-    "js": 373700,
-    "css": 105500,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (358338 measured over the prior 354900 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 359329 JS and 104812 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (361092 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (370014 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 372634 JS and 105474 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 373608 JS and 105474 CSS bytes measured."
+    "js": 382700,
+    "css": 106400,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (358338 measured over the prior 354900 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 359329 JS and 104812 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (361092 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (370014 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 372634 JS and 105474 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 373608 JS and 105474 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 382639 JS and 106385 CSS bytes measured."
   },
   "lazy:features/tasks/components/TasksPage.svelte": {
-    "js": 405100,
+    "js": 405200,
     "css": 42300,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 399891 JS and 40384 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (400050 JS measured, 4 Oct). Update and security notice strings join the shared catalog (403866 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 405053 JS and 40384 CSS bytes measured."
+    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 399891 JS and 40384 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (400050 JS measured, 4 Oct). Update and security notice strings join the shared catalog (403866 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 405053 JS and 40384 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 405116 JS and 40384 CSS bytes measured."
   },
   "lazy:features/tasks/components/TaskDetail.svelte": {
     "js": 377500,
@@ -172,9 +172,9 @@
     "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 372245 JS and 37715 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (372404 JS measured, 4 Oct). Update and security notice strings join the shared catalog (376220 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 377408 JS and 37715 CSS bytes measured."
   },
   "lazy:features/tasks/components/TaskBoard.svelte": {
-    "js": 371700,
+    "js": 371800,
     "css": 37200,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366517 JS and 35482 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (366676 JS measured, 4 Oct). Update and security notice strings join the shared catalog (370491 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 371680 JS and 35482 CSS bytes measured."
+    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366517 JS and 35482 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (366676 JS measured, 4 Oct). Update and security notice strings join the shared catalog (370491 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 371680 JS and 35482 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 371743 JS and 35482 CSS bytes measured."
   },
   "lazy:features/tasks/lib/capture.ts": {
     "js": 181800,
@@ -182,9 +182,9 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (177236 measured over 174933 at 714054aa). The object renderers' message keys in the shared message chunk add under 0.1 KB JS (177441 measured). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 179552 JS and 3963 CSS."
   },
   "lazy:features/downloads/components/DownloadsList.svelte": {
-    "js": 384300,
-    "css": 110000,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368938 measured over the prior 365500 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 369929 JS and 109271 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (371692 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (380618 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 383238 JS and 109933 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 384212 JS and 109933 CSS bytes measured."
+    "js": 391900,
+    "css": 110900,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368938 measured over the prior 365500 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 369929 JS and 109271 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (371692 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (380618 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 383238 JS and 109933 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 384212 JS and 109933 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 391867 JS and 110844 CSS bytes measured."
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
     "js": 593700,
@@ -212,9 +212,9 @@
     "description": "Measured 512177 JS and 16027 CSS bytes: Work's board loads the kit through loadChart, so this entry carries LayerChart and is bounded by WorkChart's measured graph. The shadcn-svelte chart designs (radial rings with their track, the radar web, line points, area washes, stacked areas, the headline and the overview and tile levels) add 12.5 KB JS and 2.7 KB CSS (524686 and 18703 measured)."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 890000,
-    "css": 150500,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (874447 measured over the prior 871000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 875651 JS and 149805 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (877414 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (886330 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 888950 JS and 150467 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 889924 JS and 150467 CSS bytes measured."
+    "js": 899000,
+    "css": 151400,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (874447 measured over the prior 871000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 875651 JS and 149805 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (877414 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (886330 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 888950 JS and 150467 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 889924 JS and 150467 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 898955 JS and 151378 CSS bytes measured."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 275400,
@@ -232,9 +232,9 @@
     "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (93857 measured over the prior 93600 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 94015 JS and 4741 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (94174 JS measured, 4 Oct). Update and security notice strings join the shared catalog (94202 JS measured, 4 Oct)."
   },
   "lazy:features/work/components/local/CommandRecord.svelte": {
-    "js": 89400,
+    "js": 89463,
     "css": 4800,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (89054 measured over the prior 88800 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 89212 JS and 3997 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (89371 JS measured, 4 Oct)."
+    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 89399 to 89462, CSS 3997 to 3997 bytes. Previous headroom preserved."
   },
   "lazy:features/work/components/WorkFileInspector.svelte": {
     "js": 167500,
@@ -272,9 +272,9 @@
     "description": "Measured 302457 JS and 83808 CSS bytes: the Decisions control over the shared settings graph and the work-decision session. The local-work commits grow the shared graph to 303111 JS (measured on 236b43c4)."
   },
   "lazy:features/notes/components/NoteHost.svelte": {
-    "js": 202500,
+    "js": 202600,
     "css": 8000,
-    "description": "Time and focus strings join the shared message catalog. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (197476 JS measured, 4 Oct). Update and security notice strings join the shared catalog (201286 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 202475 JS and 7574 CSS bytes measured."
+    "description": "Time and focus strings join the shared message catalog. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (197476 JS measured, 4 Oct). Update and security notice strings join the shared catalog (201286 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 202475 JS and 7574 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 202538 JS and 7574 CSS bytes measured."
   },
   "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
     "js": 532000,
@@ -287,9 +287,9 @@
     "description": "Measured 4911 JS bytes: d3-quadtree, which LayerChart's tooltip loads only for its quadtree modes; the app's charts never ask for it."
   },
   "lazy:shared/ui/data/Code/CodeBlock.svelte": {
-    "js": 99000,
+    "js": 99063,
     "css": 6000,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.2 KB JS (98631 measured over the prior 98400 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 98789 JS and 5909 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (98948 JS measured, 4 Oct)."
+    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 98976 to 99039, CSS 5909 to 5909 bytes. Previous headroom preserved."
   },
   "lazy:features/work/index.ts": {
     "js": 149500,
@@ -297,9 +297,9 @@
     "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149380 measured; the board adds a few bytes to the shared runtime)."
   },
   "lazy:features/work/components/parts/ComputerPart.svelte": {
-    "js": 126300,
+    "js": 126363,
     "css": 8400,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.2 KB JS (125945 measured over the prior 125700 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 126103 JS and 7903 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (126262 JS measured, 4 Oct)."
+    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 126290 to 126353, CSS 7903 to 7903 bytes. Previous headroom preserved."
   },
   "lazy:features/work/components/parts/ConnectionPart.svelte": {
     "js": 125800,
@@ -377,14 +377,14 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: a note as text on the canvas that edits in place. Measured 86520 JS and 4572 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 168611 JS and 10171 CSS. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 174271 JS measured. Its CSS: 11008 measured."
   },
   "lazy:features/work/components/objects/File.svelte": {
-    "js": 104200,
+    "js": 104263,
     "css": 8300,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (103813 measured over the prior 103500 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 103971 JS and 7864 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (104130 JS measured, 4 Oct)."
+    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 104158 to 104221, CSS 7864 to 7864 bytes. Previous headroom preserved."
   },
   "lazy:features/work/components/objects/Folder.svelte": {
-    "js": 89000,
+    "js": 89063,
     "css": 5700,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.2 KB JS (88650 measured over the prior 88400 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 88808 JS and 4766 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (88967 JS measured, 4 Oct)."
+    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 88995 to 89058, CSS 4766 to 4766 bytes. Previous headroom preserved."
   },
   "lazy:features/work/components/objects/Project.svelte": {
     "js": 167800,
@@ -412,9 +412,9 @@
     "description": "Measured 306623 JS and 19667 CSS bytes. Settings \u2192 Connections: detected command-line tools and MCP servers with their editor. BYOK/connections release: measured 312205 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 312332 JS measured."
   },
   "lazy:features/settings/components/sections/MemoryPage.svelte": {
-    "js": 204300,
+    "js": 204400,
     "css": 11700,
-    "description": "Time and focus strings join the shared message catalog. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (199264 JS measured, 4 Oct). Update and security notice strings join the shared catalog (203069 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 204258 JS and 11657 CSS bytes measured."
+    "description": "Time and focus strings join the shared message catalog. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (199264 JS measured, 4 Oct). Update and security notice strings join the shared catalog (203069 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 204258 JS and 11657 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 204321 JS and 11657 CSS bytes measured."
   },
   "lazy:features/settings/components/sections/SitesPage.svelte": {
     "js": 172800,
@@ -432,14 +432,14 @@
     "description": "A new work's first screen (workflows by what the person does), fetched only when a work is empty so the Workspace chunk does not carry it. Measured 116550 JS and 12231 CSS, most of it the shared Work graph. Round 5 memory: pictures asked for at the width shown: 116726 JS measured. BYOK/connections release: measured 116856 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5b: the tiles wear the real marks of the apps a workflow reads, through the canvas's site glyph and favicon cache, which the Work screen has already loaded: 192547 JS measured in this static graph. Its CSS with the glyph: 13406 measured."
   },
   "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 501600,
-    "css": 118500,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (486047 measured over the prior 482600 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 487251 JS and 117773 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (489014 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (497936 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 500556 JS and 118435 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 501530 JS and 118435 CSS bytes measured."
+    "js": 510600,
+    "css": 119400,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (486047 measured over the prior 482600 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 487251 JS and 117773 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (489014 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (497936 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 500556 JS and 118435 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 501530 JS and 118435 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 510561 JS and 119346 CSS bytes measured."
   },
   "lazy:features/blocker/components/ProtectionMenu.svelte": {
-    "js": 383700,
-    "css": 110300,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368371 measured over the prior 365000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 369362 JS and 109553 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (371125 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (380047 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 382667 JS and 110215 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 383641 JS and 110215 CSS bytes measured."
+    "js": 392700,
+    "css": 111200,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368371 measured over the prior 365000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 369362 JS and 109553 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (371125 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (380047 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 382667 JS and 110215 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 383641 JS and 110215 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 392672 JS and 111126 CSS bytes measured."
   },
   "onboarding": {
     "js": 200500,
@@ -447,14 +447,14 @@
     "description": "Onboarding reads the preference defaults, which gain the time and focus settings. Shared numeric sidebar revision and guide commands add 60 measured JS bytes above the prior limit. Onboarding remains isolated from the browser graph; CSS is unchanged. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 200217 JS and 104576 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (200376 JS measured, 4 Oct). The automatic update check joins the preference defaults (200404 JS measured, 4 Oct)."
   },
   "lazy:features/bookmarks/components/BookmarksPanel.svelte": {
-    "js": 391000,
-    "css": 111400,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (375710 measured over the prior 372300 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 376701 JS and 110721 CSS bytes measured. Localized camera and microphone prompt strings and the clear-history dialog add 1.8 KB JS (378464 measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (387386 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 390006 JS and 111383 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 390980 JS and 111383 CSS bytes measured."
+    "js": 400100,
+    "css": 112300,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (375710 measured over the prior 372300 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 376701 JS and 110721 CSS bytes measured. Localized camera and microphone prompt strings and the clear-history dialog add 1.8 KB JS (378464 measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (387386 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 390006 JS and 111383 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 390980 JS and 111383 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 400011 JS and 112294 CSS bytes measured."
   },
   "lazy:features/tools/components/previews/BookmarksView.svelte": {
-    "js": 381300,
-    "css": 108600,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365949 measured over the prior 362500 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366940 JS and 107854 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (368703 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (377625 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 380245 JS and 108516 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 381219 JS and 108516 CSS bytes measured."
+    "js": 390300,
+    "css": 109500,
+    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365949 measured over the prior 362500 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366940 JS and 107854 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (368703 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (377625 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 380245 JS and 108516 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 381219 JS and 108516 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 390250 JS and 109427 CSS bytes measured."
   },
   "lazy:features/time/components/ShutSites.svelte": {
     "js": 356200,
@@ -462,19 +462,19 @@
     "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
   },
   "lazy:features/time/components/TimePage.svelte": {
-    "js": 510300,
-    "css": 126200,
-    "description": "The focus dial chooses its length from the menu shared with Tasks. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.5 KB JS (494754 measured over the prior 491300 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 495958 JS and 125481 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (497721 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (506637 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 509258 JS and 126143 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 510232 JS and 126143 CSS bytes measured."
+    "js": 519300,
+    "css": 127100,
+    "description": "The focus dial chooses its length from the menu shared with Tasks. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.5 KB JS (494754 measured over the prior 491300 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 495958 JS and 125481 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (497721 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (506637 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 509258 JS and 126143 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 510232 JS and 126143 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 519286 JS and 127054 CSS bytes measured."
   },
   "lazy:features/time/components/TimePanel.svelte": {
-    "js": 502900,
-    "css": 124300,
-    "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (487373 measured over the prior 484000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 488577 JS and 123569 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (490340 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (499262 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 501882 JS and 124231 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 502856 JS and 124231 CSS bytes measured."
+    "js": 511900,
+    "css": 125200,
+    "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (487373 measured over the prior 484000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 488577 JS and 123569 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (490340 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (499262 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 501882 JS and 124231 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 502856 JS and 124231 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 511897 JS and 125142 CSS bytes measured."
   },
   "lazy:features/time/components/FocusCover.svelte": {
-    "js": 376100,
-    "css": 107600,
-    "description": "Stands where a page focus shuts would be: the round's ring, the site, and allow or end. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (360716 measured over the prior 357400 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 361781 JS and 106865 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (363544 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (372466 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 375086 JS and 107527 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 376060 JS and 107527 CSS bytes measured."
+    "js": 385100,
+    "css": 108500,
+    "description": "Stands where a page focus shuts would be: the round's ring, the site, and allow or end. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (360716 measured over the prior 357400 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 361781 JS and 106865 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (363544 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (372466 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 375086 JS and 107527 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 376060 JS and 107527 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 385091 JS and 108438 CSS bytes measured."
   },
   "lazy:features/tabs/components/TabCapacityState.svelte": {
     "js": 118500,
@@ -482,18 +482,18 @@
     "description": "Measured 118060 JS and 6402 CSS bytes: the capacity notice shown while a page waits for a live-view slot, loaded only when needed. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 118229 JS and 6402 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (118388 JS measured, 4 Oct). Update and security notice strings join the shared catalog (118416 JS measured, 4 Oct)."
   },
   "lazy:features/updates/components/UpdateCards.svelte": {
-    "js": 376600,
-    "css": 109200,
-    "description": "Update notice views, loaded only while a notice or a waiting update is shown (372988 JS and 108530 CSS bytes measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 375608 JS and 109192 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 376582 JS and 109192 CSS bytes measured."
+    "js": 385900,
+    "css": 110200,
+    "description": "Update notice views, loaded only while a notice or a waiting update is shown (372988 JS and 108530 CSS bytes measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 375608 JS and 109192 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 376582 JS and 109192 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 385853 JS and 110103 CSS bytes measured."
   },
   "lazy:features/updates/components/UpdateGlyph.svelte": {
-    "js": 374400,
-    "css": 107300,
-    "description": "Update notice views, loaded only while a notice or a waiting update is shown (370796 JS and 106628 CSS bytes measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 373416 JS and 107290 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 374390 JS and 107290 CSS bytes measured."
+    "js": 383700,
+    "css": 108300,
+    "description": "Update notice views, loaded only while a notice or a waiting update is shown (370796 JS and 106628 CSS bytes measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 373416 JS and 107290 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 374390 JS and 107290 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 383658 JS and 108201 CSS bytes measured."
   },
   "lazy:features/tabs/components/NavigationError.svelte": {
-    "js": 119000,
+    "js": 119100,
     "css": 6500,
-    "description": "Why an address did not open and a retry, loaded only when a first load fails; measured 118960 JS and 6454 CSS bytes, 6 Oct."
+    "description": "Why an address did not open and a retry, loaded only when a first load fails; measured 118960 JS and 6454 CSS bytes, 6 Oct. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 119023 JS and 6454 CSS bytes measured."
   }
 }

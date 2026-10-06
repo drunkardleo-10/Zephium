@@ -22,6 +22,7 @@ let epoch = 0;
 let lifetime = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let lastScheduled = 0;
+let installProgress: ReturnType<typeof setTimeout> | undefined;
 
 export const status = () => current;
 export const available = () => current.state !== "unavailable";
@@ -85,7 +86,18 @@ export async function relaunch(): Promise<boolean> {
   const accepted = await commands.updateRelaunch().catch(() => false);
   await refresh();
   relaunching = false;
+  if (accepted && status().state === "installing") watchInstallation(lifetime);
   return accepted;
+}
+
+function watchInstallation(generation: number) {
+  clearTimeout(installProgress);
+  installProgress = setTimeout(() => {
+    if (generation !== lifetime) return;
+    void refresh().finally(() => {
+      if (generation === lifetime && current.state === "installing") watchInstallation(generation);
+    });
+  }, PROGRESS_MS);
 }
 
 async function scheduled(generation: number) {
@@ -125,6 +137,8 @@ export function dispose() {
   lifetime += 1;
   epoch += 1;
   clearTimeout(timer);
+  clearTimeout(installProgress);
+  installProgress = undefined;
   timer = undefined;
   lastScheduled = 0;
   document.removeEventListener("visibilitychange", onVisible);

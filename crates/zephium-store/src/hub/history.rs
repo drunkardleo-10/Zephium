@@ -359,12 +359,22 @@ impl Hub {
     }
 
     /// Clears visits at or after `since`, or all of them when it is absent.
+    #[cfg(test)]
     pub(crate) fn clear_history(&mut self, profile: ProfileId, since: Option<i64>) -> u32 {
+        self.clear_history_checked(profile, since)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn clear_history_checked(
+        &mut self,
+        profile: ProfileId,
+        since: Option<i64>,
+    ) -> Option<u32> {
         if !self.registry.contains(&profile)
             || self.degraded_profiles.contains(&profile)
             || self.recovery_required.is_some()
         {
-            return 0;
+            return None;
         }
         let result = self.profile_conn(profile).and_then(|conn| {
             let tx = conn.transaction()?;
@@ -383,10 +393,10 @@ impl Hub {
             Ok(removed)
         });
         match result {
-            Ok(removed) => u32::try_from(removed).unwrap_or(u32::MAX),
+            Ok(removed) => Some(u32::try_from(removed).unwrap_or(u32::MAX)),
             Err(e) => {
                 eprintln!("store: clear_history failed for profile {profile}: {e}");
-                0
+                None
             }
         }
     }

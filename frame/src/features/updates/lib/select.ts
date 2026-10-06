@@ -2,7 +2,8 @@ import type { RuntimeSecurityAdvisory, UpdateStatus } from "$shared/ipc/bindings
 import { compareVersions, systemUpdateTarget, type SystemUpdateTarget } from "$domain/updates";
 
 /** The update itself, waiting on a relaunch; never dismissed. */
-export type UpdatePill = { kind: "ready"; version: string } | { kind: "installing" };
+export type UpdatePill =
+  { kind: "ready"; version: string } | { kind: "manual"; version: string } | { kind: "installing" };
 /** A notice to read once. */
 export type UpdateCard =
   { kind: "security"; target: SystemUpdateTarget } | { kind: "updated"; version: string };
@@ -21,6 +22,7 @@ export type NoticeFacts = {
 export type Notices = { pill: UpdatePill | null; card: UpdateCard | null };
 
 function pillFor(status: UpdateStatus, relaunching: boolean): UpdatePill | null {
+  if (status.state === "manualInstall") return { kind: "manual", version: status.version };
   if (status.state === "installing") return { kind: "installing" };
   if (status.state !== "ready") return null;
   return relaunching ? { kind: "installing" } : { kind: "ready", version: status.version };

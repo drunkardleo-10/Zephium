@@ -184,6 +184,15 @@ impl EngineHost {
                     .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
                 return;
             }
+            #[cfg(target_os = "macos")]
+            super::webext::bind_auth_flow_view(partition.profile(), id, &event_token, url);
+            #[cfg(target_os = "macos")]
+            super::webext::bind_auth_cleanup_fence(
+                partition.profile(),
+                id,
+                &spare.view.event_permit,
+                &spare.view.navigation,
+            );
             let Some(epoch) = spare.view.navigation.begin(url) else {
                 eprintln!("engine: could not establish adopted-view navigation epoch");
                 self.sink
@@ -269,6 +278,8 @@ impl EngineHost {
             return;
         }
         let cell = Rc::new(Cell::new(id));
+        #[cfg(target_os = "macos")]
+        super::webext::bind_auth_flow_view(partition.profile(), id, &event_token, url);
         if let Some(view) = self.build_view(
             cell,
             partition,
@@ -656,6 +667,13 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
+        #[cfg(target_os = "macos")]
+        super::webext::bind_auth_cleanup_fence(
+            partition.profile(),
+            id.get(),
+            &event_permit,
+            &navigation,
+        );
         let title_navigation = navigation.clone();
         let on_load = self.sink.clone();
         let load_permit = event_permit.clone();
@@ -941,6 +959,13 @@ impl EngineHost {
             builder
         };
 
+        #[cfg(target_os = "windows")]
+        let permission_presentation = presentation_permit.clone();
+        #[cfg(target_os = "windows")]
+        let permission_window = match self.parent.0 {
+            raw_window_handle::RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+            _ => 0,
+        };
         let mut builder = builder
             .with_bounds(to_wry(bounds))
             // Construction itself may enter a native message loop. On
@@ -969,10 +994,6 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
-                #[cfg(target_os = "macos")]
-                if super::webext::intercept_auth_redirect(&target) {
-                    return false;
-                }
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
                 // WebView2 asks only about top-level loads here; WebKit asks
@@ -992,7 +1013,15 @@ impl EngineHost {
             // Windows, camera and microphone requests go to WebView2's own
             // origin-labelled prompt; macOS replaces this handler with the
             // browser-owned broker below.
-            .with_permission_handler(raw_content_permission)
+            .with_permission_handler(move |kind| {
+                #[cfg(target_os = "windows")]
+                if !permission_presentation.load(Ordering::Acquire)
+                    || !crate::platform::imp::permission_window_is_foreground(permission_window)
+                {
+                    return wry::PermissionResponse::Deny;
+                }
+                raw_content_permission(kind)
+            })
             // This is a construction-time native policy, not a callback that
             // first materializes attacker-controlled URL/path metadata. Wry
             // installs the cancel handler before initial navigation on every
@@ -1034,12 +1063,25 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let replay = replay_safety.clone();
+            let auth_tab = id.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
-                if super::webext::intercept_auth_redirect(&target) {
-                    return false;
-                }
                 let admitted = frame_permit.allows_navigation(&target)
                     && frame_navigation.admits_target(&target);
+                if admitted
+                    && super::webext::intercept_auth_redirect(
+                        partition.profile(),
+                        auth_tab.get(),
+                        &frame_permit,
+                        &frame_navigation,
+                        action.target_is_main_frame,
+                        &target,
+                    )
+                {
+                    return false;
+                }
+                if admitted {
+                    super::webext::note_auth_native_navigation(&frame_navigation, action);
+                }
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
                 }
@@ -1848,6 +1890,25 @@ impl EngineHost {
         }
 
         let observation_id = id.clone();
+        #[cfg(target_os = "macos")]
+        let capture_observer = {
+            let capture_id = id.clone();
+            let capture_permit = event_permit.clone();
+            let capture_navigation = navigation.clone();
+            let capture_sink = self.sink.clone();
+            crate::platform::macos::capture::CaptureObserver::install(&view, move |state| {
+                if let Some(epoch) = capture_navigation.resident_media_epoch() {
+                    capture_permit.emit(
+                        &capture_sink,
+                        EngineEvent::MediaCaptureChanged {
+                            id: capture_id.get(),
+                            navigation: epoch.presentation_id(),
+                            state,
+                        },
+                    );
+                }
+            })
+        };
         let observation_permit = event_permit.clone();
         let observation_navigation = navigation.clone();
         let observer = match crate::platform::imp::install_navigation_observer(
@@ -1930,6 +1991,8 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            #[cfg(target_os = "macos")]
+            _capture_observer: capture_observer,
             replay_safety,
             discard_probe_lease: std::cell::RefCell::new(None),
             #[cfg(target_os = "macos")]

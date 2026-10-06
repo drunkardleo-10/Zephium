@@ -1780,6 +1780,14 @@ pub fn set_media_suspended(view: &wry::WebView, suspended: bool) {
     }
 }
 
+/// Permission UI belongs to the actual foreground browser window, rather
+/// than whichever logical tab was last selected while another app is active.
+pub(crate) fn permission_window_is_foreground(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    hwnd != 0 && unsafe { GetForegroundWindow() == HWND(hwnd as *mut std::ffi::c_void) }
+}
+
 /// WebView2's native audio bit cannot be overridden by page JavaScript. API
 /// or COM failure is uncertainty and therefore a discard veto.
 pub fn query_document_activity(view: &wry::WebView, done: impl FnOnce(bool) + 'static) -> bool {

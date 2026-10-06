@@ -1299,6 +1299,10 @@ impl InnerWebView {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
       options.set_additional_browser_arguments(additional_browser_args);
+      // Zephium keeps crash diagnostics local for explicit user sharing. This
+      // disables WebView2's automatic crash upload, not SmartScreen or the
+      // runtime's separately governed required diagnostics.
+      options.set_is_custom_crash_reporting_enabled(true);
       // A true value can reach this boundary only with the startup gate
       // retained above. The gate runs against the exact controller/profile
       // before WebView initialization or initial navigation.

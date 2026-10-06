@@ -39,6 +39,24 @@ pub struct TabView {
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
+    #[serde(default)]
+    #[specta(optional)]
+    pub capture: Option<MediaCaptureView>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureDeviceStateView {
+    None,
+    Active,
+    Muted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MediaCaptureView {
+    pub navigation_id: String,
+    pub camera: CaptureDeviceStateView,
+    pub microphone: CaptureDeviceStateView,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
