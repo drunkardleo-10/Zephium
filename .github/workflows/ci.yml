@@ -30,6 +30,8 @@ jobs:
         run: ruby scripts/ci/check_action_pins.rb
       - name: Test the macOS blocker seed probe policy
         run: bash scripts/ci/test_macos_blocker_seed_probe.sh
+      - name: Test which changes need the Rust jobs
+        run: bash scripts/ci/test_needs_rust.sh
       - name: actionlint
         run: |
           set -euo pipefail
@@ -39,6 +41,43 @@ jobs:
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  ${archive}" | sha256sum --check --strict
           tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}" actionlint
           "${RUNNER_TEMP}/actionlint" -color
+
+  # A pull request that touches only the frame, docs or Markdown skips the
+  # Rust jobs, unless Rust reads one of those frame files. Main always runs
+  # everything: a release needs a full run for its exact commit.
+  changes:
+    name: Changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          rust=true
+          if [[ "${EVENT}" == "pull_request" ]]; then
+            files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)')"
+            # The files API stops at 3000 entries; a list that long, or none,
+            # cannot prove the Rust jobs are unaffected.
+            count="$(grep -c . <<< "${files}" || true)"
+            if (( count > 0 && count < 3000 )); then
+              rust="$(scripts/ci/needs-rust.sh <<< "${files}")"
+            fi
+          fi
+          echo "rust=${rust}" >> "${GITHUB_OUTPUT}"
+          echo "Rust jobs needed: ${rust}" >> "${GITHUB_STEP_SUMMARY}"
 
   frontend:
     name: Frontend
@@ -69,6 +108,9 @@ jobs:
   # runs the platform-neutral policy gates.
   policy:
     name: Rust policy
+    needs: changes
+    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -102,6 +144,9 @@ jobs:
 
   macos:
     name: Rust (macOS)
+    needs: changes
+    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -142,6 +187,9 @@ jobs:
 
   windows:
     name: Rust (Windows)
+    needs: changes
+    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
