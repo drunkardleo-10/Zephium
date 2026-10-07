@@ -122,9 +122,17 @@ jobs:
       - name: Release security gate
         run: cargo xtask check-release-engine-security
 
+  # The component suite runs only on demand elsewhere, so no release ships
+  # without it.
+  components:
+    needs: gate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/components.yml
+
   macos:
     name: macOS (Apple Silicon)
-    needs: gate
+    needs: [gate, components]
     runs-on: macos-latest
     timeout-minutes: 90
     permissions:
@@ -272,7 +280,7 @@ jobs:
 
   windows:
     name: Windows (x64)
-    needs: gate
+    needs: [gate, components]
     runs-on: windows-latest
     timeout-minutes: 75
     permissions:
