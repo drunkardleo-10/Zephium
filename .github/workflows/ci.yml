@@ -164,7 +164,10 @@ jobs:
       - run: cargo clippy --workspace --lib --locked -- -D warnings
       - name: Vendored updater tests
         run: cargo test -p tauri-plugin-updater --lib --locked
-      - run: cargo nextest run --workspace --locked --retries 2
+      - run: cargo nextest run --workspace --locked --profile ci --retries 2
+      - name: Report flaky tests
+        if: ${{ !cancelled() }}
+        run: python3 scripts/ci/flaky-summary.py target/nextest/ci/junit.xml
       # The desktop tests regenerate the TypeScript IPC bindings.
       - name: Bindings drift
         run: git diff --exit-code frame/src/shared/ipc/bindings.ts
@@ -213,7 +216,11 @@ jobs:
       # elevated runner creates directories owned by Administrators. Both run on
       # the Windows QA machine instead.
       - run: >-
-          cargo nextest run --workspace --exclude zephium-desktop --locked --retries 2 --no-fail-fast
+          cargo nextest run --workspace --exclude zephium-desktop --locked --profile ci --retries 2 --no-fail-fast
           -E 'not (test(/^platform::windows::native_storage::work::tests::/)
           or (package(zephium-store) and test(/^(hub::agent_work|actor::tests::work_journal_|hub::work_document::runtime_store::tests::approved_deadline_)/)))'
+      - name: Report flaky tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python scripts/ci/flaky-summary.py target/nextest/ci/junit.xml
       - run: cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml
