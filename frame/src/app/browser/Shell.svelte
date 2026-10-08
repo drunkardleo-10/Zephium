@@ -20,7 +20,6 @@
   import { TabRail } from "$features/tabs";
   import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
-  import { installMiddleClickCloseTab } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
   import { requestTab } from "$session/work-tab.svelte";
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
@@ -80,7 +79,6 @@
       tabs.openChromeMenu(event.clientX, event.clientY, page);
     }),
   );
-  onMount(installMiddleClickCloseTab);
   onMount(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
@@ -169,6 +167,9 @@
   );
   let railEssentials = $derived(
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
+  );
+  let railClosable = $derived(
+    new Set(tree.today.flatMap((entry) => (entry.kind === "tab" ? [entry.tab.id] : []))),
   );
 
   function linkCopied(copied: boolean) {
@@ -278,7 +279,7 @@
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
           {#if compact}
-            <TabRail entries={railTabs} onSelect={selectTab} />
+            <TabRail entries={railTabs} closable={railClosable} onSelect={selectTab} />
           {:else}
             <!--
             The switch sits above the address field because it governs the

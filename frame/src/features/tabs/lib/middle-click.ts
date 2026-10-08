@@ -1,40 +1,17 @@
-import { tabs } from "$domain/tabs";
-
 /**
- * Installs a global listener for middle-clicks (button === 1) on tabs.
- * When any closable tab element in the interface is middle-clicked,
- * it closes that tab.
+ * Handlers that close a tab on a middle-click, spread onto its main button.
+ * Only rows that show a close button get them.
  */
-export function installMiddleClickCloseTab(): () => void {
-  const handleAuxClick = (event: MouseEvent) => {
-    if (event.button !== 1) return;
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const tabElement = target.closest<HTMLElement>("[data-zephium-tab-id]");
-    if (!tabElement) return;
-    if (tabElement.dataset.closable === "false") return;
-    const id = tabElement.dataset.zephiumTabId;
-    if (!id) return;
-    event.preventDefault();
-    event.stopPropagation();
-    tabs.close(id);
-  };
-
-  const preventDefaultPointerDown = (event: MouseEvent | PointerEvent) => {
-    if (event.button !== 1) return;
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    const tabElement = target.closest<HTMLElement>("[data-zephium-tab-id]");
-    if (tabElement && tabElement.dataset.closable !== "false") {
+export function closeOnMiddleClick(close: () => void) {
+  return {
+    // A middle press starts autoscroll in Chromium (WebView2); WebKit has none.
+    onmousedown: (event: MouseEvent) => {
+      if (event.button === 1) event.preventDefault();
+    },
+    onauxclick: (event: MouseEvent) => {
+      if (event.button !== 1) return;
       event.preventDefault();
-    }
-  };
-
-  window.addEventListener("auxclick", handleAuxClick, true);
-  window.addEventListener("pointerdown", preventDefaultPointerDown, true);
-
-  return () => {
-    window.removeEventListener("auxclick", handleAuxClick, true);
-    window.removeEventListener("pointerdown", preventDefaultPointerDown, true);
+      close();
+    },
   };
 }

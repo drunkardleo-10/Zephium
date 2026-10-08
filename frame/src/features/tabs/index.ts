@@ -5,4 +5,3 @@ export const loadTabCapacityState = () => import("./components/TabCapacityState.
 export const loadNavigationError = () => import("./components/NavigationError.svelte");
 export { sidebarTree } from "./lib/sidebar-model";
 export * as selectionGlide from "./lib/selection-glide";
-export { installMiddleClickCloseTab } from "./lib/middle-click";

@@ -12,12 +12,16 @@
   import * as tabDrag from "$session/tab-drag.svelte";
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
+  import { closeOnMiddleClick } from "../lib/middle-click";
 
   let {
     entries,
+    closable = new Set<string>(),
     onSelect,
   }: {
     entries: TabView[];
+    /** Tabs the expanded list shows a close button for. */
+    closable?: ReadonlySet<string>;
     onSelect: (id: string) => void;
   } = $props();
 
@@ -78,14 +82,6 @@
         data-zephium-tab-id={tab.id}
         data-zephium-tab-url={tab.url ?? ""}
         data-zephium-projection-revision={tab.projection_revision}
-        data-closable="true"
-        onauxclick={(event) => {
-          if (event.button === 1) {
-            event.preventDefault();
-            event.stopPropagation();
-            tabs.close(tab.id);
-          }
-        }}
       >
         <button
           type="button"
@@ -100,6 +96,7 @@
           onpointerup={(event) => drag.up(event)}
           onpointercancel={(event) => drag.cancel(event)}
           onclick={() => !drag.swallowClick() && onSelect(tab.id)}
+          {...closable.has(tab.id) ? closeOnMiddleClick(() => tabs.close(tab.id)) : {}}
         >
           <FavIcon
             image={favicons.image(tab.icon)}

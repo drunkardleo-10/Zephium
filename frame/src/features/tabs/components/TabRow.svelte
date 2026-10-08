@@ -13,6 +13,7 @@
   import Icon from "$shared/ui/Icon";
   import CaptureControl from "$shared/ui/CaptureControl";
   import { stopCaptureFor } from "$domain/capture";
+  import { closeOnMiddleClick } from "../lib/middle-click";
 
   let {
     cascade = 0,
@@ -54,14 +55,6 @@
     onClose(tab.id);
   }
 
-  function handleAuxClick(event: MouseEvent) {
-    if (event.button === 1 && closable) {
-      event.preventDefault();
-      event.stopPropagation();
-      onClose(tab.id);
-    }
-  }
-
   // A tab with no page yet is a different thing from a page whose site simply
   // supplies no icon, and the row should say which.
   let fallback = $derived(
@@ -75,13 +68,11 @@
   data-zephium-tab-id={tab.id}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
-  data-closable={closable}
   class={["browse-tab", grouped && "browse-tab-grouped", className]}
   data-selected={active}
   data-split-candidate={splitCandidate}
   data-cascade={cascade < CASCADE_ROWS || undefined}
   style:--cascade={cascade}
-  onauxclick={handleAuxClick}
 >
   <button
     type="button"
@@ -95,6 +86,7 @@
     onpointerup={onPointerUp}
     onpointercancel={onPointerCancel}
     onclick={() => onSelect(tab.id)}
+    {...closable ? closeOnMiddleClick(() => onClose(tab.id)) : {}}
   >
     <FavIcon
       image={favicons.image(tab.icon)}
