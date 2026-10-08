@@ -284,6 +284,22 @@ fn settings_is_a_window_page_and_extensions_is_a_deduplicated_tab() {
 }
 
 #[test]
+fn tab_close_command_closes_extensions_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    assert_ne!(extensions, web);
+
+    let _disposition = shell.operation_run_command("tab.close");
+    assert_eq!(active_id(&screen), web);
+    assert!(shell.items.tab(extensions).is_none());
+}
+
+#[test]
 fn trusted_extension_page_closure_removes_only_matching_typed_marker() {
     use zephium_core::item::TabContent;
 

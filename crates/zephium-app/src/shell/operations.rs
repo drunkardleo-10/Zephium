@@ -811,7 +811,7 @@ impl Shell {
 
     pub(super) fn operation_run_command(&mut self, id: &str) -> OperationDisposition {
         // Inside Work the pane's tab is the only page a shortcut can mean.
-        let in_work = self.active_browser_page().is_some();
+        let in_work = self.active_browser_page() == Some(crate::BrowserPage::Work);
         let active = if in_work {
             self.work_pane_tab()
         } else {
