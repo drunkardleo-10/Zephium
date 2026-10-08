@@ -101,7 +101,7 @@ def rust_packages() -> dict[tuple[str, str], dict]:
             subprocess.run(
                 ["cargo", "metadata", "--format-version", "1", "--locked",
                  "--filter-platform", target],
-                cwd=ROOT, check=True, capture_output=True, text=True,
+                cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8",
             ).stdout
         )
         by_id = {package["id"]: package for package in metadata["packages"]}
@@ -125,7 +125,7 @@ def npm_packages() -> list[dict]:
     listing = json.loads(
         subprocess.run(
             [shutil.which("pnpm") or "pnpm", "licenses", "list", "--prod", "--json"],
-            cwd=ROOT / "frame", check=True, capture_output=True, text=True,
+            cwd=ROOT / "frame", check=True, capture_output=True, text=True, encoding="utf-8",
         ).stdout
     )
     packages = []

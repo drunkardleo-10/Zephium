@@ -98,6 +98,10 @@ fn compile(worker: &WorkerBlocker, profile: u128) -> Arc<ContentRules> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "the Windows cache admits only a directory whose DACL grants the current user alone; hosted runner workspaces inherit broader entries"
+)]
 fn release_seed_recovers_after_byte_release_and_restart_without_source_loading() {
     // Avoid OS-owned /var -> /private/var symlinks: production intentionally
     // refuses symlinked cache path components.

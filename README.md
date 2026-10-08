@@ -2,88 +2,153 @@
   <img src=".github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>A browser-native work environment, rebuilt for you and your agents.</strong></p>
+  <p><strong>A fast, fully featured browser and work environment<br />rebuilt for you and your agents.</strong></p>
 
   <p>
-    <a href="https://zephium.app">Website</a>
-    ·
-    <a href="https://github.com/zephium-browser/Zephium/releases/latest">Download</a>
-    ·
-    <a href="https://discord.gg/tyveTUyEp7">Discord</a>
-  </p>
-
-  <p>
-    <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release" alt="Latest release" /></a>
+    <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="Latest release" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL-2.0" /></a>
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platforms: macOS and Windows" />
+    <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
+    <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
   </p>
 </div>
 
+<details align="center">
+  <summary><sub>Read in another language</sub></summary>
+  <sub>
+    <a href="docs/readme/README.zh-CN.md">简体中文</a> ·
+    <a href="docs/readme/README.ja.md">日本語</a> ·
+    <a href="docs/readme/README.ko.md">한국어</a> ·
+    <a href="docs/readme/README.hi.md">हिन्दी</a> ·
+    <a href="docs/readme/README.es.md">Español</a> ·
+    <a href="docs/readme/README.pt-BR.md">Português</a> ·
+    <a href="docs/readme/README.fr.md">Français</a> ·
+    <a href="docs/readme/README.de.md">Deutsch</a> ·
+    <a href="docs/readme/README.pl.md">Polski</a> ·
+    <a href="docs/readme/README.ru.md">Русский</a> ·
+    <a href="docs/readme/README.id.md">Bahasa Indonesia</a>
+  </sub>
+</details>
+
+<p align="center">
+  <img src=".github/assets/browse.webp" alt="Zephium in Browse mode, with tabs in the sidebar and zephium.app open" width="960" />
+</p>
+
+<p align="center">
+  <strong>Safari's efficiency. Brave's protection. Arc's design.</strong><br />
+  And <strong>Work</strong>, a canvas where your agents do real work in plain sight.
+</p>
+
 ---
 
-Zephium is a fast, private, open-source browser built in Rust on your operating
-system's own web engine: WKWebView on macOS and WebView2 on Windows. It is not a
-fork of Chromium or Firefox. Alongside everyday browsing it has **Work**, a
-canvas where you and your agents browse, compare and plan in the open, and keep
-the results.
+Zephium is an open-source browser built in Rust on your operating system's own
+web engine: WebKit on macOS, the engine Safari uses, and WebView2 on Windows. It
+is not a fork of Chromium or Firefox. It blocks ads and trackers natively, runs
+Chrome extensions, and puts tasks, notes and your time on the web one click
+away. The download is about 30 MB.
+
+One switch away is **Work**. Your work already happens in the browser, where
+your tabs, logins and history are. Work brings agents there instead of asking
+you to move somewhere else, and lets you watch them do it.
 
 > [!NOTE]
-> Zephium is in **beta**. `1.0.0-beta.1` is the first public release. It is
-> ready to try and to give feedback on, and rough edges are expected. Please
-> report what you find.
+> Zephium is in beta and ready to be your everyday browser. If something isn't
+> right, please [open an issue](https://github.com/zephium-browser/Zephium/issues).
 
-## Screenshots
+## Work
 
-<p align="center">
-  <img src=".github/assets/browse.webp" alt="Zephium in Browse mode" width="900" />
-</p>
-<p align="center"><sub>Browse: your tabs in a quiet sidebar, the page in front.</sub></p>
+Describe an outcome in your own words: plan a trip, compare vendors, design a
+system, fix a bug. Work takes it from there on a canvas, and you see every
+step.
 
 <p align="center">
-  <img src=".github/assets/work.webp" alt="Zephium in Work mode, with an agent comparing AWS, Vercel, Hetzner and Cloudflare" width="900" />
+  <img src=".github/assets/work.webp" alt="Zephium in Work mode: an agent compares AWS, Vercel, Hetzner and Cloudflare and draws a reference architecture" width="960" />
 </p>
-<p align="center"><sub>Work: an agent compares AWS, Vercel, Hetzner and Cloudflare on a canvas.</sub></p>
+<p align="center"><sub>Asked to compare hosting for an AI SaaS, Work reads the pricing pages, recommends a stack and draws the architecture.</sub></p>
 
-## Features
+- **It starts from what you already have.** Work recalls what it knows about
+  you, searches your history when it helps, and loads the right skill for the
+  job. Each step appears on the canvas as it happens.
+- **Helpers work in parallel, in the open.** For a trip, one helper looks for
+  flats while another checks visas and a third compares flights. They browse
+  live pages you can watch, and any source opens in a pane beside the canvas.
+- **Results stay on the canvas.** Comparisons, tables, charts, diagrams, plans,
+  code and documents are laid out where you can read them. They are not lost in
+  a chat scroll.
+- **A plan becomes your day.** One click turns each step of a plan into a task
+  linked back to the Work. Anything worth keeping can be saved as a note.
+- **It reaches past the browser.** Work reads and edits the folders you grant,
+  runs commands, and hands larger coding jobs to Claude Code or Codex. It
+  connects to MCP servers such as Linear, Notion, Sentry, Stripe and Figma, and
+  to command-line tools such as `gh`.
+- **You stay in charge.** Anything that posts, merges or changes something
+  waits for your OK.
+- **Bring any model.** Use your own keys for Anthropic, OpenAI, Google Gemini,
+  DeepSeek or OpenRouter, or run a model locally through Ollama, LM Studio or
+  any OpenAI-compatible server. Keys live in your system keychain.
 
-### Browse
+Work ships with 25 skills, including trip planning, research, compare and
+choose, plan my day, fix a bug and weekly status. You can write your own.
 
-- A native network blocker, on by default, turns away ads and trackers before a
-  page can load them, using EasyList and EasyPrivacy, with a count for every
-  site.
-- Chrome extensions install straight from the Chrome Web Store.
-- A launcher on `⌘ ⇧ Space` reaches tabs, tasks, notes, history and downloads
-  from anywhere on your desktop.
-- Tab sleeping keeps memory low when many tabs are open.
-- Notes beside the page, as Markdown files you own.
-- Tasks you write the way you would say them, landing on the right day.
-- Activity shows where the day went, and Focus keeps distractions shut.
-- A welcome flow imports what you already have from other browsers.
+## Browse
 
-### Work
+### Fast and light
 
-- One switch turns the browser into a canvas, where you describe an outcome in
-  your own words.
-- Agents work in parallel on live pages, in plain sight, and ask before they
-  change anything.
-- Agents read and edit the folders you grant, write and explain code, and run
-  commands.
-- Connect your tools through MCP servers and the command lines you already use,
-  such as GitHub and Slack.
-- Results stay on the canvas: tables, comparisons and plans, and tasks made
-  from a plan.
+- Native WebKit on macOS and WebView2 on Windows, so pages run on the engine
+  your system already keeps up to date.
+- Inactive tabs go to sleep and wake when you return, so memory stays low with
+  many tabs open.
+- A native ad and tracker blocker, on by default, built on Brave's
+  [adblock-rust](https://github.com/brave/adblock-rust) with EasyList and
+  EasyPrivacy. Requests are stopped before a page can make them, and you can
+  hide anything else on a page with a click.
 
-### Privacy
+### Designed to live in
 
-- No telemetry. Zephium collects nothing about how you browse.
-- Local first: history, tasks, notes and activity live on your device, and you
-  never need an account to browse.
-- Bring the model you prefer: Zephium's own AI, your own keys for OpenAI,
-  Anthropic or Gemini, or a model that runs locally.
+- Vertical tabs in a quiet sidebar, with spaces, profiles, pinned tabs, folders
+  and split view.
+- Liquid Glass on macOS 26 and Mica on Windows 11.
+- A launcher on `⌘ ⇧ Space` (`Ctrl Shift Space` on Windows) reaches tabs,
+  history, notes and commands from anywhere on your desktop. Anything you type
+  there can become a task.
+- Every keyboard shortcut can be changed.
+
+### Extensions
+
+Install extensions straight from the Chrome Web Store. Twenty popular ones are
+verified to work well in Zephium and are a click away in the extension manager,
+including 1Password, Bitwarden, Grammarly, DeepL, Dark Reader, Vimium,
+SponsorBlock, Raindrop.io, Notion Web Clipper and Refined GitHub.
+
+### Bring everything with you
+
+The welcome flow imports from Chrome, Safari, Arc, Zen, Firefox, Brave and
+Edge.
+
+## Built in
+
+<table>
+  <tr>
+    <td width="33%" align="center"><img src=".github/assets/tasks.webp" alt="Tasks: a task with status, deadline, list, priority and a linked page" /></td>
+    <td width="33%" align="center"><img src=".github/assets/time.webp" alt="Time: 42 minutes on the web today, a focus timer and time per site" /></td>
+    <td width="33%" align="center"><img src=".github/assets/notes.webp" alt="Notes: a Markdown note with headings, lists and code beside the page" /></td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Tasks</strong><br /><sub>Write them the way you would say them, like "call Anna tomorrow at 3". Lists, priorities, deadlines, subtasks, and the page you were on stays linked.</sub></td>
+    <td valign="top"><strong>Time</strong><br /><sub>See where your time on the web goes, counted on this device only. Start a focus round and the sites you choose stay shut until the break.</sub></td>
+    <td valign="top"><strong>Notes</strong><br /><sub>Notes beside the page, each a Markdown file you own. Edits from other apps show up in Zephium.</sub></td>
+  </tr>
+</table>
+
+## Private by default
+
+- **No telemetry.** Zephium doesn't collect or send anything about how you
+  browse.
+- **No account needed.** History, tasks, notes, memory and time live on your
+  device.
+- **Private windows keep nothing** once they close.
 
 ## Download
-
-Built on the system WebView, so the download is about 30 MB.
 
 | Platform | Architecture | Installer | Requires |
 | -------- | ------------ | --------- | -------- |
@@ -94,9 +159,16 @@ Windows builds are not code-signed yet, so SmartScreen may show "Windows
 protected your PC". Choose **More info**, then **Run anyway**. Signing is on
 the way.
 
-Intel Macs, Linux, iOS and Android are coming. Updates install automatically in
-the app. All releases are listed on the
+Zephium downloads updates in the background and installs them when you choose
+**Relaunch to update**. All releases are on the
 [releases page](https://github.com/zephium-browser/Zephium/releases).
+
+## What's next
+
+- Linux and Intel Macs.
+- Code-signed Windows builds.
+- More extensions verified to work, and native extensions built into Zephium.
+- And much more.
 
 ## Build from source
 

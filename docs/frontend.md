@@ -109,7 +109,7 @@ security boundary, not a rendering optimization.
   `flushSync()` synchronously. The panel uses `panelReady()`, never `uiReady()`.
 - See `design/launcher.md` for the launcher: search-only host, native glass
   shapes, trigger settings, lifecycle and verification status. Production builds
-  emit and enforce `dist/bootstrap-report.json`, which also fails if the panel can
+  emit and enforce `frame/reports/bootstrap-report.json`, which also fails if the panel can
   reach an editor or tool view at all; do not add browser features to the panel.
 - `onboarding.html` is a first run's page in the main window. Native picks it
   over `browser.html` before either loads (`zephium_app::onboarding_due`), and
@@ -117,7 +117,12 @@ security boundary, not a rendering optimization.
   chrome view stays hidden until the browser passes the same `uiReady` gate as a
   normal launch. It is built separately (`vite.onboarding.config.ts`) so it never
   splits code out of the browser graph; the build fails if the browser can reach
-  any onboarding module, and reports to `dist/bootstrap-report.onboarding.json`.
+  any onboarding module, and reports to `frame/reports/bootstrap-report.onboarding.json`.
+- `frame/bundle-budgets.json` records each page's startup graph and what each
+  lazy destination adds on top of the page that opens it. The build fails only
+  when one grows more than 16 KB JS or 8 KB CSS past its recorded size, or a new
+  destination adds over 48 KB without one. Shrink it first; if the growth is
+  intended, run `pnpm run budgets` and say why in the commit.
 - Theme initialization applies the system mode and subscribes to theme commands
   before its first native query. The main surface installs projection listeners,
   resolves theme/material, synchronously forces style/layout, and only then
@@ -255,7 +260,7 @@ the current product surface for inspecting controls; Interface Studio is removed
 The old unused `shared/ui/work` kit has been removed. Future entity presentations
 share one UI kit and gain folders only with their real runtime contracts.
 
-The retained logo asset is `frame/public/zephium-logo.png`. Its placement in the
+The retained logo asset is `assets/brand/zephium-logo.png`, outside the shipped bundle. Its placement in the
 product belongs to the visual refinement work; this migration does not substitute
 it for the existing wordmark or change its pixels.
 

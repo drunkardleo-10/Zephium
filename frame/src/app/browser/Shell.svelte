@@ -18,7 +18,7 @@
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
   import { TabRail } from "$features/tabs";
-  import { loadTabCapacityState } from "$features/tabs";
+  import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import { installMiddleClickCloseTab } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
@@ -46,7 +46,7 @@
   import { focus } from "$domain/time";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { ModeTabs, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
+  import { ModeTabs, PrivateBar, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
@@ -112,6 +112,7 @@
   });
   let splitting = $state(false);
   let inWork = $derived(browserPage.currentPage() === "work");
+  let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
   let modeSwitched = $state(false);
   let shownMode: boolean | null = null;
@@ -204,6 +205,41 @@
       if (command.id === "focus.alert=focus") notices.show(m.focus_back_title(), "focus");
     });
   });
+  // A load started from the new tab keeps it on screen until the page
+  // commits, so the content pane never empties between the two.
+  let newTabLoad = $state<string | null>(null);
+  let newTabShown = $derived.by(() => {
+    const tab = tabs.activeTab();
+    if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;
+    return browserPage.currentPage() === null && (!tab.loading || newTabLoad === tab.id);
+  });
+  $effect(() => {
+    const tab = tabs.activeTab();
+    const idle = !!tab && !tab.url && !tab.loading && (tab.content ?? "web") === "web";
+    untrack(() => {
+      if (idle) newTabLoad = tab.id;
+      else if (!tab || tab.url || tab.id !== newTabLoad) newTabLoad = null;
+    });
+  });
+  // A load that failed over a page still showing leaves that page in place;
+  // a notice says the new address did not open.
+  let failureNoticed: string | null = null;
+  $effect(() => {
+    const tab = tabs.activeTab();
+    const failure = tab?.failure;
+    const key = failure && tab.url ? `${tab.id} ${failure.url} ${failure.reason}` : null;
+    untrack(() => {
+      if (key === null || key === failureNoticed) return;
+      failureNoticed = key;
+      let host = failure?.url ?? "";
+      try {
+        host = new URL(host).host || host;
+      } catch {
+        // The address is shown as given.
+      }
+      notices.show(m.navigation_error_notice({ host }));
+    });
+  });
   // A search belongs to the page it runs in; moving to another page ends it.
   $effect(() => {
     const active = tabs.activeId();
@@ -229,6 +265,7 @@
   class:pb-0={inWork}
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
+  data-private={incognito || undefined}
 >
   <Sidebar
     >{#snippet browserBody(compact)}
@@ -236,7 +273,7 @@
         {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
-      {:else}<div class="sidebar-head"><ModeTabs /></div>{/if}
+      {:else if !incognito}<div class="sidebar-head"><ModeTabs /></div>{/if}
       <!-- One column in both environments: only what it lists changes, and the
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
@@ -276,7 +313,9 @@
             <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
+    {/snippet}{#snippet dock(compact)}{#if compact && incognito}<PrivateBar
+          compact
+        />{:else if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
             profile={tabs.profile()?.id ?? ""}
           />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock compact tools={!inWork}>
           {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
@@ -286,7 +325,10 @@
               entries={railEssentials}
               onSelect={selectTab}
             />{/snippet}
-        </Dock>{:else}<Dock>
+        </Dock>{:else if incognito}
+        <!-- A private window keeps nothing, so it has no tools or kept sites;
+             its foot names the scope and closes it. -->
+        <PrivateBar />{:else}<Dock>
           {#snippet above()}
             <div
               class="dock-sites"
@@ -372,7 +414,22 @@
           >{#snippet children(View)}<View tab={capacityTab} />{/snippet}</LazyView
         >{/if}
     </main>
-  {:else if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
+  {:else if tabs.activeTab()?.failure && !tabs.activeTab()?.url && !tabs.activeTab()?.loading && browserPage.currentPage() === null}
+    {@const failedTab = tabs.activeTab()}
+    {@const failure = failedTab?.failure}
+    <!-- A first load that failed: the pane says why instead of a blank new tab. -->
+    <main class="min-w-0 flex-1 ps-2">
+      <div class="content-pane h-full w-full overflow-hidden">
+        {#if failedTab && failure}<LazyView
+            loader={loadNavigationError}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(View)}<View tab={failedTab} {failure} />{/snippet}</LazyView
+          >{/if}
+      </div>
+    </main>
+  {:else if newTabShown}
     <!--
       A tab opened straight to an address is loading before it has a URL; it
       goes to its page rather than flashing the new tab first.

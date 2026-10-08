@@ -129,7 +129,7 @@ shapes are reinstalled when the appearance changes.
 - Desktop suite: 101 pass and 2 ignored before two additional owner/focus tests;
   the additional overlay tests are checked separately.
 - Native Clippy across desktop targets passes with warnings denied.
-- `frame/dist/bootstrap-report.json` traverses emitted static imports, including
+- `frame/reports/bootstrap-report.json` traverses emitted static imports, including
   shared chunks. The build rejects eager browser domains, Settings, sidebar,
   or tool-view code in the panel graph. Current panel graph is approximately
   127 KB JS and 17 KB CSS (uncompressed); the main graph is approximately

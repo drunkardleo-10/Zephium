@@ -19,6 +19,7 @@ __pycache__/
 /frame/.vitest-attachments/
 
 /frame/dist-work-preview/
+/frame/reports/
 
 # Local tooling and secrets
 .claude/
